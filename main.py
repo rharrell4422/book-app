@@ -157,3 +157,4 @@ def check_series_now(series_id: int, db: Session = Depends(get_db)):
 def get_books_by_series(series_id: int, db: Session = Depends(get_db)):
     books = db.query(models.Book).filter(models.Book.series_id == series_id).all()
     return books
+
