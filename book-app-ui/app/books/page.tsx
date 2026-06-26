@@ -22,8 +22,8 @@ export default function BooksPage() {
   async function fetchBooks() {
     try {
       const url = seriesId
-        ? `http://127.0.0.1:8000/books/by_series/${seriesId}`
-        : "http://127.0.0.1:8000/books/";
+        ? `http://localhost:8000/books/by_series/${seriesId}`
+        : "http://localhost:8000/books/";
 
       const response = await fetch(url, { cache: "no-store" });
       const data = await response.json();
@@ -40,7 +40,7 @@ export default function BooksPage() {
   async function toggleRead(book: any) {
     try {
       const response = await fetch(
-        `http://127.0.0.1:8000/books/${book.id}`,
+        `http://localhost:8000/books/${book.id}`,
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -73,7 +73,7 @@ export default function BooksPage() {
 
     try {
       const response = await fetch(
-        `http://127.0.0.1:8000/books/${bookId}`,
+        `http://localhost:8000/books/${bookId}`,
         { method: "DELETE" }
       );
 

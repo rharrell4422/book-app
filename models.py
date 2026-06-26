@@ -41,6 +41,9 @@ class Book(Base):
     series_total_books = Column(Integer, nullable=True)
     is_series_finished = Column(Boolean, default=False)
 
+    # ⭐ MISSING FIELD — now added
+    book_number = Column(Integer, nullable=True)
+
     is_read = Column(Boolean, default=False)
     read_date = Column(Date, nullable=True)
 
@@ -60,4 +63,3 @@ class Book(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     series = relationship("Series", back_populates="books")
-

@@ -19,7 +19,7 @@ export default function SeriesPage() {
 
   async function fetchSeries() {
     try {
-      const response = await fetch("http://127.0.0.1:8000/series/", {
+      const response = await fetch("http://localhost:8000/series/", {
         cache: "no-store",
       });
       const data = await response.json();
@@ -39,7 +39,7 @@ export default function SeriesPage() {
 
     try {
       const response = await fetch(
-        `http://127.0.0.1:8000/series/${seriesId}/check`,
+        `http://localhost:8000/series/${seriesId}/check`,
         { method: "POST" }
       );
       const data = await response.json();
@@ -70,7 +70,7 @@ export default function SeriesPage() {
 
     try {
       const response = await fetch(
-        `http://127.0.0.1:8000/series/${seriesId}`,
+        `http://localhost:8000/series/${seriesId}`,
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },

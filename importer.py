@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Series, Book
 
+
 # Excel serial date → Python date
 def excel_to_date(value):
     if pd.isna(value):
@@ -12,6 +13,7 @@ def excel_to_date(value):
         return datetime(1899, 12, 30) + timedelta(days=int(value))
     except:
         return None
+
 
 def run_import(file_path: str):
     db: Session = SessionLocal()
@@ -25,18 +27,17 @@ def run_import(file_path: str):
 
         # CASE 1 — Standalone book (no series)
         if pd.isna(series_name) or not str(series_name).strip():
-            date_read = excel_to_date(row.get("Date Read"))
-            year = date_read.year if date_read else None
-
             db_book = Book(
                 title=row["Title"],
                 author=row["Author"],
-                year=year,
-                genre=None,
+                format=row.get("Format"),
+                publication_date=excel_to_date(row.get("Publication Date")),
                 series_id=None,
-                book_number=None,
-                release_date=excel_to_date(row.get("Next Release Date")),
-                read_status=(row.get("Record Status") == "Read"),
+                book_number=row.get("Book #"),
+                is_read=(row.get("Record Status") == "Read"),
+                read_date=excel_to_date(row.get("Date Read")),
+                rating=row.get("Rating"),
+                notes=row.get("Notes"),
             )
 
             db.add(db_book)
@@ -47,35 +48,34 @@ def run_import(file_path: str):
         # CASE 2 — Book belongs to a series
         db_series = (
             db.query(Series)
-            .filter(Series.name == series_name, Series.author == author)
+            .filter(Series.name == series_name)
             .first()
         )
 
         if not db_series:
             db_series = Series(
                 name=series_name,
-                author=author,
-                google_query_url=None,
-                series_finished=(row.get("Series Finished") == "Yes"),
-                check_series=(row.get("Check Series") == "No"),
-                last_checked=excel_to_date(row.get("Last Checked")),
+                is_finished=(row.get("Series Finished") == "Yes"),
+                total_books=row.get("Series Total Books"),
             )
             db.add(db_series)
             db.commit()
             db.refresh(db_series)
 
-        date_read = excel_to_date(row.get("Date Read"))
-        year = date_read.year if date_read else None
-
         db_book = Book(
             title=row["Title"],
             author=row["Author"],
-            year=year,
-            genre=None,
+            format=row.get("Format"),
+            publication_date=excel_to_date(row.get("Publication Date")),
             series_id=db_series.id,
+            series_order=row.get("Book #"),
+            series_total_books=row.get("Series Total Books"),
+            is_series_finished=(row.get("Series Finished") == "Yes"),
             book_number=row.get("Book #"),
-            release_date=excel_to_date(row.get("Next Release Date")),
-            read_status=(row.get("Record Status") == "Read"),
+            is_read=(row.get("Record Status") == "Read"),
+            read_date=excel_to_date(row.get("Date Read")),
+            rating=row.get("Rating"),
+            notes=row.get("Notes"),
         )
 
         db.add(db_book)
@@ -84,5 +84,7 @@ def run_import(file_path: str):
 
     print("Import complete.")
 
+
 if __name__ == "__main__":
-    run_import("Books_Tracker_Master_Pivot_21Jun2026.xlsx")
+    # CHANGE THIS TO YOUR MINI-LIBRARY FILE
+    run_import("Small_Master Library_21June2026.xlsx")

@@ -1,31 +1,28 @@
 "use client";
 
-import * as React from "react";
+import { createContext, useContext, useState } from "react";
 
-type ToastProps = {
-  id: number;
+type ToastData = {
+  id: string;
   title?: string;
   description?: string;
+  action?: React.ReactNode;
 };
 
-const ToastContext = React.createContext<{
-  toasts: ToastProps[];
-  toast: (props: Omit<ToastProps, "id">) => void;
+const ToastContext = createContext<{
+  toasts: ToastData[];
+  toast: (data: Omit<ToastData, "id">) => void;
 }>({
   toasts: [],
   toast: () => {},
 });
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
-  const [toasts, setToasts] = React.useState<ToastProps[]>([]);
+  const [toasts, setToasts] = useState<ToastData[]>([]);
 
-  const toast = (props: Omit<ToastProps, "id">) => {
-    const id = Date.now();
-    setToasts((prev) => [...prev, { id, ...props }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 4000);
-  };
+  function toast(data: Omit<ToastData, "id">) {
+    setToasts((prev) => [...prev, { id: Math.random().toString(), ...data }]);
+  }
 
   return (
     <ToastContext.Provider value={{ toasts, toast }}>
@@ -35,5 +32,10 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 }
 
 export function useToast() {
-  return React.useContext(ToastContext);
+  return useContext(ToastContext);
 }
+
+// This is the named export your page expects
+export const toast = (data: Omit<ToastData, "id">) => {
+  console.warn("toast() called outside provider — this is a placeholder.");
+};

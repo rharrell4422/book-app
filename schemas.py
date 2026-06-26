@@ -36,6 +36,8 @@ class Book(BaseModel):
     series_order: Optional[float] = None
     series_total_books: Optional[int] = None
     is_series_finished: Optional[bool] = None
+    book_number: Optional[int] = None
+
 
     is_read: bool
     read_date: Optional[date] = None
@@ -108,6 +110,9 @@ class BookUpdate(BaseModel):
     series_total_books: Optional[int] = None
     is_series_finished: Optional[bool] = None
 
+    # ⭐ NEW FIELD (required for editing book number)
+    book_number: Optional[int] = None
+
     is_read: Optional[bool] = None
     read_date: Optional[date] = None
 
@@ -117,6 +122,7 @@ class BookUpdate(BaseModel):
     check_url: Optional[str] = None
     is_upcoming_auto: Optional[bool] = None
     is_upcoming_final: Optional[bool] = None
+
 
 
 class Book(BookBase):
