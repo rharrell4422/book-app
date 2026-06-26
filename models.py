@@ -1,64 +1,63 @@
-# models.py
-#
-# Clean, modern SQLAlchemy models for the Goodreads-powered engine.
-# No legacy fields. No unused columns. Lean and future-proof.
-
-from sqlalchemy import Column, Integer, String, Boolean, Date, ForeignKey, JSON
+from datetime import datetime
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    Text,
+    ForeignKey,
+)
 from sqlalchemy.orm import relationship
 from database import Base
 
-
-# ---------------------------------------------------------------------------
-# SERIES MODEL (CLEAN)
-# ---------------------------------------------------------------------------
 
 class Series(Base):
     __tablename__ = "series"
 
     id = Column(Integer, primary_key=True, index=True)
-
-    # Core identity
-    name = Column(String, index=True, nullable=False)
-
-    # Relationship to books
-    books = relationship("Book", back_populates="series", cascade="all, delete-orphan")
-
-    # Intelligence fields (computed by intelligence.py)
+    name = Column(String, nullable=False)
+    is_finished = Column(Boolean, default=False)
     total_books = Column(Integer, nullable=True)
-    read_books = Column(Integer, nullable=True)
-    unread_books = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    next_unread_book = Column(Integer, nullable=True)  # book_number
-    upcoming_books = Column(Integer, nullable=True)
+    books = relationship("Book", back_populates="series")
 
-    # Missing book numbers (stored as JSON list)
-    missing_books = Column(JSON, nullable=True)
-
-
-# ---------------------------------------------------------------------------
-# BOOK MODEL (CLEAN)
-# ---------------------------------------------------------------------------
 
 class Book(Base):
     __tablename__ = "books"
 
     id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    author = Column(String, nullable=False)
+    format = Column(String, nullable=True)
+    publication_date = Column(Date, nullable=True)
 
-    # Core identity
-    title = Column(String, index=True, nullable=False)
-    author = Column(String, index=True, nullable=True)
-
-    # Optional genre (safe even if spreadsheet doesn't include it)
-    genre = Column(String, nullable=True)
-
-    # Series relationship
     series_id = Column(Integer, ForeignKey("series.id"), nullable=True)
+    series_order = Column(Integer, nullable=True)
+    series_total_books = Column(Integer, nullable=True)
+    is_series_finished = Column(Boolean, default=False)
+
+    is_read = Column(Boolean, default=False)
+    read_date = Column(Date, nullable=True)
+
+    rating = Column(Integer, nullable=True)
+    notes = Column(Text, nullable=True)
+
+    # NEW FIELDS
+    auto_summary = Column(Text, nullable=True)
+    external_rating = Column(Float, nullable=True)
+    external_rating_count = Column(Integer, nullable=True)
+
+    # UPCOMING FLAGS
+    is_upcoming_auto = Column(Boolean, default=False)
+    is_upcoming_final = Column(Boolean, default=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
     series = relationship("Series", back_populates="books")
 
-    # Book metadata
-    book_number = Column(Integer, nullable=True)
-    year = Column(Integer, nullable=True)  # extracted from Goodreads
-    release_date = Column(Date, nullable=True)
-
-    # Reading status
-    read_status = Column(Boolean, default=False)
