@@ -10,6 +10,8 @@
 - Never provide code that requires pasting into nested structures or partial blocks.
 - Only provide code in clearly defined sections with explicit START/END markers that I can paste safely.
 - Never assume I know which file needs modification. Always specify the file and location.
+- - Never rewrite entire files unless I explicitly request it; only provide targeted snippets with START/END markers.
+
 
 ## File Location & Search Guidance
 
@@ -19,6 +21,8 @@
   - If multiple files are possible, list them explicitly so I know where to look first.
 - Avoid vague “find something that looks like…” instructions without file hints.
 - When using error output or stack traces, map the error back to the **specific file and function** where the fix should be applied.
+- - When suggesting edits, Copilot must reference the exact function or component name where the change belongs.
+
 
 
 
@@ -26,6 +30,8 @@
 - Always check existing file contents before refactors.
 - Never overwrite large sections without confirmation.
 - When chat restarts, I paste COPILOT.md.
+- - Copilot must confirm before making any destructive change (schema edits, importer rewrites, intelligence logic changes).
+
 
 ## Project Overview
 Backend: FastAPI + SQLite  
@@ -139,6 +145,8 @@ Updated on “Check Now” or automated agent.
 - Terminal 1: FastAPI server  
 - Terminal 2: installs, scripts, DB resets  
 - Never mix them.
+- Copilot must follow the roadmap sequence and never jump ahead (e.g., no frontend changes before backend stabilization).
+
 
 ### Editing Rules
 Stop FastAPI before editing:
@@ -170,3 +178,22 @@ Keep open: main.py, models.py, schemas.py, importer.py, intelligence.py, databas
 - Never ask for full file pastes  
 - Request only needed snippets  
 - Follow roadmap order  
+## Copilot Workspace Rules
+- Copilot must always load @workspace and #COPILOT.md at the start of every session.
+- Copilot must use the actual workspace files as the source of truth.
+- Copilot must not rely on past chat history.
+- All architectural decisions, schema definitions, and importer logic live in this COPILOT.md.
+## Development Roadmap (Condensed)
+1. Backend: FastAPI + SQLite schema finalized.
+2. Importer: Rebuild importer logic to match schema.
+3. Frontend: Next.js + Tailwind + ShadCN UI.
+4. Intelligence Engine: Series detection, new-book detection, manual "Check Now" feature.
+5. Git/GitHub: Version control active and required for all changes.
+## Personal Context for Copilot
+- User: Robbie Harrell
+- Location: Big Creek, GA
+- Goal: Build full Book App web version to replace spreadsheet.
+- Skills: Beginner in FastAPI, Next.js, Tailwind, ShadCN, Git.
+- Preferences: Extremely explicit instructions, calm sequencing, no jargon.
+- - Copilot must maintain continuity across sessions using COPILOT.md as the single source of truth.
+
