@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from fastapi.middleware.cors import CORSMiddleware
 from intelligence import compute_series_intelligence_for_series
-
+from importer.importer import run_import
 from database import SessionLocal, engine
 import models
 import schemas
@@ -163,3 +163,17 @@ def delete_book(book_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Book not found")
     return {"message": "Book deleted"}
 
+# ---------------------------------------------------------
+# IMPORT
+# ---------------------------------------------------------
+@app.post("/import")
+def trigger_import():
+    file_path = "Small_Master Library_21June2026.xlsx"
+
+    try:
+        run_import(file_path)
+        return {"status": "success"}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()   # <-- forces full traceback to terminal
+        raise e

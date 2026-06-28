@@ -2,6 +2,8 @@
 
 @workspace
 
+Load the Repository found here: https://github.com/rharrell4422/book-app/tree/main
+
 **Guidance to Copilot For Me Being a Rookie:**  
 - Don't assume I know programmer language or Jargon
 - Don't assume I know when to switch from FE/BE server path to root path
@@ -9,6 +11,40 @@
 - Don't give me file snippets to paste into current code
 - I cannot figure out how to indent and paste properly
 - I can do paste separe sections, put sections in code with descriptions and I can replace sections  
+
+SAFETY RULES:
+- ALWAYS check the current contents of files before suggesting replacements or major refactors.
+- If I have worked on importer.py recently, assume it has a full header system unless I say otherwise.
+- Never overwrite large sections without showing a diff and getting confirmation.
+- When chat restarts, I will paste key file contents.
+
+# PROJECT CONTEXT - COPILOT.md
+Full project context for Microsoft Copilot. Always use this when @workspace is active.
+
+## Project Overview
+- Full-stack book management app
+- Backend: Python (FastAPI/Flask likely)
+- Frontend: Next.js + TypeScript (book-app-ui folder)
+- Database: Likely SQLAlchemy/PostgreSQL
+
+## Backend Structure
+- main.py (entry point)
+- models.py, schemas.py
+- database.py
+- crud/ (books.py, series.py)
+- importer/ (excel_importer.py, intelligence.py, etc.)
+
+## Frontend Structure (Next.js App)
+- app/ (pages: books/page.tsx, series/page.tsx, series/[seriesId]/page.tsx, layout.tsx, etc.)
+- components/ui/ (button, card, dialog, table, etc.)
+- lib/, public/
+
+Key goal: Keep backend and frontend in sync for book + series management with import features.
+
+I will provide specific file contents when needed. Use @workspace for general understanding.
+
+
+
 
 ## Backend Files
 #file: main.py

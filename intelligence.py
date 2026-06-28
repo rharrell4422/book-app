@@ -1,3 +1,13 @@
+import traceback
+
+try:
+    from models import Series, Book
+    from datetime import date
+except Exception as e:
+    print("\n\n🔥 INTELLIGENCE MODULE FAILED DURING IMPORT 🔥")
+    traceback.print_exc()
+    raise e
+
 from datetime import date
 from models import Book, Series
 
@@ -57,3 +67,27 @@ def compute_series_intelligence_for_series(db, series_id: int):
         "next_upcoming_book_id": next_upcoming.id if next_upcoming else None,
         "is_series_finished": read_count == total_books,
     }
+def recompute_series_intelligence(db):
+    """
+    Recompute intelligence for ALL series in the database.
+    This is the function the importer expects.
+    """
+
+    all_series = db.query(Series).all()
+
+    for series in all_series:
+        intel = compute_series_intelligence_for_series(db, series.id)
+
+        if intel is None:
+            continue
+
+        # Update the Series model fields
+        series.total_books = intel.get("total_books")
+        series.is_finished = intel.get("is_series_finished")
+
+        # Commit updates
+        db.commit()
+        db.refresh(series)
+
+    return True
+
