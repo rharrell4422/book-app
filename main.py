@@ -1,8 +1,8 @@
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
-from importer import import_from_file
 from fastapi.middleware.cors import CORSMiddleware
+from intelligence import compute_series_intelligence_for_series
 
 from database import SessionLocal, engine
 import models
@@ -50,26 +50,56 @@ def get_db():
 # SERIES ENDPOINTS
 # ---------------------------------------------------------
 
-@app.post("/series/", response_model=schemas.Series)
-def create_series(series: schemas.SeriesCreate, db: Session = Depends(get_db)):
+@app.post("/series/", response_model=schemas.SeriesResponse)
+def create_series(series: schemas.SeriesBase, db: Session = Depends(get_db)):
     return crud.create_series(db=db, series=series)
 
 
-@app.get("/series/", response_model=List[schemas.Series])
+@app.get("/series/", response_model=List[schemas.SeriesResponse])
 def read_series(db: Session = Depends(get_db)):
     return crud.get_all_series(db)
 
-
-@app.get("/series/{series_id}", response_model=schemas.Series)
+# NEW SERIES ID
+@app.get("/series/{series_id}", response_model=schemas.SeriesDetailResponse)
 def read_series_by_id(series_id: int, db: Session = Depends(get_db)):
+    # 1. Load the series
     db_series = crud.get_series(db, series_id)
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
-    return db_series
+
+    # 2. Load all books for this series
+    books = crud.get_books_by_series(db, series_id)
+
+    # 3. Sort books by book_number
+    sorted_books = sorted(books, key=lambda b: (b.book_number or 0))
+
+    # 4. Run intelligence engine
+    intelligence = compute_series_intelligence_for_series(db, series_id)
 
 
-@app.put("/series/{series_id}", response_model=schemas.Series)
-def update_series(series_id: int, series: schemas.SeriesUpdate, db: Session = Depends(get_db)):
+        # 5. Return enriched response
+    return schemas.SeriesDetailResponse(
+        id=db_series.id,
+        name=db_series.name,
+        author=db_series.author,
+        description=db_series.description,
+        genre=db_series.genre,
+        tags=db_series.tags,
+        is_finished=intelligence["is_series_finished"],
+        total_books=intelligence["total_books"],
+        series_status="finished" if intelligence["is_series_finished"] else "ongoing",
+        next_unread_book_number=intelligence["next_unread_book_id"],
+        next_upcoming_book_number=intelligence["next_upcoming_book_id"],
+        missing_books=intelligence["missing_orders"],
+        created_at=db_series.created_at,
+        updated_at=db_series.updated_at,
+        books=[schemas.BookResponse.model_validate(book) for book in sorted_books]
+    )
+
+
+#BUFFER
+@app.put("/series/{series_id}", response_model=schemas.SeriesResponse)
+def update_series(series_id: int, series: schemas.SeriesBase, db: Session = Depends(get_db)):
     updated = crud.update_series(db, series_id, series)
     if not updated:
         raise HTTPException(status_code=404, detail="Series not found")
@@ -83,40 +113,22 @@ def delete_series(series_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Series not found")
     return {"message": "Series deleted"}
 
-# --- existing routes above ---
-
-@app.post("/series/{series_id}/check-now")
-async def check_now(series_id: int):
-    """
-    Manually trigger a check for new books in the series.
-    """
-    try:
-        # Placeholder logic — replace with your real scraping/checking logic
-        result = await check_for_new_books(series_id)
-        return {"status": "success", "details": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-async def check_for_new_books(series_id: int):
-    # Temporary placeholder logic
-    return f"Checked series {series_id} for new books."
-
 # ---------------------------------------------------------
 # BOOK ENDPOINTS
 # ---------------------------------------------------------
 
-@app.post("/books/", response_model=schemas.Book)
-def create_book(book: schemas.BookCreate, db: Session = Depends(get_db)):
+
+@app.post("/books/", response_model=schemas.BookResponse)
+def create_book(book: schemas.BookBase, db: Session = Depends(get_db)):
     return crud.create_book(db=db, book=book)
 
 
-@app.get("/books/", response_model=List[schemas.Book])
+@app.get("/books/", response_model=List[schemas.BookResponse])
 def read_books(db: Session = Depends(get_db)):
     return crud.get_all_books(db)
 
 
-@app.get("/books/{book_id}", response_model=schemas.Book)
+@app.get("/books/{book_id}", response_model=schemas.BookResponse)
 def read_book_by_id(book_id: int, db: Session = Depends(get_db)):
     db_book = crud.get_book(db, book_id)
     if not db_book:
@@ -124,8 +136,8 @@ def read_book_by_id(book_id: int, db: Session = Depends(get_db)):
     return db_book
 
 
-@app.patch("/books/{book_id}", response_model=schemas.Book)
-def patch_book(book_id: int, book: schemas.BookUpdate, db: Session = Depends(get_db)):
+@app.patch("/books/{book_id}", response_model=schemas.BookResponse)
+def patch_book(book_id: int, book: schemas.BookBase, db: Session = Depends(get_db)):
     db_book = crud.get_book(db, book_id)
     if not db_book:
         raise HTTPException(status_code=404, detail="Book not found")
@@ -134,15 +146,14 @@ def patch_book(book_id: int, book: schemas.BookUpdate, db: Session = Depends(get
     if book.book_number is not None:
         db_book.book_number = book.book_number
 
-    if book.is_read is not None:
-        db_book.is_read = book.is_read
+    if book.read_status is not None:
+        db_book.read_status = book.read_status
 
     # Add more fields here later if needed
 
     db.commit()
     db.refresh(db_book)
     return db_book
-
 
 
 @app.delete("/books/{book_id}")
@@ -152,7 +163,3 @@ def delete_book(book_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Book not found")
     return {"message": "Book deleted"}
 
-@app.post("/import")
-def import_library(filename: str, db: Session = Depends(get_db)):
-    summary = import_from_file(db, filename)
-    return summary

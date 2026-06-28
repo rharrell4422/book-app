@@ -1,191 +1,183 @@
-import pandas as pd
+import re
+from datetime import datetime
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from models import Book, Series
+from database import SessionLocal
 
-import models
-import schemas
-from crud import (
-    create_book,
-    update_book,
-    get_book,
-    get_all_books,
-    create_series,
-    update_series,
-    get_series,
-    get_all_series,
-)
+# ------------------------------------------------------------
+# Header Normalization
+# ------------------------------------------------------------
+
+def normalize_header(header: str) -> str:
+    h = header.strip().lower()
+    h = re.sub(r"[^a-z0-9]+", " ", h)
+    h = re.sub(r"\s+", " ", h).strip()
+    return h
 
 
-# ---------------------------------------------------------
-# Helper: Convert Excel serial date → Python date
-# ---------------------------------------------------------
-def excel_date_to_date(value: Any) -> Optional[datetime]:
-    if value is None or value == "" or str(value).strip() == "nan":
-        return None
+# ------------------------------------------------------------
+# Header Alias Map (Option B)
+# ------------------------------------------------------------
 
-    try:
-        # Excel serial dates: days since 1899-12-30
-        base = datetime(1899, 12, 30)
-        return base + timedelta(days=float(value))
-    except:
-        return None
-
-
-# ---------------------------------------------------------
-# Helper: Normalize strings
-# ---------------------------------------------------------
-def clean_str(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    value = str(value).strip()
-    return value if value else None
-
-
-# ---------------------------------------------------------
-# Helper: Normalize book number
-# ---------------------------------------------------------
-def clean_book_number(value: Any) -> Optional[int]:
-    if value is None or value == "" or str(value).strip() == "nan":
-        return None
-    try:
-        return int(float(value))
-    except:
-        return None
+HEADER_MAP = {
+    "title": ["title", "book title", "name", "bookname"],
+    "subtitle": ["subtitle", "sub title", "sub-title"],
+    "author": ["author", "writer", "book author"],
+    "series_name": ["series", "series name", "series title"],
+    "book_number": ["book number", "book #", "number", "order", "sequence", "seq"],
+    "publication_date": ["publication date", "pub date", "published", "publish date"],
+    "publisher": ["publisher", "publishing house", "imprint"],
+    "edition": ["edition", "ed."],
+    "format": ["format", "binding", "media"],
+    "pages": ["pages", "page count", "num pages"],
+    "language": ["language", "lang"],
+    "isbn": ["isbn", "isbn10", "isbn-10"],
+    "isbn13": ["isbn13", "isbn-13", "isbn 13"],
+    "asin": ["asin", "amazon id"],
+    "google_books_id": ["google books id", "google id"],
+    "goodreads_id": ["goodreads id", "gr id"],
+    "storygraph_id": ["storygraph id", "sg id"],
+    "date_added": ["date added", "added"],
+    "date_started": ["date started", "started", "start date"],
+    "date_finished": ["date finished", "finished", "finish date", "completed date"],
+    "read_status": ["read status", "status", "reading status"],
+    "rating": ["rating", "stars", "score"],
+    "review": ["review", "review text", "comments"],
+    "notes": ["notes", "note", "personal notes"],
+    "tags": ["tags", "labels", "categories"],
+}
 
 
-# ---------------------------------------------------------
-# Main Import Function
-# ---------------------------------------------------------
-def import_from_file(db: Session, filename: str) -> Dict[str, Any]:
-    # Detect file type
-    if filename.lower().endswith(".csv"):
-        df = pd.read_csv(filename)
-    else:
-        df = pd.read_excel(filename)
+# ------------------------------------------------------------
+# Build Lookup Table
+# ------------------------------------------------------------
 
-    # Summary counters
-    summary = {
-        "rows_processed": 0,
-        "books_created": 0,
-        "books_updated": 0,
-        "series_created": 0,
-        "series_updated": 0,
-        "rows_skipped": 0,
-        "skipped_details": [],
-    }
+def build_header_lookup():
+    lookup = {}
+    for field, aliases in HEADER_MAP.items():
+        for alias in aliases:
+            lookup[normalize_header(alias)] = field
+    return lookup
 
-    # Cache existing series for speed
-    series_cache = {s.name.lower(): s for s in get_all_series(db)}
-    # Cache existing books for speed (ISBN or title+author)
-    books_cache = get_all_books(db)
+HEADER_LOOKUP = build_header_lookup()
 
-    for _, row in df.iterrows():
-        summary["rows_processed"] += 1
 
-        title = clean_str(row.get("Title"))
-        author = clean_str(row.get("Author"))
+# ------------------------------------------------------------
+# Map Raw Headers → Internal Fields
+# ------------------------------------------------------------
 
-        if not title or not author:
-            summary["rows_skipped"] += 1
-            summary["skipped_details"].append(f"Missing title/author: {row}")
-            continue
+def map_headers(raw_headers):
+    mapping = {}
+    unknown_headers = []
 
-        isbn = clean_str(row.get("ISBN"))
-        series_name = clean_str(row.get("Series Name"))
-        book_number = clean_book_number(row.get("Book #"))
-        series_finished = clean_str(row.get("Series Finished"))
-        record_status = clean_str(row.get("Record Status"))
-        date_read = excel_date_to_date(row.get("Date Read"))
-        next_release = excel_date_to_date(row.get("Next Release Date"))
+    for h in raw_headers:
+        norm = normalize_header(h)
+        internal = HEADER_LOOKUP.get(norm)
 
-        is_read = record_status == "Read"
-        is_upcoming = record_status == "Upcoming"
-
-        # ---------------------------------------------------------
-        # SERIES HANDLING
-        # ---------------------------------------------------------
-        series_obj = None
-        if series_name:
-            key = series_name.lower()
-            if key in series_cache:
-                series_obj = series_cache[key]
-            else:
-                # Create new series
-                new_series = schemas.SeriesCreate(
-                    name=series_name,
-                    total_books=None,
-                    is_finished=(series_finished == "Yes"),
-                )
-                series_obj = create_series(db, new_series)
-                series_cache[key] = series_obj
-                summary["series_created"] += 1
-
-            # Update series finished flag if provided
-            if series_finished is not None:
-                updated = update_series(
-                    db,
-                    series_obj.id,
-                    schemas.SeriesUpdate(is_finished=(series_finished == "Yes")),
-                )
-                if updated:
-                    summary["series_updated"] += 1
-
-        # ---------------------------------------------------------
-        # BOOK MATCHING
-        # ---------------------------------------------------------
-        matched_book = None
-
-        # 1. Match by ISBN
-        if isbn:
-            for b in books_cache:
-                if b.isbn == isbn:
-                    matched_book = b
-                    break
-
-        # 2. Match by title + author
-        if not matched_book:
-            for b in books_cache:
-                if b.title.lower() == title.lower() and b.author.lower() == author.lower():
-                    matched_book = b
-                    break
-
-        # ---------------------------------------------------------
-        # CREATE OR UPDATE BOOK
-        # ---------------------------------------------------------
-        if matched_book:
-            # Update existing
-            update_data = schemas.BookUpdate(
-                title=title,
-                author=author,
-                isbn=isbn,
-                series_id=series_obj.id if series_obj else None,
-                series_order=book_number,
-                is_series_finished=(series_finished == "Yes") if series_finished else None,
-                is_read=is_read,
-                read_date=date_read,
-                next_release_date=next_release,
-                is_upcoming=is_upcoming,
-            )
-            update_book(db, matched_book.id, update_data)
-            summary["books_updated"] += 1
-
+        if internal:
+            mapping[h] = internal
         else:
-            # Create new
-            new_book = schemas.BookCreate(
-                title=title,
-                author=author,
-                isbn=isbn,
-                series_id=series_obj.id if series_obj else None,
-                series_order=book_number,
-                is_series_finished=(series_finished == "Yes") if series_finished else None,
-                is_read=is_read,
-                read_date=date_read,
-                next_release_date=next_release,
-                is_upcoming=is_upcoming,
-            )
-            created = create_book(db, new_book)
-            books_cache.append(created)
-            summary["books_created"] += 1
+            mapping[h] = None
+            unknown_headers.append(h)
 
-    return summary
+    return mapping, unknown_headers
+
+
+# ------------------------------------------------------------
+# Parse Date Helper
+# ------------------------------------------------------------
+
+def parse_date(value):
+    if not value:
+        return None
+
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except:
+            pass
+
+    return None
+
+
+# ------------------------------------------------------------
+# Auto-Create or Fetch Series
+# ------------------------------------------------------------
+
+def get_or_create_series(db: Session, series_name: str):
+    if not series_name:
+        return None
+
+    existing = db.query(Series).filter(Series.name == series_name).first()
+    if existing:
+        return existing
+
+    new_series = Series(name=series_name)
+    db.add(new_series)
+    db.commit()
+    db.refresh(new_series)
+    return new_series
+
+
+# ------------------------------------------------------------
+# Import a Single Row (Option B)
+# ------------------------------------------------------------
+
+def import_row(raw_headers, row_values):
+    mapping, unknown_headers = map_headers(raw_headers)
+
+    book_data = {}
+    unknown_data = {}
+
+    for raw_h, value in zip(raw_headers, row_values):
+        internal = mapping.get(raw_h)
+
+        if internal:
+            if internal in ["publication_date", "date_added", "date_started", "date_finished"]:
+                book_data[internal] = parse_date(value)
+            else:
+                book_data[internal] = value
+        else:
+            unknown_data[raw_h] = value
+
+    book_data["import_raw_headers"] = raw_headers
+    book_data["import_raw_row"] = unknown_data
+
+    return book_data
+
+
+# ------------------------------------------------------------
+# Save Book to Database
+# ------------------------------------------------------------
+
+def save_book(book_data):
+    db = SessionLocal()
+
+    series_name = book_data.pop("series_name", None)
+    if series_name:
+        series = get_or_create_series(db, series_name)
+        book_data["series_id"] = series.id
+
+    book = Book(**book_data)
+    db.add(book)
+    db.commit()
+    db.refresh(book)
+    db.close()
+
+    return book
+
+
+# ------------------------------------------------------------
+# Main Import Function
+# ------------------------------------------------------------
+
+def import_excel_rows(headers, rows):
+    imported = []
+
+    for row in rows:
+        book_data = import_row(headers, row)
+        saved = save_book(book_data)
+        imported.append(saved.id)
+
+    return imported
+

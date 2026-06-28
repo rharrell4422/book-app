@@ -1,135 +1,103 @@
 from datetime import date, datetime
-from typing import Optional, List
+from typing import List, Optional
 from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
-
-# ---------------------------------------------------------
-# SERIES SCHEMAS
-# ---------------------------------------------------------
-
-class SeriesBase(BaseModel):
-    name: str
-    total_books: Optional[int] = None
-    is_finished: bool = False
-
-
-class SeriesCreate(SeriesBase):
-    pass
-
-
-class SeriesUpdate(BaseModel):
-    name: Optional[str] = None
-    total_books: Optional[int] = None
-    is_finished: Optional[bool] = None
-
-
-# Forward declaration for nested relationship
-class Book(BaseModel):
-    id: int
-    title: str
-    author: Optional[str] = None
-    isbn: Optional[str] = None
-    format: Optional[str] = None
-    publication_date: Optional[date] = None
-
-    series_id: Optional[int] = None
-    series_order: Optional[float] = None
-    series_total_books: Optional[int] = None
-    is_series_finished: Optional[bool] = None
-    book_number: Optional[int] = None
-
-
-    is_read: bool
-    read_date: Optional[date] = None
-
-    rating: Optional[float] = None
-    notes: Optional[str] = None
-
-    check_url: Optional[str] = None
-    is_upcoming_auto: bool
-    is_upcoming_final: bool
-
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        orm_mode = True
-
-
-class Series(SeriesBase):
-    id: int
-    books: List[Book] = []
-
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        orm_mode = True
-
-
-# ---------------------------------------------------------
-# BOOK SCHEMAS
-# ---------------------------------------------------------
+# ------------------------------------------------------------
+# Book Schemas
+# ------------------------------------------------------------
 
 class BookBase(BaseModel):
     title: str
-    author: Optional[str] = None
-    isbn: Optional[str] = None
-    format: Optional[str] = None
-    publication_date: Optional[date] = None
-
+    author: str
+    subtitle: Optional[str] = None
     series_id: Optional[int] = None
-    series_order: Optional[float] = None
-    series_total_books: Optional[int] = None
-    is_series_finished: Optional[bool] = None
-
-    is_read: bool = False
-    read_date: Optional[date] = None
-
-    rating: Optional[float] = None
-    notes: Optional[str] = None
-
-    check_url: Optional[str] = None
-    is_upcoming_auto: bool = False
-    is_upcoming_final: bool = False
-
-
-class BookCreate(BookBase):
-    pass
-
-
-class BookUpdate(BaseModel):
-    title: Optional[str] = None
-    author: Optional[str] = None
-    isbn: Optional[str] = None
-    format: Optional[str] = None
+    series_order: Optional[int] = None
+    book_number: Optional[float] = None
     publication_date: Optional[date] = None
-
-    series_id: Optional[int] = None
-    series_order: Optional[float] = None
-    series_total_books: Optional[int] = None
-    is_series_finished: Optional[bool] = None
-
-    # ⭐ NEW FIELD (required for editing book number)
-    book_number: Optional[int] = None
-
-    is_read: Optional[bool] = None
-    read_date: Optional[date] = None
-
-    rating: Optional[float] = None
+    publisher: Optional[str] = None
+    edition: Optional[str] = None
+    format: Optional[str] = None
+    pages: Optional[int] = None
+    language: Optional[str] = None
+    isbn: Optional[str] = None
+    isbn13: Optional[str] = None
+    asin: Optional[str] = None
+    google_books_id: Optional[str] = None
+    goodreads_id: Optional[str] = None
+    storygraph_id: Optional[str] = None
+    date_added: Optional[date] = None
+    date_started: Optional[date] = None
+    date_finished: Optional[date] = None
+    read_status: Optional[str] = None
+    rating: Optional[int] = None
+    review: Optional[str] = None
     notes: Optional[str] = None
-
-    check_url: Optional[str] = None
+    tags: Optional[list] = None
     is_upcoming_auto: Optional[bool] = None
     is_upcoming_final: Optional[bool] = None
+    is_missing: Optional[bool] = None
+    record_status: Optional[str] = None
 
 
+##
 
-class Book(BookBase):
+class BookResponse(BookBase):
     id: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ------------------------------------------------------------
+# Series Schemas
+# ------------------------------------------------------------
+
+class SeriesBase(BaseModel):
+    name: str
+    author: Optional[str] = None
+    description: Optional[str] = None
+    genre: Optional[str] = None
+    tags: Optional[list] = None
+    is_finished: Optional[bool] = None
+    total_books: Optional[int] = None
+    series_status: Optional[str] = None
+    next_unread_book_number: Optional[float] = None
+    next_upcoming_book_number: Optional[float] = None
+    missing_books: Optional[list] = None
+
+
+class SeriesResponse(SeriesBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    books: List[BookResponse] = []
+
+    class Config:
+        orm_mode = True
+
+class SeriesDetailResponse(BaseModel):
+    id: int
+    name: str
+    author: str | None = None
+    description: str | None = None
+    genre: str | None = None
+    tags: list[str] | None = None
+
+    # Intelligence fields
+    is_finished: bool
+    total_books: int
+    series_status: str
+    next_unread_book_number: float | None = None
+    next_upcoming_book_number: float | None = None
+    missing_books: list[str] | None = None
 
     created_at: datetime
     updated_at: datetime
 
+    # List of books in the series
+    books: list[BookResponse]
+
     class Config:
-        orm_mode = True
+        from_attributes = True
