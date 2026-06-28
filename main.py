@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 from fastapi.middleware.cors import CORSMiddleware
-from intelligence import compute_series_intelligence_for_series
+from intelligence import compute_series_intelligence_for_series, lookup_book_summary, suggest_book_by_series
 from importer.importer import run_import
 from database import SessionLocal, engine
 import models
@@ -72,6 +72,7 @@ def read_series_by_id(series_id: int, db: Session = Depends(get_db)):
 
     # 3. Sort books by book_number
     sorted_books = sorted(books, key=lambda b: (b.book_number or 0))
+    series_author = db_series.author or next((book.author for book in sorted_books if book.author), None)
 
     # 4. Run intelligence engine
     intelligence = compute_series_intelligence_for_series(db, series_id)
@@ -81,7 +82,7 @@ def read_series_by_id(series_id: int, db: Session = Depends(get_db)):
     return schemas.SeriesDetailResponse(
         id=db_series.id,
         name=db_series.name,
-        author=db_series.author,
+        author=series_author,
         description=db_series.description,
         genre=db_series.genre,
         tags=db_series.tags,
@@ -128,12 +129,45 @@ def read_books(db: Session = Depends(get_db)):
     return crud.get_all_books(db)
 
 
+@app.get("/books/by_series/{series_id}", response_model=List[schemas.BookResponse])
+def read_books_by_series(series_id: int, db: Session = Depends(get_db)):
+    return crud.get_books_by_series(db, series_id)
+
+
+@app.get("/books/lookup")
+def lookup_book(title: str, author: str | None = None):
+    return lookup_book_summary(title, author)
+
+
+@app.get("/books/suggest")
+def suggest_book(series_name: str, book_number: int | None = None, author: str | None = None):
+    return suggest_book_by_series(series_name, book_number, author)
+
+
 @app.get("/books/{book_id}", response_model=schemas.BookResponse)
 def read_book_by_id(book_id: int, db: Session = Depends(get_db)):
     db_book = crud.get_book(db, book_id)
     if not db_book:
         raise HTTPException(status_code=404, detail="Book not found")
     return db_book
+
+
+@app.post("/books/{book_id}/summary")
+def fetch_and_save_book_summary(book_id: int, db: Session = Depends(get_db)):
+    db_book = crud.get_book(db, book_id)
+    if not db_book:
+        raise HTTPException(status_code=404, detail="Book not found")
+
+    summary_result = lookup_book_summary(db_book.title, db_book.author)
+    if summary_result.get("found") and summary_result.get("summary"):
+        db_book.auto_summary = summary_result.get("summary")
+        db.commit()
+        db.refresh(db_book)
+
+    return {
+        "book": schemas.BookResponse.model_validate(db_book),
+        "lookup": summary_result,
+    }
 
 
 @app.patch("/books/{book_id}", response_model=schemas.BookResponse)

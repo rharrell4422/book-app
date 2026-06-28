@@ -126,3 +126,7 @@ class Book(Base):
     )
 
     series = relationship("Series", back_populates="books")
+
+    @property
+    def series_name(self):
+        return self.series.name if self.series else None

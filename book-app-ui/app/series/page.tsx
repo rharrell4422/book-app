@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useToast } from "@/components/ui/use-toast";
+import { Button } from "@/components/ui/button";
 import {
   Table,
   TableBody,
@@ -13,9 +15,14 @@ import {
 
 export default function SeriesPage() {
   const { toast } = useToast();
-  const [series, setSeries] = useState([]);
+  const [series, setSeries] = useState<any[]>([]);
   const [loadingId, setLoadingId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
+
+  const totalBooks = series.reduce(
+    (sum, s) => sum + (s.series_total_books_final ?? 0),
+    0
+  );
 
   async function fetchSeries() {
     try {
@@ -26,6 +33,7 @@ export default function SeriesPage() {
       setSeries(data);
     } catch (error) {
       console.error("Error fetching series:", error);
+      setMessage("Unable to load series right now.");
     }
   }
 
@@ -45,14 +53,14 @@ export default function SeriesPage() {
       const data = await response.json();
 
       setMessage(
-        `Checked series ${seriesId}. Next upcoming: ${
+        `Series ${seriesId} refreshed. Next upcoming: ${
           data.next_upcoming_book_number ?? "None"
-        }`
+        }.`
       );
 
       toast({
-        title: "Check complete",
-        description: `Series ${seriesId} refreshed successfully.`,
+        title: "Series refreshed",
+        description: `Series ${seriesId} has been updated.`,
       });
 
       fetchSeries();
@@ -69,14 +77,11 @@ export default function SeriesPage() {
     if (newUrl === null) return;
 
     try {
-      const response = await fetch(
-        `http://localhost:8000/series/${seriesId}`,
-        {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ check_url: newUrl }),
-        }
-      );
+      const response = await fetch(`http://localhost:8000/series/${seriesId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ check_url: newUrl }),
+      });
 
       if (response.ok) {
         toast({
@@ -100,82 +105,108 @@ export default function SeriesPage() {
   }
 
   return (
-    <div className="p-6">
-      <h1 className="text-2xl font-bold mb-4">Series List</h1>
+    <div className="p-6 space-y-6">
+      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+        <div className="space-y-2">
+          <p className="text-sm uppercase tracking-[0.2em] text-muted-foreground">
+            Series library
+          </p>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-3xl font-bold">Series</h1>
+            <span className="rounded-full bg-muted px-3 py-1 text-xs uppercase tracking-[0.2em] text-muted-foreground">
+              {series.length} tracked
+            </span>
+          </div>
+          <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
+            Browse your tracked series, update check URLs, and refresh status for each series.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Link href="/books">
+            <Button variant="outline">View Library</Button>
+          </Link>
+          <Link href="/series/[seriesId]">
+            <Button variant="secondary">Series detail</Button>
+          </Link>
+        </div>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <div className="rounded-lg border bg-card/80 p-4">
+          <p className="text-sm text-muted-foreground">Series tracked</p>
+          <p className="text-2xl font-semibold">{series.length}</p>
+        </div>
+        <div className="rounded-lg border bg-card/80 p-4">
+          <p className="text-sm text-muted-foreground">Books tracked</p>
+          <p className="text-2xl font-semibold">{totalBooks}</p>
+        </div>
+        <div className="rounded-lg border bg-card/80 p-4">
+          <p className="text-sm text-muted-foreground">Ready to refresh</p>
+          <p className="text-2xl font-semibold">
+            {loadingId ? "Refreshing…" : "Awaiting action"}
+          </p>
+        </div>
+      </div>
 
       {message && (
-        <div className="mb-4 p-2 bg-blue-100 border border-blue-300 rounded">
+        <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
           {message}
         </div>
       )}
 
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>ID</TableHead>
-            <TableHead>Name</TableHead>
-            <TableHead>Author</TableHead>
-            <TableHead>Check URL</TableHead>
-            <TableHead>Next Unread</TableHead>
-            <TableHead>Next Upcoming</TableHead>
-            <TableHead>Missing</TableHead>
-            <TableHead>Total</TableHead>
-            <TableHead>Last Checked</TableHead>
-            <TableHead>Books</TableHead>
-            <TableHead>Check Now</TableHead>
-          </TableRow>
-        </TableHeader>
+      <div className="overflow-x-auto rounded-lg border bg-card/80">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>ID</TableHead>
+              <TableHead>Name</TableHead>
+              <TableHead>Author</TableHead>
+              <TableHead>Next unread</TableHead>
+              <TableHead>Next upcoming</TableHead>
+              <TableHead>Total</TableHead>
+              <TableHead>Last checked</TableHead>
+              <TableHead>Actions</TableHead>
+            </TableRow>
+          </TableHeader>
 
-        <TableBody>
-          {Array.isArray(series) &&
-            series.map((s: any) => (
+          <TableBody>
+            {series.map((s) => (
               <TableRow key={s.id}>
                 <TableCell>{s.id}</TableCell>
                 <TableCell>{s.name}</TableCell>
-                <TableCell>{s.author}</TableCell>
-
-                <TableCell>
-                  <div className="flex flex-col gap-1">
-                    <span className="truncate max-w-[200px]">
-                      {s.check_url ?? "—"}
-                    </span>
-                    <button
-                      onClick={() => handleEditUrl(s.id, s.check_url)}
-                      className="text-xs text-blue-600 underline"
-                    >
-                      Edit URL
-                    </button>
-                  </div>
-                </TableCell>
-
+                <TableCell>{s.author || "—"}</TableCell>
                 <TableCell>{s.next_unread_book_number ?? "—"}</TableCell>
                 <TableCell>{s.next_upcoming_book_number ?? "—"}</TableCell>
-                <TableCell>{s.missing_books ?? "—"}</TableCell>
                 <TableCell>{s.series_total_books_final ?? "—"}</TableCell>
                 <TableCell>{s.last_checked ?? "—"}</TableCell>
-
-                <TableCell>
-                  <a
-                    href={`/books?series_id=${s.id}`}
-                    className="text-blue-600 underline"
+                <TableCell className="space-x-2 whitespace-nowrap">
+                  <Link href={`/books?series_id=${s.id}`}>
+                    <Button variant="ghost" size="sm">
+                      View books
+                    </Button>
+                  </Link>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => handleEditUrl(s.id, s.check_url)}
                   >
-                    View Books
-                  </a>
-                </TableCell>
-
-                <TableCell>
-                  <button
+                    Edit URL
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
                     onClick={() => handleCheckNow(s.id)}
                     disabled={loadingId === s.id}
-                    className="px-3 py-1 bg-green-600 text-white rounded disabled:bg-gray-400"
                   >
-                    {loadingId === s.id ? "Checking…" : "Check Now"}
-                  </button>
+                    {loadingId === s.id ? "Checking…" : "Refresh"}
+                  </Button>
                 </TableCell>
               </TableRow>
             ))}
-        </TableBody>
-      </Table>
+          </TableBody>
+        </Table>
+      </div>
     </div>
   );
 }

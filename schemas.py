@@ -20,12 +20,15 @@ class BookBase(BaseModel):
     format: Optional[str] = None
     pages: Optional[int] = None
     language: Optional[str] = None
+    release_date: Optional[date] = None
+    read_date: Optional[date] = None
     isbn: Optional[str] = None
     isbn13: Optional[str] = None
     asin: Optional[str] = None
     google_books_id: Optional[str] = None
     goodreads_id: Optional[str] = None
     storygraph_id: Optional[str] = None
+    auto_summary: Optional[str] = None
     date_added: Optional[date] = None
     date_started: Optional[date] = None
     date_finished: Optional[date] = None
@@ -34,6 +37,7 @@ class BookBase(BaseModel):
     review: Optional[str] = None
     notes: Optional[str] = None
     tags: Optional[list] = None
+    series_name: Optional[str] = None
     is_upcoming_auto: Optional[bool] = None
     is_upcoming_final: Optional[bool] = None
     is_missing: Optional[bool] = None
