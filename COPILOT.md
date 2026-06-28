@@ -30,7 +30,9 @@
 - Always check existing file contents before refactors.
 - Never overwrite large sections without confirmation.
 - When chat restarts, I paste COPILOT.md.
-- - Copilot must confirm before making any destructive change (schema edits, importer rewrites, intelligence logic changes).
+- Copilot must show the diff for any proposed file change before applying it.
+- Copilot must wait for my approval before applying any file change.
+- Copilot must confirm before making any destructive change (schema edits, importer rewrites, intelligence logic changes).
 
 
 ## Project Overview

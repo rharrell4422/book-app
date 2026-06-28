@@ -168,7 +168,7 @@ def delete_book(book_id: int, db: Session = Depends(get_db)):
 # ---------------------------------------------------------
 @app.post("/import")
 def trigger_import():
-    file_path = "Small_Master Library_21June2026.xlsx"
+    file_path = "Test_LibraryImport_new_fields_28Jun2026.xlsx"
 
     try:
         run_import(file_path)

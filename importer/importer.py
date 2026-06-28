@@ -36,10 +36,10 @@ def normalize_header(header: str) -> str:
 
 
 HEADER_MAP: Dict[str, List[str]] = {
-    "title": ["title", "book title", "name", "bookname"],
+    "title": ["title", "titles", "book title", "name", "bookname"],
     "subtitle": ["subtitle", "sub title", "sub-title"],
-    "author": ["author", "writer", "book author"],
-    "series_name": ["series", "series name", "series title"],
+    "author": ["author", "authors", "writer", "book author"],
+    "series_name": ["series", "series name", "series title", "series names"],
     "book_number": ["book number", "book #", "number", "order", "sequence", "seq"],
     "publication_date": ["publication date", "pub date", "published", "publish date"],
     "publisher": ["publisher", "publishing house", "imprint"],
@@ -55,8 +55,10 @@ HEADER_MAP: Dict[str, List[str]] = {
     "storygraph_id": ["storygraph id", "sg id"],
     "date_added": ["date added", "added"],
     "date_started": ["date started", "started", "start date"],
-    "date_finished": ["date finished", "finished", "finish date", "completed date"],
-    "read_status": ["read status", "status", "reading status"],
+    "date_finished": ["date finished", "finished", "finish date", "completed date", "date read", "read date"],
+    "release_date": ["release date", "next release date"],
+    "read_status": ["read status", "record status", "status", "reading status"],
+    "series_finished": ["series finished", "series complete", "series completed"],
     "rating": ["rating", "stars", "score"],
     "review": ["review", "review text", "comments"],
     "notes": ["notes", "note", "personal notes"],
@@ -240,9 +242,14 @@ def import_row(raw_headers: List[str], row_values: List[Any]) -> Tuple[Dict[str,
             return value.isoformat()
         return value
 
-    # Clean book_data
+    # Keep true date values for database fields.
+    # Only convert raw import metadata to JSON-safe values.
     for k, v in list(book_data.items()):
-        book_data[k] = json_safe(v)
+        if k in ["import_raw_headers", "import_raw_row"]:
+            continue
+        if isinstance(v, (datetime, date)):
+            continue
+        book_data[k] = v
 
     # Clean unknown_data (goes into import_raw_row)
     for k, v in list(unknown_data.items()):
@@ -319,6 +326,7 @@ def create_or_update_book(db: Session, book_data: Dict[str, Any]) -> Book:
         subtitle=book_data.get("subtitle"),
         format=book_data.get("format"),
         publication_date=book_data.get("publication_date"),
+        release_date=book_data.get("release_date"),
         series_id=series.id if series else None,
         series_order=book_data.get("book_number"),
         series_total_books=series_total_books,
