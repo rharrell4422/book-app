@@ -139,7 +139,7 @@ def lookup_book(title: str, author: str | None = None):
     return lookup_book_summary(title, author)
 
 
-@app.get("/books/suggest")
+@app.get("/books/suggest", response_model=schemas.SuggestionResponse)
 def suggest_book(series_name: str, book_number: int | None = None, author: str | None = None):
     return suggest_book_by_series(series_name, book_number, author)
 

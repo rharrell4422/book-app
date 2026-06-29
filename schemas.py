@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import List, Optional
 from pydantic import BaseModel
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # ------------------------------------------------------------
 # Book Schemas
@@ -108,3 +108,39 @@ class SeriesDetailResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ------------------------------------------------------------
+# Suggestion Schemas
+# ------------------------------------------------------------
+
+class SuggestionRecord(BaseModel):
+    title: str
+    author: str | None = None
+    year: str | int | None = None
+    description: str | None = None
+    source_url: str | None = None
+    series_name: str | list[str] | None = None
+    series_position: int | str | float | None = None
+    source: str | None = None
+
+
+class SuggestionStageDiagnostic(BaseModel):
+    stage: str
+    provider: str
+    query: str
+    raw_count: int = 0
+    accepted_count: int = 0
+
+
+class SuggestionDiagnostics(BaseModel):
+    selected_stage: str | None = None
+    provider_counts: dict[str, int] = Field(default_factory=dict)
+    stages: list[SuggestionStageDiagnostic] = Field(default_factory=list)
+    accepted_total: int = 0
+
+
+class SuggestionResponse(BaseModel):
+    query: str
+    results: list[SuggestionRecord]
+    diagnostics: SuggestionDiagnostics | None = None

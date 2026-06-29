@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,81 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+
+const SUGGESTION_CACHE_PREFIX = "series-suggestions-v1:";
+const SUGGESTION_SCAN_PREFIX = "series-scan-v1:";
+const SUGGESTION_AUTOSTART_PREFIX = "series-scan-autostarted-v1:";
+
+type ScanStatus = "idle" | "running" | "paused" | "completed";
+
+type ScanProgress = {
+  status: ScanStatus;
+  pendingOrders: string[];
+  completedCount: number;
+  totalCount: number;
+};
+
+function loadCachedSuggestions(seriesId: string): Record<string, any[]> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.sessionStorage.getItem(`${SUGGESTION_CACHE_PREFIX}${seriesId}`);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCachedSuggestions(seriesId: string, suggestions: Record<string, any[]>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(`${SUGGESTION_CACHE_PREFIX}${seriesId}`, JSON.stringify(suggestions));
+  } catch {
+    // Ignore storage errors in private mode or restricted browsers.
+  }
+}
+
+function loadScanProgress(seriesId: string): ScanProgress | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(`${SUGGESTION_SCAN_PREFIX}${seriesId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return {
+      status: parsed.status || "idle",
+      pendingOrders: Array.isArray(parsed.pendingOrders) ? parsed.pendingOrders : [],
+      completedCount: Number.isFinite(parsed.completedCount) ? parsed.completedCount : 0,
+      totalCount: Number.isFinite(parsed.totalCount) ? parsed.totalCount : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveScanProgress(seriesId: string, progress: ScanProgress) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(`${SUGGESTION_SCAN_PREFIX}${seriesId}`, JSON.stringify(progress));
+  } catch {
+    // Ignore storage errors in private mode or restricted browsers.
+  }
+}
+
+function hasAutoStartedSeriesScan(seriesId: string): boolean {
+  if (typeof window === "undefined") return false;
+  return window.sessionStorage.getItem(`${SUGGESTION_AUTOSTART_PREFIX}${seriesId}`) === "1";
+}
+
+function markAutoStartedSeriesScan(seriesId: string) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(`${SUGGESTION_AUTOSTART_PREFIX}${seriesId}`, "1");
+  } catch {
+    // Ignore storage errors in private mode or restricted browsers.
+  }
+}
 
 function formatDate(value?: string | null) {
   if (!value) return "—";
@@ -37,8 +112,21 @@ export default function SeriesDetailPage() {
   const [summaryLoadingId, setSummaryLoadingId] = useState<number | null>(null);
   const [missingSuggestions, setMissingSuggestions] = useState<Record<string, any[]>>({});
   const [missingSuggestionLoading, setMissingSuggestionLoading] = useState<string | null>(null);
+  const [quickSuggestResults, setQuickSuggestResults] = useState<any[]>([]);
+  const [quickSuggestLoading, setQuickSuggestLoading] = useState(false);
+  const [scanStatus, setScanStatus] = useState<ScanStatus>("idle");
+  const [scanCompletedCount, setScanCompletedCount] = useState(0);
+  const [scanTotalCount, setScanTotalCount] = useState(0);
+  const [scanCurrentOrder, setScanCurrentOrder] = useState<string | null>(null);
+  const scanAbortRef = useRef<AbortController | null>(null);
+  const scanPendingRef = useRef<string[]>([]);
+  const scanCompletedRef = useRef(0);
+  const scanTotalRef = useRef(0);
 
   useEffect(() => {
+    let isActive = true;
+    const seriesController = new AbortController();
+
     async function fetchSeries() {
       setLoading(true);
       setError(null);
@@ -46,6 +134,7 @@ export default function SeriesDetailPage() {
       try {
         const response = await fetch(`http://localhost:8000/series/${seriesId}`, {
           cache: "no-store",
+          signal: seriesController.signal,
         });
 
         if (!response.ok) {
@@ -53,30 +142,76 @@ export default function SeriesDetailPage() {
         }
 
         const data = await response.json();
+        if (!isActive) return;
         setSeries(data);
 
-        // Fetch suggestions sequentially (not in parallel) to avoid timeouts
-        if (data.missing_books?.length) {
-          fetchSuggestionsSequentially(data.missing_books, data);
+        const cachedSuggestions = loadCachedSuggestions(seriesId);
+        if (Object.keys(cachedSuggestions).length > 0) {
+          setMissingSuggestions(cachedSuggestions);
+        }
+
+        const allMissingOrders: string[] = Array.isArray(data.missing_books) ? data.missing_books : [];
+        const pendingFromCache = allMissingOrders.filter((order: string) => !(order in cachedSuggestions));
+        const defaultCompleted = Math.max(0, allMissingOrders.length - pendingFromCache.length);
+
+        const existingProgress = loadScanProgress(seriesId);
+        if (existingProgress && existingProgress.totalCount > 0) {
+          const validPending = existingProgress.pendingOrders.filter((order) => allMissingOrders.includes(order));
+          const validCompleted = Math.max(0, existingProgress.totalCount - validPending.length);
+          const total = allMissingOrders.length;
+
+          scanPendingRef.current = validPending;
+          scanCompletedRef.current = Math.min(validCompleted, total);
+          scanTotalRef.current = total;
+
+          setScanStatus(existingProgress.status);
+          setScanCompletedCount(scanCompletedRef.current);
+          setScanTotalCount(total);
+
+          saveScanProgress(seriesId, {
+            status: existingProgress.status,
+            pendingOrders: validPending,
+            completedCount: scanCompletedRef.current,
+            totalCount: total,
+          });
+
+          if (existingProgress.status === "running" && validPending.length > 0) {
+            runBackgroundScan(validPending, data, seriesId, cachedSuggestions);
+          }
+        } else {
+          scanPendingRef.current = pendingFromCache;
+          scanCompletedRef.current = defaultCompleted;
+          scanTotalRef.current = allMissingOrders.length;
+
+          setScanStatus(allMissingOrders.length > 0 && pendingFromCache.length === 0 ? "completed" : "idle");
+          setScanCompletedCount(defaultCompleted);
+          setScanTotalCount(allMissingOrders.length);
+
+          saveScanProgress(seriesId, {
+            status: allMissingOrders.length > 0 && pendingFromCache.length === 0 ? "completed" : "idle",
+            pendingOrders: pendingFromCache,
+            completedCount: defaultCompleted,
+            totalCount: allMissingOrders.length,
+          });
+
+          // Auto-start only once per series (first ever load for this series in session).
+          const shouldAutoStart =
+            allMissingOrders.length > 0 &&
+            pendingFromCache.length > 0 &&
+            !hasAutoStartedSeriesScan(seriesId);
+
+          if (shouldAutoStart) {
+            markAutoStartedSeriesScan(seriesId);
+            runBackgroundScan(pendingFromCache, data, seriesId, cachedSuggestions);
+          }
         }
       } catch (error) {
+        if (!isActive) return;
         setError("Unable to load this series right now.");
         console.error("Error fetching series:", error);
       } finally {
-        setLoading(false);
-      }
-    }
-
-    async function fetchSuggestionsSequentially(missingBooks: string[], seriesData: any) {
-      for (const order of missingBooks) {
-        try {
-          const results = await fetchSuggestionForMissingBook(order, seriesData);
-          setMissingSuggestions((prev) => ({
-            ...prev,
-            [order]: results,
-          }));
-        } catch (err) {
-          console.error(`Failed to fetch suggestion for book ${order}:`, err);
+        if (isActive) {
+          setLoading(false);
         }
       }
     }
@@ -84,7 +219,87 @@ export default function SeriesDetailPage() {
     if (seriesId) {
       fetchSeries();
     }
+
+    return () => {
+      isActive = false;
+      seriesController.abort();
+      if (scanAbortRef.current) {
+        scanAbortRef.current.abort();
+        scanAbortRef.current = null;
+      }
+    };
   }, [seriesId]);
+
+  async function runBackgroundScan(
+    orders: string[],
+    seriesData: any,
+    targetSeriesId: string,
+    seedSuggestions?: Record<string, any[]>
+  ) {
+    if (scanAbortRef.current || orders.length === 0) {
+      return;
+    }
+
+    const scanController = new AbortController();
+    scanAbortRef.current = scanController;
+    scanPendingRef.current = [...orders];
+    setScanStatus("running");
+
+    const nextSuggestions: Record<string, any[]> = {
+      ...(seedSuggestions || loadCachedSuggestions(targetSeriesId)),
+    };
+
+    saveScanProgress(targetSeriesId, {
+      status: "running",
+      pendingOrders: [...scanPendingRef.current],
+      completedCount: scanCompletedRef.current,
+      totalCount: scanTotalRef.current,
+    });
+
+    try {
+      while (scanPendingRef.current.length > 0 && !scanController.signal.aborted) {
+        const order = scanPendingRef.current[0];
+        setScanCurrentOrder(order);
+
+        const results = await fetchSuggestionForMissingBook(order, seriesData, scanController.signal);
+        if (scanController.signal.aborted) {
+          break;
+        }
+
+        nextSuggestions[order] = results;
+        scanPendingRef.current = scanPendingRef.current.slice(1);
+        scanCompletedRef.current += 1;
+
+        setMissingSuggestions((prev) => ({
+          ...prev,
+          [order]: results,
+        }));
+        setScanCompletedCount(scanCompletedRef.current);
+
+        saveCachedSuggestions(targetSeriesId, nextSuggestions);
+        saveScanProgress(targetSeriesId, {
+          status: "running",
+          pendingOrders: [...scanPendingRef.current],
+          completedCount: scanCompletedRef.current,
+          totalCount: scanTotalRef.current,
+        });
+      }
+
+      const finished = scanPendingRef.current.length === 0 && !scanController.signal.aborted;
+      const nextStatus: ScanStatus = finished ? "completed" : "paused";
+      setScanStatus(nextStatus);
+      setScanCurrentOrder(null);
+
+      saveScanProgress(targetSeriesId, {
+        status: nextStatus,
+        pendingOrders: [...scanPendingRef.current],
+        completedCount: scanCompletedRef.current,
+        totalCount: scanTotalRef.current,
+      });
+    } finally {
+      scanAbortRef.current = null;
+    }
+  }
 
   if (loading) {
     return <div className="p-6">Loading series...</div>;
@@ -107,14 +322,30 @@ export default function SeriesDetailPage() {
   const upcomingCount = books.filter((book) => getBookStatus(book) === "upcoming").length;
   const unreadCount = books.filter((book) => !book.is_read).length;
   const displayAuthor = series.author || books.find((book) => book.author)?.author || "Unknown author";
+  const maxBookNumber = books.reduce((max: number, book: any) => {
+    const num = Number(book.book_number);
+    return Number.isFinite(num) ? Math.max(max, num) : max;
+  }, 0);
+  const suggestedNextNumber = String(Math.max(1, Math.floor(maxBookNumber) + 1));
+  const scanPercent = scanTotalCount > 0 ? Math.min(100, Math.round((scanCompletedCount / scanTotalCount) * 100)) : 0;
+  const autoStartedOnce = hasAutoStartedSeriesScan(seriesId);
 
-  function buildSearchUrl(query: string) {
+  function buildGoodreadsSearchUrl(query: string) {
     const encoded = encodeURIComponent(query);
     return `https://www.goodreads.com/search?q=${encoded}`;
   }
 
   function handleOpenSearch(query: string) {
-    window.open(buildSearchUrl(query), "_blank");
+    window.open(buildGoodreadsSearchUrl(query), "_blank");
+  }
+
+  function buildGoogleSearchUrl(query: string) {
+    const encoded = encodeURIComponent(query);
+    return `https://www.google.com/search?q=${encoded}`;
+  }
+
+  function handleOpenGoogleSearch(query: string) {
+    window.open(buildGoogleSearchUrl(query), "_blank");
   }
 
   async function handleFetchSummary(bookId: number, title: string, author?: string | null) {
@@ -143,11 +374,13 @@ export default function SeriesDetailPage() {
     }
   }
 
-  async function fetchSuggestionForMissingBook(bookNumber: string, seriesData?: any) {
+  async function fetchSuggestionForMissingBook(bookNumber: string, seriesData?: any, signal?: AbortSignal) {
     const seriesPayload = seriesData || series;
     if (!seriesPayload) {
       return [];
     }
+
+    let timeoutId: number | null = null;
 
     try {
       const params = new URLSearchParams();
@@ -155,14 +388,20 @@ export default function SeriesDetailPage() {
       params.set("book_number", bookNumber);
       const seriesBooks = Array.isArray(seriesPayload.books) ? seriesPayload.books : [];
       const suggestAuthor = seriesPayload.author || seriesBooks.find((book) => book.author)?.author;
-      if (suggestAuthor) {
+      if (suggestAuthor && !["unknown", "unknown author", "n/a", "na", "none"].includes(String(suggestAuthor).trim().toLowerCase())) {
         params.set("author", suggestAuthor);
       }
 
       const url = `http://localhost:8000/books/suggest?${params.toString()}`;
       console.log(`[Suggestion ${bookNumber}] Fetching from: ${url}`);
 
-      const response = await fetch(url, { signal: AbortSignal.timeout(90000) });
+      const timeoutController = new AbortController();
+      timeoutId = window.setTimeout(() => timeoutController.abort(), 90000);
+      const combinedSignal = signal
+        ? AbortSignal.any([signal, timeoutController.signal])
+        : timeoutController.signal;
+
+      const response = await fetch(url, { signal: combinedSignal });
       if (!response.ok) {
         throw new Error(`Failed to lookup suggestions (${response.status})`);
       }
@@ -171,8 +410,15 @@ export default function SeriesDetailPage() {
       console.log(`[Suggestion ${bookNumber}] Got ${responseData.results?.length || 0} results`);
       return responseData.results || [];
     } catch (err) {
+      if ((err as Error)?.name === "AbortError") {
+        return [];
+      }
       console.error(`[Suggestion ${bookNumber}] Error:`, err);
       return [];
+    } finally {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
     }
   }
 
@@ -180,15 +426,104 @@ export default function SeriesDetailPage() {
     setMissingSuggestionLoading(bookNumber);
     try {
       const results = await fetchSuggestionForMissingBook(bookNumber);
-      setMissingSuggestions((prev) => ({
-        ...prev,
-        [bookNumber]: results,
-      }));
+      setMissingSuggestions((prev) => {
+        const next = {
+          ...prev,
+          [bookNumber]: results,
+        };
+        saveCachedSuggestions(seriesId, next);
+        return next;
+      });
     } catch (err) {
       console.error(err);
       alert("Unable to suggest a title for this missing book right now.");
     } finally {
       setMissingSuggestionLoading(null);
+    }
+  }
+
+  function handleStartFullScan() {
+    if (!series) return;
+    const allMissingOrders: string[] = Array.isArray(series.missing_books) ? series.missing_books : [];
+    const cached = loadCachedSuggestions(seriesId);
+    const pendingOrders = allMissingOrders.filter((order: string) => !(order in cached));
+
+    scanPendingRef.current = pendingOrders;
+    scanTotalRef.current = allMissingOrders.length;
+    scanCompletedRef.current = Math.max(0, allMissingOrders.length - pendingOrders.length);
+
+    setScanCompletedCount(scanCompletedRef.current);
+    setScanTotalCount(scanTotalRef.current);
+
+    if (pendingOrders.length === 0) {
+      setScanStatus("completed");
+      setScanCurrentOrder(null);
+      saveScanProgress(seriesId, {
+        status: "completed",
+        pendingOrders: [],
+        completedCount: scanCompletedRef.current,
+        totalCount: scanTotalRef.current,
+      });
+      return;
+    }
+
+    runBackgroundScan(pendingOrders, series, seriesId, cached);
+  }
+
+  function handlePauseScan() {
+    if (scanAbortRef.current) {
+      scanAbortRef.current.abort();
+      scanAbortRef.current = null;
+    }
+
+    setScanStatus("paused");
+    setScanCurrentOrder(null);
+    saveScanProgress(seriesId, {
+      status: "paused",
+      pendingOrders: [...scanPendingRef.current],
+      completedCount: scanCompletedRef.current,
+      totalCount: scanTotalRef.current,
+    });
+  }
+
+  function handleResumeScan() {
+    if (!series || scanPendingRef.current.length === 0) {
+      return;
+    }
+    runBackgroundScan(scanPendingRef.current, series, seriesId, loadCachedSuggestions(seriesId));
+  }
+
+  function handleResetScanProgress() {
+    if (scanAbortRef.current) {
+      scanAbortRef.current.abort();
+      scanAbortRef.current = null;
+    }
+
+    window.sessionStorage.removeItem(`${SUGGESTION_CACHE_PREFIX}${seriesId}`);
+    window.sessionStorage.removeItem(`${SUGGESTION_SCAN_PREFIX}${seriesId}`);
+
+    const allMissingOrders: string[] = Array.isArray(series?.missing_books) ? series.missing_books : [];
+    scanPendingRef.current = [...allMissingOrders];
+    scanCompletedRef.current = 0;
+    scanTotalRef.current = allMissingOrders.length;
+
+    setMissingSuggestions({});
+    setScanStatus("idle");
+    setScanCurrentOrder(null);
+    setScanCompletedCount(0);
+    setScanTotalCount(allMissingOrders.length);
+  }
+
+  async function handleSuggestNextBook() {
+    setQuickSuggestLoading(true);
+    try {
+      const results = await fetchSuggestionForMissingBook(suggestedNextNumber);
+      setQuickSuggestResults(results);
+    } catch (err) {
+      console.error(err);
+      alert("Unable to suggest a title right now.");
+    } finally {
+      setQuickSuggestLoading(false);
     }
   }
 
@@ -312,6 +647,60 @@ export default function SeriesDetailPage() {
         <div>Total missing: {missingOrders.length}</div>
       </div>
 
+      {missingOrders.length === 0 && (
+        <div className="rounded-lg border bg-slate-50 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold">No missing slots detected</p>
+              <p className="text-sm text-muted-foreground">
+                You can still test suggestions for the next likely book number.
+              </p>
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleSuggestNextBook}
+              disabled={quickSuggestLoading}
+            >
+              {quickSuggestLoading ? "Finding…" : `Suggest for book #${suggestedNextNumber}`}
+            </Button>
+          </div>
+
+          {quickSuggestResults.length > 0 ? (
+            <div className="mt-3 space-y-2 rounded border bg-white p-3 text-sm">
+              {quickSuggestResults.map((suggestion, idx) => (
+                <div key={idx} className="space-y-1">
+                  <div className="font-medium">{suggestion.title}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {suggestion.author || "Unknown author"}
+                    {suggestion.year ? ` • ${suggestion.year}` : ""}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      onClick={() => handleAddSuggestion(suggestedNextNumber, suggestion)}
+                    >
+                      Add suggestion
+                    </Button>
+                    {suggestion.source_url ? (
+                      <a
+                        href={suggestion.source_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs text-blue-600 underline"
+                      >
+                        View source
+                      </a>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      )}
+
       {missingOrders.length > 0 && (
         <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-4">
           <div className="flex items-center justify-between gap-4">
@@ -321,6 +710,47 @@ export default function SeriesDetailPage() {
                 These books are not in your library yet. Add them if you want to track them here.
               </p>
             </div>
+            <div className="flex flex-wrap gap-2">
+              {scanStatus !== "running" ? (
+                <Button variant="secondary" size="sm" onClick={handleStartFullScan}>
+                  {scanStatus === "paused" ? "Restart Full Scan" : "Run Full Scan"}
+                </Button>
+              ) : (
+                <Button variant="secondary" size="sm" onClick={handlePauseScan}>
+                  Pause Scan
+                </Button>
+              )}
+              {scanStatus === "paused" && scanPendingRef.current.length > 0 ? (
+                <Button variant="outline" size="sm" onClick={handleResumeScan}>
+                  Resume Scan
+                </Button>
+              ) : null}
+              <Button variant="ghost" size="sm" onClick={handleResetScanProgress}>
+                Reset Cache
+              </Button>
+            </div>
+          </div>
+
+          <div className="mt-3 space-y-2">
+            <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <span>
+                Progress: {scanCompletedCount}/{scanTotalCount}
+                {scanCurrentOrder ? ` • fetching #${scanCurrentOrder}` : ""}
+              </span>
+              <span>{scanPercent}%</span>
+            </div>
+            <div className="h-2 w-full overflow-hidden rounded-full bg-white/70">
+              <div
+                className="h-full bg-yellow-500 transition-all duration-300"
+                style={{ width: `${scanPercent}%` }}
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Scan status: {scanStatus}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Auto-start: {autoStartedOnce ? "Auto-started once" : "Not auto-started yet"}
+            </p>
           </div>
 
           <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -335,6 +765,13 @@ export default function SeriesDetailPage() {
                     onClick={() => handleOpenSearch(`${series.name} ${order}`)}
                   >
                     Search Goodreads
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => handleOpenGoogleSearch(`${series.name} book ${order} ${series.author || ""}`.trim())}
+                  >
+                    Search Google
                   </Button>
                   <Button
                     variant="secondary"
@@ -369,7 +806,7 @@ export default function SeriesDetailPage() {
                               rel="noreferrer"
                               className="text-xs text-blue-600 underline"
                             >
-                              View on OpenLibrary
+                              View source
                             </a>
                           ) : null}
                         </div>

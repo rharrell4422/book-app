@@ -122,6 +122,10 @@ def get_google_books_api_key() -> str | None:
     return os.getenv("GOOGLE_BOOKS_API_KEY")
 
 
+def get_serpapi_api_key() -> str | None:
+    return os.getenv("SERPAPI_API_KEY")
+
+
 def search_google_books(query: str, author: str | None = None, max_results: int = 5) -> list[dict]:
     if not query:
         return []
@@ -142,30 +146,32 @@ def search_google_books(query: str, author: str | None = None, max_results: int 
         params["key"] = api_key
 
     headers = {"User-Agent": "BookApp/1.0 (+https://example.com)"}
-    with httpx.Client(timeout=30.0, headers=headers) as client:
-        response = client.get("https://www.googleapis.com/books/v1/volumes", params=params)
-        if response.status_code == 429:
-            return []
-        response.raise_for_status()
-        data = response.json()
 
-    items = data.get("items", [])
-    if not items and safe_author and "inauthor:" in query:
+    def fetch_items(search_query: str) -> list[dict]:
+        request_params = dict(params)
+        request_params["q"] = search_query
+
+        try:
+            with httpx.Client(timeout=8.0, headers=headers) as client:
+                response = client.get("https://www.googleapis.com/books/v1/volumes", params=request_params)
+                if response.status_code == 429:
+                    return []
+                response.raise_for_status()
+                data = response.json()
+                return data.get("items", [])
+        except httpx.RequestError:
+            return []
+        except httpx.HTTPStatusError:
+            return []
+
+    items = fetch_items(query)
+    if not items and safe_author and "+inauthor:" in query:
         fallback_query = query.split("+inauthor:")[0].strip()
-        params["q"] = fallback_query
-        response = client.get("https://www.googleapis.com/books/v1/volumes", params=params)
-        if response.status_code != 429:
-            response.raise_for_status()
-            data = response.json()
-            items = data.get("items", [])
+        items = fetch_items(fallback_query)
 
     if not items and safe_author:
-        params["q"] = f'{query.split("+inauthor:")[0].strip()} "{safe_author}"'
-        response = client.get("https://www.googleapis.com/books/v1/volumes", params=params)
-        if response.status_code != 429:
-            response.raise_for_status()
-            data = response.json()
-            items = data.get("items", [])
+        base_query = query.split("+inauthor:")[0].strip()
+        items = fetch_items(f'{base_query} "{safe_author}"')
 
     results = []
     for item in items:
@@ -193,10 +199,15 @@ def search_openlibrary(query: str, author: str | None = None, max_results: int =
 
     params = {"q": query, "limit": max_results}
     headers = {"User-Agent": "BookApp/1.0 (+https://example.com)"}
-    with httpx.Client(timeout=30.0, headers=headers) as client:
-        response = client.get("https://openlibrary.org/search.json", params=params)
-        response.raise_for_status()
-        data = response.json()
+    try:
+        with httpx.Client(timeout=8.0, headers=headers) as client:
+            response = client.get("https://openlibrary.org/search.json", params=params)
+            response.raise_for_status()
+            data = response.json()
+    except httpx.RequestError:
+        return []
+    except httpx.HTTPStatusError:
+        return []
 
     docs = data.get("docs", [])
     results = []
@@ -214,6 +225,65 @@ def search_openlibrary(query: str, author: str | None = None, max_results: int =
             "series_position": doc.get("series_position"),
             "source": "openlibrary",
         })
+    return results
+
+
+def search_serpapi_web(query: str, author: str | None = None, max_results: int = 10) -> list[dict]:
+    api_key = get_serpapi_api_key()
+    if not api_key or not query:
+        return []
+
+    composed_query = query.strip()
+    if author and author.strip() and author.lower() not in composed_query.lower():
+        composed_query = f"{composed_query} {author.strip()}"
+
+    params = {
+        "engine": "google",
+        "q": composed_query,
+        "api_key": api_key,
+        "num": max_results,
+    }
+    headers = {"User-Agent": "BookApp/1.0 (+https://example.com)"}
+
+    try:
+        with httpx.Client(timeout=10.0, headers=headers) as client:
+            response = client.get("https://serpapi.com/search.json", params=params)
+            response.raise_for_status()
+            data = response.json()
+    except httpx.RequestError:
+        return []
+    except httpx.HTTPStatusError:
+        return []
+
+    results: list[dict] = []
+    for item in data.get("organic_results", [])[:max_results]:
+        title = item.get("title")
+        if not title:
+            continue
+
+        source_url = item.get("link")
+        snippet = item.get("snippet")
+        publication_info = item.get("publication_info") or {}
+        summary_info = item.get("rich_snippet") or {}
+
+        year = None
+        if isinstance(publication_info, dict):
+            year = publication_info.get("summary")
+        if not year and isinstance(summary_info, dict):
+            top = summary_info.get("top") or {}
+            year = top.get("detected_extensions", {}).get("year") if isinstance(top, dict) else None
+
+        results.append({
+            "title": title,
+            "author": author,
+            "year": year,
+            "description": snippet,
+            "source_url": source_url,
+            "series_name": None,
+            "series_position": None,
+            "source": "serpapi",
+        })
+
     return results
 
 
@@ -269,190 +339,18 @@ def lookup_book_summary(title: str, author: str | None = None) -> dict:
 
 
 def suggest_book_by_series(series_name: str, book_number: int | None = None, author: str | None = None) -> dict:
-    if not series_name:
-        return {"query": "", "results": []}
+    from search_orchestrator import SearchOrchestrator
 
-    def normalize(text: str) -> str:
-        return re.sub(r"\s+", " ", text.lower().strip())
-
-    series_name_norm = normalize(series_name)
-
-    def add_base_forms(name: str) -> list[str]:
-        forms = [name.strip()]
-        if name.lower().startswith("the "):
-            forms.append(name[4:].strip())
-
-        for marker in ["novels", "series", "trilogy", "saga", "cycle"]:
-            if marker in name.lower():
-                prefix = re.split(rf"\b{marker}\b", name, flags=re.IGNORECASE)[0].strip()
-                if prefix and prefix not in forms:
-                    forms.append(prefix)
-        return [f for f in forms if f]
-
-    base_forms = add_base_forms(series_name)
-    google_queries: list[str] = []
-    for base in base_forms:
-        base_quoted = f'"{base}"'
-        if book_number is not None:
-            google_queries.extend([
-                f'intitle:{base_quoted} inauthor:"{author}"' if author else f'intitle:{base_quoted} {book_number}',
-                f'intitle:{base_quoted} book {book_number} inauthor:"{author}"' if author else f'intitle:{base_quoted} book {book_number}',
-                f'intitle:{base_quoted} volume {book_number} inauthor:"{author}"' if author else f'intitle:{base_quoted} volume {book_number}',
-                f'{base_quoted} {book_number} inauthor:"{author}"' if author else f'{base_quoted} {book_number}',
-            ])
-        google_queries.extend([
-            f'intitle:{base_quoted} inauthor:"{author}"' if author else f'intitle:{base_quoted}',
-            f'{base_quoted} inauthor:"{author}"' if author else base,
-        ])
-        if author:
-            google_queries.extend([
-                f'intitle:{base_quoted} OR "LitRPG" inauthor:"{author}"',
-                f'intitle:{base_quoted} OR "Lit RPG" inauthor:"{author}"',
-            ])
-    candidate_queries: list[str] = []
-    if book_number is not None:
-        for base in base_forms:
-            candidate_queries.extend([
-                f'"{base}" {book_number}',
-                f'"{base}" book {book_number}',
-                f'"{base}" volume {book_number}',
-                f'{base} {book_number}',
-            ])
-    candidate_queries.extend(base_forms)
-    if author:
-        for base in base_forms:
-            candidate_queries.append(f'{base} {author}')
-            candidate_queries.append(f'{base} author:{author}')
-
-    def extract_series_names(result: dict) -> list[str]:
-        series_names = result.get("series_name") or []
-        if isinstance(series_names, str):
-            series_names = [series_names]
-        return [normalize(str(name)) for name in series_names if name]
-
-    def matches_series(result: dict, title_norm: str) -> bool:
-        series_names = extract_series_names(result)
-        series_matches = any(
-            series_name_norm == name or series_name_norm in name or name in series_name_norm
-            for name in series_names
-        )
-        title_matches = series_name_norm in title_norm or title_norm in series_name_norm
-        return series_matches or (author is not None and title_matches)
-
-    def matches_number(result: dict, title_norm: str) -> bool:
-        if book_number is None:
-            return True
-        position = result.get("series_position")
-        if position == book_number or position == str(book_number):
-            return True
-
-        number_text = str(book_number)
-        patterns = [
-            rf"\b{re.escape(number_text)}\b",
-            rf"\bbook\s+{re.escape(number_text)}\b",
-            rf"\bvolume\s+{re.escape(number_text)}\b",
-            rf"#\s*{re.escape(number_text)}\b",
-            rf"\({re.escape(number_text)}\)",
-            rf"{re.escape(number_text)}:",
-        ]
-        return any(re.search(pattern, title_norm) for pattern in patterns)
-
-    headers = {"User-Agent": "BookApp/1.0 (+https://example.com)"}
-    results = []
-    seen = set()
-    final_query = ""
-
-    google_query_candidates = list(dict.fromkeys(google_queries + candidate_queries))
-    for query in google_query_candidates:
-        if not query.strip():
-            continue
-        final_query = query
-        google_results = search_google_books(query, author, max_results=5)
-        for result in google_results:
-            if not result.get("title"):
-                continue
-            title_norm = normalize(result["title"])
-            if not matches_series(result, title_norm):
-                continue
-            if not matches_number(result, title_norm):
-                continue
-            key = (title_norm, result.get("author"))
-            if key in seen:
-                continue
-            seen.add(key)
-            results.append(result)
-        if results:
-            break
-
-    if not results and author:
-        author_only_query = f'inauthor:"{author}"'
-        final_query = author_only_query
-        google_results = search_google_books(author_only_query, None, max_results=8)
-        for result in google_results:
-            if not result.get("title"):
-                continue
-            title_norm = normalize(result["title"])
-            if not matches_number(result, title_norm):
-                continue
-            key = (title_norm, result.get("author"))
-            if key in seen:
-                continue
-            seen.add(key)
-            results.append(result)
-
-    if not results:
-        for query in candidate_queries:
-            open_results = search_openlibrary(query, author, max_results=5)
-            for result in open_results:
-                if not result.get("title"):
-                    continue
-                title_norm = normalize(result["title"])
-                if not matches_series(result, title_norm):
-                    continue
-                if not matches_number(result, title_norm):
-                    continue
-                key = (title_norm, result.get("author"))
-                if key in seen:
-                    continue
-                seen.add(key)
-                results.append(result)
-            if results:
-                break
-
-    if not results:
-        final_query = series_name
-        open_results = search_openlibrary(series_name, author, max_results=5)
-        for result in open_results:
-            title_norm = normalize(result.get("title", ""))
-            if not matches_series(result, title_norm):
-                continue
-            if not matches_number(result, title_norm):
-                continue
-            key = (title_norm, result.get("author"))
-            if key in seen:
-                continue
-            seen.add(key)
-            results.append(result)
-
-    if not results and author:
-        final_query = f'author:"{author}"'
-        author_results = search_openlibrary(final_query, None, max_results=8)
-        for result in author_results:
-            if not result.get("title"):
-                continue
-            title_norm = normalize(result["title"])
-            if book_number is not None and not matches_number(result, title_norm):
-                continue
-            key = (title_norm, result.get("author"))
-            if key in seen:
-                continue
-            seen.add(key)
-            results.append(result)
-
-    return {
-        "query": final_query,
-        "results": results,
-    }
+    orchestrator = SearchOrchestrator(
+        google_search=search_google_books,
+        openlibrary_search=search_openlibrary,
+        serp_search=search_serpapi_web,
+    )
+    return orchestrator.suggest_series(
+        series_name=series_name,
+        book_number=book_number,
+        author=author,
+    )
 
 
 def recompute_series_intelligence(db):
