@@ -26,22 +26,66 @@
 
 
 
+## Copilot Chat Setup (Every Session)
+1. **Load Context**: User includes `@workspace` + `#COPILOT.md` in first message
+2. **Read This File**: Copilot reads COPILOT.md to understand project state, backend/frontend structure, and approval workflow
+3. **Use Workspace Files**: All code decisions based on actual workspace files, not conversation history
+4. **Track with Memory**: Use `/memories/session/` for in-progress notes and `/memories/repo/` for verified codebase facts
+
 ## Safety Rules
 - Always check existing file contents before refactors.
 - Never overwrite large sections without confirmation.
-- When chat restarts, I paste COPILOT.md.
+- When chat restarts, user pastes COPILOT.md.
 - Copilot must show the diff for any proposed file change before applying it.
 - Copilot must wait for my approval before applying any file change.
 - Copilot must confirm before making any destructive change (schema edits, importer rewrites, intelligence logic changes).
 
 ## Change Approval Workflow
 1. **Show Diff First**: Present changes in clear markdown diff format with file name, lines added (green +), lines deleted (red -).
-2. **Create Approval Button**: Use vscode_askQuestions tool to display an interactive approval dialog with:
-   - ✅ Allow Changes (recommended)
-   - ❌ Cancel
-3. **Apply Only After Approval**: Once user clicks "Allow Changes", apply changes via replace_string_in_file.
-4. **Verify Changes**: Read back the affected lines to confirm changes took effect.
-5. **Never ask "Should I proceed?"** — always use the button-based approval instead.
+   - Format: `- old line` and `+ new line` for clarity
+   - Show at least 3-5 lines of context before/after change
+   - Label with: `📝 File: path/to/file.ts`
+
+2. **Create Approval Button**: Use `vscode_askQuestions` tool to display interactive approval dialog with:
+   - Header: "Approve Code Change"
+   - Question: "Ready to apply changes to [filename]?"
+   - Options: 
+     - ✅ Allow Changes (marked recommended)
+     - ❌ Cancel
+
+3. **Apply Only After Approval**: Once user clicks "Allow Changes" button, apply via `replace_string_in_file` tool with exact oldString/newString match
+
+4. **Verify Changes**: After applying, read back the affected lines (read_file) to confirm changes took effect
+
+5. **Never Ask "Should I proceed?"** — Always use vscode_askQuestions button-based approval instead of chat questions
+
+6. **Multi-File Changes**: If multiple independent edits needed, use `multi_replace_string_in_file` tool to apply all at once after approval
+
+## Copilot Tool Reference
+| Tool | Purpose | When to Use |
+|------|---------|------------|
+| `read_file` | Read existing code | Understand current state before changes |
+| `replace_string_in_file` | Edit single section | Apply changes after approval |
+| `multi_replace_string_in_file` | Edit multiple files | Apply batch changes after approval |
+| `vscode_askQuestions` | Get user confirmation | Approval workflow for code changes |
+| `memory` (session) | Track progress | Note issues, debugging context, plans |
+| `memory` (repo) | Store verified facts | Confirmed timings, API endpoints, working commands |
+| `run_in_terminal` | Execute commands | Tests, API checks, terminal operations |
+| `semantic_search` | Find code patterns | Locate functions, imports, patterns across workspace |
+| `grep_search` | Find exact text | Search within specific files for strings |
+
+## Context Persistence Strategy
+- **Session Memory** (`/memories/session/`): In-progress debugging, current issues, temporary notes
+  - Used when: Working through a problem that spans multiple turns
+  - Cleared after session ends
+  
+- **Repo Memory** (`/memories/repo/`): Verified facts about codebase
+  - Used when: Discovered something that will help future sessions (e.g., "timeout values that work", "where the API key is read")
+  - Persists across sessions
+  
+- **Copilot.md**: This file = source of truth for project architecture, workflows, and current feature status
+  - Update after completing major work
+  - Document known limitations, next steps
 
 
 ## Project Overview
