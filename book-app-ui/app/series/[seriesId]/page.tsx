@@ -59,7 +59,7 @@ export default function SeriesDetailPage() {
           const suggestions: Record<string, any[]> = {};
           await Promise.all(
             data.missing_books.map(async (order: string) => {
-              suggestions[order] = await fetchSuggestionForMissingBook(order);
+              suggestions[order] = await fetchSuggestionForMissingBook(order, data);
             })
           );
           setMissingSuggestions(suggestions);
@@ -134,12 +134,17 @@ export default function SeriesDetailPage() {
     }
   }
 
-  async function fetchSuggestionForMissingBook(bookNumber: string) {
+  async function fetchSuggestionForMissingBook(bookNumber: string, seriesData?: any) {
+    const seriesPayload = seriesData || series;
+    if (!seriesPayload) {
+      return [];
+    }
+
     try {
       const params = new URLSearchParams();
-      params.set("series_name", series.name);
+      params.set("series_name", seriesPayload.name || "");
       params.set("book_number", bookNumber);
-      const suggestAuthor = series.author || books.find((book) => book.author)?.author;
+      const suggestAuthor = seriesPayload.author || books.find((book) => book.author)?.author;
       if (suggestAuthor) {
         params.set("author", suggestAuthor);
       }
@@ -149,8 +154,8 @@ export default function SeriesDetailPage() {
         throw new Error(`Failed to lookup suggestions (${response.status})`);
       }
 
-      const data = await response.json();
-      return data.results || [];
+      const responseData = await response.json();
+      return responseData.results || [];
     } catch (err) {
       console.error(err);
       return [];

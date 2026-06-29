@@ -126,10 +126,17 @@ def search_google_books(query: str, author: str | None = None, max_results: int 
     if not query:
         return []
 
-    if author and "inauthor:" not in query:
-        query = f"{query}+inauthor:{author}"
+    query = query.strip()
+    safe_author = author.replace('"', '') if author else None
+    if safe_author and "inauthor:" not in query:
+        query = f'{query}+inauthor:"{safe_author}"'
 
-    params = {"q": query, "maxResults": max_results}
+    params = {
+        "q": query,
+        "maxResults": max_results,
+        "printType": "books",
+        "orderBy": "relevance",
+    }
     api_key = get_google_books_api_key()
     if api_key:
         params["key"] = api_key
@@ -143,9 +150,17 @@ def search_google_books(query: str, author: str | None = None, max_results: int 
         data = response.json()
 
     items = data.get("items", [])
-    if not items and author and "inauthor:" in query:
+    if not items and safe_author and "inauthor:" in query:
         fallback_query = query.split("+inauthor:")[0].strip()
-        params["q"] = f"{fallback_query} {author}".strip()
+        params["q"] = fallback_query
+        response = client.get("https://www.googleapis.com/books/v1/volumes", params=params)
+        if response.status_code != 429:
+            response.raise_for_status()
+            data = response.json()
+            items = data.get("items", [])
+
+    if not items and safe_author:
+        params["q"] = f'{query.split("+inauthor:")[0].strip()} "{safe_author}"'
         response = client.get("https://www.googleapis.com/books/v1/volumes", params=params)
         if response.status_code != 429:
             response.raise_for_status()
@@ -275,6 +290,25 @@ def suggest_book_by_series(series_name: str, book_number: int | None = None, aut
         return [f for f in forms if f]
 
     base_forms = add_base_forms(series_name)
+    google_queries: list[str] = []
+    for base in base_forms:
+        base_quoted = f'"{base}"'
+        if book_number is not None:
+            google_queries.extend([
+                f'intitle:{base_quoted} inauthor:"{author}"' if author else f'intitle:{base_quoted} {book_number}',
+                f'intitle:{base_quoted} book {book_number} inauthor:"{author}"' if author else f'intitle:{base_quoted} book {book_number}',
+                f'intitle:{base_quoted} volume {book_number} inauthor:"{author}"' if author else f'intitle:{base_quoted} volume {book_number}',
+                f'{base_quoted} {book_number} inauthor:"{author}"' if author else f'{base_quoted} {book_number}',
+            ])
+        google_queries.extend([
+            f'intitle:{base_quoted} inauthor:"{author}"' if author else f'intitle:{base_quoted}',
+            f'{base_quoted} inauthor:"{author}"' if author else base,
+        ])
+        if author:
+            google_queries.extend([
+                f'intitle:{base_quoted} OR "LitRPG" inauthor:"{author}"',
+                f'intitle:{base_quoted} OR "Lit RPG" inauthor:"{author}"',
+            ])
     candidate_queries: list[str] = []
     if book_number is not None:
         for base in base_forms:
@@ -309,22 +343,27 @@ def suggest_book_by_series(series_name: str, book_number: int | None = None, aut
         if book_number is None:
             return True
         position = result.get("series_position")
-        number_text = str(book_number)
         if position == book_number or position == str(book_number):
             return True
-        return (
-            number_text in title_norm
-            or f"book {number_text}" in title_norm
-            or f"volume {number_text}" in title_norm
-            or f"#{number_text}" in title_norm
-        )
+
+        number_text = str(book_number)
+        patterns = [
+            rf"\b{re.escape(number_text)}\b",
+            rf"\bbook\s+{re.escape(number_text)}\b",
+            rf"\bvolume\s+{re.escape(number_text)}\b",
+            rf"#\s*{re.escape(number_text)}\b",
+            rf"\({re.escape(number_text)}\)",
+            rf"{re.escape(number_text)}:",
+        ]
+        return any(re.search(pattern, title_norm) for pattern in patterns)
 
     headers = {"User-Agent": "BookApp/1.0 (+https://example.com)"}
     results = []
     seen = set()
     final_query = ""
 
-    for query in candidate_queries:
+    google_query_candidates = list(dict.fromkeys(google_queries + candidate_queries))
+    for query in google_query_candidates:
         if not query.strip():
             continue
         final_query = query
@@ -344,6 +383,22 @@ def suggest_book_by_series(series_name: str, book_number: int | None = None, aut
             results.append(result)
         if results:
             break
+
+    if not results and author:
+        author_only_query = f'inauthor:"{author}"'
+        final_query = author_only_query
+        google_results = search_google_books(author_only_query, None, max_results=8)
+        for result in google_results:
+            if not result.get("title"):
+                continue
+            title_norm = normalize(result["title"])
+            if not matches_number(result, title_norm):
+                continue
+            key = (title_norm, result.get("author"))
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(result)
 
     if not results:
         for query in candidate_queries:
@@ -371,6 +426,8 @@ def suggest_book_by_series(series_name: str, book_number: int | None = None, aut
             title_norm = normalize(result.get("title", ""))
             if not matches_series(result, title_norm):
                 continue
+            if not matches_number(result, title_norm):
+                continue
             key = (title_norm, result.get("author"))
             if key in seen:
                 continue
@@ -384,6 +441,8 @@ def suggest_book_by_series(series_name: str, book_number: int | None = None, aut
             if not result.get("title"):
                 continue
             title_norm = normalize(result["title"])
+            if book_number is not None and not matches_number(result, title_norm):
+                continue
             key = (title_norm, result.get("author"))
             if key in seen:
                 continue
