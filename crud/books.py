@@ -5,8 +5,20 @@ from sqlalchemy.orm import Session
 from models import Book
 
 
+BOOK_COLUMN_KEYS = {column.key for column in Book.__table__.columns}
+
+
+def _book_payload(data_obj, *, exclude_unset: bool = False) -> dict:
+    if hasattr(data_obj, "model_dump"):
+        raw = data_obj.model_dump(exclude_none=True, exclude_unset=exclude_unset)
+    else:
+        raw = data_obj.dict(exclude_none=True, exclude_unset=exclude_unset)
+    return {key: value for key, value in raw.items() if key in BOOK_COLUMN_KEYS}
+
+
 def create_book(db: Session, book):
-    db_book = Book(**book.dict())
+    payload = _book_payload(book)
+    db_book = Book(**payload)
     db.add(db_book)
     db.commit()
     db.refresh(db_book)
@@ -34,7 +46,8 @@ def update_book(db: Session, book_id: int, book):
     if not db_book:
         return None
 
-    for key, value in book.dict(exclude_unset=True).items():
+    payload = _book_payload(book, exclude_unset=True)
+    for key, value in payload.items():
         setattr(db_book, key, value)
 
     db.commit()

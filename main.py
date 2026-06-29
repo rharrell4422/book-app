@@ -152,6 +152,14 @@ def read_book_by_id(book_id: int, db: Session = Depends(get_db)):
     return db_book
 
 
+@app.put("/books/{book_id}", response_model=schemas.BookResponse)
+def put_book(book_id: int, book: schemas.BookUpdate, db: Session = Depends(get_db)):
+    updated = crud.update_book(db, book_id, book)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Book not found")
+    return updated
+
+
 @app.post("/books/{book_id}/summary")
 def fetch_and_save_book_summary(book_id: int, db: Session = Depends(get_db)):
     db_book = crud.get_book(db, book_id)
@@ -171,23 +179,11 @@ def fetch_and_save_book_summary(book_id: int, db: Session = Depends(get_db)):
 
 
 @app.patch("/books/{book_id}", response_model=schemas.BookResponse)
-def patch_book(book_id: int, book: schemas.BookBase, db: Session = Depends(get_db)):
-    db_book = crud.get_book(db, book_id)
-    if not db_book:
+def patch_book(book_id: int, book: schemas.BookUpdate, db: Session = Depends(get_db)):
+    updated = crud.update_book(db, book_id, book)
+    if not updated:
         raise HTTPException(status_code=404, detail="Book not found")
-
-    # Only update fields that were provided
-    if book.book_number is not None:
-        db_book.book_number = book.book_number
-
-    if book.read_status is not None:
-        db_book.read_status = book.read_status
-
-    # Add more fields here later if needed
-
-    db.commit()
-    db.refresh(db_book)
-    return db_book
+    return updated
 
 
 @app.delete("/books/{book_id}")

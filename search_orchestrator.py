@@ -215,12 +215,63 @@ class SearchOrchestrator:
         return collected
 
     def _build_response(self, query: str, results: list[dict], diagnostics: dict) -> dict:
-        canonical_results = [self._canonicalize_result(item) for item in results]
+        ranked_results = self._rank_results(results, query)
+        canonical_results = [self._canonicalize_result(item) for item in ranked_results]
         return {
             "query": query,
             "results": canonical_results,
             "diagnostics": diagnostics,
         }
+
+    def _rank_results(self, results: list[dict], query: str) -> list[dict]:
+        if not results:
+            return []
+
+        query_norm = self._normalize(query)
+
+        def score(result: dict) -> int:
+            s = 0
+            title_norm = self._normalize(result.get("title") or "")
+            url_norm = self._normalize(result.get("source_url") or "")
+
+            # Prefer explicit book-number/title style matches in top slots.
+            if re.search(r"\bbook\s+\d+\b", title_norm):
+                s += 50
+            if re.search(r"#\s*\d+", title_norm):
+                s += 35
+            if re.search(r"\(.*book\s+\d+.*\)", title_norm):
+                s += 25
+
+            # Prefer candidates with meaningful title words over generic series-only titles.
+            if len(title_norm.split()) >= 2:
+                s += 15
+
+            # Boost trusted storefront/catalog sources for concrete title data.
+            if any(domain in url_norm for domain in [
+                "amazon.",
+                "audible.",
+                "goodreads.",
+                "kindle",
+                "openlibrary.org",
+            ]):
+                s += 25
+
+            # Keep author-site pages but below explicit store/catalog entries.
+            if any(domain in url_norm for domain in ["nicoligonnella.com", "/books"]):
+                s += 12
+
+            # If the query text appears in title, it's likely closer to user intent.
+            query_tokens = [t for t in query_norm.split() if len(t) > 2]
+            overlap = sum(1 for token in query_tokens if token in title_norm)
+            s += min(20, overlap * 4)
+
+            # Penalize generic or meta pages.
+            if any(marker in title_norm for marker in ["audiobooks", "author of", "home"]):
+                s -= 8
+
+            return s
+
+        return sorted(results, key=score, reverse=True)
 
     def _canonicalize_result(self, result: dict) -> dict:
         year_value: Any = result.get("year")
@@ -260,6 +311,9 @@ class SearchOrchestrator:
             return False
 
         title_norm = self._normalize(title)
+        if self._looks_like_discussion_result(title_norm, result.get("source_url")):
+            return False
+
         if self._looks_like_collection_title(title_norm, ctx.book_number):
             return False
 
@@ -456,6 +510,27 @@ class SearchOrchestrator:
             rf"\b{target}\s*(?:,|and|&|/|-|to)\s*\d",
         ]
         return any(re.search(pattern, title_norm) for pattern in multi_book_patterns)
+
+    def _looks_like_discussion_result(self, title_norm: str, source_url: str | None) -> bool:
+        url_norm = self._normalize(source_url or "")
+        blocked_domains = [
+            "reddit.com",
+            "reddit.",
+            "facebook.com",
+            "x.com",
+            "twitter.com",
+        ]
+        if any(domain in url_norm for domain in blocked_domains):
+            return True
+
+        discussion_markers = [
+            "opinion",
+            "review",
+            "discussion",
+            "thoughts on",
+            "what do you think",
+        ]
+        return any(marker in title_norm for marker in discussion_markers)
 
     def _normalize_author_text(self, value: str | None) -> str:
         if not value:

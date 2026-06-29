@@ -57,6 +57,46 @@ class BookResponse(BookBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class BookUpdate(BaseModel):
+    title: Optional[str] = None
+    author: Optional[str] = None
+    subtitle: Optional[str] = None
+    series_id: Optional[int] = None
+    series_order: Optional[int] = None
+    book_number: Optional[float] = None
+    publication_date: Optional[date] = None
+    publisher: Optional[str] = None
+    edition: Optional[str] = None
+    format: Optional[str] = None
+    pages: Optional[int] = None
+    language: Optional[str] = None
+    release_date: Optional[date] = None
+    read_date: Optional[date] = None
+    isbn: Optional[str] = None
+    isbn13: Optional[str] = None
+    asin: Optional[str] = None
+    google_books_id: Optional[str] = None
+    goodreads_id: Optional[str] = None
+    storygraph_id: Optional[str] = None
+    auto_summary: Optional[str] = None
+    date_added: Optional[date] = None
+    date_started: Optional[date] = None
+    date_finished: Optional[date] = None
+    read_status: Optional[str] = None
+    rating: Optional[int] = None
+    is_read: Optional[bool] = None
+    external_rating: Optional[float] = None
+    external_rating_count: Optional[int] = None
+    review: Optional[str] = None
+    notes: Optional[str] = None
+    tags: Optional[list] = None
+    series_name: Optional[str] = None
+    is_upcoming_auto: Optional[bool] = None
+    is_upcoming_final: Optional[bool] = None
+    is_missing: Optional[bool] = None
+    record_status: Optional[str] = None
+
+
 # ------------------------------------------------------------
 # Series Schemas
 # ------------------------------------------------------------

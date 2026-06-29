@@ -237,6 +237,10 @@ def search_serpapi_web(query: str, author: str | None = None, max_results: int =
     if author and author.strip() and author.lower() not in composed_query.lower():
         composed_query = f"{composed_query} {author.strip()}"
 
+    inferred_series_name = re.split(r"\bbook\s+\d+\b", composed_query, flags=re.IGNORECASE)[0].strip()
+    if author and inferred_series_name.lower().endswith(author.lower()):
+        inferred_series_name = inferred_series_name[: -len(author)].strip()
+
     params = {
         "engine": "google",
         "q": composed_query,
@@ -254,6 +258,27 @@ def search_serpapi_web(query: str, author: str | None = None, max_results: int =
         return []
     except httpx.HTTPStatusError:
         return []
+
+    book_number_match = re.search(r"\bbook\s+(\d+)\b", composed_query, flags=re.IGNORECASE)
+    requested_book_number = int(book_number_match.group(1)) if book_number_match else None
+
+    def extract_title_from_snippet(snippet_text: str | None, book_number: int | None) -> str | None:
+        if not snippet_text or book_number is None:
+            return None
+        pattern = rf"\bbook\s*{book_number}\s*[:\-]\s*([^.;|\n]+)"
+        match = re.search(pattern, snippet_text, flags=re.IGNORECASE)
+        if not match:
+            return None
+        candidate = re.sub(r"\s+", " ", match.group(1)).strip(" -:;,.\t")
+        # Some snippets list multiple entries in one line (Book 2 ... Book 3 ...).
+        candidate = re.split(r"\s*[·|]\s*", candidate, maxsplit=1)[0].strip()
+        candidate = re.split(
+            rf"\b(?:book|volume)\s+(?!{book_number}\b)\d+\b",
+            candidate,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip(" -:;,.\t")
+        return candidate or None
 
     results: list[dict] = []
     for item in data.get("organic_results", [])[:max_results]:
@@ -273,14 +298,18 @@ def search_serpapi_web(query: str, author: str | None = None, max_results: int =
             top = summary_info.get("top") or {}
             year = top.get("detected_extensions", {}).get("year") if isinstance(top, dict) else None
 
+        extracted_title = extract_title_from_snippet(snippet, requested_book_number)
+        normalized_title = extracted_title or title
+        series_position = requested_book_number if extracted_title else None
+
         results.append({
-            "title": title,
+            "title": normalized_title,
             "author": author,
             "year": year,
             "description": snippet,
             "source_url": source_url,
-            "series_name": None,
-            "series_position": None,
+            "series_name": inferred_series_name or None,
+            "series_position": series_position,
             "source": "serpapi",
         })
 
