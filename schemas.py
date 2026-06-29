@@ -34,6 +34,9 @@ class BookBase(BaseModel):
     date_finished: Optional[date] = None
     read_status: Optional[str] = None
     rating: Optional[int] = None
+    is_read: Optional[bool] = None
+    external_rating: Optional[float] = None
+    external_rating_count: Optional[int] = None
     review: Optional[str] = None
     notes: Optional[str] = None
     tags: Optional[list] = None

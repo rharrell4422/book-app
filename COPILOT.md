@@ -34,6 +34,15 @@
 - Copilot must wait for my approval before applying any file change.
 - Copilot must confirm before making any destructive change (schema edits, importer rewrites, intelligence logic changes).
 
+## Change Approval Workflow
+1. **Show Diff First**: Present changes in clear markdown diff format with file name, lines added (green +), lines deleted (red -).
+2. **Create Approval Button**: Use vscode_askQuestions tool to display an interactive approval dialog with:
+   - ✅ Allow Changes (recommended)
+   - ❌ Cancel
+3. **Apply Only After Approval**: Once user clicks "Allow Changes", apply changes via replace_string_in_file.
+4. **Verify Changes**: Read back the affected lines to confirm changes took effect.
+5. **Never ask "Should I proceed?"** — always use the button-based approval instead.
+
 
 ## Project Overview
 Backend: FastAPI + SQLite  
@@ -189,6 +198,114 @@ Keep open: main.py, models.py, schemas.py, importer.py, intelligence.py, databas
 1. Backend: FastAPI + SQLite schema finalized.
 2. Importer: Rebuild importer logic to match schema.
 3. Frontend: Next.js + Tailwind + ShadCN UI.
+
+---
+
+# 📚 Book Search & Suggestions Feature
+
+## Current Status (Completed Work)
+- ✅ Sequential fetching for missing book suggestions (no parallel timeouts)
+- ✅ Frontend timeout increased to 90 seconds (AbortSignal.timeout(90000))
+- ✅ Backend httpx timeouts increased to 30 seconds (search_google_books, search_openlibrary)
+- ✅ CORS middleware reconfigured (explicit origins, headers, max_age=3600)
+- ✅ Schema serialization updated (BookBase includes is_read, external_rating, external_rating_count)
+- ✅ No 500 errors or CORS errors (all timeouts/errors fixed)
+
+## External API Integration
+
+### Endpoint: GET `/books/suggest`
+**Parameters:**
+- `series_name` (required): Series title to search for
+- `book_number` (optional): Specific book number in series (#1, #2, etc.)
+- `author` (optional): Author name for filtering
+
+**Response:**
+```json
+{
+  "query": "final query executed",
+  "results": [
+    {
+      "title": "Book Title",
+      "author": "Author Name",
+      "year": "2024",
+      "description": "...",
+      "source_url": "...",
+      "series_name": "Series Name",
+      "series_position": 1,
+      "source": "google_books" | "openlibrary"
+    }
+  ]
+}
+```
+
+### Search Strategy
+1. Try Google Books API with multiple query variations (title, title+author, title+number, etc.)
+2. If Google fails or returns empty, try OpenLibrary with candidate queries
+3. If still empty and author provided, try author-only fallback searches
+4. Return first matching results or empty array
+
+### Current Limitation: Rate Limiting & Missing Data
+**Google Books API (Primary)**
+- Returns 429 (Too Many Requests) without API key
+- High request quota available with authenticated API key
+- Indie/self-published books may not be indexed
+
+**OpenLibrary API (Fallback)**
+- Free, no authentication required
+- Indie/self-published LitRPG books NOT indexed
+- Example searches that fail: "Unbound" series, "1% Lifesteal" series
+
+**Indie Book Limitation**
+User's library contains self-published LitRPG books not in standard databases:
+- "Unbound" by Nicoli Gonnella
+- "1% Lifesteal" by Robert Blaise
+- "The Harry Starke Novels" by Blair Howard
+
+## Next Steps: Google Books API Setup (REQUIRED)
+
+### Prerequisites
+User must set up Google Books API key:
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com)
+2. Create new project (name: "Book App")
+3. Enable "Google Books API"
+4. Create API key (type: Restricted)
+   - Restrict to Books API only
+   - Restrict to Application Type: None (unrestricted)
+5. Copy the API key
+
+### Configuration
+Add to FastAPI server environment:
+```bash
+export GOOGLE_BOOKS_API_KEY="YOUR_API_KEY_HERE"
+uvicorn main:app --reload
+```
+
+Or add to `.env` file and load in main.py.
+
+### Code Location
+Environment variable is read by `intelligence.py` line ~135:
+```python
+api_key = get_google_books_api_key()
+if api_key:
+    params["key"] = api_key
+```
+
+## Timeouts & Configuration Reference
+**Frontend** (book-app-ui/app/series/[seriesId]/page.tsx):
+- Sequential fetch loop (lines 69-79)
+- Per-request timeout: 90 seconds
+- Max concurrent: 1 (sequential only)
+
+**Backend** (intelligence.py):
+- Google Books httpx timeout: 30 seconds (line 145)
+- OpenLibrary httpx timeout: 30 seconds (line 196)
+- Fallback retries with stripped/modified queries
+
+**Middleware** (main.py):
+- CORS allowed origins: http://localhost:3000, http://127.0.0.1:3000
+- CORS max_age: 3600 seconds
+- Allowed methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
 4. Intelligence Engine: Series detection, new-book detection, manual "Check Now" feature.
 5. Git/GitHub: Version control active and required for all changes.
 ## Personal Context for Copilot

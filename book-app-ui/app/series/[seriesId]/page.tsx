@@ -55,20 +55,29 @@ export default function SeriesDetailPage() {
         const data = await response.json();
         setSeries(data);
 
+        // Fetch suggestions sequentially (not in parallel) to avoid timeouts
         if (data.missing_books?.length) {
-          const suggestions: Record<string, any[]> = {};
-          await Promise.all(
-            data.missing_books.map(async (order: string) => {
-              suggestions[order] = await fetchSuggestionForMissingBook(order, data);
-            })
-          );
-          setMissingSuggestions(suggestions);
+          fetchSuggestionsSequentially(data.missing_books, data);
         }
       } catch (error) {
         setError("Unable to load this series right now.");
         console.error("Error fetching series:", error);
       } finally {
         setLoading(false);
+      }
+    }
+
+    async function fetchSuggestionsSequentially(missingBooks: string[], seriesData: any) {
+      for (const order of missingBooks) {
+        try {
+          const results = await fetchSuggestionForMissingBook(order, seriesData);
+          setMissingSuggestions((prev) => ({
+            ...prev,
+            [order]: results,
+          }));
+        } catch (err) {
+          console.error(`Failed to fetch suggestion for book ${order}:`, err);
+        }
       }
     }
 
@@ -144,20 +153,25 @@ export default function SeriesDetailPage() {
       const params = new URLSearchParams();
       params.set("series_name", seriesPayload.name || "");
       params.set("book_number", bookNumber);
-      const suggestAuthor = seriesPayload.author || books.find((book) => book.author)?.author;
+      const seriesBooks = Array.isArray(seriesPayload.books) ? seriesPayload.books : [];
+      const suggestAuthor = seriesPayload.author || seriesBooks.find((book) => book.author)?.author;
       if (suggestAuthor) {
         params.set("author", suggestAuthor);
       }
 
-      const response = await fetch(`http://localhost:8000/books/suggest?${params.toString()}`);
+      const url = `http://localhost:8000/books/suggest?${params.toString()}`;
+      console.log(`[Suggestion ${bookNumber}] Fetching from: ${url}`);
+
+      const response = await fetch(url, { signal: AbortSignal.timeout(90000) });
       if (!response.ok) {
         throw new Error(`Failed to lookup suggestions (${response.status})`);
       }
 
       const responseData = await response.json();
+      console.log(`[Suggestion ${bookNumber}] Got ${responseData.results?.length || 0} results`);
       return responseData.results || [];
     } catch (err) {
-      console.error(err);
+      console.error(`[Suggestion ${bookNumber}] Error:`, err);
       return [];
     }
   }

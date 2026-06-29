@@ -142,7 +142,7 @@ def search_google_books(query: str, author: str | None = None, max_results: int 
         params["key"] = api_key
 
     headers = {"User-Agent": "BookApp/1.0 (+https://example.com)"}
-    with httpx.Client(timeout=10.0, headers=headers) as client:
+    with httpx.Client(timeout=30.0, headers=headers) as client:
         response = client.get("https://www.googleapis.com/books/v1/volumes", params=params)
         if response.status_code == 429:
             return []
@@ -193,7 +193,7 @@ def search_openlibrary(query: str, author: str | None = None, max_results: int =
 
     params = {"q": query, "limit": max_results}
     headers = {"User-Agent": "BookApp/1.0 (+https://example.com)"}
-    with httpx.Client(timeout=10.0, headers=headers) as client:
+    with httpx.Client(timeout=30.0, headers=headers) as client:
         response = client.get("https://openlibrary.org/search.json", params=params)
         response.raise_for_status()
         data = response.json()
