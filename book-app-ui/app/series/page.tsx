@@ -17,6 +17,8 @@ type SeriesRow = {
   id: number;
   name: string;
   author?: string | null;
+  is_finished?: boolean;
+  series_status?: string | null;
   check_url?: string | null;
   next_unread_book_number?: number | null;
   next_upcoming_book_number?: number | null;
@@ -81,6 +83,9 @@ type ValueFilterMenuProps = {
   onClear: () => void;
   searchValue: string;
   onSearchChange: (value: string) => void;
+  sortValue?: "none" | "asc" | "desc";
+  onSortChange?: (value: "none" | "asc" | "desc") => void;
+  sortLabel?: string;
 };
 
 function ValueFilterMenu({
@@ -91,6 +96,9 @@ function ValueFilterMenu({
   onClear,
   searchValue,
   onSearchChange,
+  sortValue,
+  onSortChange,
+  sortLabel = "Sort",
 }: ValueFilterMenuProps) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -126,17 +134,28 @@ function ValueFilterMenu({
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
-        className="h-8 w-full rounded border bg-background px-2 text-left text-xs"
+        className="h-7 w-full rounded border bg-background px-2 text-left text-xs"
       >
         {label} {selectedValues.length > 0 ? `(${selectedValues.length})` : ""}
       </button>
       {open ? (
         <div className="absolute z-20 mt-1 w-60 rounded-md border bg-background p-2 shadow-lg">
+        {onSortChange ? (
+          <select
+            value={sortValue ?? "none"}
+            onChange={(event) => onSortChange(event.target.value as "none" | "asc" | "desc")}
+            className="mb-2 h-7 w-full rounded border bg-background px-2 text-xs"
+          >
+            <option value="none">{sortLabel}</option>
+            <option value="asc">A to Z</option>
+            <option value="desc">Z to A</option>
+          </select>
+        ) : null}
         <input
           value={searchValue}
           onChange={(event) => onSearchChange(event.target.value)}
           placeholder="Search values"
-          className="mb-2 h-8 w-full rounded border bg-background px-2 text-xs"
+          className="mb-2 h-7 w-full rounded border bg-background px-2 text-xs"
         />
         <div className="max-h-40 space-y-1 overflow-auto pr-1">
           {visibleOptions.map((option) => {
@@ -184,16 +203,9 @@ type SortDirection = "asc" | "desc";
 export default function SeriesPage() {
   const { toast } = useToast();
   const [series, setSeries] = useState<SeriesRow[]>([]);
+  const [viewMode, setViewMode] = useState<"ongoing" | "finished">("ongoing");
   const [loadingId, setLoadingId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
-  const [filters, setFilters] = useState({
-    id: "",
-    name: "",
-    author: "",
-    nextUnread: "",
-    nextUpcoming: "",
-    total: "",
-  });
   const [valueFilters, setValueFilters] = useState({
     name: [] as string[],
     author: [] as string[],
@@ -213,6 +225,8 @@ export default function SeriesPage() {
     (sum, s) => sum + (s.books_tracked ?? 0),
     0
   );
+  const ongoingCount = useMemo(() => series.filter((row) => !row.is_finished).length, [series]);
+  const finishedCount = useMemo(() => series.filter((row) => row.is_finished).length, [series]);
 
   const nameOptions = useMemo(
     () => Array.from(new Set(series.map((row) => String(row.name || "").trim()))).sort((a, b) => a.localeCompare(b)),
@@ -224,25 +238,14 @@ export default function SeriesPage() {
   );
 
   const filteredSeries = useMemo(() => {
-    const idFilter = normalizeText(filters.id);
-    const nameFilter = normalizeText(filters.name);
-    const authorFilter = normalizeText(filters.author);
-    const nextUnreadFilter = normalizeText(filters.nextUnread);
-    const nextUpcomingFilter = normalizeText(filters.nextUpcoming);
-    const totalFilter = normalizeText(filters.total);
-
     return series.filter((row) => {
-      if (idFilter && !normalizeText(row.id).includes(idFilter)) return false;
-      if (nameFilter && !normalizeText(row.name).includes(nameFilter)) return false;
-      if (authorFilter && !normalizeText(row.author).includes(authorFilter)) return false;
-      if (nextUnreadFilter && !normalizeText(row.next_unread_book_number).includes(nextUnreadFilter)) return false;
-      if (nextUpcomingFilter && !normalizeText(row.next_upcoming_book_number).includes(nextUpcomingFilter)) return false;
-      if (totalFilter && !normalizeText(row.total_books).includes(totalFilter)) return false;
+      if (viewMode === "finished" && !row.is_finished) return false;
+      if (viewMode === "ongoing" && row.is_finished) return false;
       if (valueFilters.name.length > 0 && !valueFilters.name.includes(String(row.name || "").trim())) return false;
       if (valueFilters.author.length > 0 && !valueFilters.author.includes(String(row.author || "").trim())) return false;
       return true;
     });
-  }, [filters, series, valueFilters]);
+  }, [series, valueFilters, viewMode]);
 
   const sortedSeries = useMemo(() => {
     if (!sortConfig.key) return filteredSeries;
@@ -328,14 +331,6 @@ export default function SeriesPage() {
   }
 
   function clearFilters() {
-    setFilters({
-      id: "",
-      name: "",
-      author: "",
-      nextUnread: "",
-      nextUpcoming: "",
-      total: "",
-    });
     setValueFilters({ name: [], author: [] });
     setValueFilterSearch({ name: "", author: "" });
   }
@@ -375,6 +370,8 @@ export default function SeriesPage() {
           id: item.id,
           name: item.name,
           author: detailData?.author ?? item.author ?? null,
+          is_finished: Boolean(detailData?.is_finished ?? item.is_finished ?? false),
+          series_status: detailData?.series_status ?? item.series_status ?? null,
           check_url: item.check_url ?? null,
           next_unread_book_number:
             detailData?.next_unread_book_number ?? item.next_unread_book_number ?? null,
@@ -463,46 +460,48 @@ export default function SeriesPage() {
 
   return (
     <div className="p-4 space-y-3">
-      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-        <div className="space-y-2">
+      <div className="grid gap-2 md:grid-cols-[1fr_auto_auto] md:items-start">
+        <div>
           <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
             Series library
           </p>
-          <div className="flex flex-wrap items-center gap-3">
-            <h1 className="text-2xl font-bold">Series</h1>
-            <span className="rounded-full bg-muted px-3 py-1 text-xs uppercase tracking-[0.2em] text-muted-foreground">
-              {series.length} tracked
-            </span>
-          </div>
-          <p className="max-w-2xl text-xs leading-5 text-muted-foreground">
+          <h1 className="text-2xl font-bold">{viewMode === "ongoing" ? "Ongoing Series" : "Finished Series"}</h1>
+          <p className="max-w-2xl text-xs leading-5 text-muted-foreground md:hidden">
             Browse your tracked series, update check URLs, and refresh status for each series.
           </p>
         </div>
 
-        <div className="flex flex-wrap gap-2">
+        <div className="flex justify-start md:justify-self-center">
+          <table className="border border-border bg-card/70 text-xs">
+            <tbody>
+              <tr>
+                <td className="min-w-[140px] border border-border px-2 py-1">Series: <span className="font-semibold">{series.length}</span></td>
+                <td className="min-w-[140px] border border-border px-2 py-1">Books: <span className="font-semibold">{totalBooks}</span></td>
+                <td className="min-w-[140px] border border-border px-2 py-1">Showing: <span className="font-semibold">{sortedSeries.length}</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div className="flex flex-wrap gap-2 md:justify-self-end">
+          <Button
+            variant={viewMode === "ongoing" ? "secondary" : "outline"}
+            onClick={() => setViewMode("ongoing")}
+          >
+            Ongoing Series ({ongoingCount})
+          </Button>
+          <Button
+            variant={viewMode === "finished" ? "secondary" : "outline"}
+            onClick={() => setViewMode("finished")}
+          >
+            Finished Series ({finishedCount})
+          </Button>
           <Link href="/books">
             <Button variant="outline">View Library</Button>
           </Link>
           <Link href={detailHref}>
             <Button variant="secondary">Series detail</Button>
           </Link>
-        </div>
-      </div>
-
-      <div className="rounded-md border bg-card/70 px-3 py-2">
-        <div className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
-          <div className="rounded bg-background/70 px-2 py-1">
-            <span className="text-muted-foreground">Series tracked</span>
-            <span className="ml-2 font-semibold">{series.length}</span>
-          </div>
-          <div className="rounded bg-background/70 px-2 py-1">
-            <span className="text-muted-foreground">Books tracked</span>
-            <span className="ml-2 font-semibold">{totalBooks}</span>
-          </div>
-          <div className="rounded bg-background/70 px-2 py-1">
-            <span className="text-muted-foreground">Refresh</span>
-            <span className="ml-2 font-semibold">{loadingId ? "Refreshing..." : "Ready"}</span>
-          </div>
         </div>
       </div>
 
@@ -513,17 +512,49 @@ export default function SeriesPage() {
       )}
 
       <div className="overflow-x-auto rounded-lg border bg-card/80">
-        <Table>
+        <Table className="text-xs [&_th]:h-8 [&_th]:py-1 [&_td]:py-1">
           <TableHeader>
             <TableRow>
               <TableHead>
                 <button type="button" className="text-left" onClick={() => toggleSort("id")}>ID{sortLabel("id")}</button>
               </TableHead>
               <TableHead>
-                <button type="button" className="text-left" onClick={() => toggleSort("name")}>Name{sortLabel("name")}</button>
+                <div className="flex items-center justify-between gap-1">
+                  <button type="button" className="text-left" onClick={() => toggleSort("name")}>Name{sortLabel("name")}</button>
+                  <ValueFilterMenu
+                    label="Filter"
+                    options={nameOptions}
+                    selectedValues={valueFilters.name}
+                    onToggleValue={(value) => toggleValueFilter("name", value)}
+                    onClear={() => {
+                      setValueFilters((prev) => ({ ...prev, name: [] }));
+                      setValueFilterSearch((prev) => ({ ...prev, name: "" }));
+                    }}
+                    searchValue={valueFilterSearch.name}
+                    onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, name: value }))}
+                    sortValue={sortConfig.key === "name" ? sortConfig.direction : "none"}
+                    onSortChange={(value) => setExplicitSort("name", value)}
+                  />
+                </div>
               </TableHead>
               <TableHead>
-                <button type="button" className="text-left" onClick={() => toggleSort("author")}>Author{sortLabel("author")}</button>
+                <div className="flex items-center justify-between gap-1">
+                  <button type="button" className="text-left" onClick={() => toggleSort("author")}>Author{sortLabel("author")}</button>
+                  <ValueFilterMenu
+                    label="Filter"
+                    options={authorOptions}
+                    selectedValues={valueFilters.author}
+                    onToggleValue={(value) => toggleValueFilter("author", value)}
+                    onClear={() => {
+                      setValueFilters((prev) => ({ ...prev, author: [] }));
+                      setValueFilterSearch((prev) => ({ ...prev, author: "" }));
+                    }}
+                    searchValue={valueFilterSearch.author}
+                    onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, author: value }))}
+                    sortValue={sortConfig.key === "author" ? sortConfig.direction : "none"}
+                    onSortChange={(value) => setExplicitSort("author", value)}
+                  />
+                </div>
               </TableHead>
               <TableHead>
                 <button type="button" className="text-left" onClick={() => toggleSort("nextUnread")}>Next unread{sortLabel("nextUnread")}</button>
@@ -536,100 +567,6 @@ export default function SeriesPage() {
               </TableHead>
               <TableHead className="min-w-[200px]">
                 <button type="button" className="text-left" onClick={() => toggleSort("lastChecked")}>Last checked{sortLabel("lastChecked")}</button>
-              </TableHead>
-              <TableHead>Actions</TableHead>
-            </TableRow>
-            <TableRow>
-              <TableHead>
-                <input
-                  value={filters.id}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, id: event.target.value }))}
-                  placeholder="Filter"
-                  className="h-8 w-full rounded border bg-background px-2 text-xs"
-                />
-              </TableHead>
-              <TableHead>
-                <input
-                  value={filters.name}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, name: event.target.value }))}
-                  placeholder="Filter"
-                  className="h-8 w-full rounded border bg-background px-2 text-xs"
-                />
-                <div className="mt-1">
-                  <ValueFilterMenu
-                    label="Values"
-                    options={nameOptions}
-                    selectedValues={valueFilters.name}
-                    onToggleValue={(value) => toggleValueFilter("name", value)}
-                    onClear={() => {
-                      setValueFilters((prev) => ({ ...prev, name: [] }));
-                      setValueFilterSearch((prev) => ({ ...prev, name: "" }));
-                      setFilters((prev) => ({ ...prev, name: "" }));
-                    }}
-                    searchValue={valueFilterSearch.name}
-                    onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, name: value }))}
-                  />
-                </div>
-              </TableHead>
-              <TableHead>
-                <input
-                  value={filters.author}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, author: event.target.value }))}
-                  placeholder="Filter"
-                  className="h-8 w-full rounded border bg-background px-2 text-xs"
-                />
-                <div className="mt-1">
-                  <ValueFilterMenu
-                    label="Values"
-                    options={authorOptions}
-                    selectedValues={valueFilters.author}
-                    onToggleValue={(value) => toggleValueFilter("author", value)}
-                    onClear={() => {
-                      setValueFilters((prev) => ({ ...prev, author: [] }));
-                      setValueFilterSearch((prev) => ({ ...prev, author: "" }));
-                      setFilters((prev) => ({ ...prev, author: "" }));
-                    }}
-                    searchValue={valueFilterSearch.author}
-                    onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, author: value }))}
-                  />
-                </div>
-              </TableHead>
-              <TableHead>
-                <input
-                  value={filters.nextUnread}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, nextUnread: event.target.value }))}
-                  placeholder="Filter"
-                  className="h-8 w-full rounded border bg-background px-2 text-xs"
-                />
-              </TableHead>
-              <TableHead>
-                <input
-                  value={filters.nextUpcoming}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, nextUpcoming: event.target.value }))}
-                  placeholder="Filter"
-                  className="h-8 w-full rounded border bg-background px-2 text-xs"
-                />
-              </TableHead>
-              <TableHead>
-                <input
-                  value={filters.total}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, total: event.target.value }))}
-                  placeholder="Filter"
-                  className="h-8 w-full rounded border bg-background px-2 text-xs"
-                />
-              </TableHead>
-              <TableHead className="min-w-[200px] align-top">
-                <select
-                  value={sortConfig.key === "lastChecked" ? sortConfig.direction : "none"}
-                  onChange={(event) =>
-                    setExplicitSort("lastChecked", event.target.value as "none" | "asc" | "desc")
-                  }
-                  className="block h-8 w-full rounded border bg-background px-2 text-xs"
-                >
-                  <option value="none">Sort date</option>
-                  <option value="asc">A to Z (oldest)</option>
-                  <option value="desc">Z to A (newest)</option>
-                </select>
               </TableHead>
               <TableHead>
                 <Button type="button" variant="ghost" size="sm" onClick={clearFilters}>
@@ -650,7 +587,7 @@ export default function SeriesPage() {
                 <TableCell>{s.total_books ?? "—"}</TableCell>
                 <TableCell>{formatDate(s.last_checked)}</TableCell>
                 <TableCell className="space-x-2 whitespace-nowrap">
-                  <Link href={`/books?series_id=${s.id}`}>
+                  <Link href={`/series/${s.id}`}>
                     <Button variant="ghost" size="sm">
                       View books
                     </Button>
@@ -677,7 +614,7 @@ export default function SeriesPage() {
         </Table>
       </div>
       <p className="text-xs text-muted-foreground">
-        Showing {sortedSeries.length} of {series.length} series.
+        Showing {sortedSeries.length} of {viewMode === "ongoing" ? ongoingCount : finishedCount} series.
       </p>
     </div>
   );

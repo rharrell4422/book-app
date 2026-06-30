@@ -3,8 +3,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import { CircleHelpIcon } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
 
 import {
@@ -154,7 +165,7 @@ function ValueFilterMenu({
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
-        className="h-8 w-full rounded border bg-background px-2 text-left text-xs"
+        className="h-7 w-full rounded border bg-background px-2 text-left text-xs"
       >
         {label} {selectedValues.length > 0 ? `(${selectedValues.length})` : ""}
       </button>
@@ -164,7 +175,7 @@ function ValueFilterMenu({
           value={searchValue}
           onChange={(event) => onSearchChange(event.target.value)}
           placeholder="Search values"
-          className="mb-2 h-8 w-full rounded border bg-background px-2 text-xs"
+          className="mb-2 h-7 w-full rounded border bg-background px-2 text-xs"
         />
         <div className="max-h-40 space-y-1 overflow-auto pr-1">
           {visibleOptions.map((option) => {
@@ -209,10 +220,63 @@ function ValueFilterMenu({
 type BookSortKey = "id" | "title" | "author" | "status" | "date" | "series" | "bookNumber";
 type SortDirection = "asc" | "desc";
 
+type SeriesOption = {
+  id: number;
+  name: string;
+  author?: string | null;
+};
+
+type AddBookFormState = {
+  title: string;
+  author: string;
+  seriesName: string;
+  bookNumber: string;
+  publicationDate: string;
+  readDate: string;
+  isRead: boolean;
+  autoSummary: string;
+};
+
+type LookupResultState = {
+  found: boolean;
+  summary: string | null;
+  source_url: string | null;
+  matched_title: string | null;
+  matched_author: string | null;
+};
+
+const EMPTY_ADD_BOOK_FORM: AddBookFormState = {
+  title: "",
+  author: "",
+  seriesName: "",
+  bookNumber: "",
+  publicationDate: "",
+  readDate: "",
+  isRead: false,
+  autoSummary: "",
+};
+
+function normalizeLookupMatchedTitle(value: string | null | undefined) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  return raw
+    .replace(/\s+ebook\s*$/i, "")
+    .replace(/\s+kindle\s+edition\s*$/i, "")
+    .trim();
+}
+
 export default function BooksClient() {
   const { toast } = useToast();
   const [books, setBooks] = useState<any[]>([]);
+  const [seriesList, setSeriesList] = useState<SeriesOption[]>([]);
   const [loading, setLoading] = useState(false);
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [savingBook, setSavingBook] = useState(false);
+  const [lookingUpBook, setLookingUpBook] = useState(false);
+  const [showLookupSummary, setShowLookupSummary] = useState(false);
+  const [addBookForm, setAddBookForm] = useState<AddBookFormState>(EMPTY_ADD_BOOK_FORM);
+  const [lookupResult, setLookupResult] = useState<LookupResultState | null>(null);
   const [filters, setFilters] = useState({
     id: "",
     title: "",
@@ -222,11 +286,13 @@ export default function BooksClient() {
     bookNumber: "",
   });
   const [valueFilters, setValueFilters] = useState({
+    title: [] as string[],
     author: [] as string[],
     series: [] as string[],
     status: [] as string[],
   });
   const [valueFilterSearch, setValueFilterSearch] = useState({
+    title: "",
     author: "",
     series: "",
     status: "",
@@ -235,18 +301,25 @@ export default function BooksClient() {
     key: null,
     direction: "asc",
   });
-  const [dateFilterMode, setDateFilterMode] = useState<"any" | "before" | "after" | "between">("any");
-  const [dateFilterFrom, setDateFilterFrom] = useState("");
-  const [dateFilterTo, setDateFilterTo] = useState("");
   const searchParams = useSearchParams();
   const router = useRouter();
   const seriesId = searchParams.get("series_id");
+
+  useEffect(() => {
+    if (seriesId) {
+      router.replace(`/series/${seriesId}`);
+    }
+  }, [router, seriesId]);
 
   const totalBooks = books.length;
   const readBooks = books.filter((book) => book.is_read).length;
   const unreadBooks = books.filter((book) => !book.is_read).length;
   const upcomingBooks = books.filter((book) => getBookStatus(book) === "upcoming").length;
 
+  const titleOptions = useMemo(
+    () => Array.from(new Set(books.map((book) => String(book.title || "").trim()))).sort((a, b) => a.localeCompare(b)),
+    [books],
+  );
   const authorOptions = useMemo(
     () => Array.from(new Set(books.map((book) => String(book.author || "").trim()))).sort((a, b) => a.localeCompare(b)),
     [books],
@@ -259,29 +332,6 @@ export default function BooksClient() {
     () => Array.from(new Set(books.map((book) => String(getBookStatus(book)).trim()))).sort((a, b) => a.localeCompare(b)),
     [books],
   );
-
-  function passesDateFilter(book: any): boolean {
-    if (dateFilterMode === "any") return true;
-    const dateValue = parseFlexibleDate(getDisplayDate(book));
-    if (!dateValue) return false;
-
-    const fromDate = parseFlexibleDate(dateFilterFrom);
-    const toDate = parseFlexibleDate(dateFilterTo);
-
-    if (dateFilterMode === "before") {
-      return toDate ? dateValue <= toDate : true;
-    }
-    if (dateFilterMode === "after") {
-      return fromDate ? dateValue >= fromDate : true;
-    }
-    if (dateFilterMode === "between") {
-      const afterFrom = fromDate ? dateValue >= fromDate : true;
-      const beforeTo = toDate ? dateValue <= toDate : true;
-      return afterFrom && beforeTo;
-    }
-
-    return true;
-  }
 
   const filteredBooks = useMemo(() => {
     const idFilter = normalizeText(filters.id);
@@ -305,14 +355,14 @@ export default function BooksClient() {
       if (statusFilter !== "all" && status !== statusFilter) return false;
       if (seriesFilter && !seriesText.includes(seriesFilter)) return false;
       if (bookNumberFilter && !bookNumberText.includes(bookNumberFilter)) return false;
+      if (valueFilters.title.length > 0 && !valueFilters.title.includes(String(book.title || "").trim())) return false;
       if (valueFilters.author.length > 0 && !valueFilters.author.includes(String(book.author || "").trim())) return false;
       if (valueFilters.series.length > 0 && !valueFilters.series.includes(String(book.series_name || "").trim())) return false;
       if (valueFilters.status.length > 0 && !valueFilters.status.includes(String(getBookStatus(book)).trim())) return false;
-      if (!passesDateFilter(book)) return false;
 
       return true;
     });
-  }, [books, filters, valueFilters, dateFilterMode, dateFilterFrom, dateFilterTo]);
+  }, [books, filters, valueFilters]);
 
   const sortedBooks = useMemo(() => {
     if (!sortConfig.key) return filteredBooks;
@@ -385,7 +435,7 @@ export default function BooksClient() {
     setSortConfig({ key, direction: mode });
   }
 
-  function toggleValueFilter(kind: "author" | "series" | "status", value: string) {
+  function toggleValueFilter(kind: "title" | "author" | "series" | "status", value: string) {
     setValueFilters((prev) => {
       const exists = prev[kind].includes(value);
       return {
@@ -404,11 +454,78 @@ export default function BooksClient() {
       series: "",
       bookNumber: "",
     });
-    setValueFilters({ author: [], series: [], status: [] });
-    setValueFilterSearch({ author: "", series: "", status: "" });
-    setDateFilterMode("any");
-    setDateFilterFrom("");
-    setDateFilterTo("");
+    setValueFilters({ title: [], author: [], series: [], status: [] });
+    setValueFilterSearch({ title: "", author: "", series: "", status: "" });
+  }
+
+  function updateAddBookForm<K extends keyof AddBookFormState>(key: K, value: AddBookFormState[K]) {
+    setAddBookForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function resetAddBookForm() {
+    setAddBookForm(EMPTY_ADD_BOOK_FORM);
+    setLookupResult(null);
+    setShowLookupSummary(false);
+  }
+
+  async function handleFindDetails() {
+    const title = addBookForm.title.trim();
+    const author = addBookForm.author.trim();
+
+    if (!title) {
+      toast({
+        title: "Need a title",
+        description: "Enter at least the book title before using Find details.",
+      });
+      return;
+    }
+
+    setLookingUpBook(true);
+
+    try {
+      const params = new URLSearchParams();
+      params.set("title", title);
+      if (author) {
+        params.set("author", author);
+      }
+
+      const response = await fetch(`http://localhost:8000/books/lookup?${params.toString()}`);
+      if (!response.ok) {
+        throw new Error(`Lookup failed (${response.status})`);
+      }
+
+      const data: LookupResultState = await response.json();
+      setLookupResult(data);
+
+      if (!data.found) {
+        toast({
+          title: "No details found",
+          description: "No match was found. You can still add the book manually.",
+        });
+        return;
+      }
+
+      setAddBookForm((prev) => ({
+        ...prev,
+        title: normalizeLookupMatchedTitle(data.matched_title) || prev.title,
+        author: data.matched_author?.trim() || prev.author,
+        autoSummary: data.summary || prev.autoSummary,
+      }));
+      setShowLookupSummary(false);
+
+      toast({
+        title: "Details found",
+        description: "Matched title and author were applied to the form.",
+      });
+    } catch (error) {
+      console.error("Error looking up book:", error);
+      toast({
+        title: "Lookup error",
+        description: error instanceof Error ? error.message : "Unable to look up book details.",
+      });
+    } finally {
+      setLookingUpBook(false);
+    }
   }
 
   async function fetchBooks() {
@@ -428,8 +545,23 @@ export default function BooksClient() {
     }
   }
 
+  async function fetchSeriesList() {
+    try {
+      const response = await fetch("http://localhost:8000/series/", { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`Failed to load series (${response.status})`);
+      }
+      const data = await response.json();
+      setSeriesList(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error("Error fetching series:", error);
+    }
+  }
+
   useEffect(() => {
+    if (seriesId) return;
     fetchBooks();
+    fetchSeriesList();
   }, [seriesId]);
 
   useEffect(() => {
@@ -526,9 +658,118 @@ export default function BooksClient() {
     }
   }
 
+  async function handleAddBook() {
+    const title = addBookForm.title.trim();
+    const author = addBookForm.author.trim();
+    const seriesName = addBookForm.seriesName.trim();
+    const bookNumberText = addBookForm.bookNumber.trim();
+
+    if (!title || !author) {
+      toast({
+        title: "Missing info",
+        description: "Title and author are required.",
+      });
+      return;
+    }
+
+    const parsedBookNumber = bookNumberText ? Number(bookNumberText) : null;
+    if (bookNumberText && !Number.isFinite(parsedBookNumber)) {
+      toast({
+        title: "Invalid book number",
+        description: "Book number must be numeric when provided.",
+      });
+      return;
+    }
+
+    setSavingBook(true);
+
+    try {
+      let resolvedSeriesId: number | null = null;
+
+      if (seriesName) {
+        const normalizedSeriesName = normalizeText(seriesName);
+        const normalizedAuthor = normalizeText(author);
+        const matchedSeries = seriesList.find((series) => {
+          if (normalizeText(series.name) !== normalizedSeriesName) return false;
+
+          const existingAuthor = normalizeText(series.author);
+          return !existingAuthor || !normalizedAuthor || existingAuthor === normalizedAuthor;
+        });
+
+        if (matchedSeries) {
+          resolvedSeriesId = Number(matchedSeries.id);
+        } else {
+          const createSeriesResponse = await fetch("http://localhost:8000/series/", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: seriesName,
+              author,
+            }),
+          });
+
+          if (!createSeriesResponse.ok) {
+            throw new Error(`Failed to create series (${createSeriesResponse.status})`);
+          }
+
+          const createdSeries = await createSeriesResponse.json();
+          resolvedSeriesId = Number(createdSeries.id);
+        }
+      }
+
+      const isRead = addBookForm.isRead;
+      const readDate = addBookForm.readDate || (isRead ? new Date().toISOString().split("T")[0] : null);
+      const readStatus = isRead ? "read" : "unread";
+
+      const createBookResponse = await fetch("http://localhost:8000/books/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          author,
+          series_id: resolvedSeriesId,
+          series_order: parsedBookNumber,
+          book_number: parsedBookNumber,
+          publication_date: addBookForm.publicationDate || undefined,
+          read_date: readDate || undefined,
+          read_status: readStatus,
+          is_read: isRead,
+          auto_summary: addBookForm.autoSummary || undefined,
+        }),
+      });
+
+      if (!createBookResponse.ok) {
+        throw new Error(`Failed to create book (${createBookResponse.status})`);
+      }
+
+      const createdBook = await createBookResponse.json();
+      await Promise.all([fetchBooks(), fetchSeriesList()]);
+      setAddDialogOpen(false);
+      resetAddBookForm();
+      toast({
+        title: "Book added",
+        description: resolvedSeriesId
+          ? `Added ${createdBook.title} and attached it to a series.`
+          : `Added ${createdBook.title} to your library.`,
+      });
+    } catch (error) {
+      console.error("Error adding book:", error);
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to add book.",
+      });
+    } finally {
+      setSavingBook(false);
+    }
+  }
+
+  if (seriesId) {
+    return <div className="p-4 text-sm text-muted-foreground">Redirecting to series detail...</div>;
+  }
+
   return (
     <div className="p-4 space-y-3">
-      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+      <div className="grid gap-2 md:grid-cols-[1fr_auto_auto] md:items-start">
         <div>
           <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
             Library
@@ -536,12 +777,28 @@ export default function BooksClient() {
           <h1 className="text-2xl font-bold">
             {seriesId ? `Series ${seriesId} books` : "All books"}
           </h1>
-          <p className="max-w-2xl text-xs leading-5 text-muted-foreground">
+          <p className="max-w-2xl text-xs leading-5 text-muted-foreground md:hidden">
             Browse the collection with read status, release dates, and series links.
           </p>
         </div>
 
-        <div className="flex flex-wrap gap-2">
+        <div className="flex justify-start md:justify-self-center">
+          <table className="border border-border bg-card/70 text-xs">
+            <tbody>
+              <tr>
+                <td className="min-w-[150px] border border-border px-2 py-1">Unread: <span className="font-semibold">{unreadBooks}</span></td>
+                <td className="min-w-[150px] border border-border px-2 py-1">Read: <span className="font-semibold">{readBooks}</span></td>
+              </tr>
+              <tr>
+                <td className="border border-border px-2 py-1">Total: <span className="font-semibold">{totalBooks}</span></td>
+                <td className="border border-border px-2 py-1">Upcoming: <span className="font-semibold">{upcomingBooks}</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div className="flex flex-wrap gap-2 md:justify-self-end">
+          <Button type="button" onClick={() => setAddDialogOpen(true)}>Add Book</Button>
           <Link href="/books">
             <Button type="button" variant="outline">All Books</Button>
           </Link>
@@ -551,30 +808,108 @@ export default function BooksClient() {
         </div>
       </div>
 
-      <div className="rounded-md border bg-card/70 px-3 py-2">
-        <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-          <div className="rounded bg-background/70 px-2 py-1">
-            <span className="text-muted-foreground">Total</span>
-            <span className="ml-2 font-semibold">{totalBooks}</span>
-          </div>
-          <div className="rounded bg-background/70 px-2 py-1">
-            <span className="text-muted-foreground">Read</span>
-            <span className="ml-2 font-semibold">{readBooks}</span>
-          </div>
-          <div className="rounded bg-background/70 px-2 py-1">
-            <span className="text-muted-foreground">Unread</span>
-            <span className="ml-2 font-semibold">{unreadBooks}</span>
-          </div>
-          <div className="rounded bg-background/70 px-2 py-1">
-            <span className="text-muted-foreground">Upcoming</span>
-            <span className="ml-2 font-semibold">{upcomingBooks}</span>
-          </div>
-        </div>
-      </div>
-
       <div className="overflow-x-auto rounded-lg border bg-card/80">
-        <Table>
+        <Table className="text-xs [&_th]:h-8 [&_th]:py-1 [&_td]:py-1">
           <TableHeader>
+            <TableRow>
+              <TableHead>
+                <span className="text-muted-foreground">—</span>
+              </TableHead>
+              <TableHead>
+                <ValueFilterMenu
+                  label="Filter"
+                  options={titleOptions}
+                  selectedValues={valueFilters.title}
+                  onToggleValue={(value) => toggleValueFilter("title", value)}
+                  onClear={() => {
+                    setValueFilters((prev) => ({ ...prev, title: [] }));
+                    setValueFilterSearch((prev) => ({ ...prev, title: "" }));
+                    setFilters((prev) => ({ ...prev, title: "" }));
+                  }}
+                  searchValue={valueFilterSearch.title}
+                  onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, title: value }))}
+                />
+              </TableHead>
+              <TableHead>
+                <ValueFilterMenu
+                  label="Filter"
+                  options={authorOptions}
+                  selectedValues={valueFilters.author}
+                  onToggleValue={(value) => toggleValueFilter("author", value)}
+                  onClear={() => {
+                    setValueFilters((prev) => ({ ...prev, author: [] }));
+                    setValueFilterSearch((prev) => ({ ...prev, author: "" }));
+                    setFilters((prev) => ({ ...prev, author: "" }));
+                  }}
+                  searchValue={valueFilterSearch.author}
+                  onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, author: value }))}
+                />
+              </TableHead>
+              <TableHead>
+                <div className="space-y-1">
+                  <ValueFilterMenu
+                    label="Filter"
+                    options={statusOptions}
+                    selectedValues={valueFilters.status}
+                    onToggleValue={(value) => toggleValueFilter("status", value)}
+                    onClear={() => {
+                      setValueFilters((prev) => ({ ...prev, status: [] }));
+                      setValueFilterSearch((prev) => ({ ...prev, status: "" }));
+                    }}
+                    searchValue={valueFilterSearch.status}
+                    onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, status: value }))}
+                  />
+                </div>
+              </TableHead>
+              <TableHead className="min-w-[220px] align-top">
+                <div className="space-y-1">
+                  <select
+                    value={sortConfig.key === "date" ? sortConfig.direction : "none"}
+                    onChange={(event) =>
+                      setExplicitSort("date", event.target.value as "none" | "asc" | "desc")
+                    }
+                    className="block h-7 w-full rounded border bg-background px-2 text-xs"
+                  >
+                    <option value="none">Sort date</option>
+                    <option value="asc">A to Z (oldest)</option>
+                    <option value="desc">Z to A (newest)</option>
+                  </select>
+                </div>
+              </TableHead>
+              <TableHead>
+                <ValueFilterMenu
+                  label="Filter"
+                  options={seriesOptions}
+                  selectedValues={valueFilters.series}
+                  onToggleValue={(value) => toggleValueFilter("series", value)}
+                  onClear={() => {
+                    setValueFilters((prev) => ({ ...prev, series: [] }));
+                    setValueFilterSearch((prev) => ({ ...prev, series: "" }));
+                    setFilters((prev) => ({ ...prev, series: "" }));
+                  }}
+                  searchValue={valueFilterSearch.series}
+                  onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, series: value }))}
+                />
+              </TableHead>
+              <TableHead>
+                <select
+                  value={sortConfig.key === "bookNumber" ? sortConfig.direction : "none"}
+                  onChange={(event) =>
+                    setExplicitSort("bookNumber", event.target.value as "none" | "asc" | "desc")
+                  }
+                  className="h-7 w-full rounded border bg-background px-2 text-xs"
+                >
+                  <option value="none">Sort</option>
+                  <option value="asc">A to Z</option>
+                  <option value="desc">Z to A</option>
+                </select>
+              </TableHead>
+              <TableHead>
+                <Button type="button" variant="ghost" size="sm" onClick={clearFilters}>
+                  Clear
+                </Button>
+              </TableHead>
+            </TableRow>
             <TableRow>
               <TableHead>
                 <button type="button" className="text-left" onClick={() => toggleSort("id")}>ID{sortLabel("id")}</button>
@@ -599,151 +934,6 @@ export default function BooksClient() {
               </TableHead>
               <TableHead>Actions</TableHead>
             </TableRow>
-            <TableRow>
-              <TableHead>
-                <input
-                  value={filters.id}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, id: event.target.value }))}
-                  placeholder="Filter"
-                  className="h-8 w-full rounded border bg-background px-2 text-xs"
-                />
-              </TableHead>
-              <TableHead>
-                <input
-                  value={filters.title}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, title: event.target.value }))}
-                  placeholder="Filter"
-                  className="h-8 w-full rounded border bg-background px-2 text-xs"
-                />
-              </TableHead>
-              <TableHead>
-                <input
-                  value={filters.author}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, author: event.target.value }))}
-                  placeholder="Filter"
-                  className="h-8 w-full rounded border bg-background px-2 text-xs"
-                />
-                <div className="mt-1">
-                  <ValueFilterMenu
-                    label="Values"
-                    options={authorOptions}
-                    selectedValues={valueFilters.author}
-                    onToggleValue={(value) => toggleValueFilter("author", value)}
-                    onClear={() => {
-                      setValueFilters((prev) => ({ ...prev, author: [] }));
-                      setValueFilterSearch((prev) => ({ ...prev, author: "" }));
-                      setFilters((prev) => ({ ...prev, author: "" }));
-                    }}
-                    searchValue={valueFilterSearch.author}
-                    onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, author: value }))}
-                  />
-                </div>
-              </TableHead>
-              <TableHead>
-                <div className="space-y-1">
-                  <select
-                    value={filters.status}
-                    onChange={(event) => setFilters((prev) => ({ ...prev, status: event.target.value }))}
-                    className="h-8 w-full rounded border bg-background px-2 text-xs"
-                  >
-                    <option value="all">All</option>
-                    <option value="read">Read</option>
-                    <option value="unread">Unread</option>
-                    <option value="upcoming">Upcoming</option>
-                  </select>
-                  <ValueFilterMenu
-                    label="Values"
-                    options={statusOptions}
-                    selectedValues={valueFilters.status}
-                    onToggleValue={(value) => toggleValueFilter("status", value)}
-                    onClear={() => {
-                      setValueFilters((prev) => ({ ...prev, status: [] }));
-                      setValueFilterSearch((prev) => ({ ...prev, status: "" }));
-                      setFilters((prev) => ({ ...prev, status: "all" }));
-                    }}
-                    searchValue={valueFilterSearch.status}
-                    onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, status: value }))}
-                  />
-                </div>
-              </TableHead>
-              <TableHead className="min-w-[220px] align-top">
-                <div className="space-y-1">
-                  <select
-                    value={sortConfig.key === "date" ? sortConfig.direction : "none"}
-                    onChange={(event) =>
-                      setExplicitSort("date", event.target.value as "none" | "asc" | "desc")
-                    }
-                    className="block h-8 w-full rounded border bg-background px-2 text-xs"
-                  >
-                    <option value="none">Sort date</option>
-                    <option value="asc">A to Z (oldest)</option>
-                    <option value="desc">Z to A (newest)</option>
-                  </select>
-                  <select
-                    value={dateFilterMode}
-                    onChange={(event) => setDateFilterMode(event.target.value as "any" | "before" | "after" | "between")}
-                    className="block h-8 w-full rounded border bg-background px-2 text-xs"
-                  >
-                    <option value="any">Any date</option>
-                    <option value="after">After</option>
-                    <option value="before">Before</option>
-                    <option value="between">Between</option>
-                  </select>
-                  {dateFilterMode === "after" || dateFilterMode === "between" ? (
-                    <input
-                      type="date"
-                      value={dateFilterFrom}
-                      onChange={(event) => setDateFilterFrom(event.target.value)}
-                      className="block h-8 w-full rounded border bg-background px-2 text-xs"
-                    />
-                  ) : null}
-                  {dateFilterMode === "before" || dateFilterMode === "between" ? (
-                    <input
-                      type="date"
-                      value={dateFilterTo}
-                      onChange={(event) => setDateFilterTo(event.target.value)}
-                      className="block h-8 w-full rounded border bg-background px-2 text-xs"
-                    />
-                  ) : null}
-                </div>
-              </TableHead>
-              <TableHead>
-                <input
-                  value={filters.series}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, series: event.target.value }))}
-                  placeholder="Filter"
-                  className="h-8 w-full rounded border bg-background px-2 text-xs"
-                />
-                <div className="mt-1">
-                  <ValueFilterMenu
-                    label="Values"
-                    options={seriesOptions}
-                    selectedValues={valueFilters.series}
-                    onToggleValue={(value) => toggleValueFilter("series", value)}
-                    onClear={() => {
-                      setValueFilters((prev) => ({ ...prev, series: [] }));
-                      setValueFilterSearch((prev) => ({ ...prev, series: "" }));
-                      setFilters((prev) => ({ ...prev, series: "" }));
-                    }}
-                    searchValue={valueFilterSearch.series}
-                    onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, series: value }))}
-                  />
-                </div>
-              </TableHead>
-              <TableHead>
-                <input
-                  value={filters.bookNumber}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, bookNumber: event.target.value }))}
-                  placeholder="Filter"
-                  className="h-8 w-full rounded border bg-background px-2 text-xs"
-                />
-              </TableHead>
-              <TableHead>
-                <Button type="button" variant="ghost" size="sm" onClick={clearFilters}>
-                  Clear
-                </Button>
-              </TableHead>
-            </TableRow>
           </TableHeader>
           <TableBody>
             {Array.isArray(sortedBooks) &&
@@ -760,15 +950,17 @@ export default function BooksClient() {
                     <TableCell>{formatDate(getDisplayDate(b))}</TableCell>
                     <TableCell>{b.series_name || "—"}</TableCell>
                     <TableCell>{b.book_number ?? "—"}</TableCell>
-                    <TableCell className="flex flex-wrap gap-2">
+                    <TableCell className="whitespace-nowrap">
+                      <div className="flex items-center gap-1">
                       {b.series_id ? (
                       <Button
                         type="button"
                         variant="ghost"
                         size="sm"
+                        className="h-7 px-2 text-xs"
                         onClick={() => router.push(`/series/${b.series_id}`)}
                       >
-                        Open series
+                        View books
                       </Button>
                     ) : null}
                     <Button
@@ -777,16 +969,23 @@ export default function BooksClient() {
                       size="sm"
                       className={
                         b.is_read
-                          ? "border-rose-300 text-rose-700 hover:bg-rose-50"
-                          : "border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+                          ? "h-7 border-rose-300 px-2 text-xs text-rose-700 hover:bg-rose-50"
+                          : "h-7 border-emerald-300 px-2 text-xs text-emerald-700 hover:bg-emerald-50"
                       }
                       onClick={() => toggleRead(b)}
                     >
-                      {b.is_read ? "Book: mark unread" : "Book: mark read"}
+                      {b.is_read ? "Mark unread" : "Mark read"}
                     </Button>
-                    <Button type="button" variant="destructive" size="sm" onClick={() => deleteBook(b.id)}>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => deleteBook(b.id)}
+                    >
                       Delete
                     </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 );
@@ -798,6 +997,170 @@ export default function BooksClient() {
         Showing {sortedBooks.length} of {books.length} books.
       </p>
       {loading && <p className="text-sm text-muted-foreground">Loading books…</p>}
+
+      <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Add Book</DialogTitle>
+            <DialogDescription>
+              Add a standalone book or start a new series by entering the first book you already own.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            <div className="flex items-start gap-2">
+              <CircleHelpIcon className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <p className="font-medium text-foreground">Find details helper</p>
+                <p>Minimum for search: book title. Best results: book title plus author.</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1 sm:col-span-2">
+              <Label htmlFor="add-book-title">Title</Label>
+              <Input
+                id="add-book-title"
+                value={addBookForm.title}
+                onChange={(event) => updateAddBookForm("title", event.target.value)}
+                placeholder="Book title"
+              />
+            </div>
+
+            <div className="space-y-1 sm:col-span-2">
+              <Label htmlFor="add-book-author">Author</Label>
+              <Input
+                id="add-book-author"
+                value={addBookForm.author}
+                onChange={(event) => updateAddBookForm("author", event.target.value)}
+                placeholder="Author name"
+              />
+            </div>
+
+            <div className="sm:col-span-2 flex flex-wrap items-center gap-2">
+              <Button type="button" variant="secondary" onClick={handleFindDetails} disabled={lookingUpBook}>
+                {lookingUpBook ? "Finding..." : "Find details"}
+              </Button>
+              {lookupResult?.found ? (
+                <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <span>
+                    Matched {normalizeLookupMatchedTitle(lookupResult.matched_title) || "title"}
+                    {lookupResult.matched_author ? ` by ${lookupResult.matched_author}` : ""}.
+                  </span>
+                  {lookupResult.summary ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-[11px]"
+                      onClick={() => setShowLookupSummary((prev) => !prev)}
+                    >
+                      {showLookupSummary ? "Hide summary" : "Show summary"}
+                    </Button>
+                  ) : null}
+                  {lookupResult.source_url ? (
+                    <a
+                      href={lookupResult.source_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[11px] text-blue-600 underline"
+                    >
+                      Source
+                    </a>
+                  ) : null}
+                </div>
+              ) : lookupResult ? (
+                <span className="text-xs text-muted-foreground">No external match found. Manual add still works.</span>
+              ) : null}
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="add-book-series">Series name</Label>
+              <Input
+                id="add-book-series"
+                list="series-options"
+                value={addBookForm.seriesName}
+                onChange={(event) => updateAddBookForm("seriesName", event.target.value)}
+                placeholder="Optional series"
+              />
+              <datalist id="series-options">
+                {seriesList.map((series) => (
+                  <option key={series.id} value={series.name} />
+                ))}
+              </datalist>
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="add-book-number">Book number</Label>
+              <Input
+                id="add-book-number"
+                value={addBookForm.bookNumber}
+                onChange={(event) => updateAddBookForm("bookNumber", event.target.value)}
+                placeholder="Optional number"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="add-book-publication-date">Publication date</Label>
+              <Input
+                id="add-book-publication-date"
+                type="date"
+                value={addBookForm.publicationDate}
+                onChange={(event) => updateAddBookForm("publicationDate", event.target.value)}
+              />
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="add-book-read-date">Read date</Label>
+              <Input
+                id="add-book-read-date"
+                type="date"
+                value={addBookForm.readDate}
+                onChange={(event) => updateAddBookForm("readDate", event.target.value)}
+                disabled={!addBookForm.isRead}
+              />
+            </div>
+
+            <div className="sm:col-span-2">
+              <Label htmlFor="add-book-is-read" className="text-sm text-muted-foreground">
+                <input
+                  id="add-book-is-read"
+                  type="checkbox"
+                  checked={addBookForm.isRead}
+                  onChange={(event) => {
+                    const checked = event.target.checked;
+                    setAddBookForm((prev) => ({
+                      ...prev,
+                      isRead: checked,
+                      readDate: checked ? prev.readDate : "",
+                    }));
+                  }}
+                />
+                Mark as already read
+              </Label>
+            </div>
+
+            {lookupResult?.summary && showLookupSummary ? (
+              <div className="space-y-1 sm:col-span-2">
+                <Label htmlFor="add-book-summary">Found summary</Label>
+                <textarea
+                  id="add-book-summary"
+                  value={addBookForm.autoSummary}
+                  onChange={(event) => updateAddBookForm("autoSummary", event.target.value)}
+                  className="min-h-16 w-full rounded-lg border border-input bg-transparent px-2.5 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                />
+              </div>
+            ) : null}
+          </div>
+
+          <DialogFooter showCloseButton>
+            <Button type="button" onClick={handleAddBook} disabled={savingBook}>
+              {savingBook ? "Saving..." : "Save book"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -98,7 +98,7 @@ Release Engine: metadata + upcoming detection
 ## Backend Structure
 main.py, models.py, schemas.py, database.py  
 crud/books.py, crud/series.py  
-importer/excel_importer.py, intelligence.py  
+importer/importer.py, intelligence.py  
 
 ## Frontend Structure
 app/books/page.tsx  

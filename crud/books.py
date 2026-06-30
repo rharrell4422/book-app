@@ -1,3 +1,5 @@
+import re
+
 import models
 
 
@@ -8,12 +10,48 @@ from models import Book
 BOOK_COLUMN_KEYS = {column.key for column in Book.__table__.columns}
 
 
+def _clean_book_title(value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    cleaned = str(value).strip()
+    cleaned = re.sub(r"\s+ebook\s*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+kindle\s+edition\s*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or None
+
+
+def _infer_series_numbers_from_title(title: str | None) -> tuple[float | None, int | None]:
+    if not title:
+        return None, None
+
+    match = re.search(r"\bbook\s+(\d+(?:\.\d+)?)\b", str(title), flags=re.IGNORECASE)
+    if not match:
+        return None, None
+
+    book_number = float(match.group(1))
+    series_order = int(book_number) if book_number.is_integer() else None
+    return book_number, series_order
+
+
 def _book_payload(data_obj, *, exclude_unset: bool = False) -> dict:
     if hasattr(data_obj, "model_dump"):
         raw = data_obj.model_dump(exclude_none=True, exclude_unset=exclude_unset)
     else:
         raw = data_obj.dict(exclude_none=True, exclude_unset=exclude_unset)
-    return {key: value for key, value in raw.items() if key in BOOK_COLUMN_KEYS}
+
+    payload = {key: value for key, value in raw.items() if key in BOOK_COLUMN_KEYS}
+
+    if "title" in payload:
+        payload["title"] = _clean_book_title(payload.get("title"))
+
+    inferred_book_number, inferred_series_order = _infer_series_numbers_from_title(payload.get("title"))
+    if payload.get("book_number") is None and inferred_book_number is not None:
+        payload["book_number"] = inferred_book_number
+    if payload.get("series_order") is None and inferred_series_order is not None:
+        payload["series_order"] = inferred_series_order
+
+    return payload
 
 
 def create_book(db: Session, book):

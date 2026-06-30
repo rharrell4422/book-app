@@ -326,37 +326,68 @@ def lookup_book_summary(title: str, author: str | None = None) -> dict:
             "matched_author": None,
         }
 
-    google_results = search_google_books(title, author, max_results=3)
-    for result in google_results:
-        if result.get("description"):
-            return {
-                "found": True,
-                "summary": result.get("description"),
-                "source_url": result.get("source_url"),
-                "matched_title": result.get("title"),
-                "matched_author": result.get("author"),
-            }
+    def build_lookup_queries(raw_title: str) -> list[str]:
+        queries: list[str] = []
 
-    open_results = search_openlibrary(title, author, max_results=3)
-    if open_results:
-        first = open_results[0]
+        def add_query(value: str | None):
+            cleaned = re.sub(r"\s+", " ", str(value or "")).strip()
+            if cleaned and cleaned not in queries:
+                queries.append(cleaned)
+
+        add_query(raw_title)
+
+        stripped_paren = re.sub(r"\s*\([^)]*\bbook\s*\d+[^)]*\)\s*$", "", raw_title, flags=re.IGNORECASE)
+        add_query(stripped_paren)
+
+        stripped_series_suffix = re.sub(r"\s*[:\-]\s*[^:()]*\bbook\s*\d+.*$", "", raw_title, flags=re.IGNORECASE)
+        add_query(stripped_series_suffix)
+
+        return queries
+
+    def result_payload(result: dict, fallback_author: str | None = None) -> dict:
         return {
             "found": True,
-            "summary": first.get("description"),
-            "source_url": first.get("source_url"),
-            "matched_title": first.get("title"),
-            "matched_author": first.get("author"),
+            "summary": result.get("description"),
+            "source_url": result.get("source_url"),
+            "matched_title": result.get("title"),
+            "matched_author": result.get("author") or fallback_author,
         }
 
-    if google_results:
-        first = google_results[0]
-        return {
-            "found": True,
-            "summary": first.get("description"),
-            "source_url": first.get("source_url"),
-            "matched_title": first.get("title"),
-            "matched_author": first.get("author"),
-        }
+    lookup_queries = build_lookup_queries(title)
+    author_candidates = []
+    if author and author.strip():
+        author_candidates.append(author)
+    author_candidates.append(None)
+
+    best_fallback: dict | None = None
+
+    for query in lookup_queries:
+        for author_candidate in author_candidates:
+            google_results = search_google_books(query, author_candidate, max_results=3)
+            for result in google_results:
+                if result.get("description"):
+                    return result_payload(result, author_candidate)
+
+            open_results = search_openlibrary(query, author_candidate, max_results=3)
+            for result in open_results:
+                if result.get("description"):
+                    return result_payload(result, author_candidate)
+
+            serp_results = search_serpapi_web(query, author_candidate, max_results=5)
+            for result in serp_results:
+                if result.get("description"):
+                    return result_payload(result, author_candidate)
+
+            if not best_fallback:
+                if open_results:
+                    best_fallback = result_payload(open_results[0], author_candidate)
+                elif google_results:
+                    best_fallback = result_payload(google_results[0], author_candidate)
+                elif serp_results:
+                    best_fallback = result_payload(serp_results[0], author_candidate)
+
+    if best_fallback:
+        return best_fallback
 
     return {
         "found": False,

@@ -79,6 +79,8 @@ def read_series_by_id(series_id: int, db: Session = Depends(get_db)):
 
 
         # 5. Return enriched response
+    is_finished = bool(db_series.is_finished or intelligence["is_series_finished"])
+
     return schemas.SeriesDetailResponse(
         id=db_series.id,
         name=db_series.name,
@@ -86,9 +88,9 @@ def read_series_by_id(series_id: int, db: Session = Depends(get_db)):
         description=db_series.description,
         genre=db_series.genre,
         tags=db_series.tags,
-        is_finished=intelligence["is_series_finished"],
+        is_finished=is_finished,
         total_books=intelligence["total_books"],
-        series_status="finished" if intelligence["is_series_finished"] else "ongoing",
+        series_status="finished" if is_finished else "ongoing",
         next_unread_book_number=intelligence["next_unread_book_id"],
         next_upcoming_book_number=intelligence["next_upcoming_book_id"],
         missing_books=intelligence["missing_orders"],

@@ -4,6 +4,15 @@ import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
 import {
   Table,
@@ -225,6 +234,15 @@ function normalizeSuggestedTitle(rawTitle: string, fallbackBookNumber?: string):
   title = title.replace(/:\s*book\s*\d+.*$/i, "");
   title = title.replace(/\s*,\s*book\s*\d+.*$/i, "");
 
+  // Some store results use "Series Name - Author List" as the title.
+  if (/\s-\s/.test(title) && /,/.test(title) && !/\bby\b/i.test(title)) {
+    const [left, right] = title.split(/\s-\s/, 2);
+    const rightLooksLikeAuthorList = /^[A-Za-z.'\-\s,]+$/.test(right || "") && /,/.test(right || "");
+    if (left?.trim() && rightLooksLikeAuthorList) {
+      title = left.trim();
+    }
+  }
+
   // Trim review/blog attribution tails: " - Author Name".
   if (/\s-\s/i.test(title) && /\bby\b/i.test(title)) {
     title = title.split(/\s-\s/i)[0].trim();
@@ -346,11 +364,18 @@ export default function SeriesDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [summaryLoadingId, setSummaryLoadingId] = useState<number | null>(null);
+  const [finishedToggleSaving, setFinishedToggleSaving] = useState(false);
+  const [summaryEditorBook, setSummaryEditorBook] = useState<any | null>(null);
+  const [summaryDraft, setSummaryDraft] = useState("");
+  const [notesDraft, setNotesDraft] = useState("");
+  const [summarySaving, setSummarySaving] = useState(false);
   const [missingSuggestions, setMissingSuggestions] = useState<Record<string, any[]>>({});
   const [missingSuggestionLoading, setMissingSuggestionLoading] = useState<string | null>(null);
   const [quickSuggestResults, setQuickSuggestResults] = useState<any[]>([]);
   const [quickSuggestLoading, setQuickSuggestLoading] = useState(false);
+  const [bookSortMode, setBookSortMode] = useState<"series" | "az">("series");
   const [storeOnly, setStoreOnly] = useState(false);
+  const [showMissingFinderDetails, setShowMissingFinderDetails] = useState(false);
   const [scanStatus, setScanStatus] = useState<ScanStatus>("idle");
   const [scanCompletedCount, setScanCompletedCount] = useState(0);
   const [scanTotalCount, setScanTotalCount] = useState(0);
@@ -600,6 +625,14 @@ export default function SeriesDetailPage() {
   }
 
   const books: any[] = Array.isArray(series.books) ? series.books : [];
+  const displayedBooks =
+    bookSortMode === "az"
+      ? [...books].sort((a, b) =>
+          String(a?.title || "").localeCompare(String(b?.title || ""), undefined, {
+            sensitivity: "base",
+          })
+        )
+      : sortBooksBySeriesOrder(books);
   const missingOrders: string[] = Array.isArray(series.missing_books)
     ? series.missing_books
     : [];
@@ -714,11 +747,56 @@ export default function SeriesDetailPage() {
           book.id === updatedBook.id ? updatedBook : book
         ),
       }));
+      setSummaryEditorBook(updatedBook);
+      setSummaryDraft(String(updatedBook.auto_summary || ""));
+      setNotesDraft(String(updatedBook.notes || ""));
     } catch (err) {
       console.error(err);
       alert("Unable to fetch a summary for this book right now.");
     } finally {
       setSummaryLoadingId(null);
+    }
+  }
+
+  function openSummaryEditor(book: any) {
+    setSummaryEditorBook(book);
+    setSummaryDraft(String(book?.auto_summary || ""));
+    setNotesDraft(String(book?.notes || ""));
+  }
+
+  async function handleSaveSummaryEditor() {
+    if (!summaryEditorBook) return;
+
+    setSummarySaving(true);
+    try {
+      const response = await fetch(`http://localhost:8000/books/${summaryEditorBook.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          auto_summary: summaryDraft.trim() || null,
+          notes: notesDraft.trim() || null,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to save summary (${response.status})`);
+      }
+
+      const updatedBook = await response.json();
+      setSeries((prev: any) => ({
+        ...prev,
+        books: Array.isArray(prev?.books)
+          ? prev.books.map((book: any) => (book.id === updatedBook.id ? { ...book, ...updatedBook } : book))
+          : prev?.books,
+      }));
+      setSummaryEditorBook(updatedBook);
+      setSummaryDraft(String(updatedBook.auto_summary || ""));
+      setNotesDraft(String(updatedBook.notes || ""));
+    } catch (err) {
+      console.error(err);
+      alert("Unable to save summary or notes right now.");
+    } finally {
+      setSummarySaving(false);
     }
   }
 
@@ -770,6 +848,48 @@ export default function SeriesDetailPage() {
     }
   }
 
+  async function handleToggleSeriesFinished() {
+    if (!series) return;
+
+    const nextIsFinished = !Boolean(series.is_finished);
+    setFinishedToggleSaving(true);
+
+    try {
+      const response = await fetch(`http://localhost:8000/series/${series.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: series.name,
+          author: series.author || undefined,
+          description: series.description || undefined,
+          genre: series.genre || undefined,
+          tags: series.tags || undefined,
+          total_books: series.total_books ?? displayedBooks.length,
+          series_status: nextIsFinished ? "finished" : "ongoing",
+          next_unread_book_number: series.next_unread_book_number ?? undefined,
+          next_upcoming_book_number: series.next_upcoming_book_number ?? undefined,
+          missing_books: series.missing_books ?? undefined,
+          is_finished: nextIsFinished,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to update series (${response.status})`);
+      }
+
+      setSeries((prev: any) => prev ? {
+        ...prev,
+        is_finished: nextIsFinished,
+        series_status: nextIsFinished ? "finished" : "ongoing",
+      } : prev);
+    } catch (err) {
+      console.error(err);
+      alert("Unable to update series finished state right now.");
+    } finally {
+      setFinishedToggleSaving(false);
+    }
+  }
+
   async function fetchSuggestionForMissingBook(bookNumber: string, seriesData?: any, signal?: AbortSignal): Promise<any[] | null> {
     const seriesPayload = seriesData || series;
     if (!seriesPayload) {
@@ -783,7 +903,7 @@ export default function SeriesDetailPage() {
       params.set("series_name", seriesPayload.name || "");
       params.set("book_number", bookNumber);
       const seriesBooks = Array.isArray(seriesPayload.books) ? seriesPayload.books : [];
-      const suggestAuthor = seriesPayload.author || seriesBooks.find((book) => book.author)?.author;
+      const suggestAuthor = seriesPayload.author || seriesBooks.find((book: any) => book.author)?.author;
       if (suggestAuthor && !["unknown", "unknown author", "n/a", "na", "none"].includes(String(suggestAuthor).trim().toLowerCase())) {
         params.set("author", suggestAuthor);
       }
@@ -948,18 +1068,24 @@ export default function SeriesDetailPage() {
         series?.books || [],
         series?.name,
       );
-      const editedTitle = prompt(`Confirm title for book ${bookNumber}:`, cleanedTitle);
+      const editedTitle = prompt(`Confirm title for book ${bookNumber} (author next):`, cleanedTitle);
       if (editedTitle === null) {
         return;
       }
       const finalTitle = editedTitle.trim() || cleanedTitle;
+      const suggestedAuthor = String(suggestion.author || series.author || "Unknown author").trim();
+      const editedAuthor = prompt(`Confirm author for book ${bookNumber}:`, suggestedAuthor);
+      if (editedAuthor === null) {
+        return;
+      }
+      const finalAuthor = editedAuthor.trim() || suggestedAuthor;
 
       const response = await fetch("http://localhost:8000/books/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: finalTitle,
-          author: suggestion.author || series.author || "Unknown author",
+          author: finalAuthor,
           series_id: Number(series.id),
           series_order: Number(bookNumber),
           book_number: Number(bookNumber),
@@ -1048,9 +1174,9 @@ export default function SeriesDetailPage() {
   }
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-        <div className="space-y-3">
+    <div className="p-3 space-y-2">
+      <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
+        <div className="space-y-1">
           <p className="text-sm uppercase tracking-[0.2em] text-muted-foreground">Series detail</p>
           <div>
             <h1 className="text-3xl font-bold">{series.name}</h1>
@@ -1061,41 +1187,54 @@ export default function SeriesDetailPage() {
           )}
         </div>
 
-        <div className="flex flex-wrap gap-2">
-          <Link href="/books">
-            <Button variant="outline">Back to Library</Button>
-          </Link>
-          <Link href="/series">
-            <Button variant="secondary">View all series</Button>
-          </Link>
-        </div>
-      </div>
+        <div className="flex flex-col items-start gap-1 md:items-end md:pl-3">
+          <div className="flex w-full flex-wrap items-center gap-2 md:justify-end">
+            <Button
+              variant={series.is_finished ? "secondary" : "outline"}
+              onClick={handleToggleSeriesFinished}
+              disabled={finishedToggleSaving}
+            >
+              {finishedToggleSaving
+                ? "Saving..."
+                : series.is_finished
+                  ? "Series finished"
+                  : "Mark series finished"}
+            </Button>
+            <Link href="/books">
+              <Button variant="outline">Back to Library</Button>
+            </Link>
+            <Link href="/series">
+              <Button variant="secondary">View all series</Button>
+            </Link>
+          </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="rounded-lg border bg-card/80 p-4">
-          <p className="text-sm text-muted-foreground">Total books</p>
-          <p className="text-2xl font-semibold">{totalBooks}</p>
-        </div>
-        <div className="rounded-lg border bg-card/80 p-4">
-          <p className="text-sm text-muted-foreground">Read</p>
-          <p className="text-2xl font-semibold">{readCount}</p>
-        </div>
-        <div className="rounded-lg border bg-card/80 p-4">
-          <p className="text-sm text-muted-foreground">Unread</p>
-          <p className="text-2xl font-semibold">{unreadCount}</p>
-        </div>
-        <div className="rounded-lg border bg-card/80 p-4">
-          <p className="text-sm text-muted-foreground">Upcoming</p>
-          <p className="text-2xl font-semibold">{upcomingCount}</p>
-        </div>
-      </div>
+          <div className="flex flex-wrap items-start gap-2 md:justify-end">
+            <Table className="w-auto min-w-[270px] text-sm">
+              <TableBody>
+                <TableRow>
+                  <TableCell className="py-1.5">Unread: <span className="font-semibold">{unreadCount}</span></TableCell>
+                  <TableCell className="py-1.5">Read: <span className="font-semibold">{readCount}</span></TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="py-1.5">Total: <span className="font-semibold">{totalBooks}</span></TableCell>
+                  <TableCell className="py-1.5">Upcoming: <span className="font-semibold">{upcomingCount}</span></TableCell>
+                </TableRow>
+              </TableBody>
+            </Table>
+          </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 text-sm text-muted-foreground">
-        <div>Series status: {series.series_status || "Unknown"}</div>
-        <div>Next unread: {series.next_unread_book_number ?? "—"}</div>
-        <div>Next upcoming: {series.next_upcoming_book_number ?? "—"}</div>
-        <div>Total missing: {missingOrders.length}</div>
-        <div>Serp calls (session, this series): {serpUsageCount}</div>
+          <Table className="w-auto text-xs">
+              <TableBody>
+                <TableRow>
+                  <TableCell className="py-1 px-2">Status: <span className="font-medium">{series.series_status || "Unknown"}</span></TableCell>
+                  <TableCell className="py-1 px-2">Next unread: <span className="font-medium">{series.next_unread_book_number ?? "—"}</span></TableCell>
+                  <TableCell className="py-1 px-2">Next upcoming: <span className="font-medium">{series.next_upcoming_book_number ?? "—"}</span></TableCell>
+                  <TableCell className="py-1 px-2">Missing: <span className="font-medium">{missingOrders.length}</span></TableCell>
+                  <TableCell className="py-1 px-2">Serp: <span className="font-medium">{serpUsageCount}</span></TableCell>
+                </TableRow>
+              </TableBody>
+            </Table>
+        </div>
       </div>
 
       {recentAddMessage ? (
@@ -1103,6 +1242,145 @@ export default function SeriesDetailPage() {
           {recentAddMessage}
         </div>
       ) : null}
+
+      <div className="space-y-1">
+        <p className="text-sm font-semibold uppercase tracking-wide text-emerald-800">Added To Library</p>
+        <p className="text-xs text-muted-foreground">Books currently saved in this series.</p>
+      </div>
+
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Title</TableHead>
+            <TableHead>Author</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Date</TableHead>
+            <TableHead>
+              <div className="flex min-w-[118px] flex-col gap-1">
+                <span>Book #</span>
+                <select
+                  aria-label="Sort books"
+                  value={bookSortMode}
+                  onChange={(event) => setBookSortMode(event.target.value as "series" | "az")}
+                  className="h-7 rounded-md border bg-background px-2 text-[11px] font-normal"
+                >
+                  <option value="series">Series order</option>
+                  <option value="az">Title A to Z</option>
+                </select>
+              </div>
+            </TableHead>
+            <TableHead>Actions</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {displayedBooks.map((book) => {
+            const status = getBookStatus(book);
+            const displayDate = getBookDate(book);
+            const summary = book.auto_summary;
+            const notes = book.notes;
+            return (
+              <TableRow key={book.id}>
+                <TableCell>
+                  <div>{book.title}</div>
+                </TableCell>
+                <TableCell>{book.author || "—"}</TableCell>
+                <TableCell>
+                  <span className={getStatusChipClass(status)}>{status}</span>
+                </TableCell>
+                <TableCell>{formatDate(displayDate)}</TableCell>
+                <TableCell>{book.book_number ?? "—"}</TableCell>
+                <TableCell className="space-x-2 whitespace-nowrap">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() =>
+                      handleOpenSearch(
+                        `${book.title} ${book.author || ""}`.trim()
+                      )
+                    }
+                  >
+                    Search
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className={
+                      book.is_read
+                        ? "border-rose-300 text-rose-700 hover:bg-rose-50"
+                        : "border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+                    }
+                    size="sm"
+                    onClick={() => handleToggleRead(book)}
+                  >
+                    {book.is_read ? "Book: mark unread" : "Book: mark read"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => handleFetchSummary(book.id, book.title, book.author)}
+                    disabled={summaryLoadingId === book.id}
+                  >
+                    {summary ? "Refresh summary" : "Fetch summary"}
+                  </Button>
+                  {summary || notes ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => openSummaryEditor(book)}
+                    >
+                      See summary
+                    </Button>
+                  ) : null}
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+
+      <Dialog
+        open={Boolean(summaryEditorBook)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSummaryEditorBook(null);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{summaryEditorBook?.title || "Book summary"}</DialogTitle>
+            <DialogDescription>
+              Review the fetched summary and add your own notes without stretching the table rows.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label htmlFor="series-book-summary">Summary</Label>
+              <textarea
+                id="series-book-summary"
+                value={summaryDraft}
+                onChange={(event) => setSummaryDraft(event.target.value)}
+                className="min-h-32 w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="series-book-notes">My notes</Label>
+              <textarea
+                id="series-book-notes"
+                value={notesDraft}
+                onChange={(event) => setNotesDraft(event.target.value)}
+                className="min-h-28 w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+              />
+            </div>
+          </div>
+
+          <DialogFooter showCloseButton>
+            <Button type="button" onClick={handleSaveSummaryEditor} disabled={summarySaving}>
+              {summarySaving ? "Saving..." : "Save changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {missingOrders.length === 0 && (
         <div className="rounded-lg border bg-slate-50 p-4">
@@ -1184,57 +1462,17 @@ export default function SeriesDetailPage() {
       )}
 
       {missingOrders.length > 0 && (
-        <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-4">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <p className="text-sm font-semibold text-yellow-900">Missing books detected</p>
-              <p className="text-sm text-muted-foreground">
-                These books are not in your library yet. Add them if you want to track them here.
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {scanStatus !== "running" ? (
-                <Button variant="secondary" size="sm" onClick={handleStartFullScan}>
-                  {scanStatus === "paused" ? "Restart Full Scan" : "Run Full Scan"}
-                </Button>
-              ) : (
-                <Button variant="secondary" size="sm" onClick={handlePauseScan}>
-                  Pause Scan
-                </Button>
-              )}
-              {scanStatus === "paused" && scanPendingRef.current.length > 0 ? (
-                <Button variant="outline" size="sm" onClick={handleResumeScan}>
-                  Resume Scan
-                </Button>
-              ) : null}
-              <Button variant="ghost" size="sm" onClick={handleResetScanProgress}>
-                Reset Cache
-              </Button>
-            </div>
+        <div className="space-y-2">
+          <div className="rounded-md border border-yellow-300 bg-yellow-100 px-3 py-2 text-center text-sm font-bold uppercase tracking-wide text-yellow-900">
+            Missing Book Finder
           </div>
-
-          <div className="mt-3 space-y-2">
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>
-                Progress: {scanCompletedCount}/{scanTotalCount}
-                {scanCurrentOrder ? ` • fetching #${scanCurrentOrder}` : ""}
-              </span>
-              <span>{scanPercent}%</span>
-            </div>
-            <div className="h-2 w-full overflow-hidden rounded-full bg-white/70">
-              <div
-                className="h-full bg-yellow-500 transition-all duration-300"
-                style={{ width: `${scanPercent}%` }}
-              />
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Scan status: {scanStatus}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Auto-start: {autoStartedOnce ? "Auto-started once" : "Not auto-started yet"}
-            </p>
-            <div className="pt-1">
-              <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+          <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold text-yellow-900">Missing: {missingOrders.length}</span>
+              <span className="text-xs text-muted-foreground">{scanCompletedCount}/{scanTotalCount} scanned ({scanPercent}%)</span>
+              <span className="text-xs text-muted-foreground">Status: {scanStatus}</span>
+              {scanCurrentOrder ? <span className="text-xs text-muted-foreground">Fetching #{scanCurrentOrder}</span> : null}
+              <label className="ml-1 inline-flex items-center gap-1 text-xs text-muted-foreground">
                 <input
                   type="checkbox"
                   checked={storeOnly}
@@ -1242,177 +1480,139 @@ export default function SeriesDetailPage() {
                 />
                 Store only
               </label>
+              {scanStatus !== "running" ? (
+                <Button variant="secondary" size="sm" onClick={handleStartFullScan}>
+                  {scanStatus === "paused" ? "Restart Scan" : "Run Scan"}
+                </Button>
+              ) : (
+                <Button variant="secondary" size="sm" onClick={handlePauseScan}>
+                  Pause
+                </Button>
+              )}
+              {scanStatus === "paused" && scanPendingRef.current.length > 0 ? (
+                <Button variant="outline" size="sm" onClick={handleResumeScan}>
+                  Resume
+                </Button>
+              ) : null}
+              <Button variant="ghost" size="sm" onClick={handleResetScanProgress}>
+                Reset
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowMissingFinderDetails((prev) => !prev)}
+              >
+                {showMissingFinderDetails ? "Hide details" : `Show details (${missingOrders.length})`}
+              </Button>
             </div>
-          </div>
 
-          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {missingOrders.map((order) => (
-              (() => {
-                const orderSuggestions = missingSuggestions[order] || [];
-                const sortedOrderSuggestions = sortSuggestionsStoreFirst(orderSuggestions);
-                const visibleOrderSuggestions = storeOnly
-                  ? sortedOrderSuggestions.filter(isStoreSuggestion)
-                  : sortedOrderSuggestions;
+            <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/70">
+              <div
+                className="h-full bg-yellow-500 transition-all duration-300"
+                style={{ width: `${scanPercent}%` }}
+              />
+            </div>
 
-                return (
-              <div key={order} className="rounded-lg border bg-white p-3 shadow-sm">
-                <p className="text-sm text-muted-foreground">Missing book</p>
-                <p className="text-xl font-semibold">#{order}</p>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => handleOpenSearch(`${series.name} ${order}`)}
-                  >
-                    Search Goodreads
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => handleOpenGoogleSearch(`${series.name} book ${order} ${series.author || ""}`.trim())}
-                  >
-                    Search Google
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => handleSuggestMissingBook(order)}
-                    disabled={missingSuggestionLoading === order}
-                  >
-                    {missingSuggestionLoading === order ? "Finding…" : "Suggest title"}
-                  </Button>
-                </div>
-                {visibleOrderSuggestions.length > 0 ? (
-                  <div className="mt-3 space-y-2 rounded border bg-slate-50 p-3 text-sm">
-                    {visibleOrderSuggestions.map((suggestion, idx) => (
-                      <div key={idx} className="space-y-1">
-                        <div className="font-medium">{suggestion.title}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {suggestion.author || "Unknown author"}
-                          {suggestion.year ? ` • ${suggestion.year}` : ""}
-                        </div>
-                        {(() => {
-                          const quality = getSuggestionSourceQuality(suggestion);
-                          return (
-                            <span
-                              className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${quality.className}`}
-                            >
-                              {quality.label}
-                            </span>
-                          );
-                        })()}
-                        <div className="flex flex-wrap gap-2">
-                          <Button
-                            variant="outline"
-                            size="xs"
-                            onClick={() => handleAddSuggestion(order, suggestion)}
-                          >
-                            Add suggestion
-                          </Button>
-                          {suggestion.source_url ? (
-                            <a
-                              href={suggestion.source_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-xs text-blue-600 underline"
-                            >
-                              View source
-                            </a>
-                          ) : null}
-                        </div>
+            {showMissingFinderDetails ? (
+              <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {missingOrders.map((order) => (
+                  (() => {
+                    const orderSuggestions = missingSuggestions[order] || [];
+                    const sortedOrderSuggestions = sortSuggestionsStoreFirst(orderSuggestions);
+                    const visibleOrderSuggestions = storeOnly
+                      ? sortedOrderSuggestions.filter(isStoreSuggestion)
+                      : sortedOrderSuggestions;
+
+                    return (
+                  <div key={order} className="rounded-lg border bg-white p-3 shadow-sm">
+                    <p className="text-sm text-muted-foreground">Missing book</p>
+                    <p className="text-xl font-semibold">#{order}</p>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleOpenSearch(`${series.name} ${order}`)}
+                      >
+                        Search Goodreads
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleOpenGoogleSearch(`${series.name} book ${order} ${series.author || ""}`.trim())}
+                      >
+                        Search Google
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => handleSuggestMissingBook(order)}
+                        disabled={missingSuggestionLoading === order}
+                      >
+                        {missingSuggestionLoading === order ? "Finding…" : "Suggest title"}
+                      </Button>
+                    </div>
+                    {visibleOrderSuggestions.length > 0 ? (
+                      <div className="mt-3 space-y-2 rounded border bg-slate-50 p-3 text-sm">
+                        {visibleOrderSuggestions.map((suggestion, idx) => (
+                          <div key={idx} className="space-y-1">
+                            <div className="font-medium">{suggestion.title}</div>
+                            <div className="text-xs text-muted-foreground">
+                              {suggestion.author || "Unknown author"}
+                              {suggestion.year ? ` • ${suggestion.year}` : ""}
+                            </div>
+                            {(() => {
+                              const quality = getSuggestionSourceQuality(suggestion);
+                              return (
+                                <span
+                                  className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${quality.className}`}
+                                >
+                                  {quality.label}
+                                </span>
+                              );
+                            })()}
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                variant="outline"
+                                size="xs"
+                                onClick={() => handleAddSuggestion(order, suggestion)}
+                              >
+                                Add suggestion
+                              </Button>
+                              {suggestion.source_url ? (
+                                <a
+                                  href={suggestion.source_url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-xs text-blue-600 underline"
+                                >
+                                  View source
+                                </a>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    ) : orderSuggestions.length > 0 && storeOnly ? (
+                      <p className="mt-3 text-sm text-muted-foreground">
+                        No store results for this slot. Turn off Store only to view all suggestions.
+                      </p>
+                    ) : missingSuggestions[order] ? (
+                      <p className="mt-3 text-sm text-muted-foreground">No suggestions found.</p>
+                    ) : null}
                   </div>
-                ) : orderSuggestions.length > 0 && storeOnly ? (
-                  <p className="mt-3 text-sm text-muted-foreground">
-                    No store results for this slot. Turn off Store only to view all suggestions.
-                  </p>
-                ) : missingSuggestions[order] ? (
-                  <p className="mt-3 text-sm text-muted-foreground">No suggestions found.</p>
-                ) : null}
+                    );
+                  })()
+                ))}
               </div>
-                );
-              })()
-            ))}
+            ) : (
+              <p className="mt-2 text-xs text-muted-foreground">
+                Details are collapsed to save space. Expand when you want to browse missing slots.
+              </p>
+            )}
           </div>
         </div>
       )}
 
-      <div className="space-y-2">
-        <p className="text-sm font-semibold uppercase tracking-wide text-emerald-800">Added To Library</p>
-        <p className="text-xs text-muted-foreground">Books currently saved in this series.</p>
-      </div>
-
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Title</TableHead>
-            <TableHead>Author</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>Date</TableHead>
-            <TableHead>Book #</TableHead>
-            <TableHead>Actions</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {books.map((book) => {
-            const status = getBookStatus(book);
-            const displayDate = getBookDate(book);
-            const summary = book.auto_summary;
-            return (
-              <TableRow key={book.id}>
-                <TableCell>
-                  <div>{book.title}</div>
-                  {summary ? (
-                    <p className="text-xs text-muted-foreground line-clamp-2">
-                      {summary}
-                    </p>
-                  ) : null}
-                </TableCell>
-                <TableCell>{book.author || "—"}</TableCell>
-                <TableCell>
-                  <span className={getStatusChipClass(status)}>{status}</span>
-                </TableCell>
-                <TableCell>{formatDate(displayDate)}</TableCell>
-                <TableCell>{book.book_number ?? "—"}</TableCell>
-                <TableCell className="space-x-2 whitespace-nowrap">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() =>
-                      handleOpenSearch(
-                        `${book.title} ${book.author || ""}`.trim()
-                      )
-                    }
-                  >
-                    Search
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className={
-                      book.is_read
-                        ? "border-rose-300 text-rose-700 hover:bg-rose-50"
-                        : "border-emerald-300 text-emerald-700 hover:bg-emerald-50"
-                    }
-                    size="sm"
-                    onClick={() => handleToggleRead(book)}
-                  >
-                    {book.is_read ? "Book: mark unread" : "Book: mark read"}
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => handleFetchSummary(book.id, book.title, book.author)}
-                    disabled={summaryLoadingId === book.id}
-                  >
-                    {summary ? "Refresh summary" : "Fetch summary"}
-                  </Button>
-                </TableCell>
-              </TableRow>
-            );
-          })}
-        </TableBody>
-      </Table>
     </div>
   );
 }
