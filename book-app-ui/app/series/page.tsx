@@ -83,9 +83,6 @@ type ValueFilterMenuProps = {
   onClear: () => void;
   searchValue: string;
   onSearchChange: (value: string) => void;
-  sortValue?: "none" | "asc" | "desc";
-  onSortChange?: (value: "none" | "asc" | "desc") => void;
-  sortLabel?: string;
 };
 
 function ValueFilterMenu({
@@ -96,9 +93,6 @@ function ValueFilterMenu({
   onClear,
   searchValue,
   onSearchChange,
-  sortValue,
-  onSortChange,
-  sortLabel = "Sort",
 }: ValueFilterMenuProps) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -140,17 +134,6 @@ function ValueFilterMenu({
       </button>
       {open ? (
         <div className="absolute z-20 mt-1 w-60 rounded-md border bg-background p-2 shadow-lg">
-        {onSortChange ? (
-          <select
-            value={sortValue ?? "none"}
-            onChange={(event) => onSortChange(event.target.value as "none" | "asc" | "desc")}
-            className="mb-2 h-7 w-full rounded border bg-background px-2 text-xs"
-          >
-            <option value="none">{sortLabel}</option>
-            <option value="asc">A to Z</option>
-            <option value="desc">Z to A</option>
-          </select>
-        ) : null}
         <input
           value={searchValue}
           onChange={(event) => onSearchChange(event.target.value)}
@@ -204,6 +187,7 @@ export default function SeriesPage() {
   const { toast } = useToast();
   const [series, setSeries] = useState<SeriesRow[]>([]);
   const [viewMode, setViewMode] = useState<"ongoing" | "finished">("ongoing");
+  const [quickSearch, setQuickSearch] = useState("");
   const [loadingId, setLoadingId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [valueFilters, setValueFilters] = useState({
@@ -238,14 +222,20 @@ export default function SeriesPage() {
   );
 
   const filteredSeries = useMemo(() => {
+    const normalizedQuickSearch = normalizeText(quickSearch);
+
     return series.filter((row) => {
       if (viewMode === "finished" && !row.is_finished) return false;
       if (viewMode === "ongoing" && row.is_finished) return false;
       if (valueFilters.name.length > 0 && !valueFilters.name.includes(String(row.name || "").trim())) return false;
       if (valueFilters.author.length > 0 && !valueFilters.author.includes(String(row.author || "").trim())) return false;
+      if (normalizedQuickSearch) {
+        const haystack = `${String(row.name || "")} ${String(row.author || "")}`;
+        if (!normalizeText(haystack).includes(normalizedQuickSearch)) return false;
+      }
       return true;
     });
-  }, [series, valueFilters, viewMode]);
+  }, [quickSearch, series, valueFilters, viewMode]);
 
   const sortedSeries = useMemo(() => {
     if (!sortConfig.key) return filteredSeries;
@@ -310,14 +300,6 @@ export default function SeriesPage() {
   function sortLabel(key: SeriesSortKey) {
     if (sortConfig.key !== key) return "";
     return sortConfig.direction === "asc" ? " ▲" : " ▼";
-  }
-
-  function setExplicitSort(key: SeriesSortKey, mode: "none" | "asc" | "desc") {
-    if (mode === "none") {
-      setSortConfig({ key: null, direction: "asc" });
-      return;
-    }
-    setSortConfig({ key, direction: mode });
   }
 
   function toggleValueFilter(kind: "name" | "author", value: string) {
@@ -511,6 +493,18 @@ export default function SeriesPage() {
         </div>
       )}
 
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          value={quickSearch}
+          onChange={(event) => setQuickSearch(event.target.value)}
+          placeholder="Quick search series (e.g. victor)"
+          className="h-8 w-full max-w-sm rounded border bg-background px-2 text-xs"
+        />
+        {quickSearch ? (
+          <Button type="button" variant="ghost" size="sm" onClick={() => setQuickSearch("")}>Clear search</Button>
+        ) : null}
+      </div>
+
       <div className="overflow-x-auto rounded-lg border bg-card/80">
         <Table className="text-xs [&_th]:h-8 [&_th]:py-1 [&_td]:py-1">
           <TableHeader>
@@ -532,8 +526,6 @@ export default function SeriesPage() {
                     }}
                     searchValue={valueFilterSearch.name}
                     onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, name: value }))}
-                    sortValue={sortConfig.key === "name" ? sortConfig.direction : "none"}
-                    onSortChange={(value) => setExplicitSort("name", value)}
                   />
                 </div>
               </TableHead>
@@ -551,8 +543,6 @@ export default function SeriesPage() {
                     }}
                     searchValue={valueFilterSearch.author}
                     onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, author: value }))}
-                    sortValue={sortConfig.key === "author" ? sortConfig.direction : "none"}
-                    onSortChange={(value) => setExplicitSort("author", value)}
                   />
                 </div>
               </TableHead>
@@ -560,7 +550,7 @@ export default function SeriesPage() {
                 <button type="button" className="text-left" onClick={() => toggleSort("nextUnread")}>Next unread{sortLabel("nextUnread")}</button>
               </TableHead>
               <TableHead>
-                <button type="button" className="text-left" onClick={() => toggleSort("nextUpcoming")}>Next upcoming{sortLabel("nextUpcoming")}</button>
+                <button type="button" className="text-left" onClick={() => toggleSort("nextUpcoming")}>Next upcoming #{sortLabel("nextUpcoming")}</button>
               </TableHead>
               <TableHead>
                 <button type="button" className="text-left" onClick={() => toggleSort("total")}>Total{sortLabel("total")}</button>
@@ -615,6 +605,9 @@ export default function SeriesPage() {
       </div>
       <p className="text-xs text-muted-foreground">
         Showing {sortedSeries.length} of {viewMode === "ongoing" ? ongoingCount : finishedCount} series.
+      </p>
+      <p className="text-xs text-muted-foreground">
+        "Next upcoming #" is the next upcoming book number in that series.
       </p>
     </div>
   );

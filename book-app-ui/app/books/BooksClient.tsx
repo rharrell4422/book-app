@@ -231,9 +231,10 @@ type AddBookFormState = {
   author: string;
   seriesName: string;
   bookNumber: string;
+  status: "unread" | "upcoming" | "read";
+  releaseDate: string;
   publicationDate: string;
   readDate: string;
-  isRead: boolean;
   autoSummary: string;
 };
 
@@ -245,14 +246,51 @@ type LookupResultState = {
   matched_author: string | null;
 };
 
+const API_BASE_CANDIDATES = [
+  process.env.NEXT_PUBLIC_API_BASE_URL,
+  "http://localhost:8000",
+  "http://127.0.0.1:8000",
+].filter(Boolean) as string[];
+
+function normalizeBaseUrl(value: string) {
+  return value.replace(/\/+$/, "");
+}
+
+async function fetchApiWithFallback(path: string, init?: RequestInit) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const candidates = API_BASE_CANDIDATES.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`);
+
+  // If route includes a trailing slash, also try without it to avoid router mismatches.
+  if (normalizedPath.endsWith("/")) {
+    const trimmedPath = normalizedPath.slice(0, -1);
+    candidates.push(...API_BASE_CANDIDATES.map((base) => `${normalizeBaseUrl(base)}${trimmedPath}`));
+  }
+
+  let lastError: Error | null = null;
+  for (const url of candidates) {
+    try {
+      const response = await fetch(url, init);
+      if (response.ok) {
+        return response;
+      }
+      lastError = new Error(`Failed to load ${normalizedPath} (${response.status})`);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Network error");
+    }
+  }
+
+  throw lastError ?? new Error(`Failed to load ${normalizedPath}`);
+}
+
 const EMPTY_ADD_BOOK_FORM: AddBookFormState = {
   title: "",
   author: "",
   seriesName: "",
   bookNumber: "",
+  status: "unread",
+  releaseDate: "",
   publicationDate: "",
   readDate: "",
-  isRead: false,
   autoSummary: "",
 };
 
@@ -531,11 +569,8 @@ export default function BooksClient() {
   async function fetchBooks() {
     setLoading(true);
     try {
-      const url = seriesId
-        ? `http://localhost:8000/books/by_series/${seriesId}`
-        : "http://localhost:8000/books/";
-
-      const response = await fetch(url, { cache: "no-store" });
+      const path = seriesId ? `/books/by_series/${seriesId}` : "/books/";
+      const response = await fetchApiWithFallback(path, { cache: "no-store" });
       const data = await response.json();
       setBooks(data);
     } catch (error) {
@@ -547,10 +582,7 @@ export default function BooksClient() {
 
   async function fetchSeriesList() {
     try {
-      const response = await fetch("http://localhost:8000/series/", { cache: "no-store" });
-      if (!response.ok) {
-        throw new Error(`Failed to load series (${response.status})`);
-      }
+      const response = await fetchApiWithFallback("/series/", { cache: "no-store" });
       const data = await response.json();
       setSeriesList(Array.isArray(data) ? data : []);
     } catch (error) {
@@ -717,9 +749,12 @@ export default function BooksClient() {
         }
       }
 
-      const isRead = addBookForm.isRead;
-      const readDate = addBookForm.readDate || (isRead ? new Date().toISOString().split("T")[0] : null);
-      const readStatus = isRead ? "read" : "unread";
+      const readStatus = addBookForm.status;
+      const isRead = readStatus === "read";
+      const readDate = readStatus === "read"
+        ? (addBookForm.readDate || new Date().toISOString().split("T")[0])
+        : null;
+      const releaseDate = readStatus !== "read" ? addBookForm.releaseDate.trim() : "";
 
       const createBookResponse = await fetch("http://localhost:8000/books/", {
         method: "POST",
@@ -730,6 +765,7 @@ export default function BooksClient() {
           series_id: resolvedSeriesId,
           series_order: parsedBookNumber,
           book_number: parsedBookNumber,
+          release_date: releaseDate || undefined,
           publication_date: addBookForm.publicationDate || undefined,
           read_date: readDate || undefined,
           read_status: readStatus,
@@ -1102,6 +1138,39 @@ export default function BooksClient() {
             </div>
 
             <div className="space-y-1">
+              <Label htmlFor="add-book-status">Status</Label>
+              <select
+                id="add-book-status"
+                value={addBookForm.status}
+                onChange={(event) => {
+                  const nextStatus = event.target.value as AddBookFormState["status"];
+                  setAddBookForm((prev) => ({
+                    ...prev,
+                    status: nextStatus,
+                    readDate: nextStatus === "read" ? prev.readDate : "",
+                    releaseDate: nextStatus === "upcoming" ? prev.releaseDate : "",
+                  }));
+                }}
+                className="h-9 w-full rounded-md border bg-background px-2 text-sm"
+              >
+                <option value="unread">Unread</option>
+                <option value="upcoming">Upcoming</option>
+                <option value="read">Read</option>
+              </select>
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="add-book-release-date">Date (planned/release)</Label>
+              <Input
+                id="add-book-release-date"
+                type="date"
+                value={addBookForm.releaseDate}
+                onChange={(event) => updateAddBookForm("releaseDate", event.target.value)}
+                disabled={addBookForm.status === "read"}
+              />
+            </div>
+
+            <div className="space-y-1">
               <Label htmlFor="add-book-publication-date">Publication date</Label>
               <Input
                 id="add-book-publication-date"
@@ -1118,27 +1187,8 @@ export default function BooksClient() {
                 type="date"
                 value={addBookForm.readDate}
                 onChange={(event) => updateAddBookForm("readDate", event.target.value)}
-                disabled={!addBookForm.isRead}
+                disabled={addBookForm.status !== "read"}
               />
-            </div>
-
-            <div className="sm:col-span-2">
-              <Label htmlFor="add-book-is-read" className="text-sm text-muted-foreground">
-                <input
-                  id="add-book-is-read"
-                  type="checkbox"
-                  checked={addBookForm.isRead}
-                  onChange={(event) => {
-                    const checked = event.target.checked;
-                    setAddBookForm((prev) => ({
-                      ...prev,
-                      isRead: checked,
-                      readDate: checked ? prev.readDate : "",
-                    }));
-                  }}
-                />
-                Mark as already read
-              </Label>
             </div>
 
             {lookupResult?.summary && showLookupSummary ? (

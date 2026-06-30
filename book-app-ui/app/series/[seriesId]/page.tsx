@@ -28,6 +28,11 @@ const SUGGESTION_SCAN_PREFIX = "series-scan-v1:";
 const SUGGESTION_AUTOSTART_PREFIX = "series-scan-autostarted-v1:";
 const SUGGESTION_SERP_USAGE_PREFIX = "series-serp-usage-v1:";
 const SUGGESTION_STORE_ONLY_PREFIX = "series-store-only-v1:";
+const API_BASE_CANDIDATES = [
+  process.env.NEXT_PUBLIC_API_BASE_URL,
+  "http://localhost:8000",
+  "http://127.0.0.1:8000",
+].filter(Boolean) as string[];
 
 type ScanStatus = "idle" | "running" | "paused" | "completed";
 
@@ -37,6 +42,35 @@ type ScanProgress = {
   completedCount: number;
   totalCount: number;
 };
+
+function normalizeBaseUrl(value: string) {
+  return value.replace(/\/+$/, "");
+}
+
+async function fetchApiWithFallback(path: string, init?: RequestInit) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const candidates = API_BASE_CANDIDATES.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`);
+
+  if (normalizedPath.endsWith("/")) {
+    const trimmedPath = normalizedPath.slice(0, -1);
+    candidates.push(...API_BASE_CANDIDATES.map((base) => `${normalizeBaseUrl(base)}${trimmedPath}`));
+  }
+
+  let lastError: Error | null = null;
+  for (const url of candidates) {
+    try {
+      const response = await fetch(url, init);
+      if (response.ok) {
+        return response;
+      }
+      lastError = new Error(`Failed to load ${normalizedPath} (${response.status})`);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Network error");
+    }
+  }
+
+  throw lastError ?? new Error(`Failed to load ${normalizedPath}`);
+}
 
 function loadCachedSuggestions(seriesId: string): Record<string, any[]> {
   if (typeof window === "undefined") return {};
@@ -125,6 +159,25 @@ function formatDate(value?: string | null) {
   if (!value) return "—";
   const date = new Date(value);
   return Number.isNaN(date.valueOf()) ? value : date.toLocaleDateString();
+}
+
+function normalizeDateInput(value: string | null | undefined): string | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(raw)) {
+    return raw;
+  }
+
+  const mdyMatch = raw.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/);
+  if (mdyMatch) {
+    const month = mdyMatch[1].padStart(2, "0");
+    const day = mdyMatch[2].padStart(2, "0");
+    const year = mdyMatch[3];
+    return `${year}-${month}-${day}`;
+  }
+
+  return raw;
 }
 
 function getBookStatus(book: any) {
@@ -397,14 +450,10 @@ export default function SeriesDetailPage() {
       setError(null);
 
       try {
-        const response = await fetch(`http://localhost:8000/series/${seriesId}`, {
+        const response = await fetchApiWithFallback(`/series/${seriesId}`, {
           cache: "no-store",
           signal: seriesController.signal,
         });
-
-        if (!response.ok) {
-          throw new Error(`Failed to load series (${response.status})`);
-        }
 
         const data = await response.json();
         if (!isActive) return;
@@ -732,7 +781,7 @@ export default function SeriesDetailPage() {
   async function handleFetchSummary(bookId: number, title: string, author?: string | null) {
     setSummaryLoadingId(bookId);
     try {
-      const response = await fetch(`http://localhost:8000/books/${bookId}/summary`, {
+        const response = await fetchApiWithFallback(`/books/${bookId}/summary`, {
         method: "POST",
       });
       if (!response.ok) {
@@ -769,7 +818,7 @@ export default function SeriesDetailPage() {
 
     setSummarySaving(true);
     try {
-      const response = await fetch(`http://localhost:8000/books/${summaryEditorBook.id}`, {
+        const response = await fetchApiWithFallback(`/books/${summaryEditorBook.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -817,7 +866,7 @@ export default function SeriesDetailPage() {
     }
 
     try {
-      const response = await fetch(`http://localhost:8000/books/${book.id}`, {
+        const response = await fetchApiWithFallback(`/books/${book.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -848,6 +897,76 @@ export default function SeriesDetailPage() {
     }
   }
 
+  async function handleSetBookStatus(book: any) {
+    const currentStatus = getBookStatus(book);
+    const editedStatus = prompt("Set status (read/unread/upcoming):", currentStatus);
+    if (editedStatus === null) {
+      return;
+    }
+
+    const normalizedStatus = editedStatus.trim().toLowerCase();
+    if (!["read", "unread", "upcoming"].includes(normalizedStatus)) {
+      alert("Status must be read, unread, or upcoming.");
+      return;
+    }
+
+    const today = new Date().toISOString().split("T")[0];
+    let readDate: string | null = null;
+    let releaseDate: string | null = null;
+
+    if (normalizedStatus === "read") {
+      const readDatePrompt = prompt("Read date (MM-DD-YYYY):", String(book.read_date || today));
+      if (readDatePrompt === null) {
+        return;
+      }
+      readDate = normalizeDateInput(readDatePrompt) || today;
+      releaseDate = book.release_date || null;
+    } else {
+      const defaultReleaseDate = String(book.release_date || book.publication_date || "");
+      const datePrompt = prompt(
+        "Date for this book (MM-DD-YYYY, optional):",
+        defaultReleaseDate,
+      );
+      if (datePrompt === null) {
+        return;
+      }
+      releaseDate = normalizeDateInput(datePrompt);
+      readDate = null;
+    }
+
+    try {
+      const response = await fetchApiWithFallback(`/books/${book.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          is_read: normalizedStatus === "read",
+          read_status: normalizedStatus,
+          read_date: readDate,
+          release_date: releaseDate,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to update book (${response.status})`);
+      }
+
+      const updatedBook = await response.json();
+      setSeries((prev: any) => {
+        const prevBooks = Array.isArray(prev?.books) ? prev.books : [];
+        return {
+          ...prev,
+          books: prevBooks.map((item: any) =>
+            item.id === updatedBook.id ? { ...item, ...updatedBook } : item
+          ),
+        };
+      });
+      publishBookStatusUpdate(updatedBook);
+    } catch (err) {
+      console.error(err);
+      alert("Unable to update status right now.");
+    }
+  }
+
   async function handleToggleSeriesFinished() {
     if (!series) return;
 
@@ -855,7 +974,7 @@ export default function SeriesDetailPage() {
     setFinishedToggleSaving(true);
 
     try {
-      const response = await fetch(`http://localhost:8000/series/${series.id}`, {
+        const response = await fetchApiWithFallback(`/series/${series.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -908,8 +1027,8 @@ export default function SeriesDetailPage() {
         params.set("author", suggestAuthor);
       }
 
-      const url = `http://localhost:8000/books/suggest?${params.toString()}`;
-      console.log(`[Suggestion ${bookNumber}] Fetching from: ${url}`);
+      const path = `/books/suggest?${params.toString()}`;
+      console.log(`[Suggestion ${bookNumber}] Fetching from: ${path}`);
 
       const timeoutController = new AbortController();
       timeoutId = window.setTimeout(() => timeoutController.abort(), 90000);
@@ -917,7 +1036,7 @@ export default function SeriesDetailPage() {
         ? AbortSignal.any([signal, timeoutController.signal])
         : timeoutController.signal;
 
-      const response = await fetch(url, { signal: combinedSignal });
+      const response = await fetchApiWithFallback(path, { signal: combinedSignal });
       if (!response.ok) {
         throw new Error(`Failed to lookup suggestions (${response.status})`);
       }
@@ -1080,7 +1199,44 @@ export default function SeriesDetailPage() {
       }
       const finalAuthor = editedAuthor.trim() || suggestedAuthor;
 
-      const response = await fetch("http://localhost:8000/books/", {
+      const suggestedStatus = "upcoming";
+      const editedStatus = prompt(
+        `Status for book ${bookNumber}? (upcoming/unread/read)`,
+        suggestedStatus,
+      );
+      if (editedStatus === null) {
+        return;
+      }
+      const normalizedStatus = editedStatus.trim().toLowerCase();
+      if (!["upcoming", "unread", "read"].includes(normalizedStatus)) {
+        alert("Status must be one of: upcoming, unread, read.");
+        return;
+      }
+
+      const releaseDateDefault = suggestion.year ? `${String(suggestion.year).slice(0, 4)}-01-01` : "";
+      let releaseDate: string | null = null;
+      if (normalizedStatus !== "read") {
+          const releaseDatePrompt = prompt(
+            `Date for book ${bookNumber} (MM-DD-YYYY, optional):`,
+            releaseDateDefault,
+          );
+        if (releaseDatePrompt === null) {
+          return;
+        }
+          releaseDate = normalizeDateInput(releaseDatePrompt);
+      }
+
+      let readDate: string | null = null;
+      if (normalizedStatus === "read") {
+        const today = new Date().toISOString().split("T")[0];
+          const readDatePrompt = prompt(`Read date for book ${bookNumber} (MM-DD-YYYY):`, today);
+        if (readDatePrompt === null) {
+          return;
+        }
+          readDate = normalizeDateInput(readDatePrompt) || today;
+      }
+
+      const response = await fetchApiWithFallback("/books/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1089,9 +1245,11 @@ export default function SeriesDetailPage() {
           series_id: Number(series.id),
           series_order: Number(bookNumber),
           book_number: Number(bookNumber),
-          read_status: "unread",
-          is_read: false,
-          publication_date: suggestion.year ? `${suggestion.year}-01-01` : undefined,
+          read_status: normalizedStatus,
+          is_read: normalizedStatus === "read",
+          read_date: readDate || undefined,
+          release_date: releaseDate || undefined,
+          publication_date: suggestion.year ? `${String(suggestion.year).slice(0, 4)}-01-01` : undefined,
         }),
       });
 
@@ -1138,8 +1296,37 @@ export default function SeriesDetailPage() {
       return;
     }
 
+    const editedStatus = prompt(`Status for book ${bookNumber}? (upcoming/unread/read)`, "upcoming");
+    if (editedStatus === null) {
+      return;
+    }
+    const normalizedStatus = editedStatus.trim().toLowerCase();
+    if (!["upcoming", "unread", "read"].includes(normalizedStatus)) {
+      alert("Status must be one of: upcoming, unread, read.");
+      return;
+    }
+
+    let releaseDate: string | null = null;
+    if (normalizedStatus !== "read") {
+        const releaseDatePrompt = prompt(`Date for book ${bookNumber} (MM-DD-YYYY, optional):`, "");
+      if (releaseDatePrompt === null) {
+        return;
+      }
+        releaseDate = normalizeDateInput(releaseDatePrompt);
+    }
+
+    let readDate: string | null = null;
+    if (normalizedStatus === "read") {
+      const today = new Date().toISOString().split("T")[0];
+        const readDatePrompt = prompt(`Read date for book ${bookNumber} (MM-DD-YYYY):`, today);
+      if (readDatePrompt === null) {
+        return;
+      }
+        readDate = normalizeDateInput(readDatePrompt) || today;
+    }
+
     try {
-      const response = await fetch("http://localhost:8000/books/", {
+      const response = await fetchApiWithFallback("/books/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1148,8 +1335,10 @@ export default function SeriesDetailPage() {
           series_id: Number(series.id),
           series_order: Number(bookNumber),
           book_number: Number(bookNumber),
-          read_status: "unread",
-          is_read: false,
+          read_status: normalizedStatus,
+          is_read: normalizedStatus === "read",
+          read_date: readDate || undefined,
+          release_date: releaseDate || undefined,
         }),
       });
 
@@ -1312,6 +1501,13 @@ export default function SeriesDetailPage() {
                     onClick={() => handleToggleRead(book)}
                   >
                     {book.is_read ? "Book: mark unread" : "Book: mark read"}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleSetBookStatus(book)}
+                  >
+                    Set status/date
                   </Button>
                   <Button
                     variant="secondary"

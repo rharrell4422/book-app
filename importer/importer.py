@@ -1,4 +1,5 @@
 import traceback
+import argparse
 
 try:
     import pandas as pd
@@ -400,7 +401,35 @@ def run_import(file_path: str):
     db.close()
 
 
+def reset_database(db: Session):
+    # Delete books first to satisfy FK constraints, then series.
+    deleted_books = db.query(Book).delete(synchronize_session=False)
+    deleted_series = db.query(Series).delete(synchronize_session=False)
+    db.commit()
+    return deleted_books, deleted_series
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Import books from CSV/XLSX into Book App database")
+    parser.add_argument("file", help="Path to import file (.csv/.xlsx/.xls)")
+    parser.add_argument(
+        "--reset-db",
+        action="store_true",
+        help="Wipe books and series tables before import",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    # Change this to your actual file path when running directly
-    run_import("Books_Tracker_Master_Pivot_21Jun2026.xlsx")
+    args = parse_args()
+
+    if args.reset_db:
+        reset_session: Session = SessionLocal()
+        try:
+            deleted_books, deleted_series = reset_database(reset_session)
+            print(f"Database reset complete. Deleted {deleted_books} books and {deleted_series} series.")
+        finally:
+            reset_session.close()
+
+    run_import(args.file)
 
