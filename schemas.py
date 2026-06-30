@@ -12,7 +12,7 @@ class BookBase(BaseModel):
     author: str
     subtitle: Optional[str] = None
     series_id: Optional[int] = None
-    series_order: Optional[int] = None
+    series_order: Optional[float] = None
     book_number: Optional[float] = None
     publication_date: Optional[date] = None
     publisher: Optional[str] = None
@@ -62,7 +62,7 @@ class BookUpdate(BaseModel):
     author: Optional[str] = None
     subtitle: Optional[str] = None
     series_id: Optional[int] = None
-    series_order: Optional[int] = None
+    series_order: Optional[float] = None
     book_number: Optional[float] = None
     publication_date: Optional[date] = None
     publisher: Optional[str] = None

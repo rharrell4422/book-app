@@ -43,6 +43,37 @@ type ScanProgress = {
   totalCount: number;
 };
 
+type SeriesDetailColumnKey = "title" | "author" | "status" | "date" | "bookNumber" | "actions";
+
+const DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS: Record<SeriesDetailColumnKey, number> = {
+  title: 26,
+  author: 16,
+  status: 10,
+  date: 10,
+  bookNumber: 8,
+  actions: 30,
+};
+
+const MIN_SERIES_DETAIL_COLUMN_WIDTHS: Record<SeriesDetailColumnKey, number> = {
+  title: 12,
+  author: 10,
+  status: 8,
+  date: 8,
+  bookNumber: 6,
+  actions: 15,
+};
+
+const SERIES_DETAIL_RESIZE_NEIGHBOR: Record<SeriesDetailColumnKey, SeriesDetailColumnKey | null> = {
+  title: "author",
+  author: "status",
+  status: "date",
+  date: "bookNumber",
+  bookNumber: "actions",
+  actions: null,
+};
+
+const SERIES_DETAIL_TABLE_COLUMN_WIDTHS_STORAGE_PREFIX = "seriesDetailTableColumnWidthsV1:";
+
 function normalizeBaseUrl(value: string) {
   return value.replace(/\/+$/, "");
 }
@@ -435,11 +466,129 @@ export default function SeriesDetailPage() {
   const [scanCurrentOrder, setScanCurrentOrder] = useState<string | null>(null);
   const [serpUsageCount, setSerpUsageCount] = useState(0);
   const [recentAddMessage, setRecentAddMessage] = useState<string | null>(null);
+  const [columnWidths, setColumnWidths] = useState<Record<SeriesDetailColumnKey, number>>(DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS);
   const scanAbortRef = useRef<AbortController | null>(null);
   const scanPendingRef = useRef<string[]>([]);
   const scanCompletedRef = useRef(0);
   const scanTotalRef = useRef(0);
   const addMessageTimeoutRef = useRef<number | null>(null);
+  const booksTableWrapRef = useRef<HTMLDivElement | null>(null);
+  const resizeStateRef = useRef<{
+    key: SeriesDetailColumnKey;
+    neighborKey: SeriesDetailColumnKey;
+    startX: number;
+    startWidth: number;
+    startNeighborWidth: number;
+    containerWidth: number;
+  } | null>(null);
+
+  function sanitizeSavedSeriesDetailColumnWidths(value: unknown): Record<SeriesDetailColumnKey, number> | null {
+    if (!value || typeof value !== "object") return null;
+    const candidate = value as Partial<Record<SeriesDetailColumnKey, unknown>>;
+    const keys: SeriesDetailColumnKey[] = ["title", "author", "status", "date", "bookNumber", "actions"];
+    const next: Partial<Record<SeriesDetailColumnKey, number>> = {};
+
+    for (const key of keys) {
+      const raw = candidate[key];
+      if (typeof raw !== "number" || !Number.isFinite(raw)) {
+        return null;
+      }
+      const minimum = MIN_SERIES_DETAIL_COLUMN_WIDTHS[key];
+      next[key] = Math.max(minimum, Number(raw));
+    }
+
+    const total = keys.reduce((sum, key) => sum + (next[key] ?? 0), 0);
+    if (total <= 0) return null;
+
+    return {
+      title: Number((((next.title ?? DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS.title) / total) * 100).toFixed(2)),
+      author: Number((((next.author ?? DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS.author) / total) * 100).toFixed(2)),
+      status: Number((((next.status ?? DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS.status) / total) * 100).toFixed(2)),
+      date: Number((((next.date ?? DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS.date) / total) * 100).toFixed(2)),
+      bookNumber: Number((((next.bookNumber ?? DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS.bookNumber) / total) * 100).toFixed(2)),
+      actions: Number((((next.actions ?? DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS.actions) / total) * 100).toFixed(2)),
+    };
+  }
+
+  useEffect(() => {
+    try {
+      const storageKey = `${SERIES_DETAIL_TABLE_COLUMN_WIDTHS_STORAGE_PREFIX}${seriesId}`;
+      const saved = window.localStorage.getItem(storageKey);
+      if (!saved) return;
+      const parsed = JSON.parse(saved);
+      const restored = sanitizeSavedSeriesDetailColumnWidths(parsed);
+      if (restored) {
+        setColumnWidths(restored);
+      }
+    } catch {
+      // Ignore storage parse/read errors and keep defaults.
+    }
+  }, [seriesId]);
+
+  useEffect(() => {
+    try {
+      const storageKey = `${SERIES_DETAIL_TABLE_COLUMN_WIDTHS_STORAGE_PREFIX}${seriesId}`;
+      window.localStorage.setItem(storageKey, JSON.stringify(columnWidths));
+    } catch {
+      // Ignore storage write errors.
+    }
+  }, [seriesId, columnWidths]);
+
+  useEffect(() => {
+    const handleMouseMove = (event: MouseEvent) => {
+      const active = resizeStateRef.current;
+      if (!active) return;
+
+      const deltaX = event.clientX - active.startX;
+      const deltaPercent = (deltaX / active.containerWidth) * 100;
+      const minCurrent = MIN_SERIES_DETAIL_COLUMN_WIDTHS[active.key];
+      const minNeighbor = MIN_SERIES_DETAIL_COLUMN_WIDTHS[active.neighborKey];
+      const maxCurrent = active.startWidth + active.startNeighborWidth - minNeighbor;
+      const nextCurrentWidth = Math.min(maxCurrent, Math.max(minCurrent, active.startWidth + deltaPercent));
+      const nextNeighborWidth = active.startNeighborWidth - (nextCurrentWidth - active.startWidth);
+
+      setColumnWidths((prev) => ({
+        ...prev,
+        [active.key]: Number(nextCurrentWidth.toFixed(2)),
+        [active.neighborKey]: Number(nextNeighborWidth.toFixed(2)),
+      }));
+    };
+
+    const handleMouseUp = () => {
+      resizeStateRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, []);
+
+  function startColumnResize(key: SeriesDetailColumnKey, event: React.MouseEvent<HTMLButtonElement>) {
+    const neighborKey = SERIES_DETAIL_RESIZE_NEIGHBOR[key];
+    const containerWidth = booksTableWrapRef.current?.getBoundingClientRect().width ?? 0;
+    if (!neighborKey || containerWidth <= 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    resizeStateRef.current = {
+      key,
+      neighborKey,
+      startX: event.clientX,
+      startWidth: columnWidths[key],
+      startNeighborWidth: columnWidths[neighborKey],
+      containerWidth,
+    };
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }
 
   useEffect(() => {
     let isActive = true;
@@ -1437,28 +1586,72 @@ export default function SeriesDetailPage() {
         <p className="text-xs text-muted-foreground">Books currently saved in this series.</p>
       </div>
 
-      <Table>
+      <div className="flex justify-end">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <label htmlFor="series-books-sort">Sort</label>
+          <select
+            id="series-books-sort"
+            aria-label="Sort books"
+            value={bookSortMode}
+            onChange={(event) => setBookSortMode(event.target.value as "series" | "az")}
+            className="h-7 rounded-md border bg-background px-2 text-[11px] font-normal"
+          >
+            <option value="series">Series order</option>
+            <option value="az">Title A to Z</option>
+          </select>
+        </div>
+      </div>
+
+      <div ref={booksTableWrapRef} className="overflow-x-auto rounded-lg border bg-card/80">
+      <Table className="w-full table-fixed">
         <TableHeader>
           <TableRow>
-            <TableHead>Title</TableHead>
-            <TableHead>Author</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>Date</TableHead>
-            <TableHead>
-              <div className="flex min-w-[118px] flex-col gap-1">
-                <span>Book #</span>
-                <select
-                  aria-label="Sort books"
-                  value={bookSortMode}
-                  onChange={(event) => setBookSortMode(event.target.value as "series" | "az")}
-                  className="h-7 rounded-md border bg-background px-2 text-[11px] font-normal"
-                >
-                  <option value="series">Series order</option>
-                  <option value="az">Title A to Z</option>
-                </select>
-              </div>
+            <TableHead className="relative" style={{ width: `${columnWidths.title}%` }}>
+              Title
+              <button
+                type="button"
+                aria-label="Resize Title column"
+                onMouseDown={(event) => startColumnResize("title", event)}
+                className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+              />
             </TableHead>
-            <TableHead>Actions</TableHead>
+            <TableHead className="relative" style={{ width: `${columnWidths.author}%` }}>
+              Author
+              <button
+                type="button"
+                aria-label="Resize Author column"
+                onMouseDown={(event) => startColumnResize("author", event)}
+                className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+              />
+            </TableHead>
+            <TableHead className="relative" style={{ width: `${columnWidths.status}%` }}>
+              Status
+              <button
+                type="button"
+                aria-label="Resize Status column"
+                onMouseDown={(event) => startColumnResize("status", event)}
+                className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+              />
+            </TableHead>
+            <TableHead className="relative" style={{ width: `${columnWidths.date}%` }}>
+              Date
+              <button
+                type="button"
+                aria-label="Resize Date column"
+                onMouseDown={(event) => startColumnResize("date", event)}
+                className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+              />
+            </TableHead>
+            <TableHead className="relative" style={{ width: `${columnWidths.bookNumber}%` }}>
+              Book #
+              <button
+                type="button"
+                aria-label="Resize Book number column"
+                onMouseDown={(event) => startColumnResize("bookNumber", event)}
+                className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+              />
+            </TableHead>
+            <TableHead style={{ width: `${columnWidths.actions}%` }}>Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -1469,10 +1662,10 @@ export default function SeriesDetailPage() {
             const notes = book.notes;
             return (
               <TableRow key={book.id}>
-                <TableCell>
+                <TableCell className="truncate" title={book.title}>
                   <div>{book.title}</div>
                 </TableCell>
-                <TableCell>{book.author || "—"}</TableCell>
+                <TableCell className="truncate" title={book.author || "—"}>{book.author || "—"}</TableCell>
                 <TableCell>
                   <span className={getStatusChipClass(status)}>{status}</span>
                 </TableCell>
@@ -1532,6 +1725,7 @@ export default function SeriesDetailPage() {
           })}
         </TableBody>
       </Table>
+      </div>
 
       <Dialog
         open={Boolean(summaryEditorBook)}

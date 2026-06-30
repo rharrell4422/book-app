@@ -19,7 +19,6 @@ type SeriesRow = {
   author?: string | null;
   is_finished?: boolean;
   series_status?: string | null;
-  check_url?: string | null;
   next_unread_book_number?: number | null;
   next_upcoming_book_number?: number | null;
   total_books?: number | null;
@@ -182,6 +181,42 @@ function ValueFilterMenu({
 
 type SeriesSortKey = "id" | "name" | "author" | "nextUnread" | "nextUpcoming" | "total" | "lastChecked";
 type SortDirection = "asc" | "desc";
+type SeriesColumnKey = "id" | "name" | "author" | "nextUnread" | "nextUpcoming" | "total" | "lastChecked" | "actions";
+
+const DEFAULT_SERIES_COLUMN_WIDTHS: Record<SeriesColumnKey, number> = {
+  id: 6,
+  name: 22,
+  author: 18,
+  nextUnread: 10,
+  nextUpcoming: 12,
+  total: 8,
+  lastChecked: 12,
+  actions: 12,
+};
+
+const MIN_SERIES_COLUMN_WIDTHS: Record<SeriesColumnKey, number> = {
+  id: 4,
+  name: 12,
+  author: 10,
+  nextUnread: 8,
+  nextUpcoming: 8,
+  total: 6,
+  lastChecked: 8,
+  actions: 8,
+};
+
+const SERIES_RESIZE_NEIGHBOR: Record<SeriesColumnKey, SeriesColumnKey | null> = {
+  id: "name",
+  name: "author",
+  author: "nextUnread",
+  nextUnread: "nextUpcoming",
+  nextUpcoming: "total",
+  total: "lastChecked",
+  lastChecked: "actions",
+  actions: null,
+};
+
+const SERIES_TABLE_COLUMN_WIDTHS_STORAGE_KEY = "seriesTableColumnWidthsV1";
 
 export default function SeriesPage() {
   const { toast } = useToast();
@@ -202,8 +237,71 @@ export default function SeriesPage() {
     key: null,
     direction: "asc",
   });
+  const [columnWidths, setColumnWidths] = useState<Record<SeriesColumnKey, number>>(DEFAULT_SERIES_COLUMN_WIDTHS);
+  const tableWrapRef = useRef<HTMLDivElement | null>(null);
+  const resizeStateRef = useRef<{
+    key: SeriesColumnKey;
+    neighborKey: SeriesColumnKey;
+    startX: number;
+    startWidth: number;
+    startNeighborWidth: number;
+    containerWidth: number;
+  } | null>(null);
   const firstSeriesId = series.length > 0 ? series[0]?.id : null;
   const detailHref = firstSeriesId ? `/series/${firstSeriesId}` : "/series";
+
+  function sanitizeSavedSeriesColumnWidths(value: unknown): Record<SeriesColumnKey, number> | null {
+    if (!value || typeof value !== "object") return null;
+    const candidate = value as Partial<Record<SeriesColumnKey, unknown>>;
+
+    const keys: SeriesColumnKey[] = ["id", "name", "author", "nextUnread", "nextUpcoming", "total", "lastChecked", "actions"];
+    const next: Partial<Record<SeriesColumnKey, number>> = {};
+
+    for (const key of keys) {
+      const raw = candidate[key];
+      if (typeof raw !== "number" || !Number.isFinite(raw)) {
+        return null;
+      }
+      const minimum = MIN_SERIES_COLUMN_WIDTHS[key];
+      next[key] = Math.max(minimum, Number(raw));
+    }
+
+    const total = keys.reduce((sum, key) => sum + (next[key] ?? 0), 0);
+    if (total <= 0) return null;
+
+    return {
+      id: Number((((next.id ?? DEFAULT_SERIES_COLUMN_WIDTHS.id) / total) * 100).toFixed(2)),
+      name: Number((((next.name ?? DEFAULT_SERIES_COLUMN_WIDTHS.name) / total) * 100).toFixed(2)),
+      author: Number((((next.author ?? DEFAULT_SERIES_COLUMN_WIDTHS.author) / total) * 100).toFixed(2)),
+      nextUnread: Number((((next.nextUnread ?? DEFAULT_SERIES_COLUMN_WIDTHS.nextUnread) / total) * 100).toFixed(2)),
+      nextUpcoming: Number((((next.nextUpcoming ?? DEFAULT_SERIES_COLUMN_WIDTHS.nextUpcoming) / total) * 100).toFixed(2)),
+      total: Number((((next.total ?? DEFAULT_SERIES_COLUMN_WIDTHS.total) / total) * 100).toFixed(2)),
+      lastChecked: Number((((next.lastChecked ?? DEFAULT_SERIES_COLUMN_WIDTHS.lastChecked) / total) * 100).toFixed(2)),
+      actions: Number((((next.actions ?? DEFAULT_SERIES_COLUMN_WIDTHS.actions) / total) * 100).toFixed(2)),
+    };
+  }
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(SERIES_TABLE_COLUMN_WIDTHS_STORAGE_KEY);
+      if (!saved) return;
+      const parsed = JSON.parse(saved);
+      const restored = sanitizeSavedSeriesColumnWidths(parsed);
+      if (restored) {
+        setColumnWidths(restored);
+      }
+    } catch {
+      // Ignore storage parse/read errors and keep defaults.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SERIES_TABLE_COLUMN_WIDTHS_STORAGE_KEY, JSON.stringify(columnWidths));
+    } catch {
+      // Ignore storage write errors.
+    }
+  }, [columnWidths]);
 
   const totalBooks = series.reduce(
     (sum, s) => sum + (s.books_tracked ?? 0),
@@ -317,6 +415,62 @@ export default function SeriesPage() {
     setValueFilterSearch({ name: "", author: "" });
   }
 
+  useEffect(() => {
+    const handleMouseMove = (event: MouseEvent) => {
+      const active = resizeStateRef.current;
+      if (!active) return;
+
+      const deltaX = event.clientX - active.startX;
+      const deltaPercent = (deltaX / active.containerWidth) * 100;
+      const minCurrent = MIN_SERIES_COLUMN_WIDTHS[active.key];
+      const minNeighbor = MIN_SERIES_COLUMN_WIDTHS[active.neighborKey];
+      const maxCurrent = active.startWidth + active.startNeighborWidth - minNeighbor;
+      const nextCurrentWidth = Math.min(maxCurrent, Math.max(minCurrent, active.startWidth + deltaPercent));
+      const nextNeighborWidth = active.startNeighborWidth - (nextCurrentWidth - active.startWidth);
+
+      setColumnWidths((prev) => ({
+        ...prev,
+        [active.key]: Number(nextCurrentWidth.toFixed(2)),
+        [active.neighborKey]: Number(nextNeighborWidth.toFixed(2)),
+      }));
+    };
+
+    const handleMouseUp = () => {
+      resizeStateRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, []);
+
+  function startColumnResize(key: SeriesColumnKey, event: React.MouseEvent<HTMLButtonElement>) {
+    const neighborKey = SERIES_RESIZE_NEIGHBOR[key];
+    const containerWidth = tableWrapRef.current?.getBoundingClientRect().width ?? 0;
+    if (!neighborKey || containerWidth <= 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    resizeStateRef.current = {
+      key,
+      neighborKey,
+      startX: event.clientX,
+      startWidth: columnWidths[key],
+      startNeighborWidth: columnWidths[neighborKey],
+      containerWidth,
+    };
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }
+
   async function fetchSeries() {
     try {
       const response = await fetch("http://localhost:8000/series/", {
@@ -354,7 +508,6 @@ export default function SeriesPage() {
           author: detailData?.author ?? item.author ?? null,
           is_finished: Boolean(detailData?.is_finished ?? item.is_finished ?? false),
           series_status: detailData?.series_status ?? item.series_status ?? null,
-          check_url: item.check_url ?? null,
           next_unread_book_number:
             detailData?.next_unread_book_number ?? item.next_unread_book_number ?? null,
           next_upcoming_book_number:
@@ -408,38 +561,6 @@ export default function SeriesPage() {
     setLoadingId(null);
   }
 
-  async function handleEditUrl(seriesId: number, currentUrl: string) {
-    const newUrl = prompt("Enter new check URL:", currentUrl || "");
-    if (newUrl === null) return;
-
-    try {
-      const response = await fetch(`http://localhost:8000/series/${seriesId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ check_url: newUrl }),
-      });
-
-      if (response.ok) {
-        toast({
-          title: "URL updated",
-          description: `Series ${seriesId} check URL saved.`,
-        });
-        fetchSeries();
-      } else {
-        toast({
-          title: "Error",
-          description: "Failed to update URL.",
-        });
-      }
-    } catch (error) {
-      console.error("Error updating URL:", error);
-      toast({
-        title: "Error",
-        description: "Network or server issue while updating URL.",
-      });
-    }
-  }
-
   return (
     <div className="p-4 space-y-3">
       <div className="grid gap-2 md:grid-cols-[1fr_auto_auto] md:items-start">
@@ -449,7 +570,7 @@ export default function SeriesPage() {
           </p>
           <h1 className="text-2xl font-bold">{viewMode === "ongoing" ? "Ongoing Series" : "Finished Series"}</h1>
           <p className="max-w-2xl text-xs leading-5 text-muted-foreground md:hidden">
-            Browse your tracked series, update check URLs, and refresh status for each series.
+            Browse your tracked series and refresh status for each series.
           </p>
         </div>
 
@@ -505,14 +626,20 @@ export default function SeriesPage() {
         ) : null}
       </div>
 
-      <div className="overflow-x-auto rounded-lg border bg-card/80">
-        <Table className="text-xs [&_th]:h-8 [&_th]:py-1 [&_td]:py-1">
+      <div ref={tableWrapRef} className="overflow-x-auto rounded-lg border bg-card/80">
+        <Table className="w-full table-fixed text-xs [&_th]:h-8 [&_th]:py-1 [&_td]:py-1">
           <TableHeader>
             <TableRow>
-              <TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.id}%` }}>
                 <button type="button" className="text-left" onClick={() => toggleSort("id")}>ID{sortLabel("id")}</button>
+                <button
+                  type="button"
+                  aria-label="Resize ID column"
+                  onMouseDown={(event) => startColumnResize("id", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
               </TableHead>
-              <TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.name}%` }}>
                 <div className="flex items-center justify-between gap-1">
                   <button type="button" className="text-left" onClick={() => toggleSort("name")}>Name{sortLabel("name")}</button>
                   <ValueFilterMenu
@@ -528,8 +655,14 @@ export default function SeriesPage() {
                     onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, name: value }))}
                   />
                 </div>
+                <button
+                  type="button"
+                  aria-label="Resize Name column"
+                  onMouseDown={(event) => startColumnResize("name", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
               </TableHead>
-              <TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.author}%` }}>
                 <div className="flex items-center justify-between gap-1">
                   <button type="button" className="text-left" onClick={() => toggleSort("author")}>Author{sortLabel("author")}</button>
                   <ValueFilterMenu
@@ -545,20 +678,50 @@ export default function SeriesPage() {
                     onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, author: value }))}
                   />
                 </div>
+                <button
+                  type="button"
+                  aria-label="Resize Author column"
+                  onMouseDown={(event) => startColumnResize("author", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
               </TableHead>
-              <TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.nextUnread}%` }}>
                 <button type="button" className="text-left" onClick={() => toggleSort("nextUnread")}>Next unread{sortLabel("nextUnread")}</button>
+                <button
+                  type="button"
+                  aria-label="Resize Next unread column"
+                  onMouseDown={(event) => startColumnResize("nextUnread", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
               </TableHead>
-              <TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.nextUpcoming}%` }}>
                 <button type="button" className="text-left" onClick={() => toggleSort("nextUpcoming")}>Next upcoming #{sortLabel("nextUpcoming")}</button>
+                <button
+                  type="button"
+                  aria-label="Resize Next upcoming column"
+                  onMouseDown={(event) => startColumnResize("nextUpcoming", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
               </TableHead>
-              <TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.total}%` }}>
                 <button type="button" className="text-left" onClick={() => toggleSort("total")}>Total{sortLabel("total")}</button>
+                <button
+                  type="button"
+                  aria-label="Resize Total column"
+                  onMouseDown={(event) => startColumnResize("total", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
               </TableHead>
-              <TableHead className="min-w-[200px]">
+              <TableHead className="relative" style={{ width: `${columnWidths.lastChecked}%` }}>
                 <button type="button" className="text-left" onClick={() => toggleSort("lastChecked")}>Last checked{sortLabel("lastChecked")}</button>
+                <button
+                  type="button"
+                  aria-label="Resize Last checked column"
+                  onMouseDown={(event) => startColumnResize("lastChecked", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
               </TableHead>
-              <TableHead>
+              <TableHead style={{ width: `${columnWidths.actions}%` }}>
                 <Button type="button" variant="ghost" size="sm" onClick={clearFilters}>
                   Clear
                 </Button>
@@ -570,8 +733,8 @@ export default function SeriesPage() {
             {sortedSeries.map((s) => (
               <TableRow key={s.id}>
                 <TableCell>{s.id}</TableCell>
-                <TableCell>{s.name}</TableCell>
-                <TableCell>{s.author || "—"}</TableCell>
+                <TableCell className="truncate" title={s.name}>{s.name}</TableCell>
+                <TableCell className="truncate" title={s.author || "—"}>{s.author || "—"}</TableCell>
                 <TableCell>{s.next_unread_book_number ?? "—"}</TableCell>
                 <TableCell>{s.next_upcoming_book_number ?? "—"}</TableCell>
                 <TableCell>{s.total_books ?? "—"}</TableCell>
@@ -582,13 +745,6 @@ export default function SeriesPage() {
                       View books
                     </Button>
                   </Link>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => handleEditUrl(s.id, s.check_url)}
-                  >
-                    Edit URL
-                  </Button>
                   <Button
                     variant="outline"
                     size="sm"

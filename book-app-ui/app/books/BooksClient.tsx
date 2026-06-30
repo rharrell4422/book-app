@@ -66,9 +66,9 @@ function formatDate(value?: string | null) {
 
 function getStatusChipClass(status: string) {
   if (status === "read") {
-    return "inline-flex rounded-full border border-emerald-300 bg-emerald-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-emerald-800";
+    return "inline-flex rounded-full border border-emerald-300 bg-emerald-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-emerald-800";
   }
-  return "inline-flex rounded-full border border-rose-300 bg-rose-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-rose-800";
+  return "inline-flex rounded-full border border-rose-300 bg-rose-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-rose-800";
 }
 
 function normalizeText(value: unknown) {
@@ -219,6 +219,39 @@ function ValueFilterMenu({
 
 type BookSortKey = "id" | "title" | "author" | "status" | "date" | "series" | "bookNumber";
 type SortDirection = "asc" | "desc";
+type ResizableColumnKey = "title" | "author" | "status" | "date" | "series" | "bookNumber" | "actions";
+
+const DEFAULT_COLUMN_WIDTHS: Record<ResizableColumnKey, number> = {
+  title: 30,
+  author: 21,
+  status: 7,
+  date: 8,
+  series: 16,
+  bookNumber: 5,
+  actions: 13,
+};
+
+const MIN_COLUMN_WIDTH: Record<ResizableColumnKey, number> = {
+  title: 14,
+  author: 10,
+  status: 8,
+  date: 8,
+  series: 10,
+  bookNumber: 5,
+  actions: 5,
+};
+
+const RESIZE_NEIGHBOR: Record<ResizableColumnKey, ResizableColumnKey | null> = {
+  title: "author",
+  author: "status",
+  status: "date",
+  date: "series",
+  series: "bookNumber",
+  bookNumber: "actions",
+  actions: null,
+};
+
+const COLUMN_WIDTHS_STORAGE_KEY = "booksTableColumnWidthsV1";
 
 type SeriesOption = {
   id: number;
@@ -339,9 +372,73 @@ export default function BooksClient() {
     key: null,
     direction: "asc",
   });
+  const [columnWidths, setColumnWidths] = useState<Record<ResizableColumnKey, number>>(DEFAULT_COLUMN_WIDTHS);
+  const tableWrapRef = useRef<HTMLDivElement | null>(null);
+  const resizeStateRef = useRef<{
+    key: ResizableColumnKey;
+    neighborKey: ResizableColumnKey;
+    startX: number;
+    startWidth: number;
+    startNeighborWidth: number;
+    containerWidth: number;
+  } | null>(null);
   const searchParams = useSearchParams();
   const router = useRouter();
   const seriesId = searchParams.get("series_id");
+
+  function sanitizeSavedColumnWidths(value: unknown): Record<ResizableColumnKey, number> | null {
+    if (!value || typeof value !== "object") return null;
+    const candidate = value as Partial<Record<ResizableColumnKey, unknown>>;
+
+    const keys: ResizableColumnKey[] = ["title", "author", "status", "date", "series", "bookNumber", "actions"];
+    const next: Partial<Record<ResizableColumnKey, number>> = {};
+
+    for (const key of keys) {
+      const raw = candidate[key];
+      if (typeof raw !== "number" || !Number.isFinite(raw)) {
+        return null;
+      }
+      const minimum = MIN_COLUMN_WIDTH[key];
+      next[key] = Math.max(minimum, Number(raw));
+    }
+
+    const total = keys.reduce((sum, key) => sum + (next[key] ?? 0), 0);
+    if (total <= 0) return null;
+
+    const normalized: Record<ResizableColumnKey, number> = {
+      title: Number((((next.title ?? DEFAULT_COLUMN_WIDTHS.title) / total) * 100).toFixed(2)),
+      author: Number((((next.author ?? DEFAULT_COLUMN_WIDTHS.author) / total) * 100).toFixed(2)),
+      status: Number((((next.status ?? DEFAULT_COLUMN_WIDTHS.status) / total) * 100).toFixed(2)),
+      date: Number((((next.date ?? DEFAULT_COLUMN_WIDTHS.date) / total) * 100).toFixed(2)),
+      series: Number((((next.series ?? DEFAULT_COLUMN_WIDTHS.series) / total) * 100).toFixed(2)),
+      bookNumber: Number((((next.bookNumber ?? DEFAULT_COLUMN_WIDTHS.bookNumber) / total) * 100).toFixed(2)),
+      actions: Number((((next.actions ?? DEFAULT_COLUMN_WIDTHS.actions) / total) * 100).toFixed(2)),
+    };
+
+    return normalized;
+  }
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(COLUMN_WIDTHS_STORAGE_KEY);
+      if (!saved) return;
+      const parsed = JSON.parse(saved);
+      const restored = sanitizeSavedColumnWidths(parsed);
+      if (restored) {
+        setColumnWidths(restored);
+      }
+    } catch {
+      // Ignore storage parse/read errors and keep defaults.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(COLUMN_WIDTHS_STORAGE_KEY, JSON.stringify(columnWidths));
+    } catch {
+      // Ignore storage write errors.
+    }
+  }, [columnWidths]);
 
   useEffect(() => {
     if (seriesId) {
@@ -494,6 +591,62 @@ export default function BooksClient() {
     });
     setValueFilters({ title: [], author: [], series: [], status: [] });
     setValueFilterSearch({ title: "", author: "", series: "", status: "" });
+  }
+
+  useEffect(() => {
+    const handleMouseMove = (event: MouseEvent) => {
+      const active = resizeStateRef.current;
+      if (!active) return;
+
+      const deltaX = event.clientX - active.startX;
+      const deltaPercent = (deltaX / active.containerWidth) * 100;
+      const minCurrent = MIN_COLUMN_WIDTH[active.key];
+      const minNeighbor = MIN_COLUMN_WIDTH[active.neighborKey];
+      const maxCurrent = active.startWidth + active.startNeighborWidth - minNeighbor;
+      const nextCurrentWidth = Math.min(maxCurrent, Math.max(minCurrent, active.startWidth + deltaPercent));
+      const nextNeighborWidth = active.startNeighborWidth - (nextCurrentWidth - active.startWidth);
+
+      setColumnWidths((prev) => ({
+        ...prev,
+        [active.key]: Number(nextCurrentWidth.toFixed(2)),
+        [active.neighborKey]: Number(nextNeighborWidth.toFixed(2)),
+      }));
+    };
+
+    const handleMouseUp = () => {
+      resizeStateRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, []);
+
+  function startColumnResize(key: ResizableColumnKey, event: React.MouseEvent<HTMLButtonElement>) {
+    const neighborKey = RESIZE_NEIGHBOR[key];
+    const containerWidth = tableWrapRef.current?.getBoundingClientRect().width ?? 0;
+    if (!neighborKey || containerWidth <= 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    resizeStateRef.current = {
+      key,
+      neighborKey,
+      startX: event.clientX,
+      startWidth: columnWidths[key],
+      startNeighborWidth: columnWidths[neighborKey],
+      containerWidth,
+    };
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
   }
 
   function updateAddBookForm<K extends keyof AddBookFormState>(key: K, value: AddBookFormState[K]) {
@@ -844,14 +997,11 @@ export default function BooksClient() {
         </div>
       </div>
 
-      <div className="overflow-x-auto rounded-lg border bg-card/80">
-        <Table className="text-xs [&_th]:h-8 [&_th]:py-1 [&_td]:py-1">
+      <div ref={tableWrapRef} className="rounded-lg border bg-card/80">
+        <Table className="w-full table-fixed text-[11px] [&_th]:h-7 [&_th]:py-0.5 [&_td]:py-0.5">
           <TableHeader>
             <TableRow>
-              <TableHead>
-                <span className="text-muted-foreground">—</span>
-              </TableHead>
-              <TableHead>
+              <TableHead style={{ width: `${columnWidths.title}%` }}>
                 <ValueFilterMenu
                   label="Filter"
                   options={titleOptions}
@@ -866,7 +1016,7 @@ export default function BooksClient() {
                   onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, title: value }))}
                 />
               </TableHead>
-              <TableHead>
+              <TableHead style={{ width: `${columnWidths.author}%` }}>
                 <ValueFilterMenu
                   label="Filter"
                   options={authorOptions}
@@ -881,7 +1031,7 @@ export default function BooksClient() {
                   onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, author: value }))}
                 />
               </TableHead>
-              <TableHead>
+              <TableHead style={{ width: `${columnWidths.status}%` }}>
                 <div className="space-y-1">
                   <ValueFilterMenu
                     label="Filter"
@@ -897,22 +1047,22 @@ export default function BooksClient() {
                   />
                 </div>
               </TableHead>
-              <TableHead className="min-w-[220px] align-top">
+              <TableHead style={{ width: `${columnWidths.date}%` }} className="align-top">
                 <div className="space-y-1">
                   <select
                     value={sortConfig.key === "date" ? sortConfig.direction : "none"}
                     onChange={(event) =>
                       setExplicitSort("date", event.target.value as "none" | "asc" | "desc")
                     }
-                    className="block h-7 w-full rounded border bg-background px-2 text-xs"
+                    className="block h-6 w-full rounded border bg-background px-1.5 text-[11px]"
                   >
-                    <option value="none">Sort date</option>
+                    <option value="none">Sort</option>
                     <option value="asc">A to Z (oldest)</option>
                     <option value="desc">Z to A (newest)</option>
                   </select>
                 </div>
               </TableHead>
-              <TableHead>
+              <TableHead style={{ width: `${columnWidths.series}%` }}>
                 <ValueFilterMenu
                   label="Filter"
                   options={seriesOptions}
@@ -927,48 +1077,89 @@ export default function BooksClient() {
                   onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, series: value }))}
                 />
               </TableHead>
-              <TableHead>
+              <TableHead style={{ width: `${columnWidths.bookNumber}%` }}>
                 <select
                   value={sortConfig.key === "bookNumber" ? sortConfig.direction : "none"}
                   onChange={(event) =>
                     setExplicitSort("bookNumber", event.target.value as "none" | "asc" | "desc")
                   }
-                  className="h-7 w-full rounded border bg-background px-2 text-xs"
+                  className="h-6 w-full rounded border bg-background px-1.5 text-[11px]"
                 >
                   <option value="none">Sort</option>
                   <option value="asc">A to Z</option>
                   <option value="desc">Z to A</option>
                 </select>
               </TableHead>
-              <TableHead>
+              <TableHead style={{ width: `${columnWidths.actions}%` }}>
                 <Button type="button" variant="ghost" size="sm" onClick={clearFilters}>
                   Clear
                 </Button>
               </TableHead>
             </TableRow>
             <TableRow>
-              <TableHead>
-                <button type="button" className="text-left" onClick={() => toggleSort("id")}>ID{sortLabel("id")}</button>
-              </TableHead>
-              <TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.title}%` }}>
                 <button type="button" className="text-left" onClick={() => toggleSort("title")}>Title{sortLabel("title")}</button>
+                <button
+                  type="button"
+                  aria-label="Resize Title column"
+                  onMouseDown={(event) => startColumnResize("title", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
               </TableHead>
-              <TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.author}%` }}>
                 <button type="button" className="text-left" onClick={() => toggleSort("author")}>Author{sortLabel("author")}</button>
+                <button
+                  type="button"
+                  aria-label="Resize Author column"
+                  onMouseDown={(event) => startColumnResize("author", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
               </TableHead>
-              <TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.status}%` }}>
                 <button type="button" className="text-left" onClick={() => toggleSort("status")}>Status{sortLabel("status")}</button>
+                <button
+                  type="button"
+                  aria-label="Resize Status column"
+                  onMouseDown={(event) => startColumnResize("status", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
               </TableHead>
-              <TableHead className="min-w-[220px]">
+              <TableHead className="relative" style={{ width: `${columnWidths.date}%` }}>
                 <button type="button" className="text-left" onClick={() => toggleSort("date")}>Date{sortLabel("date")}</button>
+                <button
+                  type="button"
+                  aria-label="Resize Date column"
+                  onMouseDown={(event) => startColumnResize("date", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
               </TableHead>
-              <TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.series}%` }}>
                 <button type="button" className="text-left" onClick={() => toggleSort("series")}>Series{sortLabel("series")}</button>
+                <button
+                  type="button"
+                  aria-label="Resize Series column"
+                  onMouseDown={(event) => startColumnResize("series", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
               </TableHead>
-              <TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.bookNumber}%` }}>
                 <button type="button" className="text-left" onClick={() => toggleSort("bookNumber")}>Book #{sortLabel("bookNumber")}</button>
+                <button
+                  type="button"
+                  aria-label="Resize Book number column"
+                  onMouseDown={(event) => startColumnResize("bookNumber", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
               </TableHead>
-              <TableHead>Actions</TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.actions}%` }}>
+                Actions
+                <button
+                  type="button"
+                  aria-label="Resize Actions column"
+                  onMouseDown={(event) => startColumnResize("actions", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -977,23 +1168,22 @@ export default function BooksClient() {
                 const status = getBookStatus(b);
                 return (
                   <TableRow key={b.id}>
-                    <TableCell>{b.id}</TableCell>
-                    <TableCell>{b.title}</TableCell>
-                    <TableCell>{b.author || "—"}</TableCell>
+                    <TableCell className="truncate" title={b.title}>{b.title}</TableCell>
+                    <TableCell className="truncate" title={b.author || "—"}>{b.author || "—"}</TableCell>
                     <TableCell>
                       <span className={getStatusChipClass(status)}>{status}</span>
                     </TableCell>
                     <TableCell>{formatDate(getDisplayDate(b))}</TableCell>
-                    <TableCell>{b.series_name || "—"}</TableCell>
+                    <TableCell className="truncate" title={b.series_name || "—"}>{b.series_name || "—"}</TableCell>
                     <TableCell>{b.book_number ?? "—"}</TableCell>
                     <TableCell className="whitespace-nowrap">
-                      <div className="flex items-center gap-1">
+                      <div className="flex items-center gap-0.5">
                       {b.series_id ? (
                       <Button
                         type="button"
                         variant="ghost"
                         size="sm"
-                        className="h-7 px-2 text-xs"
+                        className="h-6 px-1.5 text-[10px]"
                         onClick={() => router.push(`/series/${b.series_id}`)}
                       >
                         View books
@@ -1005,8 +1195,8 @@ export default function BooksClient() {
                       size="sm"
                       className={
                         b.is_read
-                          ? "h-7 border-rose-300 px-2 text-xs text-rose-700 hover:bg-rose-50"
-                          : "h-7 border-emerald-300 px-2 text-xs text-emerald-700 hover:bg-emerald-50"
+                          ? "h-6 border-rose-300 px-1.5 text-[10px] text-rose-700 hover:bg-rose-50"
+                          : "h-6 border-emerald-300 px-1.5 text-[10px] text-emerald-700 hover:bg-emerald-50"
                       }
                       onClick={() => toggleRead(b)}
                     >
@@ -1016,7 +1206,7 @@ export default function BooksClient() {
                       type="button"
                       variant="destructive"
                       size="sm"
-                      className="h-7 px-2 text-xs"
+                      className="h-6 px-1.5 text-[10px]"
                       onClick={() => deleteBook(b.id)}
                     >
                       Delete

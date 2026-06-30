@@ -36,15 +36,13 @@
 - Always check existing file contents before refactors.
 - Never overwrite large sections without confirmation.
 - When chat restarts, user pastes COPILOT.md.
-- Copilot must show the diff for any proposed file change before applying it.
+- Copilot should provide a brief plain-English summary of the planned change before applying it.
+- Copilot should not dump command output or code diffs on screen unless user explicitly asks.
 - Copilot must wait for my approval before applying any file change.
 - Copilot must confirm before making any destructive change (schema edits, importer rewrites, intelligence logic changes).
 
 ## Change Approval Workflow
-1. **Show Diff First**: Present changes in clear markdown diff format with file name, lines added (green +), lines deleted (red -).
-   - Format: `- old line` and `+ new line` for clarity
-   - Show at least 3-5 lines of context before/after change
-   - Label with: `📝 File: path/to/file.ts`
+1. **Brief Summary First**: Present a short plain-English description of what will change and which file(s) are affected.
 
 2. **Create Approval Button**: Use `vscode_askQuestions` tool to display interactive approval dialog with:
    - Header: "Approve Code Change"
@@ -53,7 +51,7 @@
      - ✅ Allow Changes (marked recommended)
      - ❌ Cancel
 
-3. **Apply Only After Approval**: Once user clicks "Allow Changes" button, apply via `replace_string_in_file` tool with exact oldString/newString match
+3. **Apply Only After Approval**: Once user clicks "Allow Changes" button, apply the approved changes.
 
 4. **Verify Changes**: After applying, read back the affected lines (read_file) to confirm changes took effect
 
@@ -233,6 +231,13 @@ Keep open: main.py, models.py, schemas.py, importer.py, intelligence.py, databas
 - Never ask for full file pastes  
 - Request only needed snippets  
 - Follow roadmap order  
+
+### Git Commit Workflow
+- When committing, assume only `.py` and `.tsx` files should be staged unless Copilot explicitly says otherwise.
+- User performs all staging manually in the VS Code Source Control panel.
+- After staging, user will commit and push files to GitHub.
+- Before user commits, Copilot provides a short commit summary message for the commit text.
+
 ## Copilot Workspace Rules
 - Copilot must always load @workspace and #COPILOT.md at the start of every session.
 - Copilot must use the actual workspace files as the source of truth.
