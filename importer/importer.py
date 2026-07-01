@@ -270,6 +270,13 @@ def import_row(raw_headers: List[str], row_values: List[Any]) -> Tuple[Dict[str,
 # Series & Book DB Helpers
 # ------------------------------------------------------------
 
+def parse_series_finished_flag(value: Any) -> bool:
+    """Only an explicit 'no' means unfinished; yes/maybe/blank are finished."""
+    normalized = "" if value is None else str(value).strip().lower()
+    if normalized in ["no", "false", "n"]:
+        return False
+    return True
+
 def get_or_create_series(db: Session, series_name: str, total_books: Any = None, series_finished_flag: Any = None) -> Series:
     if not series_name:
         return None
@@ -282,7 +289,7 @@ def get_or_create_series(db: Session, series_name: str, total_books: Any = None,
     if existing:
         # Optionally update finished/total_books if provided
         if series_finished_flag is not None:
-            existing.is_finished = str(series_finished_flag).strip().lower() in ["yes", "true", "finished"]
+            existing.is_finished = bool(series_finished_flag)
         if total_books is not None:
             try:
                 existing.total_books = int(total_books)
@@ -292,7 +299,7 @@ def get_or_create_series(db: Session, series_name: str, total_books: Any = None,
         db.refresh(existing)
         return existing
 
-    is_finished = str(series_finished_flag).strip().lower() in ["yes", "true", "finished"] if series_finished_flag is not None else False
+    is_finished = bool(series_finished_flag) if series_finished_flag is not None else False
     total = None
     if total_books is not None:
         try:
@@ -314,7 +321,10 @@ def get_or_create_series(db: Session, series_name: str, total_books: Any = None,
 def create_or_update_book(db: Session, book_data: Dict[str, Any]) -> Book:
     series_name = book_data.get("series_name")
     series_total_books = book_data.get("series_total_books") or book_data.get("series_total") or None
-    series_finished_flag = book_data.get("series_finished") or book_data.get("is_series_finished") or None
+    raw_series_finished_flag = book_data.get("series_finished")
+    if raw_series_finished_flag is None and "is_series_finished" in book_data:
+        raw_series_finished_flag = book_data.get("is_series_finished")
+    series_finished_flag = parse_series_finished_flag(raw_series_finished_flag)
 
     series = None
     if series_name:
@@ -331,7 +341,7 @@ def create_or_update_book(db: Session, book_data: Dict[str, Any]) -> Book:
         series_id=series.id if series else None,
         series_order=book_data.get("book_number"),
         series_total_books=series_total_books,
-        is_series_finished=str(series_finished_flag).strip().lower() in ["yes", "true", "finished"] if series_finished_flag is not None else False,
+        is_series_finished=series_finished_flag,
         book_number=book_data.get("book_number"),
         is_read=book_data.get("is_read"),
         read_date=book_data.get("date_read"),

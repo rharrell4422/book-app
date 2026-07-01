@@ -237,6 +237,9 @@ Keep open: main.py, models.py, schemas.py, importer.py, intelligence.py, databas
 - User performs all staging manually in the VS Code Source Control panel.
 - After staging, user will commit and push files to GitHub.
 - Before user commits, Copilot provides a short commit summary message for the commit text.
+- Once user says they are keeping file changes, Copilot must list any changed files that are not `.py` or `.tsx` and call out whether they should also be staged.
+- If there are no non-`.py`/`.tsx` files that should be included, Copilot must explicitly say to stage all changed `.py` and `.tsx` files.
+- Copilot must provide a brief commit message that summarizes the workflow and work completed.
 
 ## Copilot Workspace Rules
 - Copilot must always load @workspace and #COPILOT.md at the start of every session.

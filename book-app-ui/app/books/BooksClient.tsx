@@ -112,11 +112,15 @@ function parseFlexibleDate(value?: string | null): Date | null {
   return null;
 }
 
+function toDateValue(value?: string | null): number {
+  return parseFlexibleDate(value)?.valueOf() ?? Number.NEGATIVE_INFINITY;
+}
+
 type ValueFilterMenuProps = {
   label: string;
   options: string[];
   selectedValues: string[];
-  onToggleValue: (value: string) => void;
+  onApplyValues: (values: string[]) => void;
   onClear: () => void;
   searchValue: string;
   onSearchChange: (value: string) => void;
@@ -126,15 +130,21 @@ function ValueFilterMenu({
   label,
   options,
   selectedValues,
-  onToggleValue,
+  onApplyValues,
   onClear,
   searchValue,
   onSearchChange,
 }: ValueFilterMenuProps) {
   const [open, setOpen] = useState(false);
+  const [draftValues, setDraftValues] = useState<string[]>(selectedValues);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const normalizedSearch = normalizeText(searchValue);
   const visibleOptions = options.filter((option) => normalizeText(option).includes(normalizedSearch));
+
+  useEffect(() => {
+    if (!open) return;
+    setDraftValues(selectedValues);
+  }, [open, selectedValues]);
 
   useEffect(() => {
     if (!open) return;
@@ -179,15 +189,18 @@ function ValueFilterMenu({
         />
         <div className="max-h-40 space-y-1 overflow-auto pr-1">
           {visibleOptions.map((option) => {
-            const checked = selectedValues.includes(option);
+            const checked = draftValues.includes(option);
             return (
               <label key={option} className="flex items-center gap-2 text-xs">
                 <input
                   type="checkbox"
                   checked={checked}
                   onChange={() => {
-                    onToggleValue(option);
-                    setOpen(false);
+                    setDraftValues((prev) =>
+                      prev.includes(option)
+                        ? prev.filter((item) => item !== option)
+                        : [...prev, option]
+                    );
                   }}
                 />
                 <span className="truncate">{option || "(blank)"}</span>
@@ -198,7 +211,18 @@ function ValueFilterMenu({
             <p className="text-xs text-muted-foreground">No matching values.</p>
           ) : null}
         </div>
-        <div className="mt-2 flex justify-end">
+        <div className="mt-2 flex justify-end gap-1">
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              onApplyValues(draftValues);
+              setOpen(false);
+            }}
+          >
+            Apply
+          </Button>
           <Button
             type="button"
             variant="ghost"
@@ -271,6 +295,16 @@ type AddBookFormState = {
   autoSummary: string;
 };
 
+type EditBookFormState = {
+  id: number | null;
+  title: string;
+  author: string;
+  seriesName: string;
+  bookNumber: string;
+  status: "unread" | "upcoming" | "read";
+  date: string;
+};
+
 type LookupResultState = {
   found: boolean;
   summary: string | null;
@@ -327,6 +361,16 @@ const EMPTY_ADD_BOOK_FORM: AddBookFormState = {
   autoSummary: "",
 };
 
+const EMPTY_EDIT_BOOK_FORM: EditBookFormState = {
+  id: null,
+  title: "",
+  author: "",
+  seriesName: "",
+  bookNumber: "",
+  status: "unread",
+  date: "",
+};
+
 function normalizeLookupMatchedTitle(value: string | null | undefined) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -347,6 +391,10 @@ export default function BooksClient() {
   const [lookingUpBook, setLookingUpBook] = useState(false);
   const [showLookupSummary, setShowLookupSummary] = useState(false);
   const [addBookForm, setAddBookForm] = useState<AddBookFormState>(EMPTY_ADD_BOOK_FORM);
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [savingEditBook, setSavingEditBook] = useState(false);
+  const [editBookForm, setEditBookForm] = useState<EditBookFormState>(EMPTY_EDIT_BOOK_FORM);
+  const [pinnedBookId, setPinnedBookId] = useState<number | null>(null);
   const [lookupResult, setLookupResult] = useState<LookupResultState | null>(null);
   const [filters, setFilters] = useState({
     id: "",
@@ -373,6 +421,7 @@ export default function BooksClient() {
     direction: "asc",
   });
   const [columnWidths, setColumnWidths] = useState<Record<ResizableColumnKey, number>>(DEFAULT_COLUMN_WIDTHS);
+  const [columnWidthsHydrated, setColumnWidthsHydrated] = useState(false);
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const resizeStateRef = useRef<{
     key: ResizableColumnKey;
@@ -392,15 +441,20 @@ export default function BooksClient() {
 
     const keys: ResizableColumnKey[] = ["title", "author", "status", "date", "series", "bookNumber", "actions"];
     const next: Partial<Record<ResizableColumnKey, number>> = {};
+    let hasAtLeastOneSavedKey = false;
 
     for (const key of keys) {
       const raw = candidate[key];
-      if (typeof raw !== "number" || !Number.isFinite(raw)) {
-        return null;
+      if (typeof raw === "number" && Number.isFinite(raw)) {
+        const minimum = MIN_COLUMN_WIDTH[key];
+        next[key] = Math.max(minimum, Number(raw));
+        hasAtLeastOneSavedKey = true;
+      } else {
+        next[key] = DEFAULT_COLUMN_WIDTHS[key];
       }
-      const minimum = MIN_COLUMN_WIDTH[key];
-      next[key] = Math.max(minimum, Number(raw));
     }
+
+    if (!hasAtLeastOneSavedKey) return null;
 
     const total = keys.reduce((sum, key) => sum + (next[key] ?? 0), 0);
     if (total <= 0) return null;
@@ -421,24 +475,28 @@ export default function BooksClient() {
   useEffect(() => {
     try {
       const saved = window.localStorage.getItem(COLUMN_WIDTHS_STORAGE_KEY);
-      if (!saved) return;
-      const parsed = JSON.parse(saved);
-      const restored = sanitizeSavedColumnWidths(parsed);
-      if (restored) {
-        setColumnWidths(restored);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        const restored = sanitizeSavedColumnWidths(parsed);
+        if (restored) {
+          setColumnWidths(restored);
+        }
       }
     } catch {
       // Ignore storage parse/read errors and keep defaults.
+    } finally {
+      setColumnWidthsHydrated(true);
     }
   }, []);
 
   useEffect(() => {
+    if (!columnWidthsHydrated) return;
     try {
       window.localStorage.setItem(COLUMN_WIDTHS_STORAGE_KEY, JSON.stringify(columnWidths));
     } catch {
       // Ignore storage write errors.
     }
-  }, [columnWidths]);
+  }, [columnWidths, columnWidthsHydrated]);
 
   useEffect(() => {
     if (seriesId) {
@@ -500,50 +558,138 @@ export default function BooksClient() {
   }, [books, filters, valueFilters]);
 
   const sortedBooks = useMemo(() => {
-    if (!sortConfig.key) return filteredBooks;
+    const withPriorityOrder = [...filteredBooks].sort((a, b) => {
+      const statusA = normalizeText(getBookStatus(a));
+      const statusB = normalizeText(getBookStatus(b));
 
-    const sorted = [...filteredBooks].sort((a, b) => {
-      const key = sortConfig.key;
+      const priority = (status: string) => {
+        if (status === "upcoming") return 0;
+        if (status === "read") return 1;
+        return 2;
+      };
 
-      const aValue =
-        key === "id"
-          ? Number(a.id ?? 0)
-          : key === "title"
-            ? String(a.title || "")
-            : key === "author"
-              ? String(a.author || "")
-              : key === "status"
-                ? String(getBookStatus(a) || "")
-                : key === "date"
-                  ? parseFlexibleDate(getDisplayDate(a))?.valueOf() ?? 0
-                  : key === "series"
-                    ? String(a.series_name || "")
-                    : Number(a.book_number ?? 0);
-
-      const bValue =
-        key === "id"
-          ? Number(b.id ?? 0)
-          : key === "title"
-            ? String(b.title || "")
-            : key === "author"
-              ? String(b.author || "")
-              : key === "status"
-                ? String(getBookStatus(b) || "")
-                : key === "date"
-                  ? parseFlexibleDate(getDisplayDate(b))?.valueOf() ?? 0
-                  : key === "series"
-                    ? String(b.series_name || "")
-                    : Number(b.book_number ?? 0);
-
-      if (typeof aValue === "number" && typeof bValue === "number") {
-        return aValue - bValue;
+      const priorityDelta = priority(statusA) - priority(statusB);
+      if (priorityDelta !== 0) {
+        return priorityDelta;
       }
 
-      return String(aValue).localeCompare(String(bValue), undefined, { sensitivity: "base" });
+      if (statusA === "upcoming") {
+        const aRelease = toDateValue(a.release_date || a.publication_date || getDisplayDate(a));
+        const bRelease = toDateValue(b.release_date || b.publication_date || getDisplayDate(b));
+        if (aRelease !== bRelease) {
+          return bRelease - aRelease;
+        }
+      }
+
+      if (statusA === "read") {
+        const aRead = toDateValue(a.read_date || getDisplayDate(a));
+        const bRead = toDateValue(b.read_date || getDisplayDate(b));
+        if (aRead !== bRead) {
+          return bRead - aRead;
+        }
+      }
+
+      const aId = Number(a.id ?? 0);
+      const bId = Number(b.id ?? 0);
+      if (aId !== bId) {
+        return bId - aId;
+      }
+
+      return String(a.title || "").localeCompare(String(b.title || ""), undefined, { sensitivity: "base" });
     });
 
-    return sortConfig.direction === "asc" ? sorted : sorted.reverse();
-  }, [filteredBooks, sortConfig]);
+    const base = !sortConfig.key
+      ? withPriorityOrder
+      : [...withPriorityOrder].sort((a, b) => {
+          const statusA = normalizeText(getBookStatus(a));
+          const statusB = normalizeText(getBookStatus(b));
+          const priority = (status: string) => {
+            if (status === "upcoming") return 0;
+            if (status === "read") return 1;
+            return 2;
+          };
+
+          const priorityDelta = priority(statusA) - priority(statusB);
+          if (priorityDelta !== 0) {
+            return priorityDelta;
+          }
+
+          const key = sortConfig.key;
+
+          const aValue =
+            key === "id"
+              ? Number(a.id ?? 0)
+              : key === "title"
+                ? String(a.title || "")
+                : key === "author"
+                  ? String(a.author || "")
+                  : key === "status"
+                    ? String(getBookStatus(a) || "")
+                    : key === "date"
+                      ? parseFlexibleDate(getDisplayDate(a))?.valueOf() ?? 0
+                      : key === "series"
+                        ? String(a.series_name || "")
+                        : Number(a.book_number ?? 0);
+
+          const bValue =
+            key === "id"
+              ? Number(b.id ?? 0)
+              : key === "title"
+                ? String(b.title || "")
+                : key === "author"
+                  ? String(b.author || "")
+                  : key === "status"
+                    ? String(getBookStatus(b) || "")
+                    : key === "date"
+                      ? parseFlexibleDate(getDisplayDate(b))?.valueOf() ?? 0
+                      : key === "series"
+                        ? String(b.series_name || "")
+                        : Number(b.book_number ?? 0);
+
+          const keyResult =
+            typeof aValue === "number" && typeof bValue === "number"
+              ? aValue - bValue
+              : String(aValue).localeCompare(String(bValue), undefined, { sensitivity: "base" });
+
+          if (keyResult !== 0) {
+            return sortConfig.direction === "asc" ? keyResult : -keyResult;
+          }
+
+          if (statusA === "upcoming") {
+            const aRelease = toDateValue(a.release_date || a.publication_date || getDisplayDate(a));
+            const bRelease = toDateValue(b.release_date || b.publication_date || getDisplayDate(b));
+            if (aRelease !== bRelease) {
+              return bRelease - aRelease;
+            }
+          }
+
+          if (statusA === "read") {
+            const aRead = toDateValue(a.read_date || getDisplayDate(a));
+            const bRead = toDateValue(b.read_date || getDisplayDate(b));
+            if (aRead !== bRead) {
+              return bRead - aRead;
+            }
+          }
+
+          return Number(b.id ?? 0) - Number(a.id ?? 0);
+        });
+
+    const sorted = base;
+
+    if (pinnedBookId === null) {
+      return sorted;
+    }
+
+    const pinnedIndex = sorted.findIndex((book) => Number(book?.id) === pinnedBookId);
+    if (pinnedIndex <= 0) {
+      return sorted;
+    }
+
+    const next = [...sorted];
+    const [pinned] = next.splice(pinnedIndex, 1);
+    next.unshift(pinned);
+    return next;
+  }, [filteredBooks, sortConfig, pinnedBookId]);
 
   function toggleSort(key: BookSortKey) {
     setSortConfig((prev) => {
@@ -570,14 +716,11 @@ export default function BooksClient() {
     setSortConfig({ key, direction: mode });
   }
 
-  function toggleValueFilter(kind: "title" | "author" | "series" | "status", value: string) {
-    setValueFilters((prev) => {
-      const exists = prev[kind].includes(value);
-      return {
-        ...prev,
-        [kind]: exists ? prev[kind].filter((item) => item !== value) : [...prev[kind], value],
-      };
-    });
+  function setValueFilter(kind: "title" | "author" | "series" | "status", values: string[]) {
+    setValueFilters((prev) => ({
+      ...prev,
+      [kind]: values,
+    }));
   }
 
   function clearFilters() {
@@ -680,7 +823,7 @@ export default function BooksClient() {
         params.set("author", author);
       }
 
-      const response = await fetch(`http://localhost:8000/books/lookup?${params.toString()}`);
+      const response = await fetchApiWithFallback(`/books/lookup?${params.toString()}`);
       if (!response.ok) {
         throw new Error(`Lookup failed (${response.status})`);
       }
@@ -787,7 +930,7 @@ export default function BooksClient() {
     }
 
     try {
-      const response = await fetch(`http://localhost:8000/books/${book.id}`, {
+      const response = await fetchApiWithFallback(`/books/${book.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -822,7 +965,7 @@ export default function BooksClient() {
     if (!confirm("Delete this book?")) return;
 
     try {
-      const response = await fetch(`http://localhost:8000/books/${bookId}`, {
+      const response = await fetchApiWithFallback(`/books/${bookId}`, {
         method: "DELETE",
       });
 
@@ -884,7 +1027,7 @@ export default function BooksClient() {
         if (matchedSeries) {
           resolvedSeriesId = Number(matchedSeries.id);
         } else {
-          const createSeriesResponse = await fetch("http://localhost:8000/series/", {
+          const createSeriesResponse = await fetchApiWithFallback("/series/", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -909,7 +1052,7 @@ export default function BooksClient() {
         : null;
       const releaseDate = readStatus !== "read" ? addBookForm.releaseDate.trim() : "";
 
-      const createBookResponse = await fetch("http://localhost:8000/books/", {
+      const createBookResponse = await fetchApiWithFallback("/books/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -933,6 +1076,7 @@ export default function BooksClient() {
 
       const createdBook = await createBookResponse.json();
       await Promise.all([fetchBooks(), fetchSeriesList()]);
+      setPinnedBookId(Number(createdBook?.id ?? null));
       setAddDialogOpen(false);
       resetAddBookForm();
       toast({
@@ -949,6 +1093,112 @@ export default function BooksClient() {
       });
     } finally {
       setSavingBook(false);
+    }
+  }
+
+  function openEditBookDialog(book: any) {
+    setEditBookForm({
+      id: Number(book.id),
+      title: String(book.title || ""),
+      author: String(book.author || ""),
+      seriesName: String(book.series_name || ""),
+      bookNumber: book.book_number !== null && book.book_number !== undefined ? String(book.book_number) : "",
+      status: (getBookStatus(book) as "unread" | "upcoming" | "read") || "unread",
+      date: String(getDisplayDate(book) || ""),
+    });
+    setEditDialogOpen(true);
+  }
+
+  async function handleSaveBookEdit() {
+    const bookId = Number(editBookForm.id);
+    if (!Number.isFinite(bookId) || bookId <= 0) return;
+
+    const title = editBookForm.title.trim();
+    const author = editBookForm.author.trim();
+    if (!title || !author) {
+      toast({ title: "Missing info", description: "Title and author are required." });
+      return;
+    }
+
+    const numberRaw = editBookForm.bookNumber.trim();
+    const parsedBookNumber = numberRaw ? Number(numberRaw) : null;
+    if (numberRaw && !Number.isFinite(parsedBookNumber)) {
+      toast({ title: "Invalid book number", description: "Book number must be numeric when provided." });
+      return;
+    }
+
+    setSavingEditBook(true);
+    try {
+      let resolvedSeriesId: number | null = null;
+      const seriesName = editBookForm.seriesName.trim();
+
+      if (seriesName) {
+        const normalizedSeriesName = normalizeText(seriesName);
+        const normalizedAuthor = normalizeText(author);
+        const matchedSeries = seriesList.find((series) => {
+          if (normalizeText(series.name) !== normalizedSeriesName) return false;
+          const existingAuthor = normalizeText(series.author);
+          return !existingAuthor || !normalizedAuthor || existingAuthor === normalizedAuthor;
+        });
+
+        if (matchedSeries) {
+          resolvedSeriesId = Number(matchedSeries.id);
+        } else {
+          const createSeriesResponse = await fetchApiWithFallback("/series/", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: seriesName, author }),
+          });
+          if (!createSeriesResponse.ok) {
+            throw new Error(`Failed to create series (${createSeriesResponse.status})`);
+          }
+          const createdSeries = await createSeriesResponse.json();
+          resolvedSeriesId = Number(createdSeries.id);
+        }
+      }
+
+      const status = editBookForm.status;
+      const normalizedDate = editBookForm.date.trim() || null;
+      const payload: any = {
+        title,
+        author,
+        series_id: resolvedSeriesId,
+        series_order: parsedBookNumber,
+        book_number: parsedBookNumber,
+        read_status: status,
+        is_read: status === "read",
+      };
+
+      if (status === "read") {
+        payload.read_date = normalizedDate || new Date().toISOString().split("T")[0];
+        payload.release_date = null;
+      } else {
+        payload.read_date = null;
+        payload.release_date = normalizedDate || null;
+      }
+
+      const response = await fetchApiWithFallback(`/books/${bookId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to update book (${response.status})`);
+      }
+
+      const updatedBook = await response.json();
+      setBooks((prev) => prev.map((item) => (item.id === updatedBook.id ? { ...item, ...updatedBook } : item)));
+      publishBookStatusUpdate(updatedBook);
+      setEditDialogOpen(false);
+      setEditBookForm(EMPTY_EDIT_BOOK_FORM);
+      toast({ title: "Book updated", description: `Saved changes for ${updatedBook.title}.` });
+      await fetchSeriesList();
+    } catch (error) {
+      console.error("Error updating book:", error);
+      toast({ title: "Error", description: error instanceof Error ? error.message : "Failed to update book." });
+    } finally {
+      setSavingEditBook(false);
     }
   }
 
@@ -1006,7 +1256,7 @@ export default function BooksClient() {
                   label="Filter"
                   options={titleOptions}
                   selectedValues={valueFilters.title}
-                  onToggleValue={(value) => toggleValueFilter("title", value)}
+                  onApplyValues={(values) => setValueFilter("title", values)}
                   onClear={() => {
                     setValueFilters((prev) => ({ ...prev, title: [] }));
                     setValueFilterSearch((prev) => ({ ...prev, title: "" }));
@@ -1021,7 +1271,7 @@ export default function BooksClient() {
                   label="Filter"
                   options={authorOptions}
                   selectedValues={valueFilters.author}
-                  onToggleValue={(value) => toggleValueFilter("author", value)}
+                  onApplyValues={(values) => setValueFilter("author", values)}
                   onClear={() => {
                     setValueFilters((prev) => ({ ...prev, author: [] }));
                     setValueFilterSearch((prev) => ({ ...prev, author: "" }));
@@ -1037,7 +1287,7 @@ export default function BooksClient() {
                     label="Filter"
                     options={statusOptions}
                     selectedValues={valueFilters.status}
-                    onToggleValue={(value) => toggleValueFilter("status", value)}
+                    onApplyValues={(values) => setValueFilter("status", values)}
                     onClear={() => {
                       setValueFilters((prev) => ({ ...prev, status: [] }));
                       setValueFilterSearch((prev) => ({ ...prev, status: "" }));
@@ -1067,7 +1317,7 @@ export default function BooksClient() {
                   label="Filter"
                   options={seriesOptions}
                   selectedValues={valueFilters.series}
-                  onToggleValue={(value) => toggleValueFilter("series", value)}
+                  onApplyValues={(values) => setValueFilter("series", values)}
                   onClear={() => {
                     setValueFilters((prev) => ({ ...prev, series: [] }));
                     setValueFilterSearch((prev) => ({ ...prev, series: "" }));
@@ -1201,6 +1451,15 @@ export default function BooksClient() {
                       onClick={() => toggleRead(b)}
                     >
                       {b.is_read ? "Mark unread" : "Mark read"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-6 px-1.5 text-[10px]"
+                      onClick={() => openEditBookDialog(b)}
+                    >
+                      Edit
                     </Button>
                     <Button
                       type="button"
@@ -1397,6 +1656,100 @@ export default function BooksClient() {
           <DialogFooter showCloseButton>
             <Button type="button" onClick={handleAddBook} disabled={savingBook}>
               {savingBook ? "Saving..." : "Save book"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={editDialogOpen}
+        onOpenChange={(open) => {
+          setEditDialogOpen(open);
+          if (!open) {
+            setEditBookForm(EMPTY_EDIT_BOOK_FORM);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Edit Book</DialogTitle>
+            <DialogDescription>
+              Update core book metadata from the library without leaving this page.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1 sm:col-span-2">
+              <Label htmlFor="edit-book-title">Title</Label>
+              <Input
+                id="edit-book-title"
+                value={editBookForm.title}
+                onChange={(event) => setEditBookForm((prev) => ({ ...prev, title: event.target.value }))}
+              />
+            </div>
+
+            <div className="space-y-1 sm:col-span-2">
+              <Label htmlFor="edit-book-author">Author</Label>
+              <Input
+                id="edit-book-author"
+                value={editBookForm.author}
+                onChange={(event) => setEditBookForm((prev) => ({ ...prev, author: event.target.value }))}
+              />
+            </div>
+
+            <div className="space-y-1 sm:col-span-2">
+              <Label htmlFor="edit-book-series">Series (optional)</Label>
+              <Input
+                id="edit-book-series"
+                value={editBookForm.seriesName}
+                onChange={(event) => setEditBookForm((prev) => ({ ...prev, seriesName: event.target.value }))}
+                placeholder="Series name"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="edit-book-number">Book #</Label>
+              <Input
+                id="edit-book-number"
+                value={editBookForm.bookNumber}
+                onChange={(event) => setEditBookForm((prev) => ({ ...prev, bookNumber: event.target.value }))}
+                placeholder="e.g. 24"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="edit-book-status">Status</Label>
+              <select
+                id="edit-book-status"
+                value={editBookForm.status}
+                onChange={(event) =>
+                  setEditBookForm((prev) => ({
+                    ...prev,
+                    status: event.target.value as "unread" | "upcoming" | "read",
+                  }))
+                }
+                className="h-9 w-full rounded border bg-background px-2 text-sm"
+              >
+                <option value="unread">unread</option>
+                <option value="upcoming">upcoming</option>
+                <option value="read">read</option>
+              </select>
+            </div>
+
+            <div className="space-y-1 sm:col-span-2">
+              <Label htmlFor="edit-book-date">Date</Label>
+              <Input
+                id="edit-book-date"
+                value={editBookForm.date}
+                onChange={(event) => setEditBookForm((prev) => ({ ...prev, date: event.target.value }))}
+                placeholder={editBookForm.status === "read" ? "Read date" : "Release date"}
+              />
+            </div>
+          </div>
+
+          <DialogFooter showCloseButton>
+            <Button type="button" onClick={handleSaveBookEdit} disabled={savingEditBook}>
+              {savingEditBook ? "Saving..." : "Save changes"}
             </Button>
           </DialogFooter>
         </DialogContent>

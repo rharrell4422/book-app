@@ -79,7 +79,7 @@ def read_series_by_id(series_id: int, db: Session = Depends(get_db)):
 
 
         # 5. Return enriched response
-    is_finished = bool(db_series.is_finished or intelligence["is_series_finished"])
+    is_finished = bool(intelligence.get("is_series_finished"))
 
     return schemas.SeriesDetailResponse(
         id=db_series.id,
@@ -91,8 +91,8 @@ def read_series_by_id(series_id: int, db: Session = Depends(get_db)):
         is_finished=is_finished,
         total_books=intelligence["total_books"],
         series_status="finished" if is_finished else "ongoing",
-        next_unread_book_number=intelligence["next_unread_book_id"],
-        next_upcoming_book_number=intelligence["next_upcoming_book_id"],
+        next_unread_book_number=intelligence.get("next_unread_book_number"),
+        next_upcoming_book_number=intelligence.get("next_upcoming_book_number"),
         missing_books=intelligence["missing_orders"],
         created_at=db_series.created_at,
         updated_at=db_series.updated_at,
@@ -107,6 +107,58 @@ def update_series(series_id: int, series: schemas.SeriesBase, db: Session = Depe
     if not updated:
         raise HTTPException(status_code=404, detail="Series not found")
     return updated
+
+
+@app.post("/series/{series_id}/mark_unfinished")
+def mark_series_unfinished(series_id: int, db: Session = Depends(get_db)):
+    db_series = crud.get_series(db, series_id)
+    if not db_series:
+        raise HTTPException(status_code=404, detail="Series not found")
+
+    books = crud.get_books_by_series(db, series_id)
+    for book in books:
+        book.is_series_finished = False
+
+    db_series.is_finished = False
+    db_series.series_status = "ongoing"
+
+    db.commit()
+
+    intelligence = compute_series_intelligence_for_series(db, series_id)
+    is_finished = bool(intelligence.get("is_series_finished")) if intelligence else False
+
+    return {
+        "series_id": series_id,
+        "updated_books": len(books),
+        "is_finished": is_finished,
+        "series_status": "finished" if is_finished else "ongoing",
+    }
+
+
+@app.post("/series/{series_id}/mark_finished")
+def mark_series_finished(series_id: int, db: Session = Depends(get_db)):
+    db_series = crud.get_series(db, series_id)
+    if not db_series:
+        raise HTTPException(status_code=404, detail="Series not found")
+
+    books = crud.get_books_by_series(db, series_id)
+    for book in books:
+        book.is_series_finished = True
+
+    db_series.is_finished = True
+    db_series.series_status = "finished"
+
+    db.commit()
+
+    intelligence = compute_series_intelligence_for_series(db, series_id)
+    is_finished = bool(intelligence.get("is_series_finished")) if intelligence else False
+
+    return {
+        "series_id": series_id,
+        "updated_books": len(books),
+        "is_finished": is_finished,
+        "series_status": "finished" if is_finished else "ongoing",
+    }
 
 
 @app.delete("/series/{series_id}")

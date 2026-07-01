@@ -29,6 +29,8 @@ def compute_series_intelligence_for_series(db, series_id: int):
             "missing_orders": [],
             "next_unread_book_id": None,
             "next_upcoming_book_id": None,
+            "next_unread_book_number": None,
+            "next_upcoming_book_number": None,
             "is_series_finished": False,
         }
 
@@ -49,6 +51,7 @@ def compute_series_intelligence_for_series(db, series_id: int):
 
     read_books = [b for b in books if b.is_read]
     unread_books = [b for b in books if not b.is_read]
+    has_no_series_finished_flag = any(b.is_series_finished is False for b in books)
 
     read_count = len(read_books)
     unread_count = len(unread_books)
@@ -60,14 +63,37 @@ def compute_series_intelligence_for_series(db, series_id: int):
     # Next unread
     next_unread = unread_books[0] if unread_books else None
 
-    # Upcoming = future release/publication date
+    # Upcoming = explicit upcoming status/flags OR future release/publication date.
     today = date.today()
-    upcoming_books = [
-        b for b in books
-        if (b.release_date or b.publication_date) and (b.release_date or b.publication_date) > today
-    ]
-    upcoming_books.sort(key=lambda b: b.release_date or b.publication_date)
+    upcoming_statuses = {"upcoming", "tbr", "to be read"}
+
+    def is_book_upcoming(book):
+        status = str(book.read_status or "").strip().lower()
+        has_status_upcoming = status in upcoming_statuses
+        has_upcoming_flag = bool(book.is_upcoming_auto or book.is_upcoming_final)
+        dated_release = book.release_date or book.publication_date
+        has_future_date = bool(dated_release and dated_release > today)
+        return has_status_upcoming or has_upcoming_flag or has_future_date
+
+    upcoming_books = [b for b in books if is_book_upcoming(b)]
+
+    def upcoming_sort_key(book):
+        dated_release = book.release_date or book.publication_date
+        number = book.book_number if book.book_number is not None else book.series_order
+        return (dated_release or date.max, number if number is not None else float("inf"), book.id)
+
+    upcoming_books.sort(key=upcoming_sort_key)
     next_upcoming = upcoming_books[0] if upcoming_books else None
+    has_upcoming = len(upcoming_books) > 0
+
+    def resolve_book_number(book):
+        if not book:
+            return None
+        if book.book_number is not None:
+            return float(book.book_number)
+        if book.series_order is not None:
+            return float(book.series_order)
+        return None
 
     return {
         "series_id": series_id,
@@ -77,7 +103,9 @@ def compute_series_intelligence_for_series(db, series_id: int):
         "missing_orders": missing_orders,
         "next_unread_book_id": next_unread.id if next_unread else None,
         "next_upcoming_book_id": next_upcoming.id if next_upcoming else None,
-        "is_series_finished": read_count == total_books,
+        "next_unread_book_number": resolve_book_number(next_unread),
+        "next_upcoming_book_number": resolve_book_number(next_upcoming),
+        "is_series_finished": (not has_upcoming) and (not has_no_series_finished_flag),
     }
 
 

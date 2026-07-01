@@ -149,7 +149,6 @@ function ValueFilterMenu({
                   checked={checked}
                   onChange={() => {
                     onToggleValue(option);
-                    setOpen(false);
                   }}
                 />
                 <span className="truncate">{option || "(blank)"}</span>
@@ -248,7 +247,24 @@ export default function SeriesPage() {
     containerWidth: number;
   } | null>(null);
   const firstSeriesId = series.length > 0 ? series[0]?.id : null;
-  const detailHref = firstSeriesId ? `/series/${firstSeriesId}` : "/series";
+  const detailHref = firstSeriesId ? `/series/${firstSeriesId}?fromView=${viewMode}` : "/series";
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sourceView = new URLSearchParams(window.location.search).get("view");
+    if (sourceView === "ongoing" || sourceView === "finished") {
+      setViewMode(sourceView);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    const current = url.searchParams.get("view");
+    if (current === viewMode) return;
+    url.searchParams.set("view", viewMode);
+    window.history.replaceState({}, "", url.toString());
+  }, [viewMode]);
 
   function sanitizeSavedSeriesColumnWidths(value: unknown): Record<SeriesColumnKey, number> | null {
     if (!value || typeof value !== "object") return null;
@@ -740,7 +756,7 @@ export default function SeriesPage() {
                 <TableCell>{s.total_books ?? "—"}</TableCell>
                 <TableCell>{formatDate(s.last_checked)}</TableCell>
                 <TableCell className="space-x-2 whitespace-nowrap">
-                  <Link href={`/series/${s.id}`}>
+                  <Link href={`/series/${s.id}?fromView=${viewMode}`}>
                     <Button variant="ghost" size="sm">
                       View books
                     </Button>

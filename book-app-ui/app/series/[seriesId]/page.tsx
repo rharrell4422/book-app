@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import {
@@ -211,6 +211,89 @@ function normalizeDateInput(value: string | null | undefined): string | null {
   return raw;
 }
 
+function parseMonthNameDateToIso(value: string): string | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  const normalized = raw.replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, "$1");
+
+  const parsed = new Date(normalized);
+  if (Number.isNaN(parsed.valueOf())) {
+    return null;
+  }
+
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function parseReleaseIntelText(text: string): Array<{ bookNumber: number; title: string; releaseDate: string | null }> {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return [];
+
+  const extractReleaseDate = (value: string): string | null => {
+    const monthNameMatch = value.match(
+      /\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?(?:,)?\s+\d{4}\b/i
+    );
+    if (monthNameMatch) {
+      return parseMonthNameDateToIso(monthNameMatch[0]);
+    }
+
+    const numericDateMatch = value.match(/\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/);
+    if (!numericDateMatch) {
+      return null;
+    }
+
+    return normalizeDateInput(numericDateMatch[0]);
+  };
+
+  const matches = Array.from(
+    normalized.matchAll(/Book\s*#?\s*(\d+(?:\.\d+)?)\b(?:\s*(?:\(([^)]+)\)|[:\-]\s*([^,.;|\n]+)))?/gi)
+  );
+  if (!matches.length) {
+    const fallbackMatch = normalized.match(/(?:book|bk)\s*#?\s*(\d+(?:\.\d+)?)/i);
+    if (!fallbackMatch) return [];
+
+    const fallbackNumber = Number(fallbackMatch[1]);
+    if (!Number.isFinite(fallbackNumber)) return [];
+
+    return [
+      {
+        bookNumber: fallbackNumber,
+        title: `Book ${fallbackNumber}`,
+        releaseDate: extractReleaseDate(normalized),
+      },
+    ];
+  }
+
+  const parsed = matches
+    .map((match, index) => {
+      const num = Number(match[1]);
+      if (!Number.isFinite(num)) return null;
+
+      const title = String(match[2] || match[3] || "").trim() || `Book ${num}`;
+      const start = match.index ?? 0;
+      const end = (matches[index + 1]?.index ?? normalized.length);
+      const localWindow = normalized.slice(start, end);
+      const releaseDate = extractReleaseDate(localWindow);
+
+      return {
+        bookNumber: num,
+        title,
+        releaseDate,
+      };
+    })
+    .filter((value): value is { bookNumber: number; title: string; releaseDate: string | null } => Boolean(value));
+
+  const byBookNumber = new Map<number, { bookNumber: number; title: string; releaseDate: string | null }>();
+  for (const entry of parsed) {
+    byBookNumber.set(entry.bookNumber, entry);
+  }
+
+  return Array.from(byBookNumber.values());
+}
+
 function getBookStatus(book: any) {
   if (book.read_status) {
     return String(book.read_status);
@@ -335,6 +418,93 @@ function normalizeSuggestedTitle(rawTitle: string, fallbackBookNumber?: string):
   return title || (fallbackBookNumber ? `Book ${fallbackBookNumber}` : "Untitled");
 }
 
+function escapeRegExp(value: string): string {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeBookTitleSafe(rawTitle: string, seriesName?: string, bookNumber?: number | null): string {
+  let title = String(rawTitle || "").trim();
+  if (!title) return "";
+
+  // Safe cleanup rules: remove common storefront/media suffixes and normalize spacing.
+  title = title.replace(/\s+ebook\s*$/i, "");
+  title = title.replace(/\s+kindle\s+edition\s*$/i, "");
+  title = title.replace(/\s*\(unabridged\)\s*$/i, "");
+  title = title.replace(/:\s*/g, ": ");
+  title = title.replace(/\(\s+/g, "(");
+  title = title.replace(/\s+\)/g, ")");
+  title = title.replace(/\s{2,}/g, " ");
+
+  const inferredBookNumberMatch = title.match(/\bbook\s+(\d+(?:\.\d+)?)\b/i);
+  const resolvedBookNumber = Number.isFinite(bookNumber ?? NaN)
+    ? Number(bookNumber)
+    : inferredBookNumberMatch
+      ? Number(inferredBookNumberMatch[1])
+      : null;
+  const inferredSeriesNameMatch = title.match(/\(\s*([^()]*?)\s+book\s*\d+(?:\.\d+)?\s*\)\s*$/i);
+  const inferredSeriesName = inferredSeriesNameMatch ? String(inferredSeriesNameMatch[1] || "").trim() : "";
+  const cleanSeriesName = String(seriesName || inferredSeriesName || "").trim();
+
+  // Remove trailing parenthesized book markers from mixed source formats,
+  // including entries that use word-based ordinals (e.g. "Book Nineteen").
+  title = title
+    .replace(/\s*\([^)]*\bbook\b[^)]*\)\s*:\s*$/i, "")
+    .replace(/\s*\([^)]*\bbook\b[^)]*\)\s*$/i, "")
+    .trim();
+
+  // Canonicalize noisy LitRPG subtitles to a consistent short form.
+  title = title.replace(/:\s*a\s+litrpg\s+apocalypse\s*:?\s*$/i, ": A LitRPG").trim();
+  title = title.replace(/:\s*a\s+litrpg\s+(?:adventure|novel|saga|epic|fantasy|progression\s+fantasy)\s*:?\s*$/i, ": A LitRPG").trim();
+  title = title.replace(/:\s*litrpg\s+(?:adventure|novel|saga|epic|fantasy|progression\s+fantasy)\s*:?\s*$/i, ": LitRPG").trim();
+
+  // Remove embedded series-name tails like ": Series Name, Book N" or ": Series Name".
+  if (cleanSeriesName) {
+    const escapedSeriesName = escapeRegExp(cleanSeriesName);
+    title = title
+      .replace(new RegExp(`:\\s*${escapedSeriesName}\\s*,?\\s*book\\s*\\d+(?:\\.\\d+)?\\s*$`, "i"), "")
+      .replace(new RegExp(`:\\s*${escapedSeriesName}\\s*$`, "i"), "")
+      .trim();
+  }
+
+  // Replace generic stems like "Book 13" with "Series Name 13" when series context exists.
+  if (cleanSeriesName) {
+    const genericBookStemMatch = title.match(/^book\s+(\d+(?:\.\d+)?)\s*:??\s*$/i);
+    if (genericBookStemMatch) {
+      const numberFromStem = Number(genericBookStemMatch[1]);
+      const normalizedNumber = Number.isFinite(numberFromStem)
+        ? numberFromStem
+        : resolvedBookNumber;
+      const prettyNumber = normalizedNumber !== null
+        ? (Number.isInteger(normalizedNumber) ? String(Math.trunc(normalizedNumber)) : String(normalizedNumber))
+        : "";
+      title = prettyNumber ? `${cleanSeriesName} ${prettyNumber}` : cleanSeriesName;
+    }
+  }
+
+  // Ensure the display standard: "Title: (Series Name Book N)"
+  title = title.replace(/\s{2,}/g, " ").trim();
+  const isCollectionTitle = /\bbox\s*set\b|\bbooks?\s+\d+\s*[-–]\s*\d+\b/i.test(title);
+
+  if (isCollectionTitle) {
+    return title;
+  }
+
+  if (!title) {
+    title = resolvedBookNumber !== null ? `Book ${resolvedBookNumber}` : "Untitled";
+  }
+  title = title.replace(/\s*:\s*$/, "").trim();
+  title = `${title}:`;
+
+  if (cleanSeriesName && resolvedBookNumber !== null) {
+    const prettyBookNumber = Number.isInteger(resolvedBookNumber)
+      ? String(Math.trunc(resolvedBookNumber))
+      : String(resolvedBookNumber);
+    title = `${title} (${cleanSeriesName} Book ${prettyBookNumber})`;
+  }
+
+  return title.trim();
+}
+
 function inferSeriesTitleSuffix(books: any[]): string | null {
   const suffixCounts: Record<string, number> = {};
   const suffixDisplay: Record<string, string> = {};
@@ -443,7 +613,11 @@ function saveStoreOnlyPreference(seriesId: string, value: boolean) {
 
 export default function SeriesDetailPage() {
   const params = useParams();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const seriesId = params.seriesId as string;
+  const fromView = searchParams.get("fromView") === "finished" ? "finished" : "ongoing";
+  const viewAllSeriesHref = `/series?view=${fromView}`;
   const [series, setSeries] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -466,7 +640,21 @@ export default function SeriesDetailPage() {
   const [scanCurrentOrder, setScanCurrentOrder] = useState<string | null>(null);
   const [serpUsageCount, setSerpUsageCount] = useState(0);
   const [recentAddMessage, setRecentAddMessage] = useState<string | null>(null);
+  const [releaseIntelText, setReleaseIntelText] = useState("");
+  const [releaseIntelSaving, setReleaseIntelSaving] = useState(false);
+  const [releaseIntelMessage, setReleaseIntelMessage] = useState<string | null>(null);
+  const [addBookDialogOpen, setAddBookDialogOpen] = useState(false);
+  const [addBookSaving, setAddBookSaving] = useState(false);
+  const [addBookTitle, setAddBookTitle] = useState("");
+  const [addBookNumber, setAddBookNumber] = useState("");
+  const [addBookStatus, setAddBookStatus] = useState<"upcoming" | "unread" | "read">("upcoming");
+  const [addBookDate, setAddBookDate] = useState("");
+  const [recentUpcomingBookIds, setRecentUpcomingBookIds] = useState<number[]>([]);
+  const [titleNormalizeSaving, setTitleNormalizeSaving] = useState(false);
+  const [releaseIntelDialogOpen, setReleaseIntelDialogOpen] = useState(false);
+  const [normalizeTitlesDialogOpen, setNormalizeTitlesDialogOpen] = useState(false);
   const [columnWidths, setColumnWidths] = useState<Record<SeriesDetailColumnKey, number>>(DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS);
+  const [columnWidthsHydrated, setColumnWidthsHydrated] = useState(false);
   const scanAbortRef = useRef<AbortController | null>(null);
   const scanPendingRef = useRef<string[]>([]);
   const scanCompletedRef = useRef(0);
@@ -487,15 +675,20 @@ export default function SeriesDetailPage() {
     const candidate = value as Partial<Record<SeriesDetailColumnKey, unknown>>;
     const keys: SeriesDetailColumnKey[] = ["title", "author", "status", "date", "bookNumber", "actions"];
     const next: Partial<Record<SeriesDetailColumnKey, number>> = {};
+    let hasAtLeastOneSavedKey = false;
 
     for (const key of keys) {
       const raw = candidate[key];
-      if (typeof raw !== "number" || !Number.isFinite(raw)) {
-        return null;
+      if (typeof raw === "number" && Number.isFinite(raw)) {
+        const minimum = MIN_SERIES_DETAIL_COLUMN_WIDTHS[key];
+        next[key] = Math.max(minimum, Number(raw));
+        hasAtLeastOneSavedKey = true;
+      } else {
+        next[key] = DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS[key];
       }
-      const minimum = MIN_SERIES_DETAIL_COLUMN_WIDTHS[key];
-      next[key] = Math.max(minimum, Number(raw));
     }
+
+    if (!hasAtLeastOneSavedKey) return null;
 
     const total = keys.reduce((sum, key) => sum + (next[key] ?? 0), 0);
     if (total <= 0) return null;
@@ -514,25 +707,29 @@ export default function SeriesDetailPage() {
     try {
       const storageKey = `${SERIES_DETAIL_TABLE_COLUMN_WIDTHS_STORAGE_PREFIX}${seriesId}`;
       const saved = window.localStorage.getItem(storageKey);
-      if (!saved) return;
-      const parsed = JSON.parse(saved);
-      const restored = sanitizeSavedSeriesDetailColumnWidths(parsed);
-      if (restored) {
-        setColumnWidths(restored);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        const restored = sanitizeSavedSeriesDetailColumnWidths(parsed);
+        if (restored) {
+          setColumnWidths(restored);
+        }
       }
     } catch {
       // Ignore storage parse/read errors and keep defaults.
+    } finally {
+      setColumnWidthsHydrated(true);
     }
   }, [seriesId]);
 
   useEffect(() => {
+    if (!columnWidthsHydrated) return;
     try {
       const storageKey = `${SERIES_DETAIL_TABLE_COLUMN_WIDTHS_STORAGE_PREFIX}${seriesId}`;
       window.localStorage.setItem(storageKey, JSON.stringify(columnWidths));
     } catch {
       // Ignore storage write errors.
     }
-  }, [seriesId, columnWidths]);
+  }, [seriesId, columnWidths, columnWidthsHydrated]);
 
   useEffect(() => {
     const handleMouseMove = (event: MouseEvent) => {
@@ -726,6 +923,21 @@ export default function SeriesDetailPage() {
     return unsubscribe;
   }, []);
 
+  useEffect(() => {
+    if (!Array.isArray(series?.books)) {
+      return;
+    }
+
+    const upcomingIds = new Set(
+      series.books
+        .filter((book: any) => getBookStatus(book) === "upcoming")
+        .map((book: any) => Number(book.id))
+        .filter((id: number) => Number.isFinite(id))
+    );
+
+    setRecentUpcomingBookIds((prev) => prev.filter((id) => upcomingIds.has(id)));
+  }, [series?.books]);
+
   async function runBackgroundScan(
     orders: string[],
     seriesData: any,
@@ -823,14 +1035,44 @@ export default function SeriesDetailPage() {
   }
 
   const books: any[] = Array.isArray(series.books) ? series.books : [];
-  const displayedBooks =
-    bookSortMode === "az"
-      ? [...books].sort((a, b) =>
-          String(a?.title || "").localeCompare(String(b?.title || ""), undefined, {
-            sensitivity: "base",
-          })
-        )
-      : sortBooksBySeriesOrder(books);
+  const displayedBooks = (() => {
+    if (bookSortMode === "az") {
+      return [...books].sort((a, b) =>
+        String(a?.title || "").localeCompare(String(b?.title || ""), undefined, {
+          sensitivity: "base",
+        })
+      );
+    }
+
+    const ordered = sortBooksBySeriesOrder(books);
+    if (!recentUpcomingBookIds.length) {
+      return ordered;
+    }
+
+    const rankByPinnedOrder = new Map<number, number>();
+    recentUpcomingBookIds.forEach((id, index) => {
+      rankByPinnedOrder.set(id, index);
+    });
+
+    const pinnedUpcoming = ordered
+      .filter((book) => {
+        const id = Number(book?.id);
+        return rankByPinnedOrder.has(id) && getBookStatus(book) === "upcoming";
+      })
+      .sort((a, b) => {
+        const aRank = rankByPinnedOrder.get(Number(a?.id)) ?? Number.MAX_SAFE_INTEGER;
+        const bRank = rankByPinnedOrder.get(Number(b?.id)) ?? Number.MAX_SAFE_INTEGER;
+        return aRank - bRank;
+      });
+
+    if (!pinnedUpcoming.length) {
+      return ordered;
+    }
+
+    const pinnedIdSet = new Set(pinnedUpcoming.map((book) => Number(book?.id)));
+    const rest = ordered.filter((book) => !pinnedIdSet.has(Number(book?.id)));
+    return [...pinnedUpcoming, ...rest];
+  })();
   const missingOrders: string[] = Array.isArray(series.missing_books)
     ? series.missing_books
     : [];
@@ -850,6 +1092,27 @@ export default function SeriesDetailPage() {
   const quickVisibleSuggestions = storeOnly
     ? quickSortedSuggestions.filter(isStoreSuggestion)
     : quickSortedSuggestions;
+  const titleNormalizationPreview = displayedBooks
+    .map((book) => {
+      const currentTitle = String(book?.title || "").trim();
+      const normalizedTitle = normalizeBookTitleSafe(
+        currentTitle,
+        series?.name,
+        Number(book?.book_number ?? book?.series_order ?? NaN),
+      );
+      if (!currentTitle || !normalizedTitle || currentTitle === normalizedTitle) {
+        return null;
+      }
+      return {
+        id: Number(book.id),
+        currentTitle,
+        normalizedTitle,
+      };
+    })
+    .filter(
+      (value): value is { id: number; currentTitle: string; normalizedTitle: string } =>
+        Boolean(value)
+    );
 
   function setStoreOnlyAndPersist(value: boolean) {
     setStoreOnly(value);
@@ -876,6 +1139,112 @@ export default function SeriesDetailPage() {
       setRecentAddMessage(null);
       addMessageTimeoutRef.current = null;
     }, 5000);
+  }
+
+  async function refreshSeriesFromApi() {
+    const response = await fetchApiWithFallback(`/series/${seriesId}`, {
+      cache: "no-store",
+    });
+    const data = await response.json();
+    setSeries(data);
+  }
+
+  async function handleApplyReleaseIntel() {
+    const parsedEntries = parseReleaseIntelText(releaseIntelText);
+    if (!parsedEntries.length) {
+      alert("I could not detect entries like 'Book 11 (Title)', 'Book 11: Title', or 'Book 11 ... releases on Month Day, Year'.");
+      return;
+    }
+
+    setReleaseIntelSaving(true);
+    setReleaseIntelMessage(null);
+
+    try {
+      let created = 0;
+      let updated = 0;
+
+      const existingBooks: any[] = Array.isArray(series?.books) ? series.books : [];
+
+      for (const entry of parsedEntries) {
+        const existing = existingBooks.find((book) => Number(book?.book_number) === entry.bookNumber);
+        const authorValue = String(series?.author || existing?.author || "Unknown author").trim();
+        const normalizedTitle = canonicalizeSuggestionTitle(
+          entry.title,
+          String(entry.bookNumber),
+          existingBooks,
+          series?.name,
+        );
+
+        if (existing?.id) {
+          const response = await fetchApiWithFallback(`/books/${existing.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: normalizedTitle,
+              author: authorValue,
+              is_read: false,
+              read_status: "upcoming",
+              release_date: entry.releaseDate || undefined,
+              publication_date: entry.releaseDate || undefined,
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error(`Failed to update book #${entry.bookNumber}`);
+          }
+          updated += 1;
+        } else {
+          const response = await fetchApiWithFallback("/books/", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: normalizedTitle,
+              author: authorValue,
+              series_id: Number(series.id),
+              series_order: entry.bookNumber,
+              book_number: entry.bookNumber,
+              is_read: false,
+              read_status: "upcoming",
+              release_date: entry.releaseDate || undefined,
+              publication_date: entry.releaseDate || undefined,
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error(`Failed to create book #${entry.bookNumber}`);
+          }
+          created += 1;
+        }
+      }
+
+      await fetchApiWithFallback(`/series/${series.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: series.name,
+          author: series.author || undefined,
+          description: series.description || undefined,
+          genre: series.genre || undefined,
+          tags: series.tags || undefined,
+          total_books: series.total_books ?? totalBooks,
+          series_status: "ongoing",
+          next_unread_book_number: series.next_unread_book_number ?? undefined,
+          next_upcoming_book_number: series.next_upcoming_book_number ?? undefined,
+          missing_books: series.missing_books ?? undefined,
+          is_finished: false,
+        }),
+      });
+
+      await refreshSeriesFromApi();
+      setReleaseIntelMessage(`Applied release intel: created ${created}, updated ${updated}.`);
+      setReleaseIntelText("");
+    } catch (error) {
+      console.error(error);
+      const message = error instanceof Error ? error.message : "Unable to apply release intel.";
+      alert(message);
+    } finally {
+      setReleaseIntelSaving(false);
+    }
   }
 
   function removeOrderFromScanTracking(bookNumber: string) {
@@ -907,6 +1276,87 @@ export default function SeriesDetailPage() {
       completedCount: scanCompletedRef.current,
       totalCount: scanTotalRef.current,
     });
+  }
+
+  async function handleEditBookTitle(book: any) {
+    const currentTitle = String(book?.title || "").trim();
+    const editedTitle = prompt("Edit book title:", currentTitle);
+    if (editedTitle === null) {
+      return;
+    }
+
+    const nextTitle = String(editedTitle || "").trim();
+    if (!nextTitle) {
+      alert("Title cannot be empty.");
+      return;
+    }
+    if (nextTitle === currentTitle) {
+      return;
+    }
+
+    try {
+      const response = await fetchApiWithFallback(`/books/${book.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: nextTitle }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to update title (${response.status})`);
+      }
+
+      const updatedBook = await response.json();
+      setSeries((prev: any) => ({
+        ...prev,
+        books: Array.isArray(prev?.books)
+          ? prev.books.map((item: any) => (item.id === updatedBook.id ? { ...item, ...updatedBook } : item))
+          : prev?.books,
+      }));
+      flashAddedMessage(`Updated title for book #${book.book_number ?? "?"}.`);
+    } catch (error) {
+      console.error(error);
+      alert("Unable to update title right now.");
+    }
+  }
+
+  async function handleApplyTitleNormalization() {
+    if (!titleNormalizationPreview.length) {
+      return;
+    }
+
+    setTitleNormalizeSaving(true);
+    try {
+      const updatedById = new Map<number, any>();
+
+      for (const row of titleNormalizationPreview) {
+        const response = await fetchApiWithFallback(`/books/${row.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: row.normalizedTitle }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to normalize title for book id ${row.id}`);
+        }
+
+        const updatedBook = await response.json();
+        updatedById.set(updatedBook.id, updatedBook);
+      }
+
+      setSeries((prev: any) => ({
+        ...prev,
+        books: Array.isArray(prev?.books)
+          ? prev.books.map((item: any) => (updatedById.has(item.id) ? { ...item, ...updatedById.get(item.id) } : item))
+          : prev?.books,
+      }));
+
+      flashAddedMessage(`Normalized ${updatedById.size} title${updatedById.size === 1 ? "" : "s"}.`);
+    } catch (error) {
+      console.error(error);
+      alert("Unable to apply title normalization right now.");
+    } finally {
+      setTitleNormalizeSaving(false);
+    }
   }
 
   function buildGoodreadsSearchUrl(query: string) {
@@ -1118,38 +1568,44 @@ export default function SeriesDetailPage() {
 
   async function handleToggleSeriesFinished() {
     if (!series) return;
-
-    const nextIsFinished = !Boolean(series.is_finished);
     setFinishedToggleSaving(true);
 
     try {
-        const response = await fetchApiWithFallback(`/series/${series.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: series.name,
-          author: series.author || undefined,
-          description: series.description || undefined,
-          genre: series.genre || undefined,
-          tags: series.tags || undefined,
-          total_books: series.total_books ?? displayedBooks.length,
-          series_status: nextIsFinished ? "finished" : "ongoing",
-          next_unread_book_number: series.next_unread_book_number ?? undefined,
-          next_upcoming_book_number: series.next_upcoming_book_number ?? undefined,
-          missing_books: series.missing_books ?? undefined,
-          is_finished: nextIsFinished,
-        }),
-      });
+      const movingToUnfinished = Boolean(series.is_finished);
+      const confirmed = window.confirm(
+        movingToUnfinished
+          ? "Move this series to unfinished?"
+          : "Move this series to finished?"
+      );
+      if (!confirmed) {
+        return;
+      }
+
+      const endpoint = movingToUnfinished
+        ? `/series/${series.id}/mark_unfinished`
+        : `/series/${series.id}/mark_finished`;
+      const response = await fetchApiWithFallback(endpoint, { method: "POST" });
 
       if (!response.ok) {
         throw new Error(`Failed to update series (${response.status})`);
       }
 
-      setSeries((prev: any) => prev ? {
-        ...prev,
-        is_finished: nextIsFinished,
-        series_status: nextIsFinished ? "finished" : "ongoing",
-      } : prev);
+      const result = await response.json();
+      await refreshSeriesFromApi();
+
+      if (movingToUnfinished) {
+        flashAddedMessage("Series moved to unfinished.");
+        window.setTimeout(() => {
+          router.push("/series?view=finished");
+        }, 700);
+      } else if (result?.is_finished) {
+        flashAddedMessage("Series moved to finished.");
+        window.setTimeout(() => {
+          router.push("/series?view=ongoing");
+        }, 700);
+      } else {
+        flashAddedMessage("Finished override saved, but series remains ongoing due to current intelligence rules.");
+      }
     } catch (err) {
       console.error(err);
       alert("Unable to update series finished state right now.");
@@ -1414,6 +1870,9 @@ export default function SeriesDetailPage() {
       }
 
       const newBook = await response.json();
+      if (normalizedStatus === "upcoming") {
+        setRecentUpcomingBookIds((prev) => [Number(newBook.id), ...prev.filter((id) => id !== Number(newBook.id))]);
+      }
       setSeries((prev: any) => ({
         ...prev,
         books: sortBooksBySeriesOrder([...(prev.books || []), newBook]),
@@ -1496,6 +1955,9 @@ export default function SeriesDetailPage() {
       }
 
       const updatedBook = await response.json();
+      if (normalizedStatus === "upcoming") {
+        setRecentUpcomingBookIds((prev) => [Number(updatedBook.id), ...prev.filter((id) => id !== Number(updatedBook.id))]);
+      }
       setSeries((prev: any) => ({
         ...prev,
         books: sortBooksBySeriesOrder([...(prev.books || []), updatedBook]),
@@ -1511,6 +1973,82 @@ export default function SeriesDetailPage() {
     }
   }
 
+  async function handleCreateBookFromDialog() {
+    if (!series) return;
+
+    const title = String(addBookTitle || "").trim();
+    const parsedNumber = Number(addBookNumber);
+    if (!title) {
+      alert("Title is required.");
+      return;
+    }
+    if (!Number.isFinite(parsedNumber) || parsedNumber <= 0) {
+      alert("Book number must be a positive number.");
+      return;
+    }
+
+    const normalizedDate = normalizeDateInput(addBookDate);
+    const today = new Date().toISOString().split("T")[0];
+    const payload: any = {
+      title,
+      author: String(series.author || "Unknown author").trim() || "Unknown author",
+      series_id: Number(series.id),
+      series_order: parsedNumber,
+      book_number: parsedNumber,
+      read_status: addBookStatus,
+      is_read: addBookStatus === "read",
+    };
+
+    if (addBookStatus === "read") {
+      payload.read_date = normalizedDate || today;
+    } else if (normalizedDate) {
+      payload.release_date = normalizedDate;
+    }
+
+    setAddBookSaving(true);
+    try {
+      const response = await fetchApiWithFallback("/books/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        let detail = "";
+        try {
+          const data = await response.json();
+          detail = data?.detail ? ` - ${data.detail}` : "";
+        } catch {
+          // ignore
+        }
+        throw new Error(`Failed to add book (${response.status})${detail}`);
+      }
+
+      const createdBook = await response.json();
+      if (addBookStatus === "upcoming") {
+        setRecentUpcomingBookIds((prev) => [Number(createdBook.id), ...prev.filter((id) => id !== Number(createdBook.id))]);
+      }
+      setSeries((prev: any) => ({
+        ...prev,
+        books: sortBooksBySeriesOrder([...(prev.books || []), createdBook]),
+      }));
+
+      setAddBookTitle("");
+      setAddBookNumber("");
+      setAddBookStatus("upcoming");
+      setAddBookDate("");
+      setAddBookDialogOpen(false);
+      flashAddedMessage(`Added book #${parsedNumber}: ${title}`);
+      await refreshSeriesFromApi();
+    } catch (err) {
+      console.error(err);
+      const message = err instanceof Error ? err.message : "Unable to add book right now.";
+      alert(message);
+    } finally {
+      setAddBookSaving(false);
+    }
+  }
+
   return (
     <div className="p-3 space-y-2">
       <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
@@ -1519,6 +2057,41 @@ export default function SeriesDetailPage() {
           <div>
             <h1 className="text-3xl font-bold">{series.name}</h1>
             <p className="text-sm text-muted-foreground">{series.author || "Unknown author"}</p>
+            <p className="mt-2 text-base font-semibold text-foreground">Books in this Series:</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setAddBookDialogOpen(true)}
+              >
+                Add Book
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => handleOpenGoogleSearch(`${series.name} ${series.author || ""} next book release`.trim())}
+              >
+                Check URL
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setReleaseIntelDialogOpen(true)}
+              >
+                Paste Series Intel
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setNormalizeTitlesDialogOpen(true)}
+              >
+                Normalize Titles Preview
+              </Button>
+            </div>
           </div>
           {series.description && (
             <p className="max-w-3xl text-sm leading-6 text-muted-foreground">{series.description}</p>
@@ -1528,20 +2101,20 @@ export default function SeriesDetailPage() {
         <div className="flex flex-col items-start gap-1 md:items-end md:pl-3">
           <div className="flex w-full flex-wrap items-center gap-2 md:justify-end">
             <Button
-              variant={series.is_finished ? "secondary" : "outline"}
+              variant="outline"
               onClick={handleToggleSeriesFinished}
               disabled={finishedToggleSaving}
             >
               {finishedToggleSaving
                 ? "Saving..."
                 : series.is_finished
-                  ? "Series finished"
-                  : "Mark series finished"}
+                  ? "Move to unfinished"
+                  : "Move to finished"}
             </Button>
             <Link href="/books">
               <Button variant="outline">Back to Library</Button>
             </Link>
-            <Link href="/series">
+            <Link href={viewAllSeriesHref}>
               <Button variant="secondary">View all series</Button>
             </Link>
           </div>
@@ -1580,11 +2153,6 @@ export default function SeriesDetailPage() {
           {recentAddMessage}
         </div>
       ) : null}
-
-      <div className="space-y-1">
-        <p className="text-sm font-semibold uppercase tracking-wide text-emerald-800">Added To Library</p>
-        <p className="text-xs text-muted-foreground">Books currently saved in this series.</p>
-      </div>
 
       <div className="flex justify-end">
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -1693,7 +2261,7 @@ export default function SeriesDetailPage() {
                     size="sm"
                     onClick={() => handleToggleRead(book)}
                   >
-                    {book.is_read ? "Book: mark unread" : "Book: mark read"}
+                    {book.is_read ? "Mark unread" : "Mark read"}
                   </Button>
                   <Button
                     variant="outline"
@@ -1701,6 +2269,13 @@ export default function SeriesDetailPage() {
                     onClick={() => handleSetBookStatus(book)}
                   >
                     Set status/date
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleEditBookTitle(book)}
+                  >
+                    Edit title
                   </Button>
                   <Button
                     variant="secondary"
@@ -1767,6 +2342,162 @@ export default function SeriesDetailPage() {
           <DialogFooter showCloseButton>
             <Button type="button" onClick={handleSaveSummaryEditor} disabled={summarySaving}>
               {summarySaving ? "Saving..." : "Save changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={addBookDialogOpen}
+        onOpenChange={setAddBookDialogOpen}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Add Book</DialogTitle>
+            <DialogDescription>
+              Add a new book directly to this series while you review release intel.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label htmlFor="add-book-title">Title</Label>
+              <input
+                id="add-book-title"
+                value={addBookTitle}
+                onChange={(event) => setAddBookTitle(event.target.value)}
+                placeholder="Book title"
+                className="h-9 w-full rounded border bg-white px-2 text-sm"
+              />
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1">
+                <Label htmlFor="add-book-number">Book #</Label>
+                <input
+                  id="add-book-number"
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={addBookNumber}
+                  onChange={(event) => setAddBookNumber(event.target.value)}
+                  placeholder="e.g. 28"
+                  className="h-9 w-full rounded border bg-white px-2 text-sm"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <Label htmlFor="add-book-status">Status</Label>
+                <select
+                  id="add-book-status"
+                  value={addBookStatus}
+                  onChange={(event) => setAddBookStatus(event.target.value as "upcoming" | "unread" | "read")}
+                  className="h-9 w-full rounded border bg-white px-2 text-sm"
+                >
+                  <option value="upcoming">upcoming</option>
+                  <option value="unread">unread</option>
+                  <option value="read">read</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="add-book-date">Date (optional)</Label>
+              <input
+                id="add-book-date"
+                value={addBookDate}
+                onChange={(event) => setAddBookDate(event.target.value)}
+                placeholder={addBookStatus === "read" ? "Read date (MM-DD-YYYY)" : "Release date (MM-DD-YYYY)"}
+                className="h-9 w-full rounded border bg-white px-2 text-sm"
+              />
+            </div>
+          </div>
+
+          <DialogFooter showCloseButton>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={handleCreateBookFromDialog}
+              disabled={addBookSaving}
+            >
+              {addBookSaving ? "Adding..." : "Add Book"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={releaseIntelDialogOpen}
+        onOpenChange={setReleaseIntelDialogOpen}
+      >
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Paste Release Intel</DialogTitle>
+            <DialogDescription>
+              Paste Google results text. Entries like "Book 12: Unique" and dates like "August 3rd, 2026" are parsed automatically.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-2">
+            <textarea
+              value={releaseIntelText}
+              onChange={(event) => setReleaseIntelText(event.target.value)}
+              placeholder="Paste release summary text..."
+              className="min-h-40 w-full rounded border bg-white px-2 py-2 text-xs"
+            />
+            {releaseIntelMessage ? (
+              <p className="text-xs text-blue-900">{releaseIntelMessage}</p>
+            ) : null}
+          </div>
+
+          <DialogFooter showCloseButton>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={handleApplyReleaseIntel}
+              disabled={releaseIntelSaving}
+            >
+              {releaseIntelSaving ? "Applying…" : "Apply Release Intel"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={normalizeTitlesDialogOpen}
+        onOpenChange={setNormalizeTitlesDialogOpen}
+      >
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Normalize Titles (Preview)</DialogTitle>
+            <DialogDescription>
+              Safe cleanup only: spacing and common suffix noise. Review before applying.
+            </DialogDescription>
+          </DialogHeader>
+
+          {titleNormalizationPreview.length > 0 ? (
+            <div className="max-h-72 overflow-auto rounded border bg-white text-xs">
+              {titleNormalizationPreview.map((row) => (
+                <div key={row.id} className="border-b p-2 last:border-b-0">
+                  <p className="text-muted-foreground">{row.currentTitle}</p>
+                  <p className="font-medium">{row.normalizedTitle}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">No safe title cleanup suggestions right now.</p>
+          )}
+
+          <DialogFooter showCloseButton>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={handleApplyTitleNormalization}
+              disabled={titleNormalizeSaving || titleNormalizationPreview.length === 0}
+            >
+              {titleNormalizeSaving
+                ? "Applying…"
+                : `Apply all (${titleNormalizationPreview.length})`}
             </Button>
           </DialogFooter>
         </DialogContent>
