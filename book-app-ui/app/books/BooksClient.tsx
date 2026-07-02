@@ -305,6 +305,11 @@ type EditBookFormState = {
   date: string;
 };
 
+type AgentRunFormState = {
+  title: string;
+  author: string;
+};
+
 type LookupResultState = {
   found: boolean;
   summary: string | null;
@@ -371,6 +376,11 @@ const EMPTY_EDIT_BOOK_FORM: EditBookFormState = {
   date: "",
 };
 
+const EMPTY_AGENT_RUN_FORM: AgentRunFormState = {
+  title: "",
+  author: "",
+};
+
 function normalizeLookupMatchedTitle(value: string | null | undefined) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -394,6 +404,11 @@ export default function BooksClient() {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [savingEditBook, setSavingEditBook] = useState(false);
   const [editBookForm, setEditBookForm] = useState<EditBookFormState>(EMPTY_EDIT_BOOK_FORM);
+  const [agentDialogOpen, setAgentDialogOpen] = useState(false);
+  const [agentRunning, setAgentRunning] = useState(false);
+  const [agentApproving, setAgentApproving] = useState(false);
+  const [agentRunForm, setAgentRunForm] = useState<AgentRunFormState>(EMPTY_AGENT_RUN_FORM);
+  const [agentMetadata, setAgentMetadata] = useState<Record<string, unknown> | null>(null);
   const [pinnedBookId, setPinnedBookId] = useState<number | null>(null);
   const [lookupResult, setLookupResult] = useState<LookupResultState | null>(null);
   const [filters, setFilters] = useState({
@@ -800,6 +815,107 @@ export default function BooksClient() {
     setAddBookForm(EMPTY_ADD_BOOK_FORM);
     setLookupResult(null);
     setShowLookupSummary(false);
+  }
+
+  function resetAgentWorkflow() {
+    setAgentRunForm(EMPTY_AGENT_RUN_FORM);
+    setAgentMetadata(null);
+    setAgentRunning(false);
+    setAgentApproving(false);
+  }
+
+  async function handleRunAgent() {
+    const title = agentRunForm.title.trim();
+    const author = agentRunForm.author.trim();
+
+    if (!title) {
+      toast({
+        title: "Need a title",
+        description: "Enter a title before running the agent.",
+      });
+      return;
+    }
+
+    setAgentRunning(true);
+    setAgentMetadata(null);
+
+    try {
+      const response = await fetchApiWithFallback("/agent/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          author: author || undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Agent run failed (${response.status})`);
+      }
+
+      const data = await response.json();
+      if (!data || typeof data !== "object" || Array.isArray(data)) {
+        throw new Error("Agent returned invalid metadata format.");
+      }
+
+      setAgentMetadata(data as Record<string, unknown>);
+      toast({
+        title: "Metadata ready",
+        description: "Review metadata and approve to create the book.",
+      });
+    } catch (error) {
+      console.error("Error running book agent:", error);
+      toast({
+        title: "Agent error",
+        description: error instanceof Error ? error.message : "Failed to run the book agent.",
+      });
+    } finally {
+      setAgentRunning(false);
+    }
+  }
+
+  async function handleApproveAgentMetadata() {
+    if (!agentMetadata) {
+      toast({
+        title: "No metadata",
+        description: "Run the agent and review metadata before approving.",
+      });
+      return;
+    }
+
+    setAgentApproving(true);
+
+    try {
+      const response = await fetchApiWithFallback("/agent/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ metadata: agentMetadata }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Approval failed (${response.status})`);
+      }
+
+      const createdBook = await response.json();
+      await Promise.all([fetchBooks(), fetchSeriesList()]);
+      setPinnedBookId(Number(createdBook?.id ?? null));
+
+      toast({
+        title: "Book created",
+        description: `${createdBook?.title || "Book"} was created from approved metadata.`,
+      });
+
+      setAgentDialogOpen(false);
+      resetAgentWorkflow();
+    } catch (error) {
+      console.error("Error approving metadata:", error);
+      toast({
+        title: "Approval error",
+        description: error instanceof Error ? error.message : "Failed to create book from metadata.",
+      });
+    } finally {
+      setAgentApproving(false);
+    }
   }
 
   async function handleFindDetails() {
@@ -1238,6 +1354,9 @@ export default function BooksClient() {
 
         <div className="flex flex-wrap gap-2 md:justify-self-end">
           <Button type="button" onClick={() => setAddDialogOpen(true)}>Add Book</Button>
+          <Button type="button" variant="secondary" onClick={() => setAgentDialogOpen(true)}>
+            Agent Draft
+          </Button>
           <Link href="/books">
             <Button type="button" variant="outline">All Books</Button>
           </Link>
@@ -1750,6 +1869,73 @@ export default function BooksClient() {
           <DialogFooter showCloseButton>
             <Button type="button" onClick={handleSaveBookEdit} disabled={savingEditBook}>
               {savingEditBook ? "Saving..." : "Save changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={agentDialogOpen}
+        onOpenChange={(open) => {
+          setAgentDialogOpen(open);
+          if (!open) {
+            resetAgentWorkflow();
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Agent-Assisted Book Draft</DialogTitle>
+            <DialogDescription>
+              Run the agent to generate metadata, review the result, then approve to create the book.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1 sm:col-span-2">
+              <Label htmlFor="agent-book-title">Title</Label>
+              <Input
+                id="agent-book-title"
+                value={agentRunForm.title}
+                onChange={(event) => setAgentRunForm((prev) => ({ ...prev, title: event.target.value }))}
+                placeholder="Book title"
+              />
+            </div>
+
+            <div className="space-y-1 sm:col-span-2">
+              <Label htmlFor="agent-book-author">Author (optional)</Label>
+              <Input
+                id="agent-book-author"
+                value={agentRunForm.author}
+                onChange={(event) => setAgentRunForm((prev) => ({ ...prev, author: event.target.value }))}
+                placeholder="Author name"
+              />
+            </div>
+
+            <div className="sm:col-span-2">
+              <Button type="button" variant="outline" onClick={handleRunAgent} disabled={agentRunning}>
+                {agentRunning ? "Running agent..." : "Run /agent/run"}
+              </Button>
+            </div>
+
+            <div className="space-y-1 sm:col-span-2">
+              <Label htmlFor="agent-metadata-preview">Metadata preview</Label>
+              <textarea
+                id="agent-metadata-preview"
+                readOnly
+                value={agentMetadata ? JSON.stringify(agentMetadata, null, 2) : "Run the agent to generate metadata."}
+                className="min-h-56 w-full rounded-lg border border-input bg-background px-2.5 py-2 font-mono text-xs outline-none"
+              />
+            </div>
+          </div>
+
+          <DialogFooter showCloseButton>
+            <Button
+              type="button"
+              onClick={handleApproveAgentMetadata}
+              disabled={!agentMetadata || agentApproving || agentRunning}
+            >
+              {agentApproving ? "Approving..." : "Approve and Create Book"}
             </Button>
           </DialogFooter>
         </DialogContent>

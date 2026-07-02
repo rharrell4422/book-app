@@ -2,9 +2,11 @@ from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from intelligence import compute_series_intelligence_for_series, lookup_book_summary, suggest_book_by_series
 from importer.importer import run_import
 from database import SessionLocal, engine
+from agents.book_agent import BookAgent
 import models
 import schemas
 import crud
@@ -26,6 +28,15 @@ models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
+
+class AgentRunRequest(BaseModel):
+    title: str
+    author: str | None = None
+
+
+class AgentApproveRequest(BaseModel):
+    metadata: dict
+
 # Allow frontend to talk to backend
 app.add_middleware(
     CORSMiddleware,
@@ -34,6 +45,25 @@ app.add_middleware(
     allow_headers=["*", "Content-Type"],
     max_age=3600,
 )
+
+
+@app.post("/agent/run")
+def run_agent(payload: AgentRunRequest):
+    agent = BookAgent()
+    metadata = agent.run(payload.title, payload.author)
+    if not isinstance(metadata, dict):
+        raise HTTPException(status_code=500, detail="BookAgent.run must return a metadata dict")
+    return metadata
+
+
+@app.post("/agent/approve", response_model=schemas.BookResponse)
+def approve_agent(payload: AgentApproveRequest, db: Session = Depends(get_db)):
+    try:
+        approved_book = schemas.BookBase.model_validate(payload.metadata)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid approved metadata: {exc}")
+
+    return crud.create_book(db=db, book=approved_book)
 
 # ---------------------------------------------------------
 # Dependency: get DB session

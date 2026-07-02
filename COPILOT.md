@@ -12,6 +12,42 @@
 - Never assume I know which file needs modification. Always specify the file and location.
 - - Never rewrite entire files unless I explicitly request it; only provide targeted snippets with START/END markers.
 
+## Files WIth BE Focus
+Book App/
+│
+├── __pycache__/
+│
+├── book-app-ui/                # Frontend (Next.js / TypeScript)
+│   ├── BookApp_Master_Library_29Jun2026.xlsx
+│   ├── books.db
+│   ├── books.db-shm
+│   ├── books.db-wal
+│   └── COPILOT.md
+│
+├── crud/                       # Database operations (CRUD logic)
+│   ├── __init__.py
+│   ├── books.py
+│   ├── series.py
+│   ├── database.py
+│   └── debug_scrape.py
+│
+├── importer/                   # Handles importing external data
+│   ├── __init__.py
+│   └── importer.py
+│
+├── intelligence.py             # Existing intelligence logic (will connect to agent)
+├── main.py                     # FastAPI entry point
+├── models.py                   # Database models
+├── requirements.txt            # Python dependencies
+├── schemas.py                  # Pydantic schemas
+├── search_orchestrator.py      # Search coordination logic
+├── test.py                     # Test script
+├── test.py.code-workspace      # VS Code workspace file
+│
+├── tests/                      # Unit tests
+│
+└── venv/                       # Virtual environment
+
 
 ## File Location & Search Guidance
 
@@ -271,24 +307,6 @@ Keep open: main.py, models.py, schemas.py, importer.py, intelligence.py, databas
 - `book_number` (optional): Specific book number in series (#1, #2, etc.)
 - `author` (optional): Author name for filtering
 
-**Response:**
-```json
-{
-  "query": "final query executed",
-  "results": [
-    {
-      "title": "Book Title",
-      "author": "Author Name",
-      "year": "2024",
-      "description": "...",
-      "source_url": "...",
-      "series_name": "Series Name",
-      "series_position": 1,
-      "source": "google_books" | "openlibrary"
-    }
-  ]
-}
-```
 
 ### Search Strategy
 1. Try Google Books API with multiple query variations (title, title+author, title+number, etc.)
@@ -326,21 +344,6 @@ User must set up Google Books API key:
    - Restrict to Application Type: None (unrestricted)
 5. Copy the API key
 
-### Configuration
-Add to FastAPI server environment:
-```bash
-export GOOGLE_BOOKS_API_KEY="YOUR_API_KEY_HERE"
-uvicorn main:app --reload
-```
-
-Or add to `.env` file and load in main.py.
-
-### Code Location
-Environment variable is read by `intelligence.py` line ~135:
-```python
-api_key = get_google_books_api_key()
-if api_key:
-    params["key"] = api_key
 ```
 
 ## Timeouts & Configuration Reference
