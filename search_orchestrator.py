@@ -33,6 +33,7 @@ class SearchOrchestrator:
                     "provider_counts": {"google": 0, "openlibrary": 0, "serpapi": 0},
                     "stages": [],
                     "accepted_total": 0,
+                    "rejection_counts": {},
                 },
             }
 
@@ -45,6 +46,7 @@ class SearchOrchestrator:
             "provider_counts": {"google": 0, "openlibrary": 0, "serpapi": 0},
             "stages": [],
             "accepted_total": 0,
+            "rejection_counts": {},
         }
 
         google_queries, candidate_queries = self._build_query_candidates(ctx)
@@ -56,7 +58,7 @@ class SearchOrchestrator:
             final_query = query
             google_results = self.google_search(query, author, 5)
             diagnostics["provider_counts"]["google"] += len(google_results)
-            results = self._collect_candidates(google_results, ctx, seen, author_hint=None)
+            results = self._collect_candidates(google_results, ctx, seen, author_hint=None, diagnostics=diagnostics)
             diagnostics["stages"].append({
                 "stage": "google_candidate",
                 "provider": "google_books",
@@ -69,11 +71,11 @@ class SearchOrchestrator:
                 diagnostics["accepted_total"] = len(results)
                 return self._build_response(final_query, results, diagnostics)
 
-        for candidate_author in ctx.author_candidates[:2]:
+        for candidate_author in ctx.author_candidates:
             final_query = f'inauthor:"{candidate_author}"'
             google_results = self.google_search(final_query, None, 8)
             diagnostics["provider_counts"]["google"] += len(google_results)
-            results = self._collect_candidates(google_results, ctx, seen, author_hint=candidate_author)
+            results = self._collect_candidates(google_results, ctx, seen, author_hint=candidate_author, diagnostics=diagnostics)
             diagnostics["stages"].append({
                 "stage": "google_author_fallback",
                 "provider": "google_books",
@@ -89,9 +91,9 @@ class SearchOrchestrator:
         open_query_candidates = list(dict.fromkeys(ctx.base_forms + candidate_queries))
         for query in open_query_candidates[:5]:
             final_query = query
-            open_results = self.openlibrary_search(query, None, 5)
+            open_results = self.openlibrary_search(query, ctx.primary_author, 5)
             diagnostics["provider_counts"]["openlibrary"] += len(open_results)
-            results = self._collect_candidates(open_results, ctx, seen, author_hint=None)
+            results = self._collect_candidates(open_results, ctx, seen, author_hint=None, diagnostics=diagnostics)
             diagnostics["stages"].append({
                 "stage": "openlibrary_candidate",
                 "provider": "openlibrary",
@@ -105,9 +107,9 @@ class SearchOrchestrator:
                 return self._build_response(final_query, results, diagnostics)
 
         final_query = ctx.cleaned_series_name
-        open_results = self.openlibrary_search(ctx.cleaned_series_name, None, 5)
+        open_results = self.openlibrary_search(ctx.cleaned_series_name, ctx.primary_author, 5)
         diagnostics["provider_counts"]["openlibrary"] += len(open_results)
-        results = self._collect_candidates(open_results, ctx, seen, author_hint=None)
+        results = self._collect_candidates(open_results, ctx, seen, author_hint=None, diagnostics=diagnostics)
         diagnostics["stages"].append({
             "stage": "openlibrary_series_direct",
             "provider": "openlibrary",
@@ -120,11 +122,11 @@ class SearchOrchestrator:
             diagnostics["accepted_total"] = len(results)
             return self._build_response(final_query, results, diagnostics)
 
-        for candidate_author in ctx.author_candidates[:2]:
+        for candidate_author in ctx.author_candidates:
             final_query = f'author:"{candidate_author}"'
-            author_results = self.openlibrary_search(final_query, None, 8)
+            author_results = self.openlibrary_search(final_query, candidate_author, 8)
             diagnostics["provider_counts"]["openlibrary"] += len(author_results)
-            results = self._collect_candidates(author_results, ctx, seen, author_hint=candidate_author)
+            results = self._collect_candidates(author_results, ctx, seen, author_hint=candidate_author, diagnostics=diagnostics)
             diagnostics["stages"].append({
                 "stage": "openlibrary_author_fallback",
                 "provider": "openlibrary",
@@ -137,18 +139,21 @@ class SearchOrchestrator:
                 diagnostics["accepted_total"] = len(results)
                 return self._build_response(final_query, results, diagnostics)
 
-        for candidate_author in ctx.author_candidates[:2]:
+        for candidate_author in ctx.author_candidates:
             final_query = f'intitle:"{ctx.cleaned_series_name}" inauthor:"{candidate_author}"'
             strict_results = self.google_search(final_query, None, 8)
             diagnostics["provider_counts"]["google"] += len(strict_results)
             strict = []
             for result in strict_results:
-                if self._accept_result(result, ctx, author_hint=candidate_author, strict_title_match=True):
+                accepted, rejection_reason = self._accept_result_with_reason(result, ctx, author_hint=candidate_author, strict_title_match=True)
+                if accepted:
                     key = self._result_key(result)
                     if key in seen:
                         continue
                     seen.add(key)
                     strict.append(result)
+                elif rejection_reason:
+                    diagnostics["rejection_counts"][rejection_reason] = diagnostics["rejection_counts"].get(rejection_reason, 0) + 1
             diagnostics["stages"].append({
                 "stage": "google_strict_title_fallback",
                 "provider": "google_books",
@@ -167,7 +172,7 @@ class SearchOrchestrator:
                 final_query = query
                 serp_results = self.serp_search(query, ctx.primary_author, 10)
                 diagnostics["provider_counts"]["serpapi"] += len(serp_results)
-                results = self._collect_candidates(serp_results, ctx, seen, author_hint=ctx.primary_author)
+                results = self._collect_candidates(serp_results, ctx, seen, author_hint=ctx.primary_author, diagnostics=diagnostics)
                 diagnostics["stages"].append({
                     "stage": "serpapi_fallback",
                     "provider": "serpapi",
@@ -202,10 +207,13 @@ class SearchOrchestrator:
         # Deduplicate while preserving order.
         return list(dict.fromkeys(queries))
 
-    def _collect_candidates(self, raw_results: list[dict], ctx: SearchContext, seen: set[tuple[str, str | None]], author_hint: str | None) -> list[dict]:
+    def _collect_candidates(self, raw_results: list[dict], ctx: SearchContext, seen: set[tuple[str, str | None]], author_hint: str | None, diagnostics: dict | None = None) -> list[dict]:
         collected: list[dict] = []
         for result in raw_results:
-            if not self._accept_result(result, ctx, author_hint=author_hint):
+            accepted, rejection_reason = self._accept_result_with_reason(result, ctx, author_hint=author_hint)
+            if not accepted:
+                if diagnostics is not None and rejection_reason:
+                    diagnostics["rejection_counts"][rejection_reason] = diagnostics["rejection_counts"].get(rejection_reason, 0) + 1
                 continue
             key = self._result_key(result)
             if key in seen:
@@ -300,34 +308,41 @@ class SearchOrchestrator:
         }
 
     def _accept_result(self, result: dict, ctx: SearchContext, author_hint: str | None, strict_title_match: bool = False) -> bool:
+        accepted, _ = self._accept_result_with_reason(result, ctx, author_hint, strict_title_match)
+        return accepted
+
+    def _accept_result_with_reason(self, result: dict, ctx: SearchContext, author_hint: str | None, strict_title_match: bool = False) -> tuple[bool, str | None]:
         title = result.get("title")
         if not title:
-            return False
+            return False, "missing_title"
 
         if not self._passes_author_filter(result.get("author"), ctx):
-            return False
+            return False, "author_mismatch"
 
         if author_hint and not self._author_matches_result(result.get("author"), author_hint):
-            return False
+            return False, "author_mismatch"
+
+        if ctx.author_candidates and not result.get("author"):
+            return False, "missing_author"
 
         title_norm = self._normalize(title)
         if self._looks_like_discussion_result(title_norm, result.get("source_url")):
-            return False
+            return False, "discussion_result"
 
         if self._looks_like_collection_title(title_norm, ctx.book_number):
-            return False
+            return False, "collection_result"
 
         if strict_title_match:
             if not any(self._phrase_matches(title_norm, base) for base in ctx.base_forms_norm):
-                return False
+                return False, "strict_title_mismatch"
         else:
             if not self._matches_series(result, title_norm, ctx):
-                return False
+                return False, "series_mismatch"
 
         if not self._matches_number(result, title_norm, ctx.book_number):
-            return False
+            return False, "number_mismatch"
 
-        return True
+        return True, None
 
     def _build_context(self, series_name: str, book_number: int | None, author: str | None) -> SearchContext:
         cleaned_series_name = self._clean_series_label(series_name)
@@ -554,8 +569,6 @@ class SearchOrchestrator:
 
     def _passes_author_filter(self, result_author: str | None, ctx: SearchContext) -> bool:
         if not ctx.author_candidates:
-            return True
-        if not result_author:
             return True
         for candidate in ctx.author_candidates[:2]:
             if self._author_matches_result(result_author, candidate):

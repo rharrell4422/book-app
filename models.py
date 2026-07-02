@@ -9,6 +9,7 @@ from sqlalchemy import (
     Float,
     Text,
     ForeignKey,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.sqlite import JSON
 from sqlalchemy.orm import relationship
@@ -38,6 +39,7 @@ class Series(Base):
     next_upcoming_book_number = Column(Float, nullable=True)
     missing_books = Column(JSON, nullable=True)  # list of book_numbers
     last_checked = Column(Date, nullable=True)
+    has_new_books = Column(Boolean, default=False)
 
     # External IDs
     goodreads_series_id = Column(String, nullable=True)
@@ -56,6 +58,30 @@ class Series(Base):
     )
 
     books = relationship("Book", back_populates="series")
+    canonical_entries = relationship("SeriesCanonicalEntry", back_populates="series", cascade="all, delete-orphan")
+
+
+class SeriesCanonicalEntry(Base):
+    __tablename__ = "series_canonical_entries"
+    __table_args__ = (
+        UniqueConstraint("series_id", "book_number", name="uq_series_canonical_number"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    series_id = Column(Integer, ForeignKey("series.id"), nullable=False, index=True)
+    book_number = Column(Float, nullable=False)
+    canonical_title = Column(String, nullable=False)
+    canonical_author = Column(String, nullable=True)
+    publication_year = Column(Integer, nullable=True)
+    entry_type = Column(String, default="novel")
+    is_fractional = Column(Boolean, default=False)
+    is_anthology = Column(Boolean, default=False)
+    author_aliases = Column(JSON, nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    series = relationship("Series", back_populates="canonical_entries")
 
 
 class Book(Base):

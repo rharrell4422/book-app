@@ -140,7 +140,7 @@ def fetch_page_text(url: str, timeout: float = 10.0) -> str:
     if not url:
         return ""
     headers = {"User-Agent": "BookApp/1.0 (+https://example.com)"}
-    with httpx.Client(timeout=timeout, headers=headers) as client:
+    with httpx.Client(timeout=timeout, headers=headers, trust_env=False) as client:
         response = client.get(url)
         response.raise_for_status()
         return response.text
@@ -180,7 +180,7 @@ def search_google_books(query: str, author: str | None = None, max_results: int 
         request_params["q"] = search_query
 
         try:
-            with httpx.Client(timeout=8.0, headers=headers) as client:
+            with httpx.Client(timeout=8.0, headers=headers, trust_env=False) as client:
                 response = client.get("https://www.googleapis.com/books/v1/volumes", params=request_params)
                 if response.status_code == 429:
                     return []
@@ -228,7 +228,7 @@ def search_openlibrary(query: str, author: str | None = None, max_results: int =
     params = {"q": query, "limit": max_results}
     headers = {"User-Agent": "BookApp/1.0 (+https://example.com)"}
     try:
-        with httpx.Client(timeout=8.0, headers=headers) as client:
+        with httpx.Client(timeout=8.0, headers=headers, trust_env=False) as client:
             response = client.get("https://openlibrary.org/search.json", params=params)
             response.raise_for_status()
             data = response.json()
@@ -278,7 +278,7 @@ def search_serpapi_web(query: str, author: str | None = None, max_results: int =
     headers = {"User-Agent": "BookApp/1.0 (+https://example.com)"}
 
     try:
-        with httpx.Client(timeout=10.0, headers=headers) as client:
+        with httpx.Client(timeout=10.0, headers=headers, trust_env=False) as client:
             response = client.get("https://serpapi.com/search.json", params=params)
             response.raise_for_status()
             data = response.json()

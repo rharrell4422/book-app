@@ -113,6 +113,7 @@ class SeriesBase(BaseModel):
     next_unread_book_number: Optional[float] = None
     next_upcoming_book_number: Optional[float] = None
     missing_books: Optional[list] = None
+    has_new_books: Optional[bool] = None
 
 
 class SeriesResponse(SeriesBase):
@@ -139,6 +140,7 @@ class SeriesDetailResponse(BaseModel):
     next_unread_book_number: float | None = None
     next_upcoming_book_number: float | None = None
     missing_books: list[str] | None = None
+    has_new_books: bool = False
 
     created_at: datetime
     updated_at: datetime
