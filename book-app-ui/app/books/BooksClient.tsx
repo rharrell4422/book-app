@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { CircleHelpIcon } from "lucide-react";
@@ -27,7 +27,22 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-function getBookStatus(book: any) {
+type BookRow = {
+  id: number;
+  title?: string | null;
+  author?: string | null;
+  read_status?: string | null;
+  is_read?: boolean | null;
+  release_date?: string | null;
+  publication_date?: string | null;
+  read_date?: string | null;
+  series_name?: string | null;
+  series_id?: number | null;
+  book_number?: number | null;
+  [key: string]: unknown;
+};
+
+function getBookStatus(book: BookRow) {
   if (book.read_status) {
     return String(book.read_status);
   }
@@ -51,7 +66,7 @@ function getBookStatus(book: any) {
   return "unread";
 }
 
-function getDisplayDate(book: any) {
+function getDisplayDate(book: BookRow) {
   const status = getBookStatus(book);
   return status === "upcoming"
     ? book.release_date || book.read_date
@@ -143,11 +158,6 @@ function ValueFilterMenu({
 
   useEffect(() => {
     if (!open) return;
-    setDraftValues(selectedValues);
-  }, [open, selectedValues]);
-
-  useEffect(() => {
-    if (!open) return;
 
     const handleDocumentMouseDown = (event: MouseEvent) => {
       if (!menuRef.current) return;
@@ -174,7 +184,15 @@ function ValueFilterMenu({
     <div className="relative" ref={menuRef}>
       <button
         type="button"
-        onClick={() => setOpen((prev) => !prev)}
+        onClick={() => {
+          setOpen((prev) => {
+            const nextOpen = !prev;
+            if (nextOpen) {
+              setDraftValues(selectedValues);
+            }
+            return nextOpen;
+          });
+        }}
         className="h-7 w-full rounded border bg-background px-2 text-left text-xs"
       >
         {label} {selectedValues.length > 0 ? `(${selectedValues.length})` : ""}
@@ -276,6 +294,43 @@ const RESIZE_NEIGHBOR: Record<ResizableColumnKey, ResizableColumnKey | null> = {
 };
 
 const COLUMN_WIDTHS_STORAGE_KEY = "booksTableColumnWidthsV1";
+
+function sanitizeSavedColumnWidths(value: unknown): Record<ResizableColumnKey, number> | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<Record<ResizableColumnKey, unknown>>;
+
+  const keys: ResizableColumnKey[] = ["title", "author", "status", "date", "series", "bookNumber", "actions"];
+  const next: Partial<Record<ResizableColumnKey, number>> = {};
+  let hasAtLeastOneSavedKey = false;
+
+  for (const key of keys) {
+    const raw = candidate[key];
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+      const minimum = MIN_COLUMN_WIDTH[key];
+      next[key] = Math.max(minimum, Number(raw));
+      hasAtLeastOneSavedKey = true;
+    } else {
+      next[key] = DEFAULT_COLUMN_WIDTHS[key];
+    }
+  }
+
+  if (!hasAtLeastOneSavedKey) return null;
+
+  const total = keys.reduce((sum, key) => sum + (next[key] ?? 0), 0);
+  if (total <= 0) return null;
+
+  const normalized: Record<ResizableColumnKey, number> = {
+    title: Number((((next.title ?? DEFAULT_COLUMN_WIDTHS.title) / total) * 100).toFixed(2)),
+    author: Number((((next.author ?? DEFAULT_COLUMN_WIDTHS.author) / total) * 100).toFixed(2)),
+    status: Number((((next.status ?? DEFAULT_COLUMN_WIDTHS.status) / total) * 100).toFixed(2)),
+    date: Number((((next.date ?? DEFAULT_COLUMN_WIDTHS.date) / total) * 100).toFixed(2)),
+    series: Number((((next.series ?? DEFAULT_COLUMN_WIDTHS.series) / total) * 100).toFixed(2)),
+    bookNumber: Number((((next.bookNumber ?? DEFAULT_COLUMN_WIDTHS.bookNumber) / total) * 100).toFixed(2)),
+    actions: Number((((next.actions ?? DEFAULT_COLUMN_WIDTHS.actions) / total) * 100).toFixed(2)),
+  };
+
+  return normalized;
+}
 
 type SeriesOption = {
   id: number;
@@ -393,7 +448,7 @@ function normalizeLookupMatchedTitle(value: string | null | undefined) {
 
 export default function BooksClient() {
   const { toast } = useToast();
-  const [books, setBooks] = useState<any[]>([]);
+  const [books, setBooks] = useState<BookRow[]>([]);
   const [seriesList, setSeriesList] = useState<SeriesOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
@@ -435,8 +490,26 @@ export default function BooksClient() {
     key: null,
     direction: "asc",
   });
-  const [columnWidths, setColumnWidths] = useState<Record<ResizableColumnKey, number>>(DEFAULT_COLUMN_WIDTHS);
-  const [columnWidthsHydrated, setColumnWidthsHydrated] = useState(false);
+  const [columnWidths, setColumnWidths] = useState<Record<ResizableColumnKey, number>>(() => {
+    if (typeof window === "undefined") {
+      return DEFAULT_COLUMN_WIDTHS;
+    }
+
+    try {
+      const saved = window.localStorage.getItem(COLUMN_WIDTHS_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        const restored = sanitizeSavedColumnWidths(parsed);
+        if (restored) {
+          return restored;
+        }
+      }
+    } catch {
+      // Ignore storage parse/read errors and keep defaults.
+    }
+
+    return DEFAULT_COLUMN_WIDTHS;
+  });
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const resizeStateRef = useRef<{
     key: ResizableColumnKey;
@@ -450,68 +523,13 @@ export default function BooksClient() {
   const router = useRouter();
   const seriesId = searchParams.get("series_id");
 
-  function sanitizeSavedColumnWidths(value: unknown): Record<ResizableColumnKey, number> | null {
-    if (!value || typeof value !== "object") return null;
-    const candidate = value as Partial<Record<ResizableColumnKey, unknown>>;
-
-    const keys: ResizableColumnKey[] = ["title", "author", "status", "date", "series", "bookNumber", "actions"];
-    const next: Partial<Record<ResizableColumnKey, number>> = {};
-    let hasAtLeastOneSavedKey = false;
-
-    for (const key of keys) {
-      const raw = candidate[key];
-      if (typeof raw === "number" && Number.isFinite(raw)) {
-        const minimum = MIN_COLUMN_WIDTH[key];
-        next[key] = Math.max(minimum, Number(raw));
-        hasAtLeastOneSavedKey = true;
-      } else {
-        next[key] = DEFAULT_COLUMN_WIDTHS[key];
-      }
-    }
-
-    if (!hasAtLeastOneSavedKey) return null;
-
-    const total = keys.reduce((sum, key) => sum + (next[key] ?? 0), 0);
-    if (total <= 0) return null;
-
-    const normalized: Record<ResizableColumnKey, number> = {
-      title: Number((((next.title ?? DEFAULT_COLUMN_WIDTHS.title) / total) * 100).toFixed(2)),
-      author: Number((((next.author ?? DEFAULT_COLUMN_WIDTHS.author) / total) * 100).toFixed(2)),
-      status: Number((((next.status ?? DEFAULT_COLUMN_WIDTHS.status) / total) * 100).toFixed(2)),
-      date: Number((((next.date ?? DEFAULT_COLUMN_WIDTHS.date) / total) * 100).toFixed(2)),
-      series: Number((((next.series ?? DEFAULT_COLUMN_WIDTHS.series) / total) * 100).toFixed(2)),
-      bookNumber: Number((((next.bookNumber ?? DEFAULT_COLUMN_WIDTHS.bookNumber) / total) * 100).toFixed(2)),
-      actions: Number((((next.actions ?? DEFAULT_COLUMN_WIDTHS.actions) / total) * 100).toFixed(2)),
-    };
-
-    return normalized;
-  }
-
   useEffect(() => {
-    try {
-      const saved = window.localStorage.getItem(COLUMN_WIDTHS_STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        const restored = sanitizeSavedColumnWidths(parsed);
-        if (restored) {
-          setColumnWidths(restored);
-        }
-      }
-    } catch {
-      // Ignore storage parse/read errors and keep defaults.
-    } finally {
-      setColumnWidthsHydrated(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!columnWidthsHydrated) return;
     try {
       window.localStorage.setItem(COLUMN_WIDTHS_STORAGE_KEY, JSON.stringify(columnWidths));
     } catch {
       // Ignore storage write errors.
     }
-  }, [columnWidths, columnWidthsHydrated]);
+  }, [columnWidths]);
 
   useEffect(() => {
     if (seriesId) {
@@ -978,7 +996,7 @@ export default function BooksClient() {
     }
   }
 
-  async function fetchBooks() {
+  const fetchBooks = useCallback(async () => {
     setLoading(true);
     try {
       const path = seriesId ? `/books/by_series/${seriesId}` : "/books/";
@@ -990,9 +1008,9 @@ export default function BooksClient() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [seriesId]);
 
-  async function fetchSeriesList() {
+  const fetchSeriesList = useCallback(async () => {
     try {
       const response = await fetchApiWithFallback("/series/", { cache: "no-store" });
       const data = await response.json();
@@ -1000,13 +1018,13 @@ export default function BooksClient() {
     } catch (error) {
       console.error("Error fetching series:", error);
     }
-  }
+  }, []);
 
   useEffect(() => {
     if (seriesId) return;
     fetchBooks();
     fetchSeriesList();
-  }, [seriesId]);
+  }, [seriesId, fetchBooks, fetchSeriesList]);
 
   useEffect(() => {
     const unsubscribe = subscribeBookStatusUpdates((payload) => {
@@ -1029,7 +1047,7 @@ export default function BooksClient() {
     return unsubscribe;
   }, []);
 
-  async function toggleRead(book: any) {
+  async function toggleRead(book: BookRow) {
     const nextIsRead = !book.is_read;
     const releaseDate = book.release_date || book.publication_date;
     let nextStatus = nextIsRead ? "read" : "unread";
@@ -1212,7 +1230,7 @@ export default function BooksClient() {
     }
   }
 
-  function openEditBookDialog(book: any) {
+  function openEditBookDialog(book: BookRow) {
     setEditBookForm({
       id: Number(book.id),
       title: String(book.title || ""),
@@ -1275,7 +1293,7 @@ export default function BooksClient() {
 
       const status = editBookForm.status;
       const normalizedDate = editBookForm.date.trim() || null;
-      const payload: any = {
+      const payload: Record<string, unknown> = {
         title,
         author,
         series_id: resolvedSeriesId,
@@ -1537,7 +1555,7 @@ export default function BooksClient() {
                 const status = getBookStatus(b);
                 return (
                   <TableRow key={b.id}>
-                    <TableCell className="truncate" title={b.title}>{b.title}</TableCell>
+                    <TableCell className="truncate" title={b.title ?? undefined}>{b.title || "—"}</TableCell>
                     <TableCell className="truncate" title={b.author || "—"}>{b.author || "—"}</TableCell>
                     <TableCell>
                       <span className={getStatusChipClass(status)}>{status}</span>

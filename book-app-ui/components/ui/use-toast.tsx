@@ -36,6 +36,6 @@ export function useToast() {
 }
 
 // This is the named export your page expects
-export const toast = (data: Omit<ToastData, "id">) => {
+export const toast = () => {
   console.warn("toast() called outside provider — this is a placeholder.");
 };

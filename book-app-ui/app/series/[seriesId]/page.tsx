@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -41,6 +41,48 @@ type ScanProgress = {
   pendingOrders: string[];
   completedCount: number;
   totalCount: number;
+};
+
+type BookRecord = {
+  id: number;
+  title?: string | null;
+  author?: string | null;
+  read_status?: string | null;
+  is_read?: boolean | null;
+  read_date?: string | null;
+  release_date?: string | null;
+  publication_date?: string | null;
+  book_number?: number | null;
+  series_order?: number | null;
+  auto_summary?: string | null;
+  notes?: string | null;
+  [key: string]: unknown;
+};
+
+type SuggestionRecord = {
+  title?: string | null;
+  author?: string | null;
+  year?: string | number | null;
+  source_url?: string | null;
+  source?: string | null;
+  [key: string]: unknown;
+};
+
+type SeriesRecord = {
+  id: number;
+  name: string;
+  author?: string | null;
+  description?: string | null;
+  genre?: string | null;
+  tags?: unknown;
+  is_finished?: boolean;
+  total_books?: number | null;
+  series_status?: string | null;
+  next_unread_book_number?: number | null;
+  next_upcoming_book_number?: number | null;
+  missing_books?: string[];
+  books?: BookRecord[];
+  [key: string]: unknown;
 };
 
 type SeriesDetailColumnKey = "title" | "author" | "status" | "date" | "bookNumber" | "actions";
@@ -103,7 +145,7 @@ async function fetchApiWithFallback(path: string, init?: RequestInit) {
   throw lastError ?? new Error(`Failed to load ${normalizedPath}`);
 }
 
-function loadCachedSuggestions(seriesId: string): Record<string, any[]> {
+function loadCachedSuggestions(seriesId: string): Record<string, SuggestionRecord[]> {
   if (typeof window === "undefined") return {};
   try {
     const raw = window.sessionStorage.getItem(`${SUGGESTION_CACHE_PREFIX}${seriesId}`);
@@ -115,7 +157,7 @@ function loadCachedSuggestions(seriesId: string): Record<string, any[]> {
   }
 }
 
-function saveCachedSuggestions(seriesId: string, suggestions: Record<string, any[]>) {
+function saveCachedSuggestions(seriesId: string, suggestions: Record<string, SuggestionRecord[]>) {
   if (typeof window === "undefined") return;
   try {
     window.sessionStorage.setItem(`${SUGGESTION_CACHE_PREFIX}${seriesId}`, JSON.stringify(suggestions));
@@ -294,7 +336,7 @@ function parseReleaseIntelText(text: string): Array<{ bookNumber: number; title:
   return Array.from(byBookNumber.values());
 }
 
-function getBookStatus(book: any) {
+function getBookStatus(book: BookRecord) {
   if (book.read_status) {
     return String(book.read_status);
   }
@@ -318,7 +360,7 @@ function getBookStatus(book: any) {
   return "unread";
 }
 
-function getBookDate(book: any) {
+function getBookDate(book: BookRecord) {
   const status = getBookStatus(book);
   return status === "upcoming" ? book.release_date || book.read_date : book.read_date || book.release_date;
 }
@@ -330,7 +372,7 @@ function getStatusChipClass(status: string) {
   return "inline-flex rounded-full border border-rose-300 bg-rose-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-rose-800";
 }
 
-function getSuggestionSourceQuality(suggestion: any): { label: string; className: string } {
+function getSuggestionSourceQuality(suggestion: SuggestionRecord): { label: string; className: string } {
   const sourceUrl = String(suggestion?.source_url || "").toLowerCase();
   const source = String(suggestion?.source || "").toLowerCase();
 
@@ -375,11 +417,11 @@ function getSuggestionSourceQuality(suggestion: any): { label: string; className
   };
 }
 
-function isStoreSuggestion(suggestion: any): boolean {
+function isStoreSuggestion(suggestion: SuggestionRecord): boolean {
   return getSuggestionSourceQuality(suggestion).label === "store";
 }
 
-function sortSuggestionsStoreFirst(suggestions: any[]): any[] {
+function sortSuggestionsStoreFirst(suggestions: SuggestionRecord[]): SuggestionRecord[] {
   return [...suggestions].sort((a, b) => {
     const aStore = isStoreSuggestion(a) ? 1 : 0;
     const bStore = isStoreSuggestion(b) ? 1 : 0;
@@ -505,7 +547,7 @@ function normalizeBookTitleSafe(rawTitle: string, seriesName?: string, bookNumbe
   return title.trim();
 }
 
-function inferSeriesTitleSuffix(books: any[]): string | null {
+function inferSeriesTitleSuffix(books: BookRecord[]): string | null {
   const suffixCounts: Record<string, number> = {};
   const suffixDisplay: Record<string, string> = {};
 
@@ -534,7 +576,7 @@ function inferSeriesTitleSuffix(books: any[]): string | null {
   return suffixDisplay[bestKey] || null;
 }
 
-function inferSingleWordStemPreference(books: any[]): boolean {
+function inferSingleWordStemPreference(books: BookRecord[]): boolean {
   const stems: string[] = [];
   for (const book of books || []) {
     const title = String(book?.title || "").trim();
@@ -553,7 +595,7 @@ function inferSingleWordStemPreference(books: any[]): boolean {
 function canonicalizeSuggestionTitle(
   rawTitle: string,
   fallbackBookNumber: string | undefined,
-  books: any[],
+  books: BookRecord[],
   seriesName?: string,
 ): string {
   let cleaned = normalizeSuggestedTitle(rawTitle, fallbackBookNumber);
@@ -587,7 +629,7 @@ function canonicalizeSuggestionTitle(
   return cleaned;
 }
 
-function sortBooksBySeriesOrder(books: any[]): any[] {
+function sortBooksBySeriesOrder(books: BookRecord[]): BookRecord[] {
   return [...books].sort((a, b) => {
     const aNum = Number(a?.book_number ?? a?.series_order ?? 0);
     const bNum = Number(b?.book_number ?? b?.series_order ?? 0);
@@ -618,18 +660,18 @@ export default function SeriesDetailPage() {
   const seriesId = params.seriesId as string;
   const fromView = searchParams.get("fromView") === "finished" ? "finished" : "ongoing";
   const viewAllSeriesHref = `/series?view=${fromView}`;
-  const [series, setSeries] = useState<any | null>(null);
+  const [series, setSeries] = useState<SeriesRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [summaryLoadingId, setSummaryLoadingId] = useState<number | null>(null);
   const [finishedToggleSaving, setFinishedToggleSaving] = useState(false);
-  const [summaryEditorBook, setSummaryEditorBook] = useState<any | null>(null);
+  const [summaryEditorBook, setSummaryEditorBook] = useState<BookRecord | null>(null);
   const [summaryDraft, setSummaryDraft] = useState("");
   const [notesDraft, setNotesDraft] = useState("");
   const [summarySaving, setSummarySaving] = useState(false);
-  const [missingSuggestions, setMissingSuggestions] = useState<Record<string, any[]>>({});
+  const [missingSuggestions, setMissingSuggestions] = useState<Record<string, SuggestionRecord[]>>({});
   const [missingSuggestionLoading, setMissingSuggestionLoading] = useState<string | null>(null);
-  const [quickSuggestResults, setQuickSuggestResults] = useState<any[]>([]);
+  const [quickSuggestResults, setQuickSuggestResults] = useState<SuggestionRecord[]>([]);
   const [quickSuggestLoading, setQuickSuggestLoading] = useState(false);
   const [bookSortMode, setBookSortMode] = useState<"series" | "az">("series");
   const [storeOnly, setStoreOnly] = useState(false);
@@ -653,8 +695,22 @@ export default function SeriesDetailPage() {
   const [titleNormalizeSaving, setTitleNormalizeSaving] = useState(false);
   const [releaseIntelDialogOpen, setReleaseIntelDialogOpen] = useState(false);
   const [normalizeTitlesDialogOpen, setNormalizeTitlesDialogOpen] = useState(false);
-  const [columnWidths, setColumnWidths] = useState<Record<SeriesDetailColumnKey, number>>(DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS);
-  const [columnWidthsHydrated, setColumnWidthsHydrated] = useState(false);
+  const [columnWidths, setColumnWidths] = useState<Record<SeriesDetailColumnKey, number>>(() => {
+    if (typeof window === "undefined") {
+      return DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS;
+    }
+
+    try {
+      const storageKey = `${SERIES_DETAIL_TABLE_COLUMN_WIDTHS_STORAGE_PREFIX}${seriesId}`;
+      const saved = window.localStorage.getItem(storageKey);
+      if (!saved) return DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS;
+
+      const parsed = JSON.parse(saved);
+      return sanitizeSavedSeriesDetailColumnWidths(parsed) ?? DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS;
+    } catch {
+      return DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS;
+    }
+  });
   const scanAbortRef = useRef<AbortController | null>(null);
   const scanPendingRef = useRef<string[]>([]);
   const scanCompletedRef = useRef(0);
@@ -706,30 +762,11 @@ export default function SeriesDetailPage() {
   useEffect(() => {
     try {
       const storageKey = `${SERIES_DETAIL_TABLE_COLUMN_WIDTHS_STORAGE_PREFIX}${seriesId}`;
-      const saved = window.localStorage.getItem(storageKey);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        const restored = sanitizeSavedSeriesDetailColumnWidths(parsed);
-        if (restored) {
-          setColumnWidths(restored);
-        }
-      }
-    } catch {
-      // Ignore storage parse/read errors and keep defaults.
-    } finally {
-      setColumnWidthsHydrated(true);
-    }
-  }, [seriesId]);
-
-  useEffect(() => {
-    if (!columnWidthsHydrated) return;
-    try {
-      const storageKey = `${SERIES_DETAIL_TABLE_COLUMN_WIDTHS_STORAGE_PREFIX}${seriesId}`;
       window.localStorage.setItem(storageKey, JSON.stringify(columnWidths));
     } catch {
       // Ignore storage write errors.
     }
-  }, [seriesId, columnWidths, columnWidthsHydrated]);
+  }, [seriesId, columnWidths]);
 
   useEffect(() => {
     const handleMouseMove = (event: MouseEvent) => {
@@ -895,15 +932,17 @@ export default function SeriesDetailPage() {
         window.clearTimeout(addMessageTimeoutRef.current);
       }
     };
+  // runBackgroundScan is intentionally referenced from latest render while this effect is keyed by series changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seriesId]);
 
   useEffect(() => {
     const unsubscribe = subscribeBookStatusUpdates((payload) => {
-      setSeries((prev: any) => {
+      setSeries((prev) => {
         if (!prev || !Array.isArray(prev.books)) return prev;
 
         let didChange = false;
-        const nextBooks = prev.books.map((book: any) => {
+        const nextBooks = prev.books.map((book) => {
           if (book.id !== payload.id) return book;
           didChange = true;
           return {
@@ -923,26 +962,11 @@ export default function SeriesDetailPage() {
     return unsubscribe;
   }, []);
 
-  useEffect(() => {
-    if (!Array.isArray(series?.books)) {
-      return;
-    }
-
-    const upcomingIds = new Set(
-      series.books
-        .filter((book: any) => getBookStatus(book) === "upcoming")
-        .map((book: any) => Number(book.id))
-        .filter((id: number) => Number.isFinite(id))
-    );
-
-    setRecentUpcomingBookIds((prev) => prev.filter((id) => upcomingIds.has(id)));
-  }, [series?.books]);
-
   async function runBackgroundScan(
     orders: string[],
-    seriesData: any,
+    seriesData: SeriesRecord,
     targetSeriesId: string,
-    seedSuggestions?: Record<string, any[]>
+    seedSuggestions?: Record<string, SuggestionRecord[]>
   ) {
     if (scanAbortRef.current || orders.length === 0) {
       return;
@@ -953,7 +977,7 @@ export default function SeriesDetailPage() {
     scanPendingRef.current = [...orders];
     setScanStatus("running");
 
-    const nextSuggestions: Record<string, any[]> = {
+    const nextSuggestions: Record<string, SuggestionRecord[]> = {
       ...(seedSuggestions || loadCachedSuggestions(targetSeriesId)),
     };
 
@@ -1022,6 +1046,12 @@ export default function SeriesDetailPage() {
     }
   }
 
+  const books = useMemo<BookRecord[]>(() => (Array.isArray(series?.books) ? series.books : []), [series?.books]);
+  const activeRecentUpcomingBookIds = useMemo(
+    () => recentUpcomingBookIds.filter((id) => books.some((book) => Number(book.id) === id && getBookStatus(book) === "upcoming")),
+    [recentUpcomingBookIds, books],
+  );
+
   if (loading) {
     return <div className="p-6">Loading series...</div>;
   }
@@ -1034,7 +1064,6 @@ export default function SeriesDetailPage() {
     return <div className="p-6">Series not found.</div>;
   }
 
-  const books: any[] = Array.isArray(series.books) ? series.books : [];
   const displayedBooks = (() => {
     if (bookSortMode === "az") {
       return [...books].sort((a, b) =>
@@ -1045,12 +1074,12 @@ export default function SeriesDetailPage() {
     }
 
     const ordered = sortBooksBySeriesOrder(books);
-    if (!recentUpcomingBookIds.length) {
+    if (!activeRecentUpcomingBookIds.length) {
       return ordered;
     }
 
     const rankByPinnedOrder = new Map<number, number>();
-    recentUpcomingBookIds.forEach((id, index) => {
+    activeRecentUpcomingBookIds.forEach((id, index) => {
       rankByPinnedOrder.set(id, index);
     });
 
@@ -1080,14 +1109,12 @@ export default function SeriesDetailPage() {
   const readCount = books.filter((book) => book.is_read).length;
   const upcomingCount = books.filter((book) => getBookStatus(book) === "upcoming").length;
   const unreadCount = books.filter((book) => !book.is_read).length;
-  const displayAuthor = series.author || books.find((book) => book.author)?.author || "Unknown author";
-  const maxBookNumber = books.reduce((max: number, book: any) => {
+  const maxBookNumber = books.reduce((max: number, book) => {
     const num = Number(book.book_number);
     return Number.isFinite(num) ? Math.max(max, num) : max;
   }, 0);
   const suggestedNextNumber = String(Math.max(1, Math.floor(maxBookNumber) + 1));
   const scanPercent = scanTotalCount > 0 ? Math.min(100, Math.round((scanCompletedCount / scanTotalCount) * 100)) : 0;
-  const autoStartedOnce = hasAutoStartedSeriesScan(seriesId);
   const quickSortedSuggestions = sortSuggestionsStoreFirst(quickSuggestResults);
   const quickVisibleSuggestions = storeOnly
     ? quickSortedSuggestions.filter(isStoreSuggestion)
@@ -1150,6 +1177,8 @@ export default function SeriesDetailPage() {
   }
 
   async function handleApplyReleaseIntel() {
+    if (!series) return;
+
     const parsedEntries = parseReleaseIntelText(releaseIntelText);
     if (!parsedEntries.length) {
       alert("I could not detect entries like 'Book 11 (Title)', 'Book 11: Title', or 'Book 11 ... releases on Month Day, Year'.");
@@ -1163,7 +1192,7 @@ export default function SeriesDetailPage() {
       let created = 0;
       let updated = 0;
 
-      const existingBooks: any[] = Array.isArray(series?.books) ? series.books : [];
+      const existingBooks: BookRecord[] = Array.isArray(series?.books) ? series.books : [];
 
       for (const entry of parsedEntries) {
         const existing = existingBooks.find((book) => Number(book?.book_number) === entry.bookNumber);
@@ -1278,7 +1307,7 @@ export default function SeriesDetailPage() {
     });
   }
 
-  async function handleEditBookTitle(book: any) {
+  async function handleEditBookTitle(book: BookRecord) {
     const currentTitle = String(book?.title || "").trim();
     const editedTitle = prompt("Edit book title:", currentTitle);
     if (editedTitle === null) {
@@ -1306,12 +1335,15 @@ export default function SeriesDetailPage() {
       }
 
       const updatedBook = await response.json();
-      setSeries((prev: any) => ({
-        ...prev,
-        books: Array.isArray(prev?.books)
-          ? prev.books.map((item: any) => (item.id === updatedBook.id ? { ...item, ...updatedBook } : item))
-          : prev?.books,
-      }));
+      setSeries((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          books: Array.isArray(prev.books)
+            ? prev.books.map((item) => (item.id === updatedBook.id ? { ...item, ...updatedBook } : item))
+            : prev.books,
+        };
+      });
       flashAddedMessage(`Updated title for book #${book.book_number ?? "?"}.`);
     } catch (error) {
       console.error(error);
@@ -1326,7 +1358,7 @@ export default function SeriesDetailPage() {
 
     setTitleNormalizeSaving(true);
     try {
-      const updatedById = new Map<number, any>();
+      const updatedById = new Map<number, BookRecord>();
 
       for (const row of titleNormalizationPreview) {
         const response = await fetchApiWithFallback(`/books/${row.id}`, {
@@ -1343,12 +1375,15 @@ export default function SeriesDetailPage() {
         updatedById.set(updatedBook.id, updatedBook);
       }
 
-      setSeries((prev: any) => ({
-        ...prev,
-        books: Array.isArray(prev?.books)
-          ? prev.books.map((item: any) => (updatedById.has(item.id) ? { ...item, ...updatedById.get(item.id) } : item))
-          : prev?.books,
-      }));
+      setSeries((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          books: Array.isArray(prev.books)
+            ? prev.books.map((item) => (updatedById.has(item.id) ? { ...item, ...updatedById.get(item.id) } : item))
+            : prev.books,
+        };
+      });
 
       flashAddedMessage(`Normalized ${updatedById.size} title${updatedById.size === 1 ? "" : "s"}.`);
     } catch (error) {
@@ -1377,7 +1412,7 @@ export default function SeriesDetailPage() {
     window.open(buildGoogleSearchUrl(query), "_blank");
   }
 
-  async function handleFetchSummary(bookId: number, title: string, author?: string | null) {
+  async function handleFetchSummary(bookId: number) {
     setSummaryLoadingId(bookId);
     try {
         const response = await fetchApiWithFallback(`/books/${bookId}/summary`, {
@@ -1389,12 +1424,15 @@ export default function SeriesDetailPage() {
 
       const data = await response.json();
       const updatedBook = data.book;
-      setSeries((prev: any) => ({
-        ...prev,
-        books: prev.books.map((book: any) =>
-          book.id === updatedBook.id ? updatedBook : book
-        ),
-      }));
+      setSeries((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          books: prev.books?.map((book) =>
+            book.id === updatedBook.id ? updatedBook : book
+          ),
+        };
+      });
       setSummaryEditorBook(updatedBook);
       setSummaryDraft(String(updatedBook.auto_summary || ""));
       setNotesDraft(String(updatedBook.notes || ""));
@@ -1406,7 +1444,7 @@ export default function SeriesDetailPage() {
     }
   }
 
-  function openSummaryEditor(book: any) {
+  function openSummaryEditor(book: BookRecord) {
     setSummaryEditorBook(book);
     setSummaryDraft(String(book?.auto_summary || ""));
     setNotesDraft(String(book?.notes || ""));
@@ -1431,12 +1469,15 @@ export default function SeriesDetailPage() {
       }
 
       const updatedBook = await response.json();
-      setSeries((prev: any) => ({
-        ...prev,
-        books: Array.isArray(prev?.books)
-          ? prev.books.map((book: any) => (book.id === updatedBook.id ? { ...book, ...updatedBook } : book))
-          : prev?.books,
-      }));
+      setSeries((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          books: Array.isArray(prev.books)
+            ? prev.books.map((book) => (book.id === updatedBook.id ? { ...book, ...updatedBook } : book))
+            : prev.books,
+        };
+      });
       setSummaryEditorBook(updatedBook);
       setSummaryDraft(String(updatedBook.auto_summary || ""));
       setNotesDraft(String(updatedBook.notes || ""));
@@ -1448,7 +1489,7 @@ export default function SeriesDetailPage() {
     }
   }
 
-  async function handleToggleRead(book: any) {
+  async function handleToggleRead(book: BookRecord) {
     const nextIsRead = !book.is_read;
     const releaseDate = book.release_date || book.publication_date;
     let nextStatus = nextIsRead ? "read" : "unread";
@@ -1480,11 +1521,12 @@ export default function SeriesDetailPage() {
       }
 
       const updatedBook = await response.json();
-      setSeries((prev: any) => {
-        const prevBooks = Array.isArray(prev?.books) ? prev.books : [];
+      setSeries((prev) => {
+        if (!prev) return prev;
+        const prevBooks = Array.isArray(prev.books) ? prev.books : [];
         return {
           ...prev,
-          books: prevBooks.map((item: any) =>
+          books: prevBooks.map((item) =>
             item.id === updatedBook.id ? { ...item, ...updatedBook } : item
           ),
         };
@@ -1496,7 +1538,7 @@ export default function SeriesDetailPage() {
     }
   }
 
-  async function handleSetBookStatus(book: any) {
+  async function handleSetBookStatus(book: BookRecord) {
     const currentStatus = getBookStatus(book);
     const editedStatus = prompt("Set status (read/unread/upcoming):", currentStatus);
     if (editedStatus === null) {
@@ -1550,11 +1592,12 @@ export default function SeriesDetailPage() {
       }
 
       const updatedBook = await response.json();
-      setSeries((prev: any) => {
-        const prevBooks = Array.isArray(prev?.books) ? prev.books : [];
+      setSeries((prev) => {
+        if (!prev) return prev;
+        const prevBooks = Array.isArray(prev.books) ? prev.books : [];
         return {
           ...prev,
-          books: prevBooks.map((item: any) =>
+          books: prevBooks.map((item) =>
             item.id === updatedBook.id ? { ...item, ...updatedBook } : item
           ),
         };
@@ -1614,7 +1657,7 @@ export default function SeriesDetailPage() {
     }
   }
 
-  async function fetchSuggestionForMissingBook(bookNumber: string, seriesData?: any, signal?: AbortSignal): Promise<any[] | null> {
+  async function fetchSuggestionForMissingBook(bookNumber: string, seriesData?: SeriesRecord, signal?: AbortSignal): Promise<SuggestionRecord[] | null> {
     const seriesPayload = seriesData || series;
     if (!seriesPayload) {
       return [];
@@ -1627,7 +1670,7 @@ export default function SeriesDetailPage() {
       params.set("series_name", seriesPayload.name || "");
       params.set("book_number", bookNumber);
       const seriesBooks = Array.isArray(seriesPayload.books) ? seriesPayload.books : [];
-      const suggestAuthor = seriesPayload.author || seriesBooks.find((book: any) => book.author)?.author;
+      const suggestAuthor = seriesPayload.author || seriesBooks.find((book) => book.author)?.author;
       if (suggestAuthor && !["unknown", "unknown author", "n/a", "na", "none"].includes(String(suggestAuthor).trim().toLowerCase())) {
         params.set("author", suggestAuthor);
       }
@@ -1650,7 +1693,7 @@ export default function SeriesDetailPage() {
       const serpUsed = Number(responseData?.diagnostics?.provider_counts?.serpapi || 0);
       incrementSerpUsage(serpUsed);
       console.log(`[Suggestion ${bookNumber}] Got ${responseData.results?.length || 0} results`);
-      return responseData.results || [];
+      return (responseData.results || []) as SuggestionRecord[];
     } catch (err) {
       if ((err as Error)?.name === "AbortError") {
         return null;
@@ -1777,7 +1820,9 @@ export default function SeriesDetailPage() {
     }
   }
 
-  async function handleAddSuggestion(bookNumber: string, suggestion: any) {
+  async function handleAddSuggestion(bookNumber: string, suggestion: SuggestionRecord) {
+    if (!series) return;
+
     try {
       // Reduce write contention while adding a book by pausing active scans.
       if (scanAbortRef.current) {
@@ -1787,7 +1832,7 @@ export default function SeriesDetailPage() {
       }
 
       const cleanedTitle = canonicalizeSuggestionTitle(
-        suggestion.title,
+        String(suggestion.title || ""),
         bookNumber,
         series?.books || [],
         series?.name,
@@ -1873,13 +1918,16 @@ export default function SeriesDetailPage() {
       if (normalizedStatus === "upcoming") {
         setRecentUpcomingBookIds((prev) => [Number(newBook.id), ...prev.filter((id) => id !== Number(newBook.id))]);
       }
-      setSeries((prev: any) => ({
-        ...prev,
-        books: sortBooksBySeriesOrder([...(prev.books || []), newBook]),
-        missing_books: Array.isArray(prev.missing_books)
-          ? prev.missing_books.filter((order: string) => String(order) !== String(bookNumber))
-          : prev.missing_books,
-      }));
+      setSeries((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          books: sortBooksBySeriesOrder([...(prev.books || []), newBook]),
+          missing_books: Array.isArray(prev.missing_books)
+            ? prev.missing_books.filter((order: string) => String(order) !== String(bookNumber))
+            : prev.missing_books,
+        };
+      });
       removeOrderFromScanTracking(bookNumber);
 
       // After add, clear this slot's suggestion list to reduce visual clutter.
@@ -1895,81 +1943,6 @@ export default function SeriesDetailPage() {
       console.error(err);
       const message = err instanceof Error ? err.message : "Unable to add the suggested book.";
       alert(message);
-    }
-  }
-
-  async function handleAddMissingBook(bookNumber: string) {
-    const title = prompt(`Title for book ${bookNumber}:`, `Book ${bookNumber}`);
-    if (!title) {
-      return;
-    }
-
-    const editedStatus = prompt(`Status for book ${bookNumber}? (upcoming/unread/read)`, "upcoming");
-    if (editedStatus === null) {
-      return;
-    }
-    const normalizedStatus = editedStatus.trim().toLowerCase();
-    if (!["upcoming", "unread", "read"].includes(normalizedStatus)) {
-      alert("Status must be one of: upcoming, unread, read.");
-      return;
-    }
-
-    let releaseDate: string | null = null;
-    if (normalizedStatus !== "read") {
-        const releaseDatePrompt = prompt(`Date for book ${bookNumber} (MM-DD-YYYY, optional):`, "");
-      if (releaseDatePrompt === null) {
-        return;
-      }
-        releaseDate = normalizeDateInput(releaseDatePrompt);
-    }
-
-    let readDate: string | null = null;
-    if (normalizedStatus === "read") {
-      const today = new Date().toISOString().split("T")[0];
-        const readDatePrompt = prompt(`Read date for book ${bookNumber} (MM-DD-YYYY):`, today);
-      if (readDatePrompt === null) {
-        return;
-      }
-        readDate = normalizeDateInput(readDatePrompt) || today;
-    }
-
-    try {
-      const response = await fetchApiWithFallback("/books/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title,
-          author: series.author || "Unknown author",
-          series_id: Number(series.id),
-          series_order: Number(bookNumber),
-          book_number: Number(bookNumber),
-          read_status: normalizedStatus,
-          is_read: normalizedStatus === "read",
-          read_date: readDate || undefined,
-          release_date: releaseDate || undefined,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to add book ${bookNumber}`);
-      }
-
-      const updatedBook = await response.json();
-      if (normalizedStatus === "upcoming") {
-        setRecentUpcomingBookIds((prev) => [Number(updatedBook.id), ...prev.filter((id) => id !== Number(updatedBook.id))]);
-      }
-      setSeries((prev: any) => ({
-        ...prev,
-        books: sortBooksBySeriesOrder([...(prev.books || []), updatedBook]),
-        missing_books: Array.isArray(prev.missing_books)
-          ? prev.missing_books.filter((order: string) => String(order) !== String(bookNumber))
-          : prev.missing_books,
-      }));
-      removeOrderFromScanTracking(bookNumber);
-      flashAddedMessage(`Added missing book #${bookNumber}.`);
-    } catch (error) {
-      console.error(error);
-      alert("Could not add the missing book. Check the console for details.");
     }
   }
 
@@ -1989,7 +1962,7 @@ export default function SeriesDetailPage() {
 
     const normalizedDate = normalizeDateInput(addBookDate);
     const today = new Date().toISOString().split("T")[0];
-    const payload: any = {
+    const payload: Record<string, unknown> = {
       title,
       author: String(series.author || "Unknown author").trim() || "Unknown author",
       series_id: Number(series.id),
@@ -2028,10 +2001,13 @@ export default function SeriesDetailPage() {
       if (addBookStatus === "upcoming") {
         setRecentUpcomingBookIds((prev) => [Number(createdBook.id), ...prev.filter((id) => id !== Number(createdBook.id))]);
       }
-      setSeries((prev: any) => ({
-        ...prev,
-        books: sortBooksBySeriesOrder([...(prev.books || []), createdBook]),
-      }));
+      setSeries((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          books: sortBooksBySeriesOrder([...(prev.books || []), createdBook]),
+        };
+      });
 
       setAddBookTitle("");
       setAddBookNumber("");
@@ -2230,8 +2206,8 @@ export default function SeriesDetailPage() {
             const notes = book.notes;
             return (
               <TableRow key={book.id}>
-                <TableCell className="truncate" title={book.title}>
-                  <div>{book.title}</div>
+                <TableCell className="truncate" title={book.title ?? undefined}>
+                  <div>{book.title || "—"}</div>
                 </TableCell>
                 <TableCell className="truncate" title={book.author || "—"}>{book.author || "—"}</TableCell>
                 <TableCell>
@@ -2280,7 +2256,7 @@ export default function SeriesDetailPage() {
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() => handleFetchSummary(book.id, book.title, book.author)}
+                    onClick={() => handleFetchSummary(book.id)}
                     disabled={summaryLoadingId === book.id}
                   >
                     {summary ? "Refresh summary" : "Fetch summary"}
@@ -2434,7 +2410,7 @@ export default function SeriesDetailPage() {
           <DialogHeader>
             <DialogTitle>Paste Release Intel</DialogTitle>
             <DialogDescription>
-              Paste Google results text. Entries like "Book 12: Unique" and dates like "August 3rd, 2026" are parsed automatically.
+              Paste Google results text. Entries like &quot;Book 12: Unique&quot; and dates like &quot;August 3rd, 2026&quot; are parsed automatically.
             </DialogDescription>
           </DialogHeader>
 

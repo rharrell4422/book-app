@@ -12,7 +12,17 @@ export type BookStatusSyncPayload = {
   updated_at: number;
 };
 
-function normalizePayload(book: any): BookStatusSyncPayload {
+type BookStatusInput = {
+  id?: number | string | null;
+  is_read?: boolean | null;
+  read_status?: string | null;
+  read_date?: string | null;
+  release_date?: string | null;
+  publication_date?: string | null;
+  series_id?: number | string | null;
+};
+
+function normalizePayload(book: BookStatusInput): BookStatusSyncPayload {
   return {
     id: Number(book?.id),
     is_read: Boolean(book?.is_read),
@@ -25,7 +35,7 @@ function normalizePayload(book: any): BookStatusSyncPayload {
   };
 }
 
-export function publishBookStatusUpdate(book: any) {
+export function publishBookStatusUpdate(book: BookStatusInput) {
   if (typeof window === "undefined") return;
 
   const payload = normalizePayload(book);

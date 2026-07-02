@@ -27,6 +27,22 @@ type SeriesRow = {
   updated_at?: string | null;
 };
 
+type SeriesApiRow = {
+  id: number;
+  name: string;
+  author?: string | null;
+  is_finished?: boolean;
+  series_status?: string | null;
+  next_unread_book_number?: number | null;
+  next_upcoming_book_number?: number | null;
+  total_books?: number | null;
+  updated_at?: string | null;
+};
+
+type SeriesDetailApiRow = SeriesApiRow & {
+  books?: Array<unknown>;
+};
+
 function formatDate(value?: string | null) {
   if (!value) return "—";
   const date = new Date(value);
@@ -217,10 +233,48 @@ const SERIES_RESIZE_NEIGHBOR: Record<SeriesColumnKey, SeriesColumnKey | null> = 
 
 const SERIES_TABLE_COLUMN_WIDTHS_STORAGE_KEY = "seriesTableColumnWidthsV1";
 
+function sanitizeSavedSeriesColumnWidths(value: unknown): Record<SeriesColumnKey, number> | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<Record<SeriesColumnKey, unknown>>;
+
+  const keys: SeriesColumnKey[] = ["id", "name", "author", "nextUnread", "nextUpcoming", "total", "lastChecked", "actions"];
+  const next: Partial<Record<SeriesColumnKey, number>> = {};
+
+  for (const key of keys) {
+    const raw = candidate[key];
+    if (typeof raw !== "number" || !Number.isFinite(raw)) {
+      return null;
+    }
+    const minimum = MIN_SERIES_COLUMN_WIDTHS[key];
+    next[key] = Math.max(minimum, Number(raw));
+  }
+
+  const total = keys.reduce((sum, key) => sum + (next[key] ?? 0), 0);
+  if (total <= 0) return null;
+
+  return {
+    id: Number((((next.id ?? DEFAULT_SERIES_COLUMN_WIDTHS.id) / total) * 100).toFixed(2)),
+    name: Number((((next.name ?? DEFAULT_SERIES_COLUMN_WIDTHS.name) / total) * 100).toFixed(2)),
+    author: Number((((next.author ?? DEFAULT_SERIES_COLUMN_WIDTHS.author) / total) * 100).toFixed(2)),
+    nextUnread: Number((((next.nextUnread ?? DEFAULT_SERIES_COLUMN_WIDTHS.nextUnread) / total) * 100).toFixed(2)),
+    nextUpcoming: Number((((next.nextUpcoming ?? DEFAULT_SERIES_COLUMN_WIDTHS.nextUpcoming) / total) * 100).toFixed(2)),
+    total: Number((((next.total ?? DEFAULT_SERIES_COLUMN_WIDTHS.total) / total) * 100).toFixed(2)),
+    lastChecked: Number((((next.lastChecked ?? DEFAULT_SERIES_COLUMN_WIDTHS.lastChecked) / total) * 100).toFixed(2)),
+    actions: Number((((next.actions ?? DEFAULT_SERIES_COLUMN_WIDTHS.actions) / total) * 100).toFixed(2)),
+  };
+}
+
 export default function SeriesPage() {
   const { toast } = useToast();
   const [series, setSeries] = useState<SeriesRow[]>([]);
-  const [viewMode, setViewMode] = useState<"ongoing" | "finished">("ongoing");
+  const [viewMode, setViewMode] = useState<"ongoing" | "finished">(() => {
+    if (typeof window === "undefined") {
+      return "ongoing";
+    }
+
+    const sourceView = new URLSearchParams(window.location.search).get("view");
+    return sourceView === "finished" ? "finished" : "ongoing";
+  });
   const [quickSearch, setQuickSearch] = useState("");
   const [loadingId, setLoadingId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
@@ -236,7 +290,21 @@ export default function SeriesPage() {
     key: null,
     direction: "asc",
   });
-  const [columnWidths, setColumnWidths] = useState<Record<SeriesColumnKey, number>>(DEFAULT_SERIES_COLUMN_WIDTHS);
+  const [columnWidths, setColumnWidths] = useState<Record<SeriesColumnKey, number>>(() => {
+    if (typeof window === "undefined") {
+      return DEFAULT_SERIES_COLUMN_WIDTHS;
+    }
+
+    try {
+      const saved = window.localStorage.getItem(SERIES_TABLE_COLUMN_WIDTHS_STORAGE_KEY);
+      if (!saved) return DEFAULT_SERIES_COLUMN_WIDTHS;
+
+      const parsed = JSON.parse(saved);
+      return sanitizeSavedSeriesColumnWidths(parsed) ?? DEFAULT_SERIES_COLUMN_WIDTHS;
+    } catch {
+      return DEFAULT_SERIES_COLUMN_WIDTHS;
+    }
+  });
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const resizeStateRef = useRef<{
     key: SeriesColumnKey;
@@ -251,65 +319,12 @@ export default function SeriesPage() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const sourceView = new URLSearchParams(window.location.search).get("view");
-    if (sourceView === "ongoing" || sourceView === "finished") {
-      setViewMode(sourceView);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
     const current = url.searchParams.get("view");
     if (current === viewMode) return;
     url.searchParams.set("view", viewMode);
     window.history.replaceState({}, "", url.toString());
   }, [viewMode]);
-
-  function sanitizeSavedSeriesColumnWidths(value: unknown): Record<SeriesColumnKey, number> | null {
-    if (!value || typeof value !== "object") return null;
-    const candidate = value as Partial<Record<SeriesColumnKey, unknown>>;
-
-    const keys: SeriesColumnKey[] = ["id", "name", "author", "nextUnread", "nextUpcoming", "total", "lastChecked", "actions"];
-    const next: Partial<Record<SeriesColumnKey, number>> = {};
-
-    for (const key of keys) {
-      const raw = candidate[key];
-      if (typeof raw !== "number" || !Number.isFinite(raw)) {
-        return null;
-      }
-      const minimum = MIN_SERIES_COLUMN_WIDTHS[key];
-      next[key] = Math.max(minimum, Number(raw));
-    }
-
-    const total = keys.reduce((sum, key) => sum + (next[key] ?? 0), 0);
-    if (total <= 0) return null;
-
-    return {
-      id: Number((((next.id ?? DEFAULT_SERIES_COLUMN_WIDTHS.id) / total) * 100).toFixed(2)),
-      name: Number((((next.name ?? DEFAULT_SERIES_COLUMN_WIDTHS.name) / total) * 100).toFixed(2)),
-      author: Number((((next.author ?? DEFAULT_SERIES_COLUMN_WIDTHS.author) / total) * 100).toFixed(2)),
-      nextUnread: Number((((next.nextUnread ?? DEFAULT_SERIES_COLUMN_WIDTHS.nextUnread) / total) * 100).toFixed(2)),
-      nextUpcoming: Number((((next.nextUpcoming ?? DEFAULT_SERIES_COLUMN_WIDTHS.nextUpcoming) / total) * 100).toFixed(2)),
-      total: Number((((next.total ?? DEFAULT_SERIES_COLUMN_WIDTHS.total) / total) * 100).toFixed(2)),
-      lastChecked: Number((((next.lastChecked ?? DEFAULT_SERIES_COLUMN_WIDTHS.lastChecked) / total) * 100).toFixed(2)),
-      actions: Number((((next.actions ?? DEFAULT_SERIES_COLUMN_WIDTHS.actions) / total) * 100).toFixed(2)),
-    };
-  }
-
-  useEffect(() => {
-    try {
-      const saved = window.localStorage.getItem(SERIES_TABLE_COLUMN_WIDTHS_STORAGE_KEY);
-      if (!saved) return;
-      const parsed = JSON.parse(saved);
-      const restored = sanitizeSavedSeriesColumnWidths(parsed);
-      if (restored) {
-        setColumnWidths(restored);
-      }
-    } catch {
-      // Ignore storage parse/read errors and keep defaults.
-    }
-  }, []);
 
   useEffect(() => {
     try {
@@ -500,7 +515,7 @@ export default function SeriesPage() {
       }
 
       const detailResults = await Promise.allSettled(
-        baseSeries.map(async (item: any) => {
+        (baseSeries as SeriesApiRow[]).map(async (item) => {
           const detailResponse = await fetch(`http://localhost:8000/series/${item.id}`, {
             cache: "no-store",
           });
@@ -511,9 +526,9 @@ export default function SeriesPage() {
         })
       );
 
-      const hydrated = baseSeries.map((item: any, index: number) => {
+      const hydrated = (baseSeries as SeriesApiRow[]).map((item, index: number) => {
         const detail = detailResults[index];
-        const detailData = detail?.status === "fulfilled" ? detail.value : null;
+        const detailData: SeriesDetailApiRow | null = detail?.status === "fulfilled" ? (detail.value as SeriesDetailApiRow) : null;
         const booksTracked = Array.isArray(detailData?.books)
           ? detailData.books.length
           : 0;
@@ -543,7 +558,10 @@ export default function SeriesPage() {
   }
 
   useEffect(() => {
-    fetchSeries();
+    const rafId = window.requestAnimationFrame(() => {
+      void fetchSeries();
+    });
+    return () => window.cancelAnimationFrame(rafId);
   }, []);
 
   async function handleCheckNow(seriesId: number) {
@@ -779,7 +797,7 @@ export default function SeriesPage() {
         Showing {sortedSeries.length} of {viewMode === "ongoing" ? ongoingCount : finishedCount} series.
       </p>
       <p className="text-xs text-muted-foreground">
-        "Next upcoming #" is the next upcoming book number in that series.
+        &quot;Next upcoming #&quot; is the next upcoming book number in that series.
       </p>
     </div>
   );
