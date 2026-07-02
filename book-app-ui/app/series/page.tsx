@@ -233,6 +233,51 @@ const SERIES_RESIZE_NEIGHBOR: Record<SeriesColumnKey, SeriesColumnKey | null> = 
 
 const SERIES_TABLE_COLUMN_WIDTHS_STORAGE_KEY = "seriesTableColumnWidthsV1";
 
+const STATIC_API_BASE_CANDIDATES = [
+  process.env.NEXT_PUBLIC_API_BASE_URL,
+  "http://localhost:8000",
+  "http://127.0.0.1:8000",
+].filter(Boolean) as string[];
+
+function normalizeBaseUrl(value: string) {
+  return value.replace(/\/+$/, "");
+}
+
+function getApiBaseCandidates() {
+  const dynamicCandidates: string[] = [];
+  if (typeof window !== "undefined") {
+    dynamicCandidates.push(`${window.location.protocol}//${window.location.hostname}:8000`);
+  }
+
+  return Array.from(new Set([...STATIC_API_BASE_CANDIDATES, ...dynamicCandidates]));
+}
+
+async function fetchApiWithFallback(path: string, init?: RequestInit) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const baseCandidates = getApiBaseCandidates();
+  const candidates = baseCandidates.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`);
+
+  if (normalizedPath.endsWith("/")) {
+    const trimmedPath = normalizedPath.slice(0, -1);
+    candidates.push(...baseCandidates.map((base) => `${normalizeBaseUrl(base)}${trimmedPath}`));
+  }
+
+  let lastError: Error | null = null;
+  for (const url of candidates) {
+    try {
+      const response = await fetch(url, init);
+      if (response.ok) {
+        return response;
+      }
+      lastError = new Error(`Failed to load ${normalizedPath} (${response.status})`);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Network error");
+    }
+  }
+
+  throw lastError ?? new Error(`Failed to load ${normalizedPath}`);
+}
+
 function sanitizeSavedSeriesColumnWidths(value: unknown): Record<SeriesColumnKey, number> | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<Record<SeriesColumnKey, unknown>>;
@@ -267,14 +312,7 @@ function sanitizeSavedSeriesColumnWidths(value: unknown): Record<SeriesColumnKey
 export default function SeriesPage() {
   const { toast } = useToast();
   const [series, setSeries] = useState<SeriesRow[]>([]);
-  const [viewMode, setViewMode] = useState<"ongoing" | "finished">(() => {
-    if (typeof window === "undefined") {
-      return "ongoing";
-    }
-
-    const sourceView = new URLSearchParams(window.location.search).get("view");
-    return sourceView === "finished" ? "finished" : "ongoing";
-  });
+  const [viewMode, setViewMode] = useState<"ongoing" | "finished">("ongoing");
   const [quickSearch, setQuickSearch] = useState("");
   const [loadingId, setLoadingId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
@@ -290,21 +328,7 @@ export default function SeriesPage() {
     key: null,
     direction: "asc",
   });
-  const [columnWidths, setColumnWidths] = useState<Record<SeriesColumnKey, number>>(() => {
-    if (typeof window === "undefined") {
-      return DEFAULT_SERIES_COLUMN_WIDTHS;
-    }
-
-    try {
-      const saved = window.localStorage.getItem(SERIES_TABLE_COLUMN_WIDTHS_STORAGE_KEY);
-      if (!saved) return DEFAULT_SERIES_COLUMN_WIDTHS;
-
-      const parsed = JSON.parse(saved);
-      return sanitizeSavedSeriesColumnWidths(parsed) ?? DEFAULT_SERIES_COLUMN_WIDTHS;
-    } catch {
-      return DEFAULT_SERIES_COLUMN_WIDTHS;
-    }
-  });
+  const [columnWidths, setColumnWidths] = useState<Record<SeriesColumnKey, number>>(DEFAULT_SERIES_COLUMN_WIDTHS);
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const resizeStateRef = useRef<{
     key: SeriesColumnKey;
@@ -318,6 +342,17 @@ export default function SeriesPage() {
   const detailHref = firstSeriesId ? `/series/${firstSeriesId}?fromView=${viewMode}` : "/series";
 
   useEffect(() => {
+    const rafId = window.requestAnimationFrame(() => {
+      const sourceView = new URLSearchParams(window.location.search).get("view");
+      if (sourceView === "ongoing" || sourceView === "finished") {
+        setViewMode(sourceView);
+      }
+    });
+
+    return () => window.cancelAnimationFrame(rafId);
+  }, []);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
     const current = url.searchParams.get("view");
@@ -325,6 +360,24 @@ export default function SeriesPage() {
     url.searchParams.set("view", viewMode);
     window.history.replaceState({}, "", url.toString());
   }, [viewMode]);
+
+  useEffect(() => {
+    const rafId = window.requestAnimationFrame(() => {
+      try {
+        const saved = window.localStorage.getItem(SERIES_TABLE_COLUMN_WIDTHS_STORAGE_KEY);
+        if (!saved) return;
+        const parsed = JSON.parse(saved);
+        const restored = sanitizeSavedSeriesColumnWidths(parsed);
+        if (restored) {
+          setColumnWidths(restored);
+        }
+      } catch {
+        // Ignore storage parse/read errors and keep defaults.
+      }
+    });
+
+    return () => window.cancelAnimationFrame(rafId);
+  }, []);
 
   useEffect(() => {
     try {
@@ -504,7 +557,7 @@ export default function SeriesPage() {
 
   async function fetchSeries() {
     try {
-      const response = await fetch("http://localhost:8000/series/", {
+      const response = await fetchApiWithFallback("/series/", {
         cache: "no-store",
       });
       const baseSeries = await response.json();
@@ -516,12 +569,9 @@ export default function SeriesPage() {
 
       const detailResults = await Promise.allSettled(
         (baseSeries as SeriesApiRow[]).map(async (item) => {
-          const detailResponse = await fetch(`http://localhost:8000/series/${item.id}`, {
+          const detailResponse = await fetchApiWithFallback(`/series/${item.id}`, {
             cache: "no-store",
           });
-          if (!detailResponse.ok) {
-            throw new Error(`Failed to load details for series ${item.id}`);
-          }
           return detailResponse.json();
         })
       );
@@ -553,7 +603,7 @@ export default function SeriesPage() {
       setSeries(hydrated);
     } catch (error) {
       console.error("Error fetching series:", error);
-      setMessage("Unable to load series right now.");
+      setMessage(error instanceof Error ? `Unable to load series: ${error.message}` : "Unable to load series right now.");
     }
   }
 
@@ -569,10 +619,7 @@ export default function SeriesPage() {
     setMessage("");
 
     try {
-      const response = await fetch(
-        `http://localhost:8000/series/${seriesId}/check`,
-        { method: "POST" }
-      );
+      const response = await fetchApiWithFallback(`/series/${seriesId}/check`, { method: "POST" });
       const data = await response.json();
 
       setMessage(

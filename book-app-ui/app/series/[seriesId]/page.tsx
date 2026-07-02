@@ -28,7 +28,7 @@ const SUGGESTION_SCAN_PREFIX = "series-scan-v1:";
 const SUGGESTION_AUTOSTART_PREFIX = "series-scan-autostarted-v1:";
 const SUGGESTION_SERP_USAGE_PREFIX = "series-serp-usage-v1:";
 const SUGGESTION_STORE_ONLY_PREFIX = "series-store-only-v1:";
-const API_BASE_CANDIDATES = [
+const STATIC_API_BASE_CANDIDATES = [
   process.env.NEXT_PUBLIC_API_BASE_URL,
   "http://localhost:8000",
   "http://127.0.0.1:8000",
@@ -120,13 +120,23 @@ function normalizeBaseUrl(value: string) {
   return value.replace(/\/+$/, "");
 }
 
+function getApiBaseCandidates() {
+  const dynamicCandidates: string[] = [];
+  if (typeof window !== "undefined") {
+    dynamicCandidates.push(`${window.location.protocol}//${window.location.hostname}:8000`);
+  }
+
+  return Array.from(new Set([...STATIC_API_BASE_CANDIDATES, ...dynamicCandidates]));
+}
+
 async function fetchApiWithFallback(path: string, init?: RequestInit) {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const candidates = API_BASE_CANDIDATES.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`);
+  const baseCandidates = getApiBaseCandidates();
+  const candidates = baseCandidates.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`);
 
   if (normalizedPath.endsWith("/")) {
     const trimmedPath = normalizedPath.slice(0, -1);
-    candidates.push(...API_BASE_CANDIDATES.map((base) => `${normalizeBaseUrl(base)}${trimmedPath}`));
+    candidates.push(...baseCandidates.map((base) => `${normalizeBaseUrl(base)}${trimmedPath}`));
   }
 
   let lastError: Error | null = null;
@@ -695,22 +705,7 @@ export default function SeriesDetailPage() {
   const [titleNormalizeSaving, setTitleNormalizeSaving] = useState(false);
   const [releaseIntelDialogOpen, setReleaseIntelDialogOpen] = useState(false);
   const [normalizeTitlesDialogOpen, setNormalizeTitlesDialogOpen] = useState(false);
-  const [columnWidths, setColumnWidths] = useState<Record<SeriesDetailColumnKey, number>>(() => {
-    if (typeof window === "undefined") {
-      return DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS;
-    }
-
-    try {
-      const storageKey = `${SERIES_DETAIL_TABLE_COLUMN_WIDTHS_STORAGE_PREFIX}${seriesId}`;
-      const saved = window.localStorage.getItem(storageKey);
-      if (!saved) return DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS;
-
-      const parsed = JSON.parse(saved);
-      return sanitizeSavedSeriesDetailColumnWidths(parsed) ?? DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS;
-    } catch {
-      return DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS;
-    }
-  });
+  const [columnWidths, setColumnWidths] = useState<Record<SeriesDetailColumnKey, number>>(DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS);
   const scanAbortRef = useRef<AbortController | null>(null);
   const scanPendingRef = useRef<string[]>([]);
   const scanCompletedRef = useRef(0);
@@ -758,6 +753,25 @@ export default function SeriesDetailPage() {
       actions: Number((((next.actions ?? DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS.actions) / total) * 100).toFixed(2)),
     };
   }
+
+  useEffect(() => {
+    const rafId = window.requestAnimationFrame(() => {
+      try {
+        const storageKey = `${SERIES_DETAIL_TABLE_COLUMN_WIDTHS_STORAGE_PREFIX}${seriesId}`;
+        const saved = window.localStorage.getItem(storageKey);
+        if (!saved) return;
+        const parsed = JSON.parse(saved);
+        const restored = sanitizeSavedSeriesDetailColumnWidths(parsed);
+        if (restored) {
+          setColumnWidths(restored);
+        }
+      } catch {
+        // Ignore storage parse/read errors and keep defaults.
+      }
+    });
+
+    return () => window.cancelAnimationFrame(rafId);
+  }, [seriesId]);
 
   useEffect(() => {
     try {

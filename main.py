@@ -47,6 +47,17 @@ app.add_middleware(
 )
 
 
+# ---------------------------------------------------------
+# Dependency: get DB session
+# ---------------------------------------------------------
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 @app.post("/agent/run")
 def run_agent(payload: AgentRunRequest):
     agent = BookAgent()
@@ -64,17 +75,6 @@ def approve_agent(payload: AgentApproveRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=422, detail=f"Invalid approved metadata: {exc}")
 
     return crud.create_book(db=db, book=approved_book)
-
-# ---------------------------------------------------------
-# Dependency: get DB session
-# ---------------------------------------------------------
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
 
 # ---------------------------------------------------------
 # SERIES ENDPOINTS

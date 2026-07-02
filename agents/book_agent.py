@@ -1,93 +1,57 @@
-"""
-BookAgent: Full production-ready agent with manual approval workflow.
+"""Book agent with a manual-approval workflow.
 
-This agent performs a complete reasoning loop:
-1. Generate search queries
-2. Fetch text from search results
-3. Interpret the text into structured metadata
-4. Return metadata for manual approval
-5. (Optional) Create the book in the database when approved
-
-All backend integrations are wired in:
-- search_orchestrator.py
-- intelligence.py
-- crud/books.py
-
-The agent returns a Python dict for safety and clarity.
+This module intentionally returns metadata only. It does not auto-create books.
 """
 
+from intelligence import lookup_book_summary, search_google_books, search_openlibrary, search_serpapi_web
 from search_orchestrator import SearchOrchestrator
-from intelligence import Intelligence
-from crud.books import create_book
 
 
 class BookAgent:
-    """
-    The BookAgent coordinates the entire reasoning loop.
-    It does NOT automatically create books — it returns metadata first.
-    You approve the metadata, then call create_book(metadata).
-    """
-
     def __init__(self):
-        # Dependency injection
-        self.search = SearchOrchestrator()
-        self.intel = Intelligence()
+        self.search = SearchOrchestrator(
+            google_search=search_google_books,
+            openlibrary_search=search_openlibrary,
+            serp_search=search_serpapi_web,
+        )
 
-    # ------------------------------------------------------------
-    # 1. Generate Search Queries
-    # ------------------------------------------------------------
-    def generate_search_queries(self, title: str, author: str = None) -> list[str]:
-        """
-        Uses SearchOrchestrator to generate search queries.
-        """
-        queries = self.search.generate_queries(title, author)
+    def generate_search_queries(self, title: str, author: str | None = None) -> list[str]:
+        title = (title or "").strip()
+        author = (author or "").strip() or None
+        if not title:
+            return []
+
+        queries = [title]
+        if author:
+            queries.append(f"{title} {author}")
         return queries
 
-    # ------------------------------------------------------------
-    # 2. Fetch Text
-    # ------------------------------------------------------------
-    def fetch_text(self, queries: list[str]) -> str:
-        """
-        Uses SearchOrchestrator to fetch raw text from the web.
-        """
-        raw_text = self.search.fetch_text_from_queries(queries)
-        return raw_text
+    def fetch_text(self, queries: list[str], author: str | None = None) -> dict:
+        if not queries:
+            return {
+                "found": False,
+                "summary": None,
+                "source_url": None,
+                "matched_title": None,
+                "matched_author": None,
+            }
+        return lookup_book_summary(queries[0], author)
 
-    # ------------------------------------------------------------
-    # 3. Interpret Text
-    # ------------------------------------------------------------
-    def interpret_text(self, raw_text: str) -> dict:
-        """
-        Uses Intelligence to interpret raw text and extract metadata.
-        Returns a Python dict for safety and clarity.
-        """
-        metadata = self.intel.extract_metadata(raw_text)
-        return metadata
+    def interpret_text(self, fetched: dict, fallback_title: str, fallback_author: str | None = None) -> dict:
+        return {
+            "title": fetched.get("matched_title") or fallback_title,
+            "author": fetched.get("matched_author") or fallback_author or "Unknown author",
+            "auto_summary": fetched.get("summary"),
+            "notes": None,
+            "source_url": fetched.get("source_url"),
+            "found": bool(fetched.get("found")),
+        }
 
-    # ------------------------------------------------------------
-    # 4. Manual Approval Step
-    # ------------------------------------------------------------
     def create_book(self, metadata: dict):
-        """
-        Creates a book in the database.
-        This is ONLY called after you manually approve the metadata.
-        """
-        return create_book(metadata)
+        # Book creation is intentionally handled by /agent/approve, not here.
+        raise RuntimeError("Book creation is approval-gated; use /agent/approve")
 
-    # ------------------------------------------------------------
-    # 5. Reasoning Loop
-    # ------------------------------------------------------------
-    def run(self, title: str, author: str = None) -> dict:
-        """
-        Full reasoning loop:
-        1. Generate search queries
-        2. Fetch text
-        3. Interpret text
-        4. Return metadata (manual approval required)
-
-        This function NEVER writes to the database automatically.
-        """
+    def run(self, title: str, author: str | None = None) -> dict:
         queries = self.generate_search_queries(title, author)
-        raw_text = self.fetch_text(queries)
-        metadata = self.interpret_text(raw_text)
-        return metadata
+        fetched = self.fetch_text(queries, author)
+        return self.interpret_text(fetched, fallback_title=title, fallback_author=author)

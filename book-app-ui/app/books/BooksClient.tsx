@@ -373,7 +373,7 @@ type LookupResultState = {
   matched_author: string | null;
 };
 
-const API_BASE_CANDIDATES = [
+const STATIC_API_BASE_CANDIDATES = [
   process.env.NEXT_PUBLIC_API_BASE_URL,
   "http://localhost:8000",
   "http://127.0.0.1:8000",
@@ -383,14 +383,24 @@ function normalizeBaseUrl(value: string) {
   return value.replace(/\/+$/, "");
 }
 
+function getApiBaseCandidates() {
+  const dynamicCandidates: string[] = [];
+  if (typeof window !== "undefined") {
+    dynamicCandidates.push(`${window.location.protocol}//${window.location.hostname}:8000`);
+  }
+
+  return Array.from(new Set([...STATIC_API_BASE_CANDIDATES, ...dynamicCandidates]));
+}
+
 async function fetchApiWithFallback(path: string, init?: RequestInit) {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const candidates = API_BASE_CANDIDATES.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`);
+  const baseCandidates = getApiBaseCandidates();
+  const candidates = baseCandidates.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`);
 
   // If route includes a trailing slash, also try without it to avoid router mismatches.
   if (normalizedPath.endsWith("/")) {
     const trimmedPath = normalizedPath.slice(0, -1);
-    candidates.push(...API_BASE_CANDIDATES.map((base) => `${normalizeBaseUrl(base)}${trimmedPath}`));
+    candidates.push(...baseCandidates.map((base) => `${normalizeBaseUrl(base)}${trimmedPath}`));
   }
 
   let lastError: Error | null = null;
@@ -490,26 +500,7 @@ export default function BooksClient() {
     key: null,
     direction: "asc",
   });
-  const [columnWidths, setColumnWidths] = useState<Record<ResizableColumnKey, number>>(() => {
-    if (typeof window === "undefined") {
-      return DEFAULT_COLUMN_WIDTHS;
-    }
-
-    try {
-      const saved = window.localStorage.getItem(COLUMN_WIDTHS_STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        const restored = sanitizeSavedColumnWidths(parsed);
-        if (restored) {
-          return restored;
-        }
-      }
-    } catch {
-      // Ignore storage parse/read errors and keep defaults.
-    }
-
-    return DEFAULT_COLUMN_WIDTHS;
-  });
+  const [columnWidths, setColumnWidths] = useState<Record<ResizableColumnKey, number>>(DEFAULT_COLUMN_WIDTHS);
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const resizeStateRef = useRef<{
     key: ResizableColumnKey;
@@ -522,6 +513,24 @@ export default function BooksClient() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const seriesId = searchParams.get("series_id");
+
+  useEffect(() => {
+    const rafId = window.requestAnimationFrame(() => {
+      try {
+        const saved = window.localStorage.getItem(COLUMN_WIDTHS_STORAGE_KEY);
+        if (!saved) return;
+        const parsed = JSON.parse(saved);
+        const restored = sanitizeSavedColumnWidths(parsed);
+        if (restored) {
+          setColumnWidths(restored);
+        }
+      } catch {
+        // Ignore storage parse/read errors and keep defaults.
+      }
+    });
+
+    return () => window.cancelAnimationFrame(rafId);
+  }, []);
 
   useEffect(() => {
     try {
