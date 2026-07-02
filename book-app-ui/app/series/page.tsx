@@ -25,6 +25,7 @@ type SeriesRow = {
   books_tracked?: number;
   last_checked?: string | null;
   updated_at?: string | null;
+  has_new_books?: boolean;
 };
 
 type SeriesApiRow = {
@@ -37,11 +38,60 @@ type SeriesApiRow = {
   next_upcoming_book_number?: number | null;
   total_books?: number | null;
   updated_at?: string | null;
+  has_new_books?: boolean;
 };
 
 type SeriesDetailApiRow = SeriesApiRow & {
   books?: Array<unknown>;
 };
+
+type CheckBannerTone = "success" | "danger" | "error";
+
+type CheckBannerState = {
+  seriesId: number;
+  seriesTitle: string;
+  tone: CheckBannerTone;
+  title: string;
+  message: string;
+  actionHref?: string;
+  actionLabel?: string;
+  detail?: string;
+};
+
+type SeriesCheckStatusResponse = {
+  series_id: number;
+  status: "idle" | "started" | "running" | "completed" | "failed";
+  updated_at?: string;
+  error?: string;
+  result?: Record<string, unknown>;
+  progress_total?: number;
+  progress_completed?: number;
+  current_book_number?: number | null;
+};
+
+type CandidateDiagnostic = {
+  book_number?: number;
+  reason?: string | null;
+  message?: string | null;
+};
+
+function summarizeCandidateDiagnostics(rawDiagnostics: unknown): string | null {
+  if (!Array.isArray(rawDiagnostics) || rawDiagnostics.length === 0) {
+    return null;
+  }
+
+  const diagnostics = rawDiagnostics as CandidateDiagnostic[];
+  const firstMeaningful = diagnostics.find((item) => item?.message);
+  if (firstMeaningful?.message) {
+    return firstMeaningful.message;
+  }
+
+  return null;
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 
 function formatDate(value?: string | null) {
   if (!value) return "—";
@@ -88,6 +138,18 @@ function parseFlexibleDate(value?: string | null): Date | null {
   }
 
   return null;
+}
+
+function getCheckBannerClassName(tone: CheckBannerTone) {
+  if (tone === "success") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-900";
+  }
+
+  if (tone === "danger") {
+    return "border-rose-200 bg-rose-50 text-rose-900";
+  }
+
+  return "border-amber-200 bg-amber-50 text-amber-900";
 }
 
 type ValueFilterMenuProps = {
@@ -255,10 +317,14 @@ function getApiBaseCandidates() {
 async function fetchApiWithFallback(path: string, init?: RequestInit) {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   const baseCandidates = getApiBaseCandidates();
-  const candidates = baseCandidates.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`);
+  const candidates = [
+    `/api${normalizedPath}`,
+    ...baseCandidates.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`),
+  ];
 
   if (normalizedPath.endsWith("/")) {
     const trimmedPath = normalizedPath.slice(0, -1);
+    candidates.push(`/api${trimmedPath}`);
     candidates.push(...baseCandidates.map((base) => `${normalizeBaseUrl(base)}${trimmedPath}`));
   }
 
@@ -316,6 +382,20 @@ export default function SeriesPage() {
   const [quickSearch, setQuickSearch] = useState("");
   const [loadingId, setLoadingId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
+  const [checkBanner, setCheckBanner] = useState<CheckBannerState | null>(null);
+  const [rowCheckState, setRowCheckState] = useState<Record<number, CheckBannerState>>({});
+
+  function dismissCheckBanner(seriesId?: number) {
+    setCheckBanner(null);
+    if (seriesId === undefined) {
+      return;
+    }
+    setRowCheckState((prev) => {
+      const next = { ...prev };
+      delete next[seriesId];
+      return next;
+    });
+  }
   const [valueFilters, setValueFilters] = useState({
     name: [] as string[],
     author: [] as string[],
@@ -420,11 +500,20 @@ export default function SeriesPage() {
   }, [quickSearch, series, valueFilters, viewMode]);
 
   const sortedSeries = useMemo(() => {
-    if (!sortConfig.key) return filteredSeries;
+    const prioritizedSeries = [...filteredSeries].sort((a, b) => {
+      const aFlagged = a.has_new_books ? 1 : 0;
+      const bFlagged = b.has_new_books ? 1 : 0;
+      if (aFlagged !== bFlagged) {
+        return bFlagged - aFlagged;
+      }
+      return 0;
+    });
+
+    if (!sortConfig.key) return prioritizedSeries;
 
     const parsedTime = (value?: string | null) => parseFlexibleDate(value)?.valueOf() ?? 0;
 
-    const sorted = [...filteredSeries].sort((a, b) => {
+    const sorted = [...prioritizedSeries].sort((a, b) => {
       const key = sortConfig.key;
 
       const aValue =
@@ -597,6 +686,7 @@ export default function SeriesPage() {
           books_tracked: booksTracked,
           last_checked: detailData?.updated_at ?? item.updated_at ?? null,
           updated_at: detailData?.updated_at ?? item.updated_at ?? null,
+          has_new_books: Boolean(detailData?.has_new_books ?? item.has_new_books ?? false),
         } satisfies SeriesRow;
       });
 
@@ -615,28 +705,117 @@ export default function SeriesPage() {
   }, []);
 
   async function handleCheckNow(seriesId: number) {
+    const targetSeries = series.find((item) => item.id === seriesId);
+    const seriesTitle = String(targetSeries?.name || `Series ${seriesId}`);
+
     setLoadingId(seriesId);
     setMessage("");
+    setRowCheckState((prev) => ({
+      ...prev,
+      [seriesId]: {
+        seriesId,
+        seriesTitle,
+        tone: "error",
+        title: `${seriesTitle} Checking`,
+        message: "Checking for new books...",
+      },
+    }));
 
     try {
       const response = await fetchApiWithFallback(`/series/${seriesId}/check`, { method: "POST" });
-      const data = await response.json();
+      const kickoff = (await response.json()) as SeriesCheckStatusResponse;
 
-      setMessage(
-        `Series ${seriesId} refreshed. Next upcoming: ${
-          data.next_upcoming_book_number ?? "None"
-        }.`
-      );
+      let statusPayload = kickoff;
+      while (statusPayload.status === "started" || statusPayload.status === "running") {
+        await delay(1000);
+        const statusResponse = await fetchApiWithFallback(`/series/${seriesId}/check`, { cache: "no-store" });
+        statusPayload = (await statusResponse.json()) as SeriesCheckStatusResponse;
+        const completed = Number(statusPayload.progress_completed || 0);
+        const total = Number(statusPayload.progress_total || 0);
+        const currentBook = statusPayload.current_book_number;
+        setRowCheckState((prev) => ({
+          ...prev,
+          [seriesId]: {
+            seriesId,
+            seriesTitle,
+            tone: "error",
+            title: `${seriesTitle} Checking`,
+            message: total > 0
+              ? `Checking ${completed}/${total}${currentBook ? ` (book ${currentBook})` : ""}...`
+              : "Checking for new books...",
+          },
+        }));
+      }
 
-      toast({
-        title: "Series refreshed",
-        description: `Series ${seriesId} has been updated.`,
-      });
+      if (statusPayload.status === "failed") {
+        throw new Error(statusPayload.error || "Error checking series.");
+      }
+
+      const data = statusPayload.result ?? {};
+
+      let nextBanner: CheckBannerState;
+      if (data?.has_new_books && Array.isArray(data.added_books) && data.added_books.length > 0) {
+        nextBanner = {
+          seriesId,
+          seriesTitle,
+          tone: "success",
+          title: `${seriesTitle} Checked`,
+          message: data.added_books.length === 1
+            ? "Book added to series and library."
+            : `${data.added_books.length} books added to series and library.`,
+          actionHref: `/series/${seriesId}?fromView=${viewMode}`,
+          actionLabel: "View series",
+        };
+        setMessage(nextBanner.message);
+        toast({
+          title: `${seriesTitle} Checked`,
+          description: nextBanner.message,
+        });
+      } else {
+        const diagnosticDetail = summarizeCandidateDiagnostics(
+          typeof data === "object" && data !== null ? (data as Record<string, unknown>).candidate_diagnostics : null,
+        );
+        nextBanner = {
+          seriesId,
+          seriesTitle,
+          tone: "danger",
+          title: `${seriesTitle} Checked`,
+          message: "No new books.",
+          detail: diagnosticDetail || undefined,
+        };
+        setMessage("No new books.");
+        toast({
+          title: `${seriesTitle} Checked`,
+          description: diagnosticDetail ? `No new books. ${diagnosticDetail}` : "No new books.",
+        });
+      }
+
+      setCheckBanner(nextBanner);
+      setRowCheckState((prev) => ({
+        ...prev,
+        [seriesId]: nextBanner,
+      }));
 
       fetchSeries();
     } catch (error) {
       console.error("Error checking series:", error);
-      setMessage("Error checking series.");
+      const errorBanner: CheckBannerState = {
+        seriesId,
+        seriesTitle,
+        tone: "error",
+        title: `${seriesTitle} Check Failed`,
+        message: error instanceof Error ? error.message : "Error checking series.",
+      };
+      setCheckBanner(errorBanner);
+      setRowCheckState((prev) => ({
+        ...prev,
+        [seriesId]: errorBanner,
+      }));
+      setMessage(errorBanner.message);
+      toast({
+        title: errorBanner.title,
+        description: errorBanner.message,
+      });
     }
 
     setLoadingId(null);
@@ -689,11 +868,33 @@ export default function SeriesPage() {
         </div>
       </div>
 
-      {message && (
+      {checkBanner ? (
+        <div className={`rounded-lg border px-4 py-3 text-sm ${getCheckBannerClassName(checkBanner.tone)}`}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="font-semibold">{checkBanner.title}</p>
+              <p>{checkBanner.message}</p>
+              {checkBanner.detail ? <p className="text-xs opacity-80">{checkBanner.detail}</p> : null}
+            </div>
+            <div className="flex items-center gap-2">
+              {checkBanner.actionHref && checkBanner.actionLabel ? (
+                <Link href={checkBanner.actionHref}>
+                  <Button variant={checkBanner.tone === "success" ? "secondary" : "outline"} size="sm">
+                    {checkBanner.actionLabel}
+                  </Button>
+                </Link>
+              ) : null}
+              <Button type="button" variant="ghost" size="sm" onClick={() => dismissCheckBanner(checkBanner.seriesId)}>
+                Dismiss
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : message ? (
         <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
           {message}
         </div>
-      )}
+      ) : null}
 
       <div className="flex flex-wrap items-center gap-2">
         <input
@@ -814,26 +1015,54 @@ export default function SeriesPage() {
             {sortedSeries.map((s) => (
               <TableRow key={s.id}>
                 <TableCell>{s.id}</TableCell>
-                <TableCell className="truncate" title={s.name}>{s.name}</TableCell>
+                <TableCell className="truncate" title={s.name}>
+                  <div className="flex items-center gap-1 truncate">
+                    <span className="truncate">{s.name}</span>
+                    {s.has_new_books ? <span className="text-amber-500" aria-label="New books added">★</span> : null}
+                  </div>
+                </TableCell>
                 <TableCell className="truncate" title={s.author || "—"}>{s.author || "—"}</TableCell>
                 <TableCell>{s.next_unread_book_number ?? "—"}</TableCell>
                 <TableCell>{s.next_upcoming_book_number ?? "—"}</TableCell>
                 <TableCell>{s.total_books ?? "—"}</TableCell>
                 <TableCell>{formatDate(s.last_checked)}</TableCell>
-                <TableCell className="space-x-2 whitespace-nowrap">
-                  <Link href={`/series/${s.id}?fromView=${viewMode}`}>
-                    <Button variant="ghost" size="sm">
-                      View books
+                <TableCell className="whitespace-nowrap">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Link href={`/series/${s.id}?fromView=${viewMode}`}>
+                      <Button variant="ghost" size="sm">
+                        View books
+                      </Button>
+                    </Link>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleCheckNow(s.id)}
+                      disabled={loadingId === s.id}
+                    >
+                      {loadingId === s.id ? "Checking…" : "Check for New"}
                     </Button>
-                  </Link>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => handleCheckNow(s.id)}
-                    disabled={loadingId === s.id}
-                  >
-                    {loadingId === s.id ? "Checking…" : "Refresh"}
-                  </Button>
+                    {rowCheckState[s.id]?.actionHref && rowCheckState[s.id]?.actionLabel ? (
+                      <Link href={rowCheckState[s.id].actionHref!}>
+                        <Button variant="secondary" size="sm">
+                          {rowCheckState[s.id].actionLabel}
+                        </Button>
+                      </Link>
+                    ) : null}
+                  </div>
+                  {rowCheckState[s.id] ? (
+                    <div className={`mt-2 rounded border px-2 py-1 text-[11px] ${getCheckBannerClassName(rowCheckState[s.id].tone)}`}>
+                      <span className="font-semibold">{rowCheckState[s.id].title}</span>
+                      <span className="ml-1">{rowCheckState[s.id].message}</span>
+                      {rowCheckState[s.id].detail ? <span className="ml-1 opacity-80">{rowCheckState[s.id].detail}</span> : null}
+                      <button
+                        type="button"
+                        onClick={() => dismissCheckBanner(s.id)}
+                        className="ml-2 underline underline-offset-2"
+                      >
+                        dismiss
+                      </button>
+                    </div>
+                  ) : null}
                 </TableCell>
               </TableRow>
             ))}

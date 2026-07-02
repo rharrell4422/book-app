@@ -1,24 +1,12 @@
-import re
-
 import models
 
 
 from sqlalchemy.orm import Session
 from models import Book
+from book_metadata_utils import normalize_book_title
 
 
 BOOK_COLUMN_KEYS = {column.key for column in Book.__table__.columns}
-
-
-def _clean_book_title(value: str | None) -> str | None:
-    if value is None:
-        return None
-
-    cleaned = str(value).strip()
-    cleaned = re.sub(r"\s+ebook\s*$", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s+kindle\s+edition\s*$", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned or None
 
 
 def _infer_series_numbers_from_title(title: str | None) -> tuple[float | None, int | None]:
@@ -43,7 +31,11 @@ def _book_payload(data_obj, *, exclude_unset: bool = False) -> dict:
     payload = {key: value for key, value in raw.items() if key in BOOK_COLUMN_KEYS}
 
     if "title" in payload:
-        payload["title"] = _clean_book_title(payload.get("title"))
+        payload["title"] = normalize_book_title(
+            payload.get("title") or "",
+            series_name=payload.get("series_name"),
+            book_number=payload.get("book_number"),
+        )
 
     inferred_book_number, inferred_series_order = _infer_series_numbers_from_title(payload.get("title"))
     if payload.get("book_number") is None and inferred_book_number is not None:

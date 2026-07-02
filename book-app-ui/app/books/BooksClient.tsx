@@ -365,6 +365,11 @@ type AgentRunFormState = {
   author: string;
 };
 
+type AgentRunResponse = {
+  found: boolean;
+  metadata: Record<string, unknown>;
+};
+
 type LookupResultState = {
   found: boolean;
   summary: string | null;
@@ -395,11 +400,15 @@ function getApiBaseCandidates() {
 async function fetchApiWithFallback(path: string, init?: RequestInit) {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   const baseCandidates = getApiBaseCandidates();
-  const candidates = baseCandidates.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`);
+  const candidates = [
+    `/api${normalizedPath}`,
+    ...baseCandidates.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`),
+  ];
 
   // If route includes a trailing slash, also try without it to avoid router mismatches.
   if (normalizedPath.endsWith("/")) {
     const trimmedPath = normalizedPath.slice(0, -1);
+    candidates.push(`/api${trimmedPath}`);
     candidates.push(...baseCandidates.map((base) => `${normalizeBaseUrl(base)}${trimmedPath}`));
   }
 
@@ -473,6 +482,7 @@ export default function BooksClient() {
   const [agentRunning, setAgentRunning] = useState(false);
   const [agentApproving, setAgentApproving] = useState(false);
   const [agentRunForm, setAgentRunForm] = useState<AgentRunFormState>(EMPTY_AGENT_RUN_FORM);
+  const [agentFound, setAgentFound] = useState<boolean | null>(null);
   const [agentMetadata, setAgentMetadata] = useState<Record<string, unknown> | null>(null);
   const [pinnedBookId, setPinnedBookId] = useState<number | null>(null);
   const [lookupResult, setLookupResult] = useState<LookupResultState | null>(null);
@@ -568,6 +578,20 @@ export default function BooksClient() {
     [books],
   );
 
+  const activeValueFilters = useMemo(() => {
+    const titleSet = new Set(titleOptions);
+    const authorSet = new Set(authorOptions);
+    const seriesSet = new Set(seriesOptions);
+    const statusSet = new Set(statusOptions);
+
+    return {
+      title: valueFilters.title.filter((value) => titleSet.has(value)),
+      author: valueFilters.author.filter((value) => authorSet.has(value)),
+      series: valueFilters.series.filter((value) => seriesSet.has(value)),
+      status: valueFilters.status.filter((value) => statusSet.has(value)),
+    };
+  }, [valueFilters, titleOptions, authorOptions, seriesOptions, statusOptions]);
+
   const filteredBooks = useMemo(() => {
     const idFilter = normalizeText(filters.id);
     const titleFilter = normalizeText(filters.title);
@@ -590,14 +614,14 @@ export default function BooksClient() {
       if (statusFilter !== "all" && status !== statusFilter) return false;
       if (seriesFilter && !seriesText.includes(seriesFilter)) return false;
       if (bookNumberFilter && !bookNumberText.includes(bookNumberFilter)) return false;
-      if (valueFilters.title.length > 0 && !valueFilters.title.includes(String(book.title || "").trim())) return false;
-      if (valueFilters.author.length > 0 && !valueFilters.author.includes(String(book.author || "").trim())) return false;
-      if (valueFilters.series.length > 0 && !valueFilters.series.includes(String(book.series_name || "").trim())) return false;
-      if (valueFilters.status.length > 0 && !valueFilters.status.includes(String(getBookStatus(book)).trim())) return false;
+      if (activeValueFilters.title.length > 0 && !activeValueFilters.title.includes(String(book.title || "").trim())) return false;
+      if (activeValueFilters.author.length > 0 && !activeValueFilters.author.includes(String(book.author || "").trim())) return false;
+      if (activeValueFilters.series.length > 0 && !activeValueFilters.series.includes(String(book.series_name || "").trim())) return false;
+      if (activeValueFilters.status.length > 0 && !activeValueFilters.status.includes(String(getBookStatus(book)).trim())) return false;
 
       return true;
     });
-  }, [books, filters, valueFilters]);
+  }, [books, filters, activeValueFilters]);
 
   const sortedBooks = useMemo(() => {
     const withPriorityOrder = [...filteredBooks].sort((a, b) => {
@@ -846,6 +870,7 @@ export default function BooksClient() {
 
   function resetAgentWorkflow() {
     setAgentRunForm(EMPTY_AGENT_RUN_FORM);
+    setAgentFound(null);
     setAgentMetadata(null);
     setAgentRunning(false);
     setAgentApproving(false);
@@ -864,6 +889,7 @@ export default function BooksClient() {
     }
 
     setAgentRunning(true);
+    setAgentFound(null);
     setAgentMetadata(null);
 
     try {
@@ -885,7 +911,18 @@ export default function BooksClient() {
         throw new Error("Agent returned invalid metadata format.");
       }
 
-      setAgentMetadata(data as Record<string, unknown>);
+      const typedResponse = data as Partial<AgentRunResponse>;
+      const responseMetadata =
+        typedResponse.metadata && typeof typedResponse.metadata === "object" && !Array.isArray(typedResponse.metadata)
+          ? typedResponse.metadata
+          : (data as Record<string, unknown>);
+      const responseFound =
+        typeof typedResponse.found === "boolean"
+          ? typedResponse.found
+          : Boolean((responseMetadata as Record<string, unknown>).found);
+
+      setAgentFound(responseFound);
+      setAgentMetadata(responseMetadata);
       toast({
         title: "Metadata ready",
         description: "Review metadata and approve to create the book.",
@@ -916,7 +953,7 @@ export default function BooksClient() {
       const response = await fetchApiWithFallback("/agent/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ metadata: agentMetadata }),
+        body: JSON.stringify({ metadata: agentMetadata, found: agentFound }),
       });
 
       if (!response.ok) {
@@ -1401,7 +1438,7 @@ export default function BooksClient() {
                 <ValueFilterMenu
                   label="Filter"
                   options={titleOptions}
-                  selectedValues={valueFilters.title}
+                  selectedValues={activeValueFilters.title}
                   onApplyValues={(values) => setValueFilter("title", values)}
                   onClear={() => {
                     setValueFilters((prev) => ({ ...prev, title: [] }));
@@ -1416,7 +1453,7 @@ export default function BooksClient() {
                 <ValueFilterMenu
                   label="Filter"
                   options={authorOptions}
-                  selectedValues={valueFilters.author}
+                  selectedValues={activeValueFilters.author}
                   onApplyValues={(values) => setValueFilter("author", values)}
                   onClear={() => {
                     setValueFilters((prev) => ({ ...prev, author: [] }));
@@ -1432,7 +1469,7 @@ export default function BooksClient() {
                   <ValueFilterMenu
                     label="Filter"
                     options={statusOptions}
-                    selectedValues={valueFilters.status}
+                    selectedValues={activeValueFilters.status}
                     onApplyValues={(values) => setValueFilter("status", values)}
                     onClear={() => {
                       setValueFilters((prev) => ({ ...prev, status: [] }));
@@ -1462,7 +1499,7 @@ export default function BooksClient() {
                 <ValueFilterMenu
                   label="Filter"
                   options={seriesOptions}
-                  selectedValues={valueFilters.series}
+                  selectedValues={activeValueFilters.series}
                   onApplyValues={(values) => setValueFilter("series", values)}
                   onClear={() => {
                     setValueFilters((prev) => ({ ...prev, series: [] }));
@@ -1955,6 +1992,12 @@ export default function BooksClient() {
               />
             </div>
           </div>
+
+          {agentFound === false ? (
+            <div className="rounded-md border border-red-500 bg-red-200 px-3 py-2 text-sm font-semibold text-red-900">
+              ⚠️ No known book found for this title. You can still approve manually.
+            </div>
+          ) : null}
 
           <DialogFooter showCloseButton>
             <Button

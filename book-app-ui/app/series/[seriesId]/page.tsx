@@ -115,6 +115,7 @@ const SERIES_DETAIL_RESIZE_NEIGHBOR: Record<SeriesDetailColumnKey, SeriesDetailC
 };
 
 const SERIES_DETAIL_TABLE_COLUMN_WIDTHS_STORAGE_PREFIX = "seriesDetailTableColumnWidthsV1:";
+const SERIES_DETAIL_VIEWED_STORAGE_PREFIX = "seriesDetailViewedV1:";
 
 function normalizeBaseUrl(value: string) {
   return value.replace(/\/+$/, "");
@@ -132,10 +133,14 @@ function getApiBaseCandidates() {
 async function fetchApiWithFallback(path: string, init?: RequestInit) {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   const baseCandidates = getApiBaseCandidates();
-  const candidates = baseCandidates.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`);
+  const candidates = [
+    `/api${normalizedPath}`,
+    ...baseCandidates.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`),
+  ];
 
   if (normalizedPath.endsWith("/")) {
     const trimmedPath = normalizedPath.slice(0, -1);
+    candidates.push(`/api${trimmedPath}`);
     candidates.push(...baseCandidates.map((base) => `${normalizeBaseUrl(base)}${trimmedPath}`));
   }
 
@@ -344,6 +349,36 @@ function parseReleaseIntelText(text: string): Array<{ bookNumber: number; title:
   }
 
   return Array.from(byBookNumber.values());
+}
+
+function parseKnownSeriesListText(text: string): Array<{ bookNumber: number; title: string; publicationYear: number | null; note: string | null }> {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return [];
+
+  const entries = Array.from(
+    normalized.matchAll(/(\d+(?:\.\d+)?)\s+(.+?)\s+\((\d{4})\)(?:\s+\(([^)]*)\))?(?=\s*\d+(?:\.\d+)?\s+|$)/g)
+  );
+
+  const parsed = entries
+    .map((match) => {
+      const bookNumber = Number(match[1]);
+      if (!Number.isFinite(bookNumber)) return null;
+
+      return {
+        bookNumber,
+        title: String(match[2] || "").trim(),
+        publicationYear: Number(match[3]) || null,
+        note: String(match[4] || "").trim() || null,
+      };
+    })
+    .filter((value): value is { bookNumber: number; title: string; publicationYear: number | null; note: string | null } => Boolean(value));
+
+  const deduped = new Map<number, { bookNumber: number; title: string; publicationYear: number | null; note: string | null }>();
+  for (const entry of parsed) {
+    deduped.set(entry.bookNumber, entry);
+  }
+
+  return Array.from(deduped.values()).sort((a, b) => a.bookNumber - b.bookNumber);
 }
 
 function getBookStatus(book: BookRecord) {
@@ -663,6 +698,20 @@ function saveStoreOnlyPreference(seriesId: string, value: boolean) {
   }
 }
 
+function hasViewedSeries(seriesId: string): boolean {
+  if (typeof window === "undefined") return false;
+  return window.sessionStorage.getItem(`${SERIES_DETAIL_VIEWED_STORAGE_PREFIX}${seriesId}`) === "1";
+}
+
+function markSeriesAsViewed(seriesId: string) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(`${SERIES_DETAIL_VIEWED_STORAGE_PREFIX}${seriesId}`, "1");
+  } catch {
+    // Ignore storage errors in private mode or restricted browsers.
+  }
+}
+
 export default function SeriesDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -705,6 +754,11 @@ export default function SeriesDetailPage() {
   const [titleNormalizeSaving, setTitleNormalizeSaving] = useState(false);
   const [releaseIntelDialogOpen, setReleaseIntelDialogOpen] = useState(false);
   const [normalizeTitlesDialogOpen, setNormalizeTitlesDialogOpen] = useState(false);
+  const [knownTotalDraft, setKnownTotalDraft] = useState("");
+  const [knownTotalSaving, setKnownTotalSaving] = useState(false);
+  const [knownSeriesListDialogOpen, setKnownSeriesListDialogOpen] = useState(false);
+  const [knownSeriesListText, setKnownSeriesListText] = useState("");
+  const [knownSeriesListSaving, setKnownSeriesListSaving] = useState(false);
   const [columnWidths, setColumnWidths] = useState<Record<SeriesDetailColumnKey, number>>(DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS);
   const scanAbortRef = useRef<AbortController | null>(null);
   const scanPendingRef = useRef<string[]>([]);
@@ -856,6 +910,16 @@ export default function SeriesDetailPage() {
         if (!isActive) return;
         setSeries(data);
 
+        if (data?.has_new_books && !hasViewedSeries(seriesId)) {
+          try {
+            await fetchApiWithFallback(`/series/${seriesId}/clear_new_books`, { method: "POST" });
+            markSeriesAsViewed(seriesId);
+            setSeries((prev) => (prev ? { ...prev, has_new_books: false } : prev));
+          } catch (clearError) {
+            console.error("Error clearing series new-book flag:", clearError);
+          }
+        }
+
         const cachedSuggestions = loadCachedSuggestions(seriesId);
         if (Object.keys(cachedSuggestions).length > 0) {
           setMissingSuggestions(cachedSuggestions);
@@ -975,6 +1039,11 @@ export default function SeriesDetailPage() {
 
     return unsubscribe;
   }, []);
+
+  useEffect(() => {
+    if (!series) return;
+    setKnownTotalDraft(series.total_books ? String(series.total_books) : "");
+  }, [series?.id, series?.total_books]);
 
   async function runBackgroundScan(
     orders: string[],
@@ -1188,6 +1257,95 @@ export default function SeriesDetailPage() {
     });
     const data = await response.json();
     setSeries(data);
+  }
+
+  async function handleSaveKnownTotal() {
+    if (!series) return;
+
+    const parsed = Number(knownTotalDraft);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      alert("Known total must be a positive number.");
+      return;
+    }
+
+    setKnownTotalSaving(true);
+    try {
+      const response = await fetchApiWithFallback(`/series/${series.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: series.name,
+          author: series.author || undefined,
+          description: series.description || undefined,
+          genre: series.genre || undefined,
+          tags: series.tags || undefined,
+          total_books: parsed,
+          series_status: series.series_status || "ongoing",
+          next_unread_book_number: series.next_unread_book_number ?? undefined,
+          next_upcoming_book_number: series.next_upcoming_book_number ?? undefined,
+          missing_books: series.missing_books ?? undefined,
+          is_finished: series.is_finished ?? false,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to save known total (${response.status})`);
+      }
+
+      await refreshSeriesFromApi();
+      flashAddedMessage(`Saved known total of ${parsed}.`);
+    } catch (error) {
+      console.error(error);
+      alert(error instanceof Error ? error.message : "Unable to save known total.");
+    } finally {
+      setKnownTotalSaving(false);
+    }
+  }
+
+  async function handleApplyKnownSeriesList() {
+    if (!series) return;
+
+    const parsedEntries = parseKnownSeriesListText(knownSeriesListText);
+    if (!parsedEntries.length) {
+      alert("I could not parse numbered entries like '53 Forgotten In Death (2021)'.");
+      return;
+    }
+
+    setKnownSeriesListSaving(true);
+    try {
+      const existingBooks: BookRecord[] = Array.isArray(series.books) ? series.books : [];
+      const payloadEntries = parsedEntries.map((entry) => ({
+        ...entry,
+        title: canonicalizeSuggestionTitle(
+          entry.title,
+          String(entry.bookNumber),
+          existingBooks,
+          series.name,
+        ),
+      }));
+
+      const response = await fetchApiWithFallback(`/series/${series.id}/apply_known_list`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entries: payloadEntries }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to apply known series list (${response.status})`);
+      }
+
+      const result = await response.json();
+
+      await refreshSeriesFromApi();
+      setKnownSeriesListDialogOpen(false);
+      setKnownSeriesListText("");
+      flashAddedMessage(`Applied known series list: created ${result.created}, updated ${result.updated}.`);
+    } catch (error) {
+      console.error(error);
+      alert(error instanceof Error ? error.message : "Unable to apply known series list.");
+    } finally {
+      setKnownSeriesListSaving(false);
+    }
   }
 
   async function handleApplyReleaseIntel() {
@@ -2081,6 +2239,25 @@ export default function SeriesDetailPage() {
               >
                 Normalize Titles Preview
               </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setKnownSeriesListDialogOpen(true)}
+              >
+                Apply Known Series List
+              </Button>
+              <label htmlFor="known-total-books" className="text-xs text-muted-foreground">Known total</label>
+              <input
+                id="known-total-books"
+                value={knownTotalDraft}
+                onChange={(event) => setKnownTotalDraft(event.target.value)}
+                placeholder="e.g. 64"
+                className="h-8 w-24 rounded border bg-background px-2 text-xs"
+              />
+              <Button type="button" variant="outline" size="sm" onClick={handleSaveKnownTotal} disabled={knownTotalSaving}>
+                {knownTotalSaving ? "Saving..." : "Save total"}
+              </Button>
             </div>
           </div>
           {series.description && (
@@ -2488,6 +2665,40 @@ export default function SeriesDetailPage() {
               {titleNormalizeSaving
                 ? "Applying…"
                 : `Apply all (${titleNormalizationPreview.length})`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={knownSeriesListDialogOpen}
+        onOpenChange={setKnownSeriesListDialogOpen}
+      >
+        <DialogContent className="sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Apply Known Series List</DialogTitle>
+            <DialogDescription>
+              Paste numbered entries such as &quot;53 Forgotten In Death (2021)&quot;. This will create or update books in the current series and set the known total from the highest whole-numbered entry.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-2">
+            <textarea
+              value={knownSeriesListText}
+              onChange={(event) => setKnownSeriesListText(event.target.value)}
+              placeholder="Paste the known series list here..."
+              className="min-h-56 w-full rounded border bg-white px-2 py-2 text-xs"
+            />
+          </div>
+
+          <DialogFooter showCloseButton>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={handleApplyKnownSeriesList}
+              disabled={knownSeriesListSaving}
+            >
+              {knownSeriesListSaving ? "Applying..." : "Apply Known List"}
             </Button>
           </DialogFooter>
         </DialogContent>
