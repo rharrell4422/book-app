@@ -139,6 +139,15 @@ function parseFlexibleDate(value?: string | null): Date | null {
   return null;
 }
 
+function toIsoDateString(value?: string | null): string | null {
+  const parsed = parseFlexibleDate(value);
+  if (!parsed) return null;
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function toDateValue(value?: string | null): number {
   return parseFlexibleDate(value)?.valueOf() ?? Number.NEGATIVE_INFINITY;
 }
@@ -1091,11 +1100,7 @@ export default function BooksClient() {
           book.id === payload.id
             ? {
                 ...book,
-                is_read: payload.is_read,
-                read_status: payload.read_status,
-                read_date: payload.read_date,
-                release_date: payload.release_date,
-                publication_date: payload.publication_date,
+                ...payload,
               }
             : book,
         ),
@@ -1304,7 +1309,7 @@ export default function BooksClient() {
       seriesName: String(book.series_name || ""),
       bookNumber: book.book_number !== null && book.book_number !== undefined ? String(book.book_number) : "",
       status: (getBookStatus(book) as "unread" | "upcoming" | "read") || "unread",
-      date: String(getDisplayDate(book) || ""),
+      date: toIsoDateString(getDisplayDate(book)) || "",
     });
     setEditDialogOpen(true);
   }
@@ -1358,7 +1363,15 @@ export default function BooksClient() {
       }
 
       const status = editBookForm.status;
-      const normalizedDate = editBookForm.date.trim() || null;
+      const rawDate = editBookForm.date.trim();
+      const normalizedDate = rawDate ? toIsoDateString(rawDate) : null;
+      if (rawDate && !normalizedDate) {
+        toast({
+          title: "Invalid date",
+          description: "Use a valid date format, such as YYYY-MM-DD.",
+        });
+        return;
+      }
       const payload: Record<string, unknown> = {
         title,
         author,

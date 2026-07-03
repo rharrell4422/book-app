@@ -9,6 +9,11 @@ export type BookStatusSyncPayload = {
   release_date: string | null;
   publication_date: string | null;
   series_id: number | null;
+  title?: string;
+  author?: string;
+  book_number?: number | null;
+  series_order?: number | null;
+  series_name?: string | null;
   updated_at: number;
 };
 
@@ -20,6 +25,11 @@ type BookStatusInput = {
   release_date?: string | null;
   publication_date?: string | null;
   series_id?: number | string | null;
+  title?: string | null;
+  author?: string | null;
+  book_number?: number | null;
+  series_order?: number | null;
+  series_name?: string | null;
 };
 
 function normalizePayload(book: BookStatusInput): BookStatusSyncPayload {
@@ -31,6 +41,11 @@ function normalizePayload(book: BookStatusInput): BookStatusSyncPayload {
     release_date: book?.release_date ? String(book.release_date) : null,
     publication_date: book?.publication_date ? String(book.publication_date) : null,
     series_id: book?.series_id == null ? null : Number(book.series_id),
+    title: book?.title == null ? undefined : String(book.title),
+    author: book?.author == null ? undefined : String(book.author),
+    book_number: typeof book?.book_number === "number" ? book.book_number : null,
+    series_order: typeof book?.series_order === "number" ? book.series_order : null,
+    series_name: book?.series_name == null ? null : String(book.series_name),
     updated_at: Date.now(),
   };
 }

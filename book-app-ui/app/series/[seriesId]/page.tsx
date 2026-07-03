@@ -24,6 +24,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useToast } from "@/components/ui/use-toast";
 
 const SUGGESTION_CACHE_PREFIX = "series-suggestions-v1:";
 const SUGGESTION_SCAN_PREFIX = "series-scan-v1:";
@@ -88,6 +89,15 @@ type SeriesRecord = {
   title_normalization_mode_override?: TitleNormalizationMode | null;
   books?: BookRecord[];
   [key: string]: unknown;
+};
+
+type EditBookFormState = {
+  id: number | null;
+  title: string;
+  author: string;
+  bookNumber: string;
+  status: "unread" | "upcoming" | "available" | "read";
+  date: string;
 };
 
 type SeriesCheckStatusPayload = {
@@ -439,6 +449,33 @@ function normalizeDateInput(value: string | null | undefined): string | null {
   return raw;
 }
 
+function toIsoDateString(value: string | null | undefined): string | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  const strictIso = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (strictIso) {
+    const year = strictIso[1];
+    const month = strictIso[2].padStart(2, "0");
+    const day = strictIso[3].padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  const normalized = normalizeDateInput(raw);
+  if (normalized && /^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    return normalized;
+  }
+
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.valueOf())) {
+    return null;
+  }
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function parseMonthNameDateToIso(value: string): string | null {
   const raw = String(value || "").trim();
   if (!raw) return null;
@@ -575,9 +612,42 @@ function hasUpcomingBookSignals(book: BookRecord) {
   return false;
 }
 
+function isFutureDate(value?: string | null): boolean {
+  if (!value) return false;
+  const parsedDate = new Date(value);
+  if (Number.isNaN(parsedDate.valueOf())) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  parsedDate.setHours(0, 0, 0, 0);
+  return parsedDate > today;
+}
+
+function isPastOrTodayDate(value?: string | null): boolean {
+  if (!value) return false;
+  const parsedDate = new Date(value);
+  if (Number.isNaN(parsedDate.valueOf())) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  parsedDate.setHours(0, 0, 0, 0);
+  return parsedDate <= today;
+}
+
 function getBookStatus(book: BookRecord) {
-  if (book.is_read) {
+  if (book.is_read || String(book.read_status || "").trim().toLowerCase() === "read") {
     return "read";
+  }
+
+  const explicitStatus = String(book.read_status || "").trim().toLowerCase();
+  if (explicitStatus === "upcoming") {
+    return "upcoming";
+  }
+  if (explicitStatus === "available") {
+    return "available";
+  }
+
+  const releaseDate = String(book.release_date || book.publication_date || "").trim();
+  if (releaseDate) {
+    return isFutureDate(releaseDate) ? "upcoming" : "available";
   }
 
   if (hasUpcomingBookSignals(book)) {
@@ -595,6 +665,9 @@ function getBookDate(book: BookRecord) {
 function getStatusChipClass(status: string) {
   if (status === "read") {
     return "inline-flex rounded-full border border-emerald-300 bg-emerald-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-emerald-800";
+  }
+  if (status === "available") {
+    return "inline-flex rounded-full border border-sky-300 bg-sky-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-sky-800";
   }
   return "inline-flex rounded-full border border-rose-300 bg-rose-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-rose-800";
 }
@@ -918,7 +991,7 @@ export default function SeriesDetailPage() {
   const [addBookSaving, setAddBookSaving] = useState(false);
   const [addBookTitle, setAddBookTitle] = useState("");
   const [addBookNumber, setAddBookNumber] = useState("");
-  const [addBookStatus, setAddBookStatus] = useState<"upcoming" | "unread" | "read">("upcoming");
+  const [addBookStatus, setAddBookStatus] = useState<"upcoming" | "unread" | "available" | "read">("upcoming");
   const [addBookDate, setAddBookDate] = useState("");
   const [recentUpcomingBookIds, setRecentUpcomingBookIds] = useState<number[]>([]);
   const [titleNormalizeSaving, setTitleNormalizeSaving] = useState(false);
@@ -931,7 +1004,23 @@ export default function SeriesDetailPage() {
   const [knownSeriesListDialogOpen, setKnownSeriesListDialogOpen] = useState(false);
   const [knownSeriesListText, setKnownSeriesListText] = useState("");
   const [knownSeriesListSaving, setKnownSeriesListSaving] = useState(false);
+  const [editBookDialogOpen, setEditBookDialogOpen] = useState(false);
+  const [savingEditBook, setSavingEditBook] = useState(false);
+  const [statusDialogOpen, setStatusDialogOpen] = useState(false);
+  const [statusTargetBook, setStatusTargetBook] = useState<BookRecord | null>(null);
+  const [statusAction, setStatusAction] = useState<"read" | "unread" | "upcoming" | "available">("unread");
+  const [statusDate, setStatusDate] = useState("");
+  const [statusSaving, setStatusSaving] = useState(false);
+  const [editBookForm, setEditBookForm] = useState<EditBookFormState>({
+    id: null,
+    title: "",
+    author: "",
+    bookNumber: "",
+    status: "unread",
+    date: "",
+  });
   const [columnWidths, setColumnWidths] = useState<Record<SeriesDetailColumnKey, number>>(DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS);
+  const { toast } = useToast();
   const scanAbortRef = useRef<AbortController | null>(null);
   const scanPendingRef = useRef<string[]>([]);
   const scanCompletedRef = useRef(0);
@@ -1190,11 +1279,7 @@ export default function SeriesDetailPage() {
           didChange = true;
           return {
             ...book,
-            is_read: payload.is_read,
-            read_status: payload.read_status,
-            read_date: payload.read_date,
-            release_date: payload.release_date,
-            publication_date: payload.publication_date,
+            ...payload,
           };
         });
 
@@ -1796,30 +1881,72 @@ export default function SeriesDetailPage() {
   }
 
   async function handleEditBookTitle(book: BookRecord) {
-    const currentTitle = String(book?.title || "").trim();
-    const editedTitle = prompt("Edit book title:", currentTitle);
-    if (editedTitle === null) {
+    const status = (getBookStatus(book) as "unread" | "upcoming" | "available" | "read") || "unread";
+    setEditBookForm({
+      id: Number(book.id),
+      title: String(book.title || ""),
+      author: String(book.author || ""),
+      bookNumber: book.book_number !== null && book.book_number !== undefined ? String(book.book_number) : "",
+      status,
+      date: toIsoDateString(getBookDate(book)) || "",
+    });
+    setEditBookDialogOpen(true);
+  }
+
+  async function handleSaveBookEdit() {
+    const bookId = Number(editBookForm.id);
+    if (!Number.isFinite(bookId) || bookId <= 0) return;
+
+    const title = editBookForm.title.trim();
+    const author = editBookForm.author.trim();
+    if (!title || !author) {
+      alert("Title and author are required.");
       return;
     }
 
-    const nextTitle = String(editedTitle || "").trim();
-    if (!nextTitle) {
-      alert("Title cannot be empty.");
-      return;
-    }
-    if (nextTitle === currentTitle) {
+    const numberRaw = editBookForm.bookNumber.trim();
+    const parsedBookNumber = numberRaw ? Number(numberRaw) : null;
+    if (numberRaw && !Number.isFinite(parsedBookNumber)) {
+      alert("Book number must be numeric when provided.");
       return;
     }
 
+    const rawDate = editBookForm.date.trim();
+    const normalizedDate = rawDate ? toIsoDateString(rawDate) : null;
+    if (rawDate && !normalizedDate) {
+      alert("Use a valid date format, such as YYYY-MM-DD.");
+      return;
+    }
+
+    setSavingEditBook(true);
     try {
-      const response = await fetchApiWithFallback(`/books/${book.id}`, {
+      const status = editBookForm.status;
+      const payload: Record<string, unknown> = {
+        title,
+        author,
+        series_id: Number(series?.id),
+        series_order: parsedBookNumber,
+        book_number: parsedBookNumber,
+        read_status: status,
+        is_read: status === "read",
+      };
+
+      if (status === "read") {
+        payload.read_date = normalizedDate || new Date().toISOString().split("T")[0];
+        payload.release_date = null;
+      } else {
+        payload.read_date = null;
+        payload.release_date = normalizedDate || null;
+      }
+
+      const response = await fetchApiWithFallback(`/books/${bookId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: nextTitle }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
-        throw new Error(`Failed to update title (${response.status})`);
+        throw new Error(`Failed to update book (${response.status})`);
       }
 
       const updatedBook = await response.json();
@@ -1832,10 +1959,18 @@ export default function SeriesDetailPage() {
             : prev.books,
         };
       });
-      flashAddedMessage(`Updated title for book #${book.book_number ?? "?"}.`);
+      publishBookStatusUpdate(updatedBook);
+      setEditBookDialogOpen(false);
+      flashAddedMessage(`Book updated: ${updatedBook.title || title}`);
+      toast({
+        title: "Book updated",
+        description: "Changes were saved and reflected in the Library view.",
+      });
     } catch (error) {
       console.error(error);
-      alert("Unable to update title right now.");
+      alert(error instanceof Error ? error.message : "Unable to update book right now.");
+    } finally {
+      setSavingEditBook(false);
     }
   }
 
@@ -2053,52 +2188,63 @@ export default function SeriesDetailPage() {
   }
 
   async function handleSetBookStatus(book: BookRecord) {
-    const currentStatus = getBookStatus(book);
-    const editedStatus = prompt("Set status (read/unread/upcoming):", currentStatus);
-    if (editedStatus === null) {
-      return;
-    }
+    const currentStatus = (getBookStatus(book) as "read" | "unread" | "upcoming" | "available") || "unread";
+    setStatusTargetBook(book);
+    setStatusAction(currentStatus);
+    setStatusDate(toIsoDateString(currentStatus === "read" ? book.read_date : (book.release_date || book.publication_date)) || "");
+    setStatusDialogOpen(true);
+  }
 
-    const normalizedStatus = editedStatus.trim().toLowerCase();
-    if (!["read", "unread", "upcoming"].includes(normalizedStatus)) {
-      alert("Status must be read, unread, or upcoming.");
-      return;
-    }
+  async function handleSaveBookStatus() {
+    if (!statusTargetBook) return;
 
-    const today = new Date().toISOString().split("T")[0];
-    let readDate: string | null = null;
-    let releaseDate: string | null = null;
-
-    if (normalizedStatus === "read") {
-      const readDatePrompt = prompt("Read date (MM-DD-YYYY):", String(book.read_date || today));
-      if (readDatePrompt === null) {
-        return;
-      }
-      readDate = normalizeDateInput(readDatePrompt) || today;
-      releaseDate = book.release_date || null;
-    } else {
-      const defaultReleaseDate = String(book.release_date || book.publication_date || "");
-      const datePrompt = prompt(
-        "Date for this book (MM-DD-YYYY, optional):",
-        defaultReleaseDate,
-      );
-      if (datePrompt === null) {
-        return;
-      }
-      releaseDate = normalizeDateInput(datePrompt);
-      readDate = null;
-    }
-
+    setStatusSaving(true);
     try {
-      const response = await fetchApiWithFallback(`/books/${book.id}`, {
+      const todayIso = new Date().toISOString().split("T")[0];
+      const normalizedDate = statusDate.trim() ? toIsoDateString(statusDate) : null;
+      if (statusDate.trim() && !normalizedDate) {
+        alert("Use a valid date format, such as YYYY-MM-DD.");
+        return;
+      }
+
+      const payload: Record<string, unknown> = {
+        is_read: statusAction === "read",
+        read_status: statusAction,
+      };
+
+      if (statusAction === "read") {
+        payload.read_date = normalizedDate || todayIso;
+        payload.release_date = null;
+      } else if (statusAction === "unread") {
+        payload.read_date = null;
+      } else if (statusAction === "upcoming") {
+        payload.read_date = null;
+        payload.release_date = normalizedDate || toIsoDateString(statusTargetBook.release_date || statusTargetBook.publication_date) || null;
+      } else if (statusAction === "available") {
+        payload.read_date = null;
+        const existingDate = toIsoDateString(statusTargetBook.release_date || statusTargetBook.publication_date);
+        if (!existingDate || isPastOrTodayDate(existingDate)) {
+          payload.release_date = null;
+        }
+      }
+
+      const effectiveReleaseDate = String(payload.release_date || "").trim() || toIsoDateString(statusTargetBook.release_date || statusTargetBook.publication_date);
+      if (!payload.read_date && effectiveReleaseDate) {
+        if (isFutureDate(effectiveReleaseDate)) {
+          payload.read_status = "upcoming";
+          payload.is_read = false;
+          payload.release_date = effectiveReleaseDate;
+        } else if (isPastOrTodayDate(effectiveReleaseDate)) {
+          payload.read_status = "available";
+          payload.is_read = false;
+          payload.release_date = null;
+        }
+      }
+
+      const response = await fetchApiWithFallback(`/books/${statusTargetBook.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          is_read: normalizedStatus === "read",
-          read_status: normalizedStatus,
-          read_date: readDate,
-          release_date: releaseDate,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
@@ -2117,9 +2263,14 @@ export default function SeriesDetailPage() {
         };
       });
       publishBookStatusUpdate(updatedBook);
+      setStatusDialogOpen(false);
+      setStatusTargetBook(null);
+      flashAddedMessage(`Status updated for ${updatedBook.title || "book"}.`);
     } catch (err) {
       console.error(err);
       alert("Unable to update status right now.");
+    } finally {
+      setStatusSaving(false);
     }
   }
 
@@ -2363,17 +2514,21 @@ export default function SeriesDetailPage() {
       }
       const finalAuthor = editedAuthor.trim() || suggestedAuthor;
 
-      const suggestedStatus = "upcoming";
+      const currentYear = new Date().getFullYear();
+      const suggestionYear = Number(String(suggestion.year || "").slice(0, 4));
+      const suggestedStatus = Number.isFinite(suggestionYear)
+        ? (suggestionYear > currentYear ? "upcoming" : "available")
+        : "upcoming";
       const editedStatus = prompt(
-        `Status for book ${bookNumber}? (upcoming/unread/read)`,
+        `Status for book ${bookNumber}? (upcoming/available/unread/read)`,
         suggestedStatus,
       );
       if (editedStatus === null) {
         return;
       }
       const normalizedStatus = editedStatus.trim().toLowerCase();
-      if (!["upcoming", "unread", "read"].includes(normalizedStatus)) {
-        alert("Status must be one of: upcoming, unread, read.");
+      if (!["upcoming", "available", "unread", "read"].includes(normalizedStatus)) {
+        alert("Status must be one of: upcoming, available, unread, read.");
         return;
       }
 
@@ -2804,29 +2959,17 @@ export default function SeriesDetailPage() {
                 <TableCell className="space-x-2 whitespace-nowrap">
                   <Button
                     variant="outline"
-                    className={
-                      book.is_read
-                        ? "border-rose-300 text-rose-700 hover:bg-rose-50"
-                        : "border-emerald-300 text-emerald-700 hover:bg-emerald-50"
-                    }
-                    size="sm"
-                    onClick={() => handleToggleRead(book)}
-                  >
-                    {book.is_read ? "Mark unread" : "Mark read"}
-                  </Button>
-                  <Button
-                    variant="outline"
                     size="sm"
                     onClick={() => handleSetBookStatus(book)}
                   >
-                    Set status/date
+                    Set Status
                   </Button>
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={() => handleEditBookTitle(book)}
                   >
-                    Edit title
+                    Edit book
                   </Button>
                   <Button
                     variant="destructive"
@@ -2949,11 +3092,12 @@ export default function SeriesDetailPage() {
                 <select
                   id="add-book-status"
                   value={addBookStatus}
-                  onChange={(event) => setAddBookStatus(event.target.value as "upcoming" | "unread" | "read")}
+                  onChange={(event) => setAddBookStatus(event.target.value as "upcoming" | "unread" | "available" | "read")}
                   className="h-9 w-full rounded border bg-white px-2 text-sm"
                 >
                   <option value="upcoming">upcoming</option>
                   <option value="unread">unread</option>
+                  <option value="available">available</option>
                   <option value="read">read</option>
                 </select>
               </div>
@@ -2979,6 +3123,143 @@ export default function SeriesDetailPage() {
               disabled={addBookSaving}
             >
               {addBookSaving ? "Adding..." : "Add Book"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={statusDialogOpen} onOpenChange={setStatusDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Set Status</DialogTitle>
+            <DialogDescription>
+              Update book state with automatic date-based inference.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label htmlFor="series-status-action">Action</Label>
+              <select
+                id="series-status-action"
+                value={statusAction}
+                onChange={(event) =>
+                  setStatusAction(event.target.value as "read" | "unread" | "upcoming" | "available")
+                }
+                className="h-9 w-full rounded border bg-white px-2 text-sm"
+              >
+                <option value="read">Mark as Read</option>
+                <option value="unread">Mark as Unread</option>
+                <option value="upcoming">Mark as Upcoming</option>
+                <option value="available">Mark as Available</option>
+              </select>
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="series-status-date">
+                {statusAction === "read" ? "Date Read" : "Publication Date (optional)"}
+              </Label>
+              <input
+                id="series-status-date"
+                value={statusDate}
+                onChange={(event) => setStatusDate(event.target.value)}
+                placeholder="YYYY-MM-DD"
+                className="h-9 w-full rounded border bg-white px-2 text-sm"
+              />
+            </div>
+          </div>
+
+          <DialogFooter showCloseButton>
+            <Button type="button" onClick={handleSaveBookStatus} disabled={statusSaving}>
+              {statusSaving ? "Saving..." : "Save status"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={editBookDialogOpen}
+        onOpenChange={setEditBookDialogOpen}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Edit Book</DialogTitle>
+            <DialogDescription>
+              Update title, author, number, status, and date for this book.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label htmlFor="edit-book-title">Title</Label>
+              <input
+                id="edit-book-title"
+                value={editBookForm.title}
+                onChange={(event) => setEditBookForm((prev) => ({ ...prev, title: event.target.value }))}
+                placeholder="Book title"
+                className="h-9 w-full rounded border bg-white px-2 text-sm"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="edit-book-author">Author</Label>
+              <input
+                id="edit-book-author"
+                value={editBookForm.author}
+                onChange={(event) => setEditBookForm((prev) => ({ ...prev, author: event.target.value }))}
+                placeholder="Author name"
+                className="h-9 w-full rounded border bg-white px-2 text-sm"
+              />
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1">
+                <Label htmlFor="edit-book-number">Book #</Label>
+                <input
+                  id="edit-book-number"
+                  value={editBookForm.bookNumber}
+                  onChange={(event) => setEditBookForm((prev) => ({ ...prev, bookNumber: event.target.value }))}
+                  placeholder="e.g. 24"
+                  className="h-9 w-full rounded border bg-white px-2 text-sm"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <Label htmlFor="edit-book-status">Status</Label>
+                <select
+                  id="edit-book-status"
+                  value={editBookForm.status}
+                  onChange={(event) =>
+                    setEditBookForm((prev) => ({
+                      ...prev,
+                      status: event.target.value as "unread" | "upcoming" | "available" | "read",
+                    }))
+                  }
+                  className="h-9 w-full rounded border bg-white px-2 text-sm"
+                >
+                  <option value="unread">unread</option>
+                  <option value="upcoming">upcoming</option>
+                  <option value="available">available</option>
+                  <option value="read">read</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="edit-book-date">Date</Label>
+              <input
+                id="edit-book-date"
+                value={editBookForm.date}
+                onChange={(event) => setEditBookForm((prev) => ({ ...prev, date: event.target.value }))}
+                placeholder={editBookForm.status === "read" ? "Read date (YYYY-MM-DD)" : "Release date (YYYY-MM-DD)"}
+                className="h-9 w-full rounded border bg-white px-2 text-sm"
+              />
+            </div>
+          </div>
+
+          <DialogFooter showCloseButton>
+            <Button type="button" onClick={handleSaveBookEdit} disabled={savingEditBook}>
+              {savingEditBook ? "Saving..." : "Save changes"}
             </Button>
           </DialogFooter>
         </DialogContent>
