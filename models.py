@@ -40,6 +40,10 @@ class Series(Base):
     missing_books = Column(JSON, nullable=True)  # list of book_numbers
     last_checked = Column(Date, nullable=True)
     has_new_books = Column(Boolean, default=False)
+    has_unread_books = Column(Boolean, default=False)
+    has_upcoming_books = Column(Boolean, default=False)
+    is_caught_up = Column(Boolean, default=False)
+    title_normalization_mode_override = Column(String, nullable=True)
 
     # External IDs
     goodreads_series_id = Column(String, nullable=True)
@@ -59,6 +63,25 @@ class Series(Base):
 
     books = relationship("Book", back_populates="series")
     canonical_entries = relationship("SeriesCanonicalEntry", back_populates="series", cascade="all, delete-orphan")
+
+    @property
+    def series_state(self):
+        return {
+            "has_new_books": bool(self.has_new_books),
+            "has_unread_books": bool(self.has_unread_books),
+            "has_upcoming_books": bool(self.has_upcoming_books),
+            "is_caught_up": bool(self.is_caught_up),
+        }
+
+    @property
+    def read_count(self):
+        active_books = [book for book in (self.books or []) if str(book.record_status or "active") != "deleted"]
+        return sum(1 for book in active_books if bool(book.is_read))
+
+    @property
+    def unread_count(self):
+        active_books = [book for book in (self.books or []) if str(book.record_status or "active") != "deleted"]
+        return sum(1 for book in active_books if not bool(book.is_read))
 
 
 class SeriesCanonicalEntry(Base):

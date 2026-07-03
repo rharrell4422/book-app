@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
+import Spinner from "@/components/ui/spinner";
 import {
   Dialog,
   DialogContent,
@@ -14,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
+import { scheduleSeriesCheckReset } from "@/lib/series-check-progress";
 import {
   Table,
   TableBody,
@@ -42,6 +44,8 @@ type ScanProgress = {
   completedCount: number;
   totalCount: number;
 };
+
+ type TitleNormalizationMode = "keep_original" | "clean_up" | "new_clean_title" | "match_other_titles";
 
 type BookRecord = {
   id: number;
@@ -81,8 +85,26 @@ type SeriesRecord = {
   next_unread_book_number?: number | null;
   next_upcoming_book_number?: number | null;
   missing_books?: string[];
+  title_normalization_mode_override?: TitleNormalizationMode | null;
   books?: BookRecord[];
   [key: string]: unknown;
+};
+
+type SeriesCheckStatusPayload = {
+  session_id?: string | null;
+  status: "idle" | "started" | "running" | "complete";
+  progress?: number;
+  current_pass?: string | null;
+  elapsed_seconds?: number;
+  timed_out?: boolean;
+  missing_books?: Array<number | string>;
+  no_new_books?: boolean;
+  result?: {
+    added_books?: unknown[];
+    missing_books?: string[];
+    discovery_mode?: string | null;
+  };
+  error?: string;
 };
 
 type SeriesDetailColumnKey = "title" | "author" | "status" | "date" | "bookNumber" | "actions";
@@ -115,7 +137,148 @@ const SERIES_DETAIL_RESIZE_NEIGHBOR: Record<SeriesDetailColumnKey, SeriesDetailC
 };
 
 const SERIES_DETAIL_TABLE_COLUMN_WIDTHS_STORAGE_PREFIX = "seriesDetailTableColumnWidthsV1:";
-const SERIES_DETAIL_VIEWED_STORAGE_PREFIX = "seriesDetailViewedV1:";
+const TITLE_NORMALIZATION_MODES: TitleNormalizationMode[] = ["keep_original", "clean_up", "new_clean_title", "match_other_titles"];
+
+function isTitleNormalizationMode(value: unknown): value is TitleNormalizationMode {
+  return typeof value === "string" && TITLE_NORMALIZATION_MODES.includes(value as TitleNormalizationMode);
+}
+
+function getTitleNormalizationModeLabel(mode: TitleNormalizationMode) {
+  if (mode === "keep_original") return "Keep Original Title - Leave As Is";
+  if (mode === "clean_up") return "Clean Up Title - Fix formatting junk";
+  if (mode === "new_clean_title") return "New Clean Title - Keep book name, add clean series suffix";
+  return "Match Other Titles - Format like the rest of the series";
+}
+
+function getTitleNormalizationModeDescription(mode: TitleNormalizationMode) {
+  if (mode === "keep_original") return "Keeps the title exactly as imported.";
+  if (mode === "clean_up") return "Removes junk formatting while keeping the official book title structure.";
+  if (mode === "new_clean_title") return "Keeps the unique book title and adds (Series Name Book #).";
+  return "Matches the formatting style used by other titles in this series.";
+}
+
+function normalizeBookTitleCleanupOnly(rawTitle: string): string {
+  let title = String(rawTitle || "").trim();
+  if (!title) return "";
+
+  title = title.replace(/\s+ebook\s*$/i, "");
+  title = title.replace(/\s+kindle\s+edition\s*$/i, "");
+  title = title.replace(/\s*\(unabridged\)\s*$/i, "");
+  title = title.replace(/:\s*/g, ": ");
+  title = title.replace(/\(\s+/g, "(");
+  title = title.replace(/\s+\)/g, ")");
+  title = title.replace(/\s{2,}/g, " ");
+
+  title = title.replace(/:\s*a\s+litrpg\s+apocalypse\s*:?$/i, ": A LitRPG").trim();
+  title = title.replace(/:\s*a\s+litrpg\s+(?:adventure|novel|saga|epic|fantasy|progression\s+fantasy)\s*:?$/i, ": A LitRPG").trim();
+  title = title.replace(/:\s*litrpg\s+(?:adventure|novel|saga|epic|fantasy|progression\s+fantasy)\s*:?$/i, ": LitRPG").trim();
+
+  return title.replace(/\s{2,}/g, " ").trim();
+}
+
+function normalizeBookTitleCleanUp(rawTitle: string, seriesName?: string): string {
+  let title = normalizeBookTitleCleanupOnly(rawTitle);
+  if (!title) return "";
+
+  title = title.replace(/:\s*:/g, ": ");
+
+  const repeatedWrappedBookPattern = /^(.*?):\s*\((book\s+[^)]+)\)\s*:\s*\(([^)]*\bbook\s*\d+[^)]*)\)\s*$/i;
+  const repeatedMatch = title.match(repeatedWrappedBookPattern);
+  if (repeatedMatch) {
+    const stem = String(repeatedMatch[1] || "").trim();
+    const bookWord = String(repeatedMatch[2] || "").trim();
+    const suffix = String(repeatedMatch[3] || "").trim();
+    return `${stem}: ${bookWord} (${suffix})`.replace(/\s{2,}/g, " ").trim();
+  }
+
+  if (seriesName) {
+    const escaped = escapeRegExp(String(seriesName).trim());
+    title = title.replace(new RegExp(`^(${escaped})\s*:\s*${escaped}\s*`, "i"), "$1: ").trim();
+  }
+
+  return title;
+}
+
+function normalizeBookTitleBookNameOnly(rawTitle: string): string {
+  const cleaned = normalizeBookTitleCleanupOnly(rawTitle);
+  if (!cleaned) return "";
+
+  const stripped = cleaned
+    .replace(/\s*:\s*\([^)]*\)\s*$/i, "")
+    .replace(/\s*:\s*.*$/i, "")
+    .replace(/\s+[-–]\s+.*$/i, "")
+    .trim();
+
+  return stripped || cleaned;
+}
+
+function normalizeBookTitleSeriesNameOnly(rawTitle: string, seriesName?: string, bookNumber?: number | null): string {
+  const cleaned = normalizeBookTitleCleanupOnly(rawTitle);
+  if (!cleaned) return "";
+
+  const inferredBookNumberMatch = cleaned.match(/\bbook\s+(\d+(?:\.\d+)?)\b/i);
+  const resolvedBookNumber = Number.isFinite(bookNumber ?? NaN)
+    ? Number(bookNumber)
+    : inferredBookNumberMatch
+      ? Number(inferredBookNumberMatch[1])
+      : null;
+  const cleanSeriesName = String(seriesName || "").trim();
+  if (!cleanSeriesName) {
+    return cleaned;
+  }
+
+  if (resolvedBookNumber === null) {
+    return cleanSeriesName;
+  }
+
+  const prettyBookNumber = Number.isInteger(resolvedBookNumber)
+    ? String(Math.trunc(resolvedBookNumber))
+    : String(resolvedBookNumber);
+  return `${cleanSeriesName} Book ${prettyBookNumber}`;
+}
+
+function normalizeBookTitleNewClean(rawTitle: string, seriesName?: string, bookNumber?: number | null): string {
+  const cleaned = normalizeBookTitleCleanUp(rawTitle, seriesName);
+  if (!cleaned) return "";
+
+  const inferredBookNumberMatch = cleaned.match(/\bbook\s+(\d+(?:\.\d+)?)\b/i);
+  const resolvedBookNumber = Number.isFinite(bookNumber ?? NaN)
+    ? Number(bookNumber)
+    : inferredBookNumberMatch
+      ? Number(inferredBookNumberMatch[1])
+      : null;
+  const inferredSeriesNameMatch = cleaned.match(/\(\s*([^()]*?)\s+book\s*\d+(?:\.\d+)?\s*\)\s*$/i);
+  const inferredSeriesName = inferredSeriesNameMatch ? String(inferredSeriesNameMatch[1] || "").trim() : "";
+  const cleanSeriesName = String(seriesName || inferredSeriesName || "").trim();
+
+  if (!cleanSeriesName || resolvedBookNumber === null) {
+    return normalizeBookTitleBookNameOnly(cleaned);
+  }
+
+  const prettyBookNumber = Number.isInteger(resolvedBookNumber)
+    ? String(Math.trunc(resolvedBookNumber))
+    : String(resolvedBookNumber);
+  const coreTitle = normalizeBookTitleBookNameOnly(cleaned);
+  return `${coreTitle} (${cleanSeriesName} Book ${prettyBookNumber})`.replace(/\s{2,}/g, " ").trim();
+}
+
+function inferSeriesTitlePattern(books: BookRecord[]): "with_suffix" | "title_only" {
+  let withSuffix = 0;
+  let titleOnly = 0;
+
+  for (const book of books || []) {
+    const title = String(book?.title || "").trim();
+    if (!title) continue;
+
+    if (/\([^)]*\bbook\s*\d+(?:\.\d+)?[^)]*\)\s*$/i.test(title)) {
+      withSuffix += 1;
+    } else {
+      titleOnly += 1;
+    }
+  }
+
+  return withSuffix >= titleOnly ? "with_suffix" : "title_only";
+}
 
 function normalizeBaseUrl(value: string) {
   return value.replace(/\/+$/, "");
@@ -132,6 +295,10 @@ function getApiBaseCandidates() {
 
 async function fetchApiWithFallback(path: string, init?: RequestInit) {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const isSuggestGetRequest = (init?.method || "GET").toUpperCase() === "GET" && /\/suggest(?:\?|$)/.test(normalizedPath);
+  const requestInit: RequestInit = isSuggestGetRequest
+    ? { ...init, cache: "no-store" }
+    : init ?? {};
   const baseCandidates = getApiBaseCandidates();
   const candidates = [
     `/api${normalizedPath}`,
@@ -147,7 +314,7 @@ async function fetchApiWithFallback(path: string, init?: RequestInit) {
   let lastError: Error | null = null;
   for (const url of candidates) {
     try {
-      const response = await fetch(url, init);
+      const response = await fetch(url, requestInit);
       if (response.ok) {
         return response;
       }
@@ -158,6 +325,10 @@ async function fetchApiWithFallback(path: string, init?: RequestInit) {
   }
 
   throw lastError ?? new Error(`Failed to load ${normalizedPath}`);
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function loadCachedSuggestions(seriesId: string): Record<string, SuggestionRecord[]> {
@@ -381,25 +552,36 @@ function parseKnownSeriesListText(text: string): Array<{ bookNumber: number; tit
   return Array.from(deduped.values()).sort((a, b) => a.bookNumber - b.bookNumber);
 }
 
-function getBookStatus(book: BookRecord) {
-  if (book.read_status) {
-    return String(book.read_status);
-  }
-  if (book.is_read) {
-    return "read";
+function hasUpcomingBookSignals(book: BookRecord) {
+  const status = String(book.read_status || "").trim().toLowerCase();
+  if (status === "upcoming" || status === "tbr" || status === "to be read") {
+    return true;
   }
 
-  const releaseDate = book.release_date || book.publication_date;
-  if (releaseDate) {
-    const parsedDate = new Date(releaseDate);
+  if (book.is_read) {
+    return false;
+  }
+
+  if (book.release_date || book.publication_date) {
+    const parsedDate = new Date(book.release_date || book.publication_date || "");
     if (!Number.isNaN(parsedDate.valueOf())) {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       parsedDate.setHours(0, 0, 0, 0);
-      if (parsedDate > today) {
-        return "upcoming";
-      }
+      return parsedDate > today;
     }
+  }
+
+  return false;
+}
+
+function getBookStatus(book: BookRecord) {
+  if (book.is_read) {
+    return "read";
+  }
+
+  if (hasUpcomingBookSignals(book)) {
+    return "upcoming";
   }
 
   return "unread";
@@ -509,18 +691,9 @@ function escapeRegExp(value: string): string {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function normalizeBookTitleSafe(rawTitle: string, seriesName?: string, bookNumber?: number | null): string {
-  let title = String(rawTitle || "").trim();
+function normalizeBookTitleBookNameSeries(rawTitle: string, seriesName?: string, bookNumber?: number | null): string {
+  const title = normalizeBookTitleCleanupOnly(rawTitle);
   if (!title) return "";
-
-  // Safe cleanup rules: remove common storefront/media suffixes and normalize spacing.
-  title = title.replace(/\s+ebook\s*$/i, "");
-  title = title.replace(/\s+kindle\s+edition\s*$/i, "");
-  title = title.replace(/\s*\(unabridged\)\s*$/i, "");
-  title = title.replace(/:\s*/g, ": ");
-  title = title.replace(/\(\s+/g, "(");
-  title = title.replace(/\s+\)/g, ")");
-  title = title.replace(/\s{2,}/g, " ");
 
   const inferredBookNumberMatch = title.match(/\bbook\s+(\d+(?:\.\d+)?)\b/i);
   const resolvedBookNumber = Number.isFinite(bookNumber ?? NaN)
@@ -532,64 +705,71 @@ function normalizeBookTitleSafe(rawTitle: string, seriesName?: string, bookNumbe
   const inferredSeriesName = inferredSeriesNameMatch ? String(inferredSeriesNameMatch[1] || "").trim() : "";
   const cleanSeriesName = String(seriesName || inferredSeriesName || "").trim();
 
-  // Remove trailing parenthesized book markers from mixed source formats,
-  // including entries that use word-based ordinals (e.g. "Book Nineteen").
-  title = title
-    .replace(/\s*\([^)]*\bbook\b[^)]*\)\s*:\s*$/i, "")
-    .replace(/\s*\([^)]*\bbook\b[^)]*\)\s*$/i, "")
-    .trim();
-
-  // Canonicalize noisy LitRPG subtitles to a consistent short form.
-  title = title.replace(/:\s*a\s+litrpg\s+apocalypse\s*:?\s*$/i, ": A LitRPG").trim();
-  title = title.replace(/:\s*a\s+litrpg\s+(?:adventure|novel|saga|epic|fantasy|progression\s+fantasy)\s*:?\s*$/i, ": A LitRPG").trim();
-  title = title.replace(/:\s*litrpg\s+(?:adventure|novel|saga|epic|fantasy|progression\s+fantasy)\s*:?\s*$/i, ": LitRPG").trim();
-
-  // Remove embedded series-name tails like ": Series Name, Book N" or ": Series Name".
-  if (cleanSeriesName) {
-    const escapedSeriesName = escapeRegExp(cleanSeriesName);
-    title = title
-      .replace(new RegExp(`:\\s*${escapedSeriesName}\\s*,?\\s*book\\s*\\d+(?:\\.\\d+)?\\s*$`, "i"), "")
-      .replace(new RegExp(`:\\s*${escapedSeriesName}\\s*$`, "i"), "")
-      .trim();
-  }
-
-  // Replace generic stems like "Book 13" with "Series Name 13" when series context exists.
-  if (cleanSeriesName) {
-    const genericBookStemMatch = title.match(/^book\s+(\d+(?:\.\d+)?)\s*:??\s*$/i);
-    if (genericBookStemMatch) {
-      const numberFromStem = Number(genericBookStemMatch[1]);
-      const normalizedNumber = Number.isFinite(numberFromStem)
-        ? numberFromStem
-        : resolvedBookNumber;
-      const prettyNumber = normalizedNumber !== null
-        ? (Number.isInteger(normalizedNumber) ? String(Math.trunc(normalizedNumber)) : String(normalizedNumber))
-        : "";
-      title = prettyNumber ? `${cleanSeriesName} ${prettyNumber}` : cleanSeriesName;
-    }
-  }
-
-  // Ensure the display standard: "Title: (Series Name Book N)"
-  title = title.replace(/\s{2,}/g, " ").trim();
-  const isCollectionTitle = /\bbox\s*set\b|\bbooks?\s+\d+\s*[-–]\s*\d+\b/i.test(title);
-
-  if (isCollectionTitle) {
+  if (!cleanSeriesName) {
     return title;
   }
 
-  if (!title) {
-    title = resolvedBookNumber !== null ? `Book ${resolvedBookNumber}` : "Untitled";
-  }
-  title = title.replace(/\s*:\s*$/, "").trim();
-  title = `${title}:`;
+  const escapedSeriesName = escapeRegExp(cleanSeriesName);
+  let normalized = title
+    .replace(new RegExp(`:\\s*${escapedSeriesName}\\s*,?\\s*book\\s*\\d+(?:\\.\\d+)?\\s*$`, "i"), "")
+    .replace(new RegExp(`:\\s*${escapedSeriesName}\\s*$`, "i"), "")
+    .trim();
 
-  if (cleanSeriesName && resolvedBookNumber !== null) {
+  const genericBookStemMatch = normalized.match(/^book\s+(\d+(?:\.\d+)?)\s*:??\s*$/i);
+  if (genericBookStemMatch) {
+    const numberFromStem = Number(genericBookStemMatch[1]);
+    const normalizedNumber = Number.isFinite(numberFromStem)
+      ? numberFromStem
+      : resolvedBookNumber;
+    const prettyNumber = normalizedNumber !== null
+      ? (Number.isInteger(normalizedNumber) ? String(Math.trunc(normalizedNumber)) : String(normalizedNumber))
+      : "";
+    normalized = prettyNumber ? `${cleanSeriesName} ${prettyNumber}` : cleanSeriesName;
+  }
+
+  normalized = normalized.replace(/\s*:\s*$/, "").trim();
+  if (!normalized) {
+    normalized = resolvedBookNumber !== null ? `Book ${resolvedBookNumber}` : "Untitled";
+  }
+  normalized = `${normalized}:`;
+
+  if (resolvedBookNumber !== null) {
     const prettyBookNumber = Number.isInteger(resolvedBookNumber)
       ? String(Math.trunc(resolvedBookNumber))
       : String(resolvedBookNumber);
-    title = `${title} (${cleanSeriesName} Book ${prettyBookNumber})`;
+    normalized = `${normalized} (${cleanSeriesName} Book ${prettyBookNumber})`;
   }
 
-  return title.trim();
+  return normalized.trim();
+}
+
+function normalizeBookTitleForMode(
+  rawTitle: string,
+  mode: TitleNormalizationMode,
+  seriesName?: string,
+  bookNumber?: number | null,
+  books: BookRecord[] = [],
+): string {
+  const raw = String(rawTitle || "").trim();
+  if (!raw || mode === "keep_original") {
+    return raw;
+  }
+
+  if (mode === "clean_up") {
+    return normalizeBookTitleCleanUp(raw, seriesName);
+  }
+
+  if (mode === "new_clean_title") {
+    return normalizeBookTitleNewClean(raw, seriesName, bookNumber);
+  }
+
+  const cleanTitle = normalizeBookTitleCleanUp(raw, seriesName);
+  const seriesPattern = inferSeriesTitlePattern(books);
+  if (seriesPattern === "title_only") {
+    return normalizeBookTitleBookNameOnly(cleanTitle);
+  }
+
+  return normalizeBookTitleNewClean(cleanTitle, seriesName, bookNumber);
 }
 
 function inferSeriesTitleSuffix(books: BookRecord[]): string | null {
@@ -698,20 +878,6 @@ function saveStoreOnlyPreference(seriesId: string, value: boolean) {
   }
 }
 
-function hasViewedSeries(seriesId: string): boolean {
-  if (typeof window === "undefined") return false;
-  return window.sessionStorage.getItem(`${SERIES_DETAIL_VIEWED_STORAGE_PREFIX}${seriesId}`) === "1";
-}
-
-function markSeriesAsViewed(seriesId: string) {
-  if (typeof window === "undefined") return;
-  try {
-    window.sessionStorage.setItem(`${SERIES_DETAIL_VIEWED_STORAGE_PREFIX}${seriesId}`, "1");
-  } catch {
-    // Ignore storage errors in private mode or restricted browsers.
-  }
-}
-
 export default function SeriesDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -741,6 +907,10 @@ export default function SeriesDetailPage() {
   const [scanCurrentOrder, setScanCurrentOrder] = useState<string | null>(null);
   const [serpUsageCount, setSerpUsageCount] = useState(0);
   const [recentAddMessage, setRecentAddMessage] = useState<string | null>(null);
+  const [seriesCheckLoading, setSeriesCheckLoading] = useState(false);
+  const [seriesCheckProgress, setSeriesCheckProgress] = useState(0);
+  const [seriesCheckCurrentPass, setSeriesCheckCurrentPass] = useState<string | null>(null);
+  const [seriesCheckStillChecking, setSeriesCheckStillChecking] = useState(false);
   const [releaseIntelText, setReleaseIntelText] = useState("");
   const [releaseIntelSaving, setReleaseIntelSaving] = useState(false);
   const [releaseIntelMessage, setReleaseIntelMessage] = useState<string | null>(null);
@@ -752,6 +922,8 @@ export default function SeriesDetailPage() {
   const [addBookDate, setAddBookDate] = useState("");
   const [recentUpcomingBookIds, setRecentUpcomingBookIds] = useState<number[]>([]);
   const [titleNormalizeSaving, setTitleNormalizeSaving] = useState(false);
+  const [normalizeTitlesConfirmed, setNormalizeTitlesConfirmed] = useState(false);
+  const [titleNormalizationExamplesOpen, setTitleNormalizationExamplesOpen] = useState(false);
   const [releaseIntelDialogOpen, setReleaseIntelDialogOpen] = useState(false);
   const [normalizeTitlesDialogOpen, setNormalizeTitlesDialogOpen] = useState(false);
   const [knownTotalDraft, setKnownTotalDraft] = useState("");
@@ -765,6 +937,7 @@ export default function SeriesDetailPage() {
   const scanCompletedRef = useRef(0);
   const scanTotalRef = useRef(0);
   const addMessageTimeoutRef = useRef<number | null>(null);
+  const seriesCheckResetTimeoutRef = useRef<number | null>(null);
   const booksTableWrapRef = useRef<HTMLDivElement | null>(null);
   const resizeStateRef = useRef<{
     key: SeriesDetailColumnKey;
@@ -774,6 +947,8 @@ export default function SeriesDetailPage() {
     startNeighborWidth: number;
     containerWidth: number;
   } | null>(null);
+
+  const seriesNormalizationMode = (series?.title_normalization_mode_override as TitleNormalizationMode | null | undefined) || "keep_original";
 
   function sanitizeSavedSeriesDetailColumnWidths(value: unknown): Record<SeriesDetailColumnKey, number> | null {
     if (!value || typeof value !== "object") return null;
@@ -909,16 +1084,6 @@ export default function SeriesDetailPage() {
         const data = await response.json();
         if (!isActive) return;
         setSeries(data);
-
-        if (data?.has_new_books && !hasViewedSeries(seriesId)) {
-          try {
-            await fetchApiWithFallback(`/series/${seriesId}/clear_new_books`, { method: "POST" });
-            markSeriesAsViewed(seriesId);
-            setSeries((prev) => (prev ? { ...prev, has_new_books: false } : prev));
-          } catch (clearError) {
-            console.error("Error clearing series new-book flag:", clearError);
-          }
-        }
 
         const cachedSuggestions = loadCachedSuggestions(seriesId);
         if (Object.keys(cachedSuggestions).length > 0) {
@@ -1135,6 +1300,12 @@ export default function SeriesDetailPage() {
     [recentUpcomingBookIds, books],
   );
 
+  useEffect(() => {
+    return () => {
+      clearSeriesCheckResetTimeout();
+    };
+  }, []);
+
   if (loading) {
     return <div className="p-6">Loading series...</div>;
   }
@@ -1205,10 +1376,12 @@ export default function SeriesDetailPage() {
   const titleNormalizationPreview = displayedBooks
     .map((book) => {
       const currentTitle = String(book?.title || "").trim();
-      const normalizedTitle = normalizeBookTitleSafe(
+      const normalizedTitle = normalizeBookTitleForMode(
         currentTitle,
+        seriesNormalizationMode,
         series?.name,
         Number(book?.book_number ?? book?.series_order ?? NaN),
+        Array.isArray(series?.books) ? series.books : [],
       );
       if (!currentTitle || !normalizedTitle || currentTitle === normalizedTitle) {
         return null;
@@ -1223,6 +1396,44 @@ export default function SeriesDetailPage() {
       (value): value is { id: number; currentTitle: string; normalizedTitle: string } =>
         Boolean(value)
     );
+
+  async function handleSaveTitleNormalizationOverride(nextMode: TitleNormalizationMode) {
+    if (!series) return;
+
+    try {
+      const response = await fetchApiWithFallback(`/series/${series.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: series.name,
+          author: series.author || undefined,
+          description: series.description || undefined,
+          genre: series.genre || undefined,
+          tags: series.tags || undefined,
+          total_books: series.total_books ?? undefined,
+          series_status: series.series_status || undefined,
+          next_unread_book_number: series.next_unread_book_number ?? undefined,
+          next_upcoming_book_number: series.next_upcoming_book_number ?? undefined,
+          missing_books: series.missing_books ?? undefined,
+          is_finished: series.is_finished ?? false,
+          title_normalization_mode_override: nextMode,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to save series normalization override (${response.status})`);
+      }
+
+      await refreshSeriesFromApi();
+      flashAddedMessage(
+        `Series normalization mode set to ${getTitleNormalizationModeLabel(nextMode)}.`,
+      );
+    } catch (error) {
+      console.error(error);
+      alert(error instanceof Error ? error.message : "Unable to save normalization override.");
+    }
+  }
+
 
   function setStoreOnlyAndPersist(value: boolean) {
     setStoreOnly(value);
@@ -1251,12 +1462,117 @@ export default function SeriesDetailPage() {
     }, 5000);
   }
 
+  function resetSeriesCheckUiState() {
+    setSeriesCheckLoading(false);
+    setSeriesCheckCurrentPass(null);
+    setSeriesCheckProgress(0);
+    setSeriesCheckStillChecking(false);
+  }
+
+  function clearSeriesCheckResetTimeout() {
+    if (seriesCheckResetTimeoutRef.current !== null) {
+      window.clearTimeout(seriesCheckResetTimeoutRef.current);
+      seriesCheckResetTimeoutRef.current = null;
+    }
+  }
+
   async function refreshSeriesFromApi() {
     const response = await fetchApiWithFallback(`/series/${seriesId}`, {
       cache: "no-store",
     });
     const data = await response.json();
     setSeries(data);
+  }
+
+  async function handleCheckForNew() {
+    if (!series) return;
+
+    clearSeriesCheckResetTimeout();
+    setSeriesCheckLoading(true);
+    setSeriesCheckProgress(0);
+    setSeriesCheckCurrentPass("exact match");
+    setSeriesCheckStillChecking(false);
+    flashAddedMessage(`Checking ${series.name} for new books...`);
+
+    try {
+      const response = await fetchApiWithFallback(`/series/${series.id}/check`, { method: "POST" });
+      if (!response.ok) {
+        throw new Error(`Unable to start check (${response.status})`);
+      }
+
+      const kickoff = await response.json() as SeriesCheckStatusPayload;
+      const sessionId = kickoff.session_id;
+
+      let statusPayload: SeriesCheckStatusPayload = {
+        status: kickoff.status === "complete" ? "complete" : "running",
+        progress: 0,
+        current_pass: "exact match",
+      };
+
+      while (statusPayload.status === "running") {
+        await delay(2500);
+        const statusPath = sessionId
+          ? `/series/${series.id}/check/status?session_id=${encodeURIComponent(sessionId)}`
+          : `/series/${series.id}/check/status`;
+        const statusResponse = await fetchApiWithFallback(statusPath, { cache: "no-store" });
+        statusPayload = await statusResponse.json();
+
+        setSeriesCheckProgress(Math.max(0, Math.min(100, Number(statusPayload.progress ?? 0))));
+        setSeriesCheckCurrentPass(statusPayload.current_pass || null);
+        setSeriesCheckStillChecking(Boolean(statusPayload.timed_out) || Number(statusPayload.elapsed_seconds ?? 0) >= 120);
+
+        if (statusPayload.status === "idle") {
+          statusPayload = { ...statusPayload, status: "complete", no_new_books: true };
+        }
+      }
+
+      if (statusPayload.error) {
+        throw new Error(statusPayload.error);
+      }
+
+      const data = statusPayload.result ?? {};
+      const addedCount = Array.isArray(data.added_books) ? data.added_books.length : 0;
+      const missingList = Array.isArray(statusPayload.missing_books)
+        ? statusPayload.missing_books
+        : Array.isArray(data.missing_books)
+          ? data.missing_books
+          : [];
+      const missingCount = missingList.length;
+      const message = addedCount > 0
+        ? `${series.name}: Check complete. ${addedCount} book${addedCount === 1 ? "" : "s"} added.`
+        : missingCount > 0
+          ? `${series.name}: Check complete. Missing books: ${missingList.join(", ")}.`
+          : `${series.name}: Check complete. No new books found.`;
+
+      await refreshSeriesFromApi();
+      flashAddedMessage(message);
+      setSeriesCheckStillChecking(false);
+
+      const terminalStatusSignal =
+        String(statusPayload.status || "").toLowerCase() === "complete"
+          ? "complete"
+          : String(statusPayload.current_pass || data.discovery_mode || "");
+
+      const timeoutId = scheduleSeriesCheckReset(
+        terminalStatusSignal,
+        () => {
+          resetSeriesCheckUiState();
+          seriesCheckResetTimeoutRef.current = null;
+        },
+        (cb, delayMs) => window.setTimeout(cb, delayMs),
+      );
+      if (timeoutId !== null) {
+        setSeriesCheckProgress(100);
+        setSeriesCheckCurrentPass(statusPayload.current_pass || String(statusPayload.status || "complete"));
+        seriesCheckResetTimeoutRef.current = timeoutId;
+      } else {
+        resetSeriesCheckUiState();
+      }
+    } catch (error) {
+      console.error(error);
+      alert(error instanceof Error ? error.message : "Unable to check for new books right now.");
+      resetSeriesCheckUiState();
+    }
   }
 
   async function handleSaveKnownTotal() {
@@ -1527,6 +1843,10 @@ export default function SeriesDetailPage() {
     if (!titleNormalizationPreview.length) {
       return;
     }
+    if (!normalizeTitlesConfirmed) {
+      alert("Please confirm the preview before applying title normalization.");
+      return;
+    }
 
     setTitleNormalizeSaving(true);
     try {
@@ -1556,6 +1876,8 @@ export default function SeriesDetailPage() {
             : prev.books,
         };
       });
+          await refreshSeriesFromApi();
+          setNormalizeTitlesConfirmed(false);
 
       flashAddedMessage(`Normalized ${updatedById.size} title${updatedById.size === 1 ? "" : "s"}.`);
     } catch (error) {
@@ -1663,19 +1985,7 @@ export default function SeriesDetailPage() {
 
   async function handleToggleRead(book: BookRecord) {
     const nextIsRead = !book.is_read;
-    const releaseDate = book.release_date || book.publication_date;
-    let nextStatus = nextIsRead ? "read" : "unread";
-    if (!nextIsRead && releaseDate) {
-      const parsedDate = new Date(releaseDate);
-      if (!Number.isNaN(parsedDate.valueOf())) {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        parsedDate.setHours(0, 0, 0, 0);
-        if (parsedDate > today) {
-          nextStatus = "upcoming";
-        }
-      }
-    }
+    const nextStatus = nextIsRead ? "read" : (hasUpcomingBookSignals(book) ? "upcoming" : "unread");
 
     try {
         const response = await fetchApiWithFallback(`/books/${book.id}`, {
@@ -1707,6 +2017,38 @@ export default function SeriesDetailPage() {
     } catch (err) {
       console.error(err);
       alert("Unable to update read status right now.");
+    }
+  }
+
+  async function handleDeleteBook(book: BookRecord) {
+    const confirmed = window.confirm(`Delete \"${book.title || "this book"}\"? This cannot be undone.`);
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      const response = await fetchApiWithFallback(`/books/${book.id}`, {
+        method: "DELETE",
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to delete book (${response.status})`);
+      }
+
+      setSeries((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          books: Array.isArray(prev.books) ? prev.books.filter((item) => item.id !== book.id) : prev.books,
+        };
+      });
+
+      await refreshSeriesFromApi();
+      setNormalizeTitlesConfirmed(false);
+      flashAddedMessage(`Deleted book #${book.book_number ?? book.id}.`);
+    } catch (error) {
+      console.error(error);
+      alert(error instanceof Error ? error.message : "Unable to delete book right now.");
     }
   }
 
@@ -2217,6 +2559,32 @@ export default function SeriesDetailPage() {
               </Button>
               <Button
                 type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => void handleCheckForNew()}
+                disabled={seriesCheckLoading}
+              >
+                {seriesCheckLoading ? `Checking ${series.name}…` : `Check ${series.name} for New`}
+              </Button>
+              {seriesCheckLoading ? (
+                <div className="flex min-w-[240px] items-center gap-2 rounded border bg-background px-2 py-1 text-xs">
+                  <Spinner />
+                  <div className="w-32 overflow-hidden rounded-full bg-slate-200">
+                    <div
+                      className="h-1.5 bg-slate-700 transition-all duration-500"
+                      style={{ width: `${Math.max(4, seriesCheckProgress)}%` }}
+                    />
+                  </div>
+                  <span className={seriesCheckStillChecking ? "animate-pulse text-muted-foreground" : "text-muted-foreground"}>
+                    {seriesCheckStillChecking ? "Still checking..." : `${seriesCheckProgress}%`}
+                  </span>
+                  {seriesCheckCurrentPass ? (
+                    <span className="text-muted-foreground">{seriesCheckCurrentPass}</span>
+                  ) : null}
+                </div>
+              ) : null}
+              <Button
+                type="button"
                 variant="outline"
                 size="sm"
                 onClick={() => handleOpenGoogleSearch(`${series.name} ${series.author || ""} next book release`.trim())}
@@ -2237,7 +2605,7 @@ export default function SeriesDetailPage() {
                 size="sm"
                 onClick={() => setNormalizeTitlesDialogOpen(true)}
               >
-                Normalize Titles Preview
+                Normalize Titles
               </Button>
               <Button
                 type="button"
@@ -2247,6 +2615,33 @@ export default function SeriesDetailPage() {
               >
                 Apply Known Series List
               </Button>
+              <div className="flex items-center gap-2 rounded border bg-slate-50 px-2 py-1 text-xs">
+                <label htmlFor="series-title-normalization-mode" className="whitespace-nowrap text-muted-foreground">
+                  Title normalization
+                </label>
+                <select
+                  id="series-title-normalization-mode"
+                  value={series?.title_normalization_mode_override ?? "keep_original"}
+                  onChange={(event) => {
+                    void handleSaveTitleNormalizationOverride(event.target.value as TitleNormalizationMode);
+                    setNormalizeTitlesConfirmed(false);
+                  }}
+                  className="h-8 rounded border bg-background px-2 text-xs"
+                >
+                  <option value="keep_original">Keep Original Title - Leave As Is</option>
+                  <option value="clean_up">Clean Up Title - Fix formatting junk</option>
+                  <option value="new_clean_title">New Clean Title - Keep book name, add clean series suffix</option>
+                  <option value="match_other_titles">Match Other Titles - Format like the rest of the series</option>
+                </select>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setTitleNormalizationExamplesOpen(true)}
+                >
+                  Examples
+                </Button>
+              </div>
               <label htmlFor="known-total-books" className="text-xs text-muted-foreground">Known total</label>
               <input
                 id="known-total-books"
@@ -2408,17 +2803,6 @@ export default function SeriesDetailPage() {
                 <TableCell>{book.book_number ?? "—"}</TableCell>
                 <TableCell className="space-x-2 whitespace-nowrap">
                   <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() =>
-                      handleOpenSearch(
-                        `${book.title} ${book.author || ""}`.trim()
-                      )
-                    }
-                  >
-                    Search
-                  </Button>
-                  <Button
                     variant="outline"
                     className={
                       book.is_read
@@ -2443,6 +2827,13 @@ export default function SeriesDetailPage() {
                     onClick={() => handleEditBookTitle(book)}
                   >
                     Edit title
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => handleDeleteBook(book)}
+                  >
+                    Delete
                   </Button>
                   <Button
                     variant="secondary"
@@ -2632,41 +3023,118 @@ export default function SeriesDetailPage() {
 
       <Dialog
         open={normalizeTitlesDialogOpen}
-        onOpenChange={setNormalizeTitlesDialogOpen}
+        onOpenChange={(open) => {
+          setNormalizeTitlesDialogOpen(open);
+          if (!open) {
+            setNormalizeTitlesConfirmed(false);
+          }
+        }}
       >
-        <DialogContent className="sm:max-w-2xl">
+        <DialogContent className="sm:max-w-4xl">
           <DialogHeader>
-            <DialogTitle>Normalize Titles (Preview)</DialogTitle>
+            <DialogTitle>Normalize Titles</DialogTitle>
             <DialogDescription>
-              Safe cleanup only: spacing and common suffix noise. Review before applying.
+              Active mode: {getTitleNormalizationModeLabel(seriesNormalizationMode)}. {getTitleNormalizationModeDescription(seriesNormalizationMode)}
             </DialogDescription>
           </DialogHeader>
 
           {titleNormalizationPreview.length > 0 ? (
-            <div className="max-h-72 overflow-auto rounded border bg-white text-xs">
+            <div className="max-h-[32rem] overflow-auto rounded border bg-white text-xs">
+              <div className="grid grid-cols-[1fr_auto_1fr] gap-2 border-b bg-slate-50 px-3 py-2 font-semibold text-muted-foreground">
+                <div>Current title</div>
+                <div />
+                <div>Normalized title</div>
+              </div>
               {titleNormalizationPreview.map((row) => (
-                <div key={row.id} className="border-b p-2 last:border-b-0">
-                  <p className="text-muted-foreground">{row.currentTitle}</p>
-                  <p className="font-medium">{row.normalizedTitle}</p>
+                <div key={row.id} className="grid grid-cols-[1fr_auto_1fr] items-center gap-2 border-b px-3 py-2 last:border-b-0">
+                  <div className="min-w-0">
+                    <p className="truncate font-medium text-foreground">{row.currentTitle}</p>
+                  </div>
+                  <div className="px-1 text-sm text-muted-foreground" aria-hidden="true">
+                    →
+                  </div>
+                  <div className="min-w-0">
+                    <p className="truncate font-medium text-emerald-700">{row.normalizedTitle}</p>
+                  </div>
                 </div>
               ))}
             </div>
           ) : (
-            <p className="text-xs text-muted-foreground">No safe title cleanup suggestions right now.</p>
+            <p className="text-xs text-muted-foreground">
+              {seriesNormalizationMode === "keep_original"
+                ? "Keep Original Title mode is selected, so no batch changes are needed."
+                : "No title normalization changes are needed for the current mode."}
+            </p>
           )}
+
+          <label className="flex items-start gap-2 rounded border bg-slate-50 px-3 py-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={normalizeTitlesConfirmed}
+              onChange={(event) => setNormalizeTitlesConfirmed(event.target.checked)}
+              className="mt-0.5"
+            />
+            <span>I reviewed the preview and want to apply these title changes.</span>
+          </label>
 
           <DialogFooter showCloseButton>
             <Button
               type="button"
               variant="secondary"
               onClick={handleApplyTitleNormalization}
-              disabled={titleNormalizeSaving || titleNormalizationPreview.length === 0}
+              disabled={titleNormalizeSaving || titleNormalizationPreview.length === 0 || !normalizeTitlesConfirmed}
             >
               {titleNormalizeSaving
                 ? "Applying…"
                 : `Apply all (${titleNormalizationPreview.length})`}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={titleNormalizationExamplesOpen} onOpenChange={setTitleNormalizationExamplesOpen}>
+        <DialogContent className="sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Title Style Examples</DialogTitle>
+            <DialogDescription>
+              Each option applies only to this series and does not use external metadata.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="max-h-[34rem] space-y-4 overflow-auto rounded border bg-white p-3 text-xs">
+            <div className="space-y-1">
+              <p className="font-semibold">1. Keep Original Title - Leave As Is</p>
+              <p className="text-muted-foreground">Original:</p>
+              <p>Cherry Blossom Girls International: (Book Nine): (Cherry Blossom Girls Book 9)</p>
+              <p className="text-muted-foreground">Stays as:</p>
+              <p>Cherry Blossom Girls International: (Book Nine): (Cherry Blossom Girls Book 9)</p>
+            </div>
+
+            <div className="space-y-1">
+              <p className="font-semibold">2. Clean Up Title - Fix formatting junk</p>
+              <p className="text-muted-foreground">Original:</p>
+              <p>Cherry Blossom Girls International: (Book Nine): (Cherry Blossom Girls Book 9)</p>
+              <p className="text-muted-foreground">Becomes:</p>
+              <p>Cherry Blossom Girls International: Book Nine (Cherry Blossom Girls Book 9)</p>
+            </div>
+
+            <div className="space-y-1">
+              <p className="font-semibold">3. New Clean Title - Keep book name, add clean series suffix</p>
+              <p className="text-muted-foreground">Original:</p>
+              <p>Cherry Blossom Girls International: (Book Nine): (Cherry Blossom Girls Book 9)</p>
+              <p className="text-muted-foreground">Becomes:</p>
+              <p>Cherry Blossom Girls International (Cherry Blossom Girls Book 9)</p>
+            </div>
+
+            <div className="space-y-1">
+              <p className="font-semibold">4. Match Other Titles - Format like the rest of the series</p>
+              <p className="text-muted-foreground">Original:</p>
+              <p>Cherry Blossom Girls International: (Book Nine): (Cherry Blossom Girls Book 9)</p>
+              <p className="text-muted-foreground">Becomes:</p>
+              <p>Cherry Blossom Girls International (Cherry Blossom Girls Book 9)</p>
+              <p className="text-muted-foreground">(matching the style used by other books in the same series)</p>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
 

@@ -33,6 +33,9 @@ type BookRow = {
   author?: string | null;
   read_status?: string | null;
   is_read?: boolean | null;
+  is_missing?: boolean | null;
+  is_upcoming_auto?: boolean | null;
+  is_upcoming_final?: boolean | null;
   release_date?: string | null;
   publication_date?: string | null;
   read_date?: string | null;
@@ -43,11 +46,20 @@ type BookRow = {
 };
 
 function getBookStatus(book: BookRow) {
-  if (book.read_status) {
-    return String(book.read_status);
-  }
   if (book.is_read) {
     return "read";
+  }
+
+  if (book.is_missing || book.is_upcoming_auto || book.is_upcoming_final) {
+    return "upcoming";
+  }
+
+  if (book.series_id && book.book_number !== null && book.book_number !== undefined) {
+    return "upcoming";
+  }
+
+  if (book.read_status) {
+    return String(book.read_status);
   }
 
   const releaseDate = book.release_date || book.publication_date;
@@ -1096,6 +1108,8 @@ export default function BooksClient() {
   async function toggleRead(book: BookRow) {
     const nextIsRead = !book.is_read;
     const releaseDate = book.release_date || book.publication_date;
+    const shouldStayUpcoming = Boolean(book.is_missing || book.is_upcoming_auto || book.is_upcoming_final);
+    const shouldDefaultToUpcoming = Boolean(book.series_id && book.book_number !== null && book.book_number !== undefined);
     let nextStatus = nextIsRead ? "read" : "unread";
     if (!nextIsRead && releaseDate) {
       const parsedDate = new Date(releaseDate);
@@ -1107,6 +1121,12 @@ export default function BooksClient() {
           nextStatus = "upcoming";
         }
       }
+    }
+    if (!nextIsRead && shouldStayUpcoming) {
+      nextStatus = "upcoming";
+    }
+    if (!nextIsRead && shouldDefaultToUpcoming) {
+      nextStatus = "upcoming";
     }
 
     try {

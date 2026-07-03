@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 const BACKEND_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
 
 async function proxyRequest(request: NextRequest, pathSegments: string[]) {
@@ -12,13 +15,17 @@ async function proxyRequest(request: NextRequest, pathSegments: string[]) {
 
   const hasBody = !["GET", "HEAD"].includes(request.method);
   const body = hasBody ? await request.arrayBuffer() : undefined;
-
-  const response = await fetch(targetUrl.toString(), {
+  const requestInit: RequestInit = {
     method: request.method,
     headers,
     body,
     redirect: "follow",
-  });
+  };
+  if (request.method === "GET") {
+    requestInit.cache = "no-store";
+  }
+
+  const response = await fetch(targetUrl.toString(), requestInit);
 
   const responseHeaders = new Headers(response.headers);
   responseHeaders.delete("content-encoding");

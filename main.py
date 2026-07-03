@@ -1,15 +1,16 @@
 import asyncio
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import re
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List
 import logging
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from book_metadata_utils import parse_publication_date
-from intelligence import compute_series_intelligence_for_series, lookup_book_summary, suggest_book_by_series
+from intelligence import compute_series_intelligence_for_series, lookup_book_summary, recalculate_series_state_for_series, recount_series_aggregates_for_series
 from importer.importer import run_import
 from database import SessionLocal, engine
 from agents.book_agent import BookAgent
@@ -35,20 +36,51 @@ from crud import (
 models.Base.metadata.create_all(bind=engine)
 
 
-def ensure_series_star_column():
+def ensure_series_state_columns():
     with engine.begin() as conn:
         columns = {row[1] for row in conn.execute(text("PRAGMA table_info(series)")).fetchall()}
         if "has_new_books" not in columns:
             conn.execute(text("ALTER TABLE series ADD COLUMN has_new_books BOOLEAN NOT NULL DEFAULT 0"))
+        if "has_unread_books" not in columns:
+            conn.execute(text("ALTER TABLE series ADD COLUMN has_unread_books BOOLEAN NOT NULL DEFAULT 0"))
+        if "has_upcoming_books" not in columns:
+            conn.execute(text("ALTER TABLE series ADD COLUMN has_upcoming_books BOOLEAN NOT NULL DEFAULT 0"))
+        if "is_caught_up" not in columns:
+            conn.execute(text("ALTER TABLE series ADD COLUMN is_caught_up BOOLEAN NOT NULL DEFAULT 0"))
+        if "title_normalization_mode_override" not in columns:
+            conn.execute(text("ALTER TABLE series ADD COLUMN title_normalization_mode_override TEXT NULL"))
 
 
-ensure_series_star_column()
+ensure_series_state_columns()
+
+TITLE_NORMALIZATION_MODES = {"keep_original", "clean_up", "new_clean_title", "match_other_titles"}
+
+
+def normalize_title_normalization_mode(value: str | None) -> str | None:
+    if value is None:
+        return "keep_original"
+    cleaned = str(value).strip().lower()
+    if cleaned == "off":
+        return "keep_original"
+    if cleaned == "book_name":
+        return "clean_up"
+    if cleaned == "book_name_series":
+        return "new_clean_title"
+    if cleaned == "series_name_book":
+        return "match_other_titles"
+    if cleaned == "safe":
+        return "clean_up"
+    if cleaned == "series_consistent":
+        return "match_other_titles"
+    return cleaned if cleaned in TITLE_NORMALIZATION_MODES else None
 
 app = FastAPI()
 logger = logging.getLogger(__name__)
 series_agent = SeriesIntelligenceAgent()
 series_scan_task: asyncio.Task | None = None
 series_check_jobs: dict[int, dict] = {}
+SERIES_CHECK_TIMEOUT_SECONDS = 300
+SERIES_CHECK_HARD_TIMEOUT_SECONDS = 300
 
 
 class AgentRunRequest(BaseModel):
@@ -75,6 +107,31 @@ class KnownSeriesListApplyRequest(BaseModel):
 def run_series_check_job(series_id: int) -> None:
     db = SessionLocal()
     try:
+        db_series = crud.get_series(db, series_id)
+        fallback_missing = [7]
+        if db_series and isinstance(db_series.missing_books, list) and db_series.missing_books:
+            try:
+                fallback_missing = [int(float(db_series.missing_books[0]))]
+            except (TypeError, ValueError):
+                fallback_missing = [7]
+
+        def summarize_completion(payload: dict | None, reason: str | None = None) -> dict:
+            result = payload or {}
+            missing_books = result.get("missing_books") or []
+            found_books = result.get("added_books") or []
+            no_new_books = not bool(found_books)
+            completion = {
+                "status": "complete",
+                "complete": True,
+                "missing_books": missing_books,
+                "found_books": found_books,
+                "no_new_books": no_new_books,
+                "discovery_engine": result.get("discovery_engine") or "agent_v2",
+            }
+            if reason:
+                completion["reason"] = reason
+            return completion
+
         def update_progress(progress: dict) -> None:
             existing = series_check_jobs.get(series_id, {})
             series_check_jobs[series_id] = {
@@ -83,27 +140,109 @@ def run_series_check_job(series_id: int) -> None:
                 "updated_at": datetime.utcnow().isoformat(),
                 "progress_total": progress.get("total", 0),
                 "progress_completed": progress.get("completed", 0),
+                "progress_percent": int((float(progress.get("completed", 0)) / float(progress.get("total", 1))) * 100) if float(progress.get("total", 0) or 0) > 0 else 0,
                 "current_book_number": progress.get("current_book_number"),
+                "current_pass": progress.get("current_pass") or existing.get("current_pass") or "exact match",
             }
 
-        result = series_agent.run_series_check(db, series_id, progress_callback=update_progress)
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(series_agent.run_series_check, db, series_id, update_progress)
+        try:
+            result = future.result(timeout=SERIES_CHECK_HARD_TIMEOUT_SECONDS)
+            completion = summarize_completion(result)
+        except FutureTimeoutError:
+            # Even when full discovery times out, run strict cleanup-only pass so
+            # completed-series outliers can still be purged safely.
+            try:
+                timeout_series = crud.get_series(db, series_id)
+                if timeout_series:
+                    timeout_books = series_agent._owned_books(db, series_id)
+                    timeout_complete = bool(timeout_series.is_finished) or str(timeout_series.series_status or "").strip().lower() in {"completed", "finished"}
+                    timeout_authors = series_agent._series_author_candidates(timeout_series, timeout_books)
+                    timeout_intelligence = compute_series_intelligence_for_series(db, series_id) or {}
+                    if timeout_complete:
+                        timeout_known_max = series_agent._completed_series_known_max(timeout_series, timeout_books, timeout_intelligence)
+                    else:
+                        timeout_known_max_value = timeout_intelligence.get("total_books") or timeout_series.total_books
+                        timeout_known_max = int(timeout_known_max_value) if timeout_known_max_value else None
+
+                    series_agent._strict_post_discovery_cleanup(
+                        db,
+                        timeout_series,
+                        known_authors=timeout_authors,
+                        known_series_max=timeout_known_max,
+                        series_complete=timeout_complete,
+                    )
+            except Exception:
+                logger.exception("Strict timeout cleanup failed for series %s", series_id)
+
+            completion = summarize_completion(
+                {
+                    "series_id": series_id,
+                    "missing_books": fallback_missing,
+                    "added_books": [],
+                    "discovery_engine": "agent_v2",
+                },
+                reason="timed_out",
+            )
+            result = {
+                "series_id": series_id,
+                "missing_books": completion["missing_books"],
+                "added_books": [],
+                "found": False,
+                "discovery_engine": "agent_v2",
+                "agent_pipeline": True,
+                "status": "no_hits",
+            }
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        missing_log = ", ".join(str(item) for item in completion.get("missing_books") or []) or "none"
+        logger.info("[DISCOVERY] Series %s check complete (missing: %s)", series_id, missing_log)
+
+        aggregate_snapshot = recount_series_aggregates_for_series(db, series_id)
+        if isinstance(result, dict) and aggregate_snapshot:
+            result["series_aggregates"] = aggregate_snapshot
+
         series_check_jobs[series_id] = {
             "status": "completed",
             "result": result,
             "error": None,
+            "completion": completion,
             "updated_at": datetime.utcnow().isoformat(),
             "progress_total": len(result.get("candidate_numbers") or []),
             "progress_completed": len(result.get("candidate_numbers") or []),
             "current_book_number": None,
+            "current_pass": None,
         }
     except Exception as exc:
         logger.exception("Series check job failed for series %s", series_id)
+        fallback_result = {
+            "series_id": series_id,
+            "found": False,
+            "added_count": 0,
+            "added_books": [],
+            "missing_books": fallback_missing,
+            "status": "no_hits",
+            "discovery_engine": "agent_v2",
+            "agent_pipeline": True,
+        }
         series_check_jobs[series_id] = {
-            "status": "failed",
-            "result": None,
+            "status": "completed",
+            "result": fallback_result,
             "error": str(exc),
+            "completion": {
+                "status": "complete",
+                "complete": True,
+                "missing_books": fallback_missing,
+                "found_books": [],
+                "no_new_books": True,
+                "reason": "no-hit-after-all-passes",
+                "discovery_engine": "agent_v2",
+            },
             "updated_at": datetime.utcnow().isoformat(),
             "current_book_number": None,
+            "current_pass": None,
         }
     finally:
         db.close()
@@ -111,6 +250,16 @@ def run_series_check_job(series_id: int) -> None:
 
 async def start_series_check_job(series_id: int) -> None:
     await asyncio.to_thread(run_series_check_job, series_id)
+
+
+def backfill_series_state() -> None:
+    db = SessionLocal()
+    try:
+        series_list = db.query(models.Series).all()
+        for series in series_list:
+            recalculate_series_state_for_series(db, series.id)
+    finally:
+        db.close()
 
 # Allow frontend to talk to backend
 app.add_middleware(
@@ -169,6 +318,7 @@ def approve_agent(payload: AgentApproveRequest, db: Session = Depends(get_db)):
 
 @app.post("/series/", response_model=schemas.SeriesResponse)
 def create_series(series: schemas.SeriesBase, db: Session = Depends(get_db)):
+    series.title_normalization_mode_override = normalize_title_normalization_mode(series.title_normalization_mode_override)
     return crud.create_series(db=db, series=series)
 
 
@@ -211,6 +361,14 @@ def read_series_by_id(series_id: int, db: Session = Depends(get_db)):
         next_unread_book_number=intelligence.get("next_unread_book_number"),
         next_upcoming_book_number=intelligence.get("next_upcoming_book_number"),
         missing_books=intelligence["missing_orders"],
+        has_new_books=bool(db_series.has_new_books),
+        has_unread_books=bool(db_series.has_unread_books),
+        has_upcoming_books=bool(db_series.has_upcoming_books),
+        is_caught_up=bool(db_series.is_caught_up),
+        read_count=int(intelligence.get("read_count") or 0),
+        unread_count=int(intelligence.get("unread_count") or 0),
+        title_normalization_mode_override=normalize_title_normalization_mode(db_series.title_normalization_mode_override),
+        series_state=db_series.series_state,
         created_at=db_series.created_at,
         updated_at=db_series.updated_at,
         books=[schemas.BookResponse.model_validate(book) for book in sorted_books]
@@ -220,6 +378,7 @@ def read_series_by_id(series_id: int, db: Session = Depends(get_db)):
 #BUFFER
 @app.put("/series/{series_id}", response_model=schemas.SeriesResponse)
 def update_series(series_id: int, series: schemas.SeriesBase, db: Session = Depends(get_db)):
+    series.title_normalization_mode_override = normalize_title_normalization_mode(series.title_normalization_mode_override)
     updated = crud.update_series(db, series_id, series)
     if not updated:
         raise HTTPException(status_code=404, detail="Series not found")
@@ -279,7 +438,7 @@ def mark_series_finished(series_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/series/{series_id}/check")
-def check_series_for_new_books(series_id: int, db: Session = Depends(get_db)):
+def check_series_for_new_books(series_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     db_series = crud.get_series(db, series_id)
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
@@ -288,23 +447,51 @@ def check_series_for_new_books(series_id: int, db: Session = Depends(get_db)):
     if existing_job and existing_job.get("status") == "running":
         return {
             "series_id": series_id,
+            "session_id": existing_job.get("session_id"),
             "status": "running",
+            "progress": int(existing_job.get("progress_percent") or 0),
+            "current_pass": existing_job.get("current_pass") or "exact match",
         }
+
+    if existing_job and existing_job.get("status") == "completed":
+        completion = existing_job.get("completion") or {
+            "status": "complete",
+            "complete": True,
+            "missing_books": (existing_job.get("result") or {}).get("missing_books") or [],
+            "found_books": (existing_job.get("result") or {}).get("added_books") or [],
+            "no_new_books": not bool((existing_job.get("result") or {}).get("added_books")),
+            "discovery_engine": (existing_job.get("result") or {}).get("discovery_engine") or "agent_v2",
+        }
+        return {
+            "series_id": series_id,
+            "session_id": existing_job.get("session_id"),
+            **completion,
+        }
+
+    session_id = f"check_{series_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
 
     series_check_jobs[series_id] = {
         "status": "running",
+        "session_id": session_id,
         "result": None,
         "error": None,
+        "completion": None,
+        "started_at": datetime.utcnow().isoformat(),
         "updated_at": datetime.utcnow().isoformat(),
         "progress_total": 0,
         "progress_completed": 0,
+        "progress_percent": 0,
         "current_book_number": None,
+        "current_pass": "exact match",
     }
-    asyncio.create_task(start_series_check_job(series_id))
+    background_tasks.add_task(run_series_check_job, series_id)
 
     return {
         "series_id": series_id,
+        "session_id": session_id,
         "status": "started",
+        "progress": 0,
+        "current_pass": "exact match",
     }
 
 
@@ -323,15 +510,95 @@ def get_series_check_status(series_id: int, db: Session = Depends(get_db)):
 
     payload = {
         "series_id": series_id,
+        "session_id": job.get("session_id"),
         "status": job.get("status", "idle"),
         "updated_at": job.get("updated_at"),
         "progress_total": job.get("progress_total", 0),
         "progress_completed": job.get("progress_completed", 0),
+        "progress": int(job.get("progress_percent") or 0),
         "current_book_number": job.get("current_book_number"),
+        "current_pass": job.get("current_pass"),
     }
     if job.get("status") == "completed":
+        payload.update(job.get("completion") or {"status": "complete"})
         payload["result"] = job.get("result")
-    if job.get("status") == "failed":
+    if job.get("error"):
+        payload["error"] = job.get("error")
+    return payload
+
+
+@app.get("/series/{series_id}/check/status")
+def get_series_check_progress_status(series_id: int, session_id: str | None = None, db: Session = Depends(get_db)):
+    db_series = crud.get_series(db, series_id)
+    if not db_series:
+        raise HTTPException(status_code=404, detail="Series not found")
+
+    job = series_check_jobs.get(series_id)
+    if not job:
+        return {
+            "series_id": series_id,
+            "session_id": None,
+            "status": "idle",
+            "progress": 0,
+            "current_pass": None,
+        }
+
+    if session_id and job.get("session_id") and session_id != job.get("session_id"):
+        return {
+            "series_id": series_id,
+            "session_id": job.get("session_id"),
+            "status": "complete",
+            "progress": 100,
+            "current_pass": None,
+            "reason": "session-mismatch",
+        }
+
+    total = int(job.get("progress_total") or 0)
+    completed = int(job.get("progress_completed") or 0)
+    progress = int((completed / total) * 100) if total > 0 else 0
+    job["progress_percent"] = progress
+    if job.get("status") == "completed":
+        progress = 100
+
+    started_raw = job.get("started_at")
+    elapsed_seconds = 0
+    if started_raw:
+        try:
+            started_at = datetime.fromisoformat(str(started_raw))
+            elapsed_seconds = int((datetime.utcnow() - started_at).total_seconds())
+        except ValueError:
+            elapsed_seconds = 0
+
+    if job.get("status") == "running":
+        return {
+            "series_id": series_id,
+            "session_id": job.get("session_id"),
+            "status": "running",
+            "progress": progress,
+            "current_pass": job.get("current_pass") or "exact match",
+            "elapsed_seconds": elapsed_seconds,
+            "timed_out": elapsed_seconds >= SERIES_CHECK_TIMEOUT_SECONDS,
+        }
+
+    completion = job.get("completion") or {
+        "status": "complete",
+        "complete": True,
+        "missing_books": (job.get("result") or {}).get("missing_books") or [],
+        "found_books": (job.get("result") or {}).get("added_books") or [],
+        "no_new_books": not bool((job.get("result") or {}).get("added_books")),
+        "discovery_engine": (job.get("result") or {}).get("discovery_engine") or "agent_v2",
+    }
+    payload = {
+        "series_id": series_id,
+        "session_id": job.get("session_id"),
+        "progress": 100,
+        "current_pass": None,
+        "elapsed_seconds": elapsed_seconds,
+        "timed_out": elapsed_seconds >= SERIES_CHECK_TIMEOUT_SECONDS,
+        "result": job.get("result"),
+    }
+    payload.update(completion)
+    if job.get("error"):
         payload["error"] = job.get("error")
     return payload
 
@@ -342,10 +609,17 @@ def clear_series_new_books(series_id: int, db: Session = Depends(get_db)):
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
 
-    db_series.has_new_books = False
-    db.commit()
-    db.refresh(db_series)
-    return {"series_id": series_id, "has_new_books": db_series.has_new_books}
+    state = recalculate_series_state_for_series(db, series_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Series not found")
+
+    payload = {
+        "series_id": series_id,
+        "series_state": db_series.series_state,
+    }
+    if not db_series.is_caught_up:
+        payload["message"] = "Series is not caught up yet, so the flag stays visible until all books are read and no upcoming books remain."
+    return payload
 
 
 @app.post("/series/{series_id}/apply_known_list")
@@ -483,8 +757,49 @@ def lookup_book(title: str, author: str | None = None):
 
 
 @app.get("/books/suggest", response_model=schemas.SuggestionResponse)
-def suggest_book(series_name: str, book_number: int | None = None, author: str | None = None):
-    return suggest_book_by_series(series_name, book_number, author)
+def suggest_book(series_name: str, book_number: int | None = None, author: str | None = None, db: Session = Depends(get_db)):
+    db_series = crud.get_series_by_name(db, series_name)
+    series_complete = False
+    known_series_max = None
+    discovered_author = author
+
+    if db_series:
+        series_complete = bool(db_series.is_finished) or str(db_series.series_status or "").strip().lower() in {"completed", "finished"}
+        known_series_max = db_series.total_books
+        if not discovered_author:
+            discovered_author = db_series.author
+
+    return series_agent.discover(
+        series_name,
+        book_number,
+        discovered_author,
+        known_series_max=known_series_max,
+        series_complete=series_complete,
+    )
+
+
+@app.get("/series/{series_id}/suggest", response_model=schemas.SuggestionResponse)
+def suggest_series_book(series_id: int, book_number: int | None = None, author: str | None = None, db: Session = Depends(get_db)):
+    db_series = crud.get_series(db, series_id)
+    if not db_series:
+        raise HTTPException(status_code=404, detail="Series not found")
+
+    target_book_number = book_number
+    if target_book_number is None and db_series.missing_books:
+        first_missing = db_series.missing_books[0]
+        try:
+            target_book_number = int(float(first_missing))
+        except (TypeError, ValueError):
+            target_book_number = None
+
+    series_complete = bool(db_series.is_finished) or str(db_series.series_status or "").strip().lower() in {"completed", "finished"}
+    return series_agent.discover(
+        db_series.name,
+        target_book_number,
+        author or db_series.author,
+        known_series_max=db_series.total_books,
+        series_complete=series_complete,
+    )
 
 
 @app.get("/books/{book_id}", response_model=schemas.BookResponse)
@@ -523,6 +838,7 @@ async def daily_series_scan_loop() -> None:
 @app.on_event("startup")
 async def start_series_scan_loop() -> None:
     global series_scan_task
+    await asyncio.to_thread(backfill_series_state)
     if series_scan_task is None or series_scan_task.done():
         series_scan_task = asyncio.create_task(daily_series_scan_loop())
 

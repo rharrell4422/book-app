@@ -40,7 +40,6 @@ Book App/
 ├── models.py                   # Database models
 ├── requirements.txt            # Python dependencies
 ├── schemas.py                  # Pydantic schemas
-├── search_orchestrator.py      # Search coordination logic
 ├── test.py                     # Test script
 ├── test.py.code-workspace      # VS Code workspace file
 │

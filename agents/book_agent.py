@@ -4,18 +4,10 @@ This module intentionally returns metadata only. It does not auto-create books.
 """
 
 from book_metadata_utils import normalize_book_metadata
-from intelligence import lookup_book_summary, search_google_books, search_openlibrary, search_serpapi_web
-from search_orchestrator import SearchOrchestrator
+from intelligence import lookup_book_summary
 
 
 class BookAgent:
-    def __init__(self):
-        self.search = SearchOrchestrator(
-            google_search=search_google_books,
-            openlibrary_search=search_openlibrary,
-            serp_search=search_serpapi_web,
-        )
-
     def generate_search_queries(self, title: str, author: str | None = None) -> list[str]:
         title = (title or "").strip()
         author = (author or "").strip() or None

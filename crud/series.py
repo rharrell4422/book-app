@@ -1,4 +1,5 @@
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from models import Series, Book
 
 
@@ -16,6 +17,13 @@ def get_all_series(db: Session):
 
 def get_series(db: Session, series_id: int):
     return db.query(Series).filter(Series.id == series_id).first()
+
+
+def get_series_by_name(db: Session, series_name: str):
+    cleaned = str(series_name or "").strip()
+    if not cleaned:
+        return None
+    return db.query(Series).filter(func.lower(Series.name) == cleaned.lower()).first()
 
 
 def update_series(db: Session, series_id: int, series):

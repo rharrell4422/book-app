@@ -10,6 +10,7 @@ from .books import (
 from .series import (
     get_all_series,
     get_series,
+    get_series_by_name,
     create_series,
     update_series,
     delete_series,

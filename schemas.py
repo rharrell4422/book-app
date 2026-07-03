@@ -101,6 +101,13 @@ class BookUpdate(BaseModel):
 # Series Schemas
 # ------------------------------------------------------------
 
+
+class SeriesState(BaseModel):
+    has_new_books: bool = False
+    has_unread_books: bool = False
+    has_upcoming_books: bool = False
+    is_caught_up: bool = False
+
 class SeriesBase(BaseModel):
     name: str
     author: Optional[str] = None
@@ -114,6 +121,13 @@ class SeriesBase(BaseModel):
     next_upcoming_book_number: Optional[float] = None
     missing_books: Optional[list] = None
     has_new_books: Optional[bool] = None
+    has_unread_books: Optional[bool] = None
+    has_upcoming_books: Optional[bool] = None
+    is_caught_up: Optional[bool] = None
+    read_count: Optional[int] = None
+    unread_count: Optional[int] = None
+    title_normalization_mode_override: Optional[str] = None
+    series_state: Optional[SeriesState] = None
 
 
 class SeriesResponse(SeriesBase):
@@ -121,9 +135,9 @@ class SeriesResponse(SeriesBase):
     created_at: datetime
     updated_at: datetime
     books: List[BookResponse] = []
+    series_state: SeriesState | None = None
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)
 
 class SeriesDetailResponse(BaseModel):
     id: int
@@ -141,6 +155,14 @@ class SeriesDetailResponse(BaseModel):
     next_upcoming_book_number: float | None = None
     missing_books: list[str] | None = None
     has_new_books: bool = False
+    has_unread_books: bool = False
+    has_upcoming_books: bool = False
+    is_caught_up: bool = False
+    read_count: int = 0
+    unread_count: int = 0
+    title_normalization_mode_override: str | None = None
+    title_normalization_mode_override: str | None = None
+    series_state: SeriesState | None = None
 
     created_at: datetime
     updated_at: datetime
@@ -148,8 +170,7 @@ class SeriesDetailResponse(BaseModel):
     # List of books in the series
     books: list[BookResponse]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ------------------------------------------------------------
@@ -180,9 +201,29 @@ class SuggestionDiagnostics(BaseModel):
     provider_counts: dict[str, int] = Field(default_factory=dict)
     stages: list[SuggestionStageDiagnostic] = Field(default_factory=list)
     accepted_total: int = 0
+    rejection_counts: dict[str, int] = Field(default_factory=dict)
+    top_score: float = 0.0
+    timed_out: bool = False
+    elapsed_seconds: float = 0.0
+    passes_completed: int = 0
+    sources_used: list[str] = Field(default_factory=list)
+    current_pass: str | None = None
+    false_positive_filter: dict[str, bool] = Field(default_factory=dict)
+    publication_date_filter: dict[str, object] = Field(default_factory=dict)
 
 
 class SuggestionResponse(BaseModel):
     query: str
     results: list[SuggestionRecord]
     diagnostics: SuggestionDiagnostics | None = None
+    status: str | None = None
+    passes_completed: int = 0
+    sources_used: list[str] = Field(default_factory=list)
+    missing_books: list[int] = Field(default_factory=list)
+    discovery_engine: str | None = None
+    discovery_mode: str | None = None
+    provider_attempt_order: list[str] = Field(default_factory=list)
+    provider_attempts: list[dict] = Field(default_factory=list)
+    provider_selected: str | None = None
+    final_reason: str | None = None
+    agent_pipeline: bool = False

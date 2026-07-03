@@ -26,6 +26,19 @@ type SeriesRow = {
   last_checked?: string | null;
   updated_at?: string | null;
   has_new_books?: boolean;
+  has_unread_books?: boolean;
+  has_upcoming_books?: boolean;
+  is_caught_up?: boolean;
+  missing_books?: string[];
+  inferred_missing_numbers?: number[];
+  series_state?: SeriesState | null;
+};
+
+type SeriesState = {
+  has_new_books: boolean;
+  has_unread_books: boolean;
+  has_upcoming_books: boolean;
+  is_caught_up: boolean;
 };
 
 type SeriesApiRow = {
@@ -39,10 +52,20 @@ type SeriesApiRow = {
   total_books?: number | null;
   updated_at?: string | null;
   has_new_books?: boolean;
+  has_unread_books?: boolean;
+  has_upcoming_books?: boolean;
+  is_caught_up?: boolean;
+  missing_books?: string[];
+  series_state?: SeriesState | null;
+};
+
+type SeriesDetailBook = {
+  book_number?: number | null;
+  series_order?: number | null;
 };
 
 type SeriesDetailApiRow = SeriesApiRow & {
-  books?: Array<unknown>;
+  books?: SeriesDetailBook[];
 };
 
 type CheckBannerTone = "success" | "danger" | "error";
@@ -58,12 +81,24 @@ type CheckBannerState = {
   detail?: string;
 };
 
+const CHECK_STATUS_POLL_INTERVAL_MS = 1000;
+const CHECK_STATUS_MAX_POLLS = 600;
+const CHECK_STATUS_STALLED_POLLS = 120;
+
 type SeriesCheckStatusResponse = {
   series_id: number;
-  status: "idle" | "started" | "running" | "completed" | "failed";
+  session_id?: string | null;
+  status: "idle" | "started" | "running" | "complete";
   updated_at?: string;
   error?: string;
   result?: Record<string, unknown>;
+  complete?: boolean;
+  no_new_books?: boolean;
+  reason?: string;
+  missing_books?: Array<number | string>;
+  found_books?: Array<Record<string, unknown>>;
+  progress?: number;
+  current_pass?: string | null;
   progress_total?: number;
   progress_completed?: number;
   current_book_number?: number | null;
@@ -74,6 +109,22 @@ type CandidateDiagnostic = {
   reason?: string | null;
   message?: string | null;
 };
+
+function getSeriesState(row: Pick<SeriesRow, "has_new_books" | "has_unread_books" | "has_upcoming_books" | "is_caught_up" | "series_state">): SeriesState {
+  return {
+    has_new_books: Boolean(row.series_state?.has_new_books ?? row.has_new_books ?? false),
+    has_unread_books: Boolean(row.series_state?.has_unread_books ?? row.has_unread_books ?? false),
+    has_upcoming_books: Boolean(row.series_state?.has_upcoming_books ?? row.has_upcoming_books ?? false),
+    is_caught_up: Boolean(row.series_state?.is_caught_up ?? row.is_caught_up ?? false),
+  };
+}
+
+function getSeriesPriority(row: SeriesRow): number {
+  const state = getSeriesState(row);
+  if (state.has_new_books) return 0;
+  if (state.has_unread_books) return 1;
+  return 2;
+}
 
 function summarizeCandidateDiagnostics(rawDiagnostics: unknown): string | null {
   if (!Array.isArray(rawDiagnostics) || rawDiagnostics.length === 0) {
@@ -138,6 +189,72 @@ function parseFlexibleDate(value?: string | null): Date | null {
   }
 
   return null;
+}
+
+function inferMissingNumbersFromBooks(books: SeriesDetailBook[] | undefined): number[] {
+  if (!Array.isArray(books) || books.length === 0) {
+    return [];
+  }
+
+  const ownedWholeNumbers = new Set<number>();
+  for (const book of books) {
+    const candidate = book?.book_number ?? book?.series_order;
+    if (typeof candidate !== "number" || !Number.isFinite(candidate)) {
+      continue;
+    }
+    if (!Number.isInteger(candidate) || candidate <= 0) {
+      continue;
+    }
+    ownedWholeNumbers.add(candidate);
+  }
+
+  if (ownedWholeNumbers.size < 2) {
+    return [];
+  }
+
+  const highestOwned = Math.max(...ownedWholeNumbers);
+  const missing: number[] = [];
+  for (let number = 1; number <= highestOwned; number += 1) {
+    if (!ownedWholeNumbers.has(number)) {
+      missing.push(number);
+    }
+  }
+
+  return missing;
+}
+
+function mergeMissingNumbers(knownMissing: string[] | undefined, inferredMissing: number[]): string[] {
+  const merged = new Set<string>();
+  if (Array.isArray(knownMissing)) {
+    for (const value of knownMissing) {
+      const normalized = String(value).trim();
+      if (normalized) {
+        merged.add(normalized);
+      }
+    }
+  }
+
+  for (const number of inferredMissing) {
+    merged.add(String(number));
+  }
+
+  return Array.from(merged).sort((a, b) => Number(a) - Number(b));
+}
+
+function formatMissingBooksLabel(missingBooks: Array<number | string> | undefined): string | null {
+  if (!Array.isArray(missingBooks) || missingBooks.length === 0) {
+    return null;
+  }
+
+  const values = missingBooks
+    .map((value) => String(value).trim())
+    .filter((value) => value.length > 0);
+
+  if (values.length === 0) {
+    return null;
+  }
+
+  return `Missing: Book ${values.join(", ")}`;
 }
 
 function getCheckBannerClassName(tone: CheckBannerTone) {
@@ -500,60 +617,69 @@ export default function SeriesPage() {
   }, [quickSearch, series, valueFilters, viewMode]);
 
   const sortedSeries = useMemo(() => {
-    const prioritizedSeries = [...filteredSeries].sort((a, b) => {
-      const aFlagged = a.has_new_books ? 1 : 0;
-      const bFlagged = b.has_new_books ? 1 : 0;
-      if (aFlagged !== bFlagged) {
-        return bFlagged - aFlagged;
-      }
-      return 0;
-    });
+    const prioritizedSeries = filteredSeries
+      .map((row, index) => ({ row, index }))
+      .sort((a, b) => {
+        const priorityDelta = getSeriesPriority(a.row) - getSeriesPriority(b.row);
+        if (priorityDelta !== 0) {
+          return priorityDelta;
+        }
 
-    if (!sortConfig.key) return prioritizedSeries;
+        if (!sortConfig.key) {
+          return a.index - b.index;
+        }
 
-    const parsedTime = (value?: string | null) => parseFlexibleDate(value)?.valueOf() ?? 0;
+        const parsedTime = (value?: string | null) => parseFlexibleDate(value)?.valueOf() ?? 0;
 
-    const sorted = [...prioritizedSeries].sort((a, b) => {
-      const key = sortConfig.key;
+        const key = sortConfig.key;
 
-      const aValue =
-        key === "id"
-          ? Number(a.id ?? 0)
-          : key === "name"
-            ? String(a.name || "")
-            : key === "author"
-              ? String(a.author || "")
-              : key === "nextUnread"
-                ? Number(a.next_unread_book_number ?? 0)
-                : key === "nextUpcoming"
-                  ? Number(a.next_upcoming_book_number ?? 0)
-                  : key === "total"
-                    ? Number(a.total_books ?? 0)
-                    : parsedTime(a.last_checked);
+        const aValue =
+          key === "id"
+            ? Number(a.row.id ?? 0)
+            : key === "name"
+              ? String(a.row.name || "")
+              : key === "author"
+                ? String(a.row.author || "")
+                : key === "nextUnread"
+                  ? Number(a.row.next_unread_book_number ?? 0)
+                  : key === "nextUpcoming"
+                    ? Number(a.row.next_upcoming_book_number ?? 0)
+                    : key === "total"
+                      ? Number(a.row.total_books ?? 0)
+                      : parsedTime(a.row.last_checked);
 
-      const bValue =
-        key === "id"
-          ? Number(b.id ?? 0)
-          : key === "name"
-            ? String(b.name || "")
-            : key === "author"
-              ? String(b.author || "")
-              : key === "nextUnread"
-                ? Number(b.next_unread_book_number ?? 0)
-                : key === "nextUpcoming"
-                  ? Number(b.next_upcoming_book_number ?? 0)
-                  : key === "total"
-                    ? Number(b.total_books ?? 0)
-                    : parsedTime(b.last_checked);
+        const bValue =
+          key === "id"
+            ? Number(b.row.id ?? 0)
+            : key === "name"
+              ? String(b.row.name || "")
+              : key === "author"
+                ? String(b.row.author || "")
+                : key === "nextUnread"
+                  ? Number(b.row.next_unread_book_number ?? 0)
+                  : key === "nextUpcoming"
+                    ? Number(b.row.next_upcoming_book_number ?? 0)
+                    : key === "total"
+                      ? Number(b.row.total_books ?? 0)
+                      : parsedTime(b.row.last_checked);
 
-      if (typeof aValue === "number" && typeof bValue === "number") {
-        return aValue - bValue;
-      }
+        if (typeof aValue === "number" && typeof bValue === "number") {
+          const valueDelta = aValue - bValue;
+          if (valueDelta !== 0) {
+            return sortConfig.direction === "asc" ? valueDelta : -valueDelta;
+          }
+        } else {
+          const valueDelta = String(aValue).localeCompare(String(bValue), undefined, { sensitivity: "base" });
+          if (valueDelta !== 0) {
+            return sortConfig.direction === "asc" ? valueDelta : -valueDelta;
+          }
+        }
 
-      return String(aValue).localeCompare(String(bValue), undefined, { sensitivity: "base" });
-    });
+        return a.index - b.index;
+      })
+      .map((item) => item.row);
 
-    return sortConfig.direction === "asc" ? sorted : sorted.reverse();
+    return prioritizedSeries;
   }, [filteredSeries, sortConfig]);
 
   function toggleSort(key: SeriesSortKey) {
@@ -668,9 +794,16 @@ export default function SeriesPage() {
       const hydrated = (baseSeries as SeriesApiRow[]).map((item, index: number) => {
         const detail = detailResults[index];
         const detailData: SeriesDetailApiRow | null = detail?.status === "fulfilled" ? (detail.value as SeriesDetailApiRow) : null;
+        const books = Array.isArray(detailData?.books) ? detailData.books : [];
         const booksTracked = Array.isArray(detailData?.books)
-          ? detailData.books.length
+          ? books.length
           : 0;
+        const inferredMissingNumbers = inferMissingNumbersFromBooks(books);
+        const mergedMissingBooks = mergeMissingNumbers(
+          detailData?.missing_books ?? item.missing_books,
+          inferredMissingNumbers,
+        );
+        const seriesState = detailData?.series_state ?? item.series_state ?? null;
 
         return {
           id: item.id,
@@ -686,7 +819,18 @@ export default function SeriesPage() {
           books_tracked: booksTracked,
           last_checked: detailData?.updated_at ?? item.updated_at ?? null,
           updated_at: detailData?.updated_at ?? item.updated_at ?? null,
-          has_new_books: Boolean(detailData?.has_new_books ?? item.has_new_books ?? false),
+          has_new_books: Boolean(seriesState?.has_new_books ?? detailData?.has_new_books ?? item.has_new_books ?? false),
+          has_unread_books: Boolean(seriesState?.has_unread_books ?? detailData?.has_unread_books ?? item.has_unread_books ?? false),
+          has_upcoming_books: Boolean(seriesState?.has_upcoming_books ?? detailData?.has_upcoming_books ?? item.has_upcoming_books ?? false),
+          is_caught_up: Boolean(seriesState?.is_caught_up ?? detailData?.is_caught_up ?? item.is_caught_up ?? false),
+          missing_books: mergedMissingBooks,
+          inferred_missing_numbers: inferredMissingNumbers,
+          series_state: seriesState ? seriesState : {
+            has_new_books: Boolean(detailData?.has_new_books ?? item.has_new_books ?? false),
+            has_unread_books: Boolean(detailData?.has_unread_books ?? item.has_unread_books ?? false),
+            has_upcoming_books: Boolean(detailData?.has_upcoming_books ?? item.has_upcoming_books ?? false),
+            is_caught_up: Boolean(detailData?.is_caught_up ?? item.is_caught_up ?? false),
+          },
         } satisfies SeriesRow;
       });
 
@@ -707,6 +851,7 @@ export default function SeriesPage() {
   async function handleCheckNow(seriesId: number) {
     const targetSeries = series.find((item) => item.id === seriesId);
     const seriesTitle = String(targetSeries?.name || `Series ${seriesId}`);
+    const missingLabel = formatMissingBooksLabel(targetSeries?.missing_books);
 
     setLoadingId(seriesId);
     setMessage("");
@@ -717,22 +862,49 @@ export default function SeriesPage() {
         seriesTitle,
         tone: "error",
         title: `${seriesTitle} Checking`,
-        message: "Checking for new books...",
+        message: missingLabel ? `${missingLabel}. Checking missing books first...` : "Checking for new books...",
       },
     }));
 
     try {
       const response = await fetchApiWithFallback(`/series/${seriesId}/check`, { method: "POST" });
       const kickoff = (await response.json()) as SeriesCheckStatusResponse;
+      const sessionId = kickoff.session_id;
 
       let statusPayload = kickoff;
+      let pollCount = 0;
+      let unchangedStatusPolls = 0;
+      let lastStatusFingerprint = `${statusPayload.updated_at || ""}|${statusPayload.progress_completed || 0}|${statusPayload.current_book_number || ""}`;
       while (statusPayload.status === "started" || statusPayload.status === "running") {
-        await delay(1000);
-        const statusResponse = await fetchApiWithFallback(`/series/${seriesId}/check`, { cache: "no-store" });
+        if (pollCount >= CHECK_STATUS_MAX_POLLS) {
+          throw new Error("Series check timed out. It may still be running in the background; try again in a moment.");
+        }
+
+        await delay(CHECK_STATUS_POLL_INTERVAL_MS);
+        const statusPath = sessionId
+          ? `/series/${seriesId}/check/status?session_id=${encodeURIComponent(sessionId)}`
+          : `/series/${seriesId}/check/status`;
+        const statusResponse = await fetchApiWithFallback(statusPath, { cache: "no-store" });
         statusPayload = (await statusResponse.json()) as SeriesCheckStatusResponse;
+        pollCount += 1;
+
+        const nextStatusFingerprint = `${statusPayload.updated_at || ""}|${statusPayload.progress || 0}|${statusPayload.current_pass || ""}`;
+        if (nextStatusFingerprint === lastStatusFingerprint) {
+          unchangedStatusPolls += 1;
+        } else {
+          unchangedStatusPolls = 0;
+          lastStatusFingerprint = nextStatusFingerprint;
+        }
+
+        if (unchangedStatusPolls >= CHECK_STATUS_STALLED_POLLS) {
+          throw new Error("Series check appears stalled. Please try again.");
+        }
+
         const completed = Number(statusPayload.progress_completed || 0);
         const total = Number(statusPayload.progress_total || 0);
+        const progress = Number(statusPayload.progress || 0);
         const currentBook = statusPayload.current_book_number;
+        const currentPass = statusPayload.current_pass;
         setRowCheckState((prev) => ({
           ...prev,
           [seriesId]: {
@@ -741,28 +913,35 @@ export default function SeriesPage() {
             tone: "error",
             title: `${seriesTitle} Checking`,
             message: total > 0
-              ? `Checking ${completed}/${total}${currentBook ? ` (book ${currentBook})` : ""}...`
-              : "Checking for new books...",
+              ? `Checking ${completed}/${total}${currentBook ? ` (book ${currentBook})` : ""}${currentPass ? ` • ${currentPass}` : ""}...`
+              : `Checking ${progress}%${currentPass ? ` • ${currentPass}` : ""}...`,
           },
         }));
       }
 
-      if (statusPayload.status === "failed") {
+      if (statusPayload.error) {
         throw new Error(statusPayload.error || "Error checking series.");
       }
 
       const data = statusPayload.result ?? {};
+      const missingFromStatus = Array.isArray(statusPayload.missing_books) ? statusPayload.missing_books : [];
 
       let nextBanner: CheckBannerState;
-      if (data?.has_new_books && Array.isArray(data.added_books) && data.added_books.length > 0) {
+      const foundBooks = Array.isArray(statusPayload.found_books)
+        ? statusPayload.found_books
+        : Array.isArray(data.added_books)
+          ? data.added_books
+          : [];
+
+      if (foundBooks.length > 0) {
         nextBanner = {
           seriesId,
           seriesTitle,
           tone: "success",
           title: `${seriesTitle} Checked`,
-          message: data.added_books.length === 1
+          message: foundBooks.length === 1
             ? "Book added to series and library."
-            : `${data.added_books.length} books added to series and library.`,
+            : `${foundBooks.length} books added to series and library.`,
           actionHref: `/series/${seriesId}?fromView=${viewMode}`,
           actionLabel: "View series",
         };
@@ -775,18 +954,26 @@ export default function SeriesPage() {
         const diagnosticDetail = summarizeCandidateDiagnostics(
           typeof data === "object" && data !== null ? (data as Record<string, unknown>).candidate_diagnostics : null,
         );
+        const missingAfterCheck = missingFromStatus.length > 0
+          ? missingFromStatus
+          : Array.isArray(targetSeries?.missing_books)
+            ? targetSeries.missing_books
+            : [];
+        const missingDetail = formatMissingBooksLabel(missingAfterCheck);
         nextBanner = {
           seriesId,
           seriesTitle,
           tone: "danger",
           title: `${seriesTitle} Checked`,
           message: "No new books.",
-          detail: diagnosticDetail || undefined,
+          detail: [missingDetail, diagnosticDetail].filter(Boolean).join(". ") || undefined,
         };
         setMessage("No new books.");
         toast({
           title: `${seriesTitle} Checked`,
-          description: diagnosticDetail ? `No new books. ${diagnosticDetail}` : "No new books.",
+          description: [missingDetail, diagnosticDetail].filter(Boolean).length > 0
+            ? `No new books. ${[missingDetail, diagnosticDetail].filter(Boolean).join(". ")}`
+            : "No new books.",
         });
       }
 
@@ -832,6 +1019,20 @@ export default function SeriesPage() {
           <p className="max-w-2xl text-xs leading-5 text-muted-foreground md:hidden">
             Browse your tracked series and refresh status for each series.
           </p>
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+            <span className="inline-flex items-center gap-1">
+              <span aria-hidden="true">⭐</span>
+              <span>new books found</span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span aria-hidden="true">📘</span>
+              <span>unread books remain</span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span aria-hidden="true">🔮</span>
+              <span>upcoming books remain</span>
+            </span>
+          </div>
         </div>
 
         <div className="flex justify-start md:justify-self-center">
@@ -1018,8 +1219,16 @@ export default function SeriesPage() {
                 <TableCell className="truncate" title={s.name}>
                   <div className="flex items-center gap-1 truncate">
                     <span className="truncate">{s.name}</span>
-                    {s.has_new_books ? <span className="text-amber-500" aria-label="New books added">★</span> : null}
+                    {getSeriesState(s).has_new_books ? <span className="text-amber-500" aria-label="New books found">⭐</span> : null}
+                    {getSeriesState(s).has_unread_books ? <span aria-label="Unread books remain">📘</span> : null}
+                    {getSeriesState(s).has_upcoming_books ? <span aria-label="Upcoming books remain">🔮</span> : null}
+                    {Array.isArray(s.missing_books) && s.missing_books.length > 0 ? <span aria-label="Missing books detected">🧩</span> : null}
                   </div>
+                  {Array.isArray(s.missing_books) && s.missing_books.length > 0 ? (
+                    <p className="mt-1 truncate text-[11px] text-rose-700" title={formatMissingBooksLabel(s.missing_books) || undefined}>
+                      {formatMissingBooksLabel(s.missing_books)}
+                    </p>
+                  ) : null}
                 </TableCell>
                 <TableCell className="truncate" title={s.author || "—"}>{s.author || "—"}</TableCell>
                 <TableCell>{s.next_unread_book_number ?? "—"}</TableCell>
@@ -1027,15 +1236,16 @@ export default function SeriesPage() {
                 <TableCell>{s.total_books ?? "—"}</TableCell>
                 <TableCell>{formatDate(s.last_checked)}</TableCell>
                 <TableCell className="whitespace-nowrap">
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-2 whitespace-nowrap">
                     <Link href={`/series/${s.id}?fromView=${viewMode}`}>
-                      <Button variant="ghost" size="sm">
+                      <Button variant="ghost" size="sm" className="shrink-0">
                         View books
                       </Button>
                     </Link>
                     <Button
                       variant="outline"
                       size="sm"
+                      className="shrink-0"
                       onClick={() => handleCheckNow(s.id)}
                       disabled={loadingId === s.id}
                     >
@@ -1043,7 +1253,7 @@ export default function SeriesPage() {
                     </Button>
                     {rowCheckState[s.id]?.actionHref && rowCheckState[s.id]?.actionLabel ? (
                       <Link href={rowCheckState[s.id].actionHref!}>
-                        <Button variant="secondary" size="sm">
+                        <Button variant="secondary" size="sm" className="shrink-0">
                           {rowCheckState[s.id].actionLabel}
                         </Button>
                       </Link>

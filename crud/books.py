@@ -3,7 +3,7 @@ import models
 
 from sqlalchemy.orm import Session
 from models import Book
-from book_metadata_utils import normalize_book_title
+from intelligence import recalculate_series_state_for_series, recount_series_aggregates_for_series
 
 
 BOOK_COLUMN_KEYS = {column.key for column in Book.__table__.columns}
@@ -31,11 +31,7 @@ def _book_payload(data_obj, *, exclude_unset: bool = False) -> dict:
     payload = {key: value for key, value in raw.items() if key in BOOK_COLUMN_KEYS}
 
     if "title" in payload:
-        payload["title"] = normalize_book_title(
-            payload.get("title") or "",
-            series_name=payload.get("series_name"),
-            book_number=payload.get("book_number"),
-        )
+        payload["title"] = str(payload.get("title") or "").strip()
 
     inferred_book_number, inferred_series_order = _infer_series_numbers_from_title(payload.get("title"))
     if payload.get("book_number") is None and inferred_book_number is not None:
@@ -52,6 +48,8 @@ def create_book(db: Session, book):
     db.add(db_book)
     db.commit()
     db.refresh(db_book)
+    if db_book.series_id is not None:
+        recalculate_series_state_for_series(db, db_book.series_id)
     return db_book
 
 
@@ -76,12 +74,17 @@ def update_book(db: Session, book_id: int, book):
     if not db_book:
         return None
 
+    previous_series_id = db_book.series_id
     payload = _book_payload(book, exclude_unset=True)
     for key, value in payload.items():
         setattr(db_book, key, value)
 
     db.commit()
     db.refresh(db_book)
+    if db_book.series_id is not None:
+        recalculate_series_state_for_series(db, db_book.series_id)
+    if previous_series_id is not None and previous_series_id != db_book.series_id:
+        recalculate_series_state_for_series(db, previous_series_id)
     return db_book
 
 
@@ -90,7 +93,11 @@ def delete_book(db: Session, book_id: int):
     if not db_book:
         return False
 
+    series_id = db_book.series_id
     db.delete(db_book)
     db.commit()
+    if series_id is not None:
+        recalculate_series_state_for_series(db, series_id)
+        recount_series_aggregates_for_series(db, series_id)
     return True
 
