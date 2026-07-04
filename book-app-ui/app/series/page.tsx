@@ -1015,7 +1015,7 @@ export default function SeriesPage() {
           <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
             Series library
           </p>
-          <h1 className="text-2xl font-bold">{viewMode === "ongoing" ? "Ongoing Series" : "Finished Series"}</h1>
+          <h1 className="text-2xl font-bold">{viewMode === "ongoing" ? "Unfinished Series" : "Finished Series"}</h1>
           <p className="max-w-2xl text-xs leading-5 text-muted-foreground md:hidden">
             Browse your tracked series and refresh status for each series.
           </p>
@@ -1052,7 +1052,7 @@ export default function SeriesPage() {
             variant={viewMode === "ongoing" ? "secondary" : "outline"}
             onClick={() => setViewMode("ongoing")}
           >
-            Ongoing Series ({ongoingCount})
+            Unfinished Series ({ongoingCount})
           </Button>
           <Button
             variant={viewMode === "finished" ? "secondary" : "outline"}

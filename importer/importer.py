@@ -19,6 +19,7 @@ from typing import List, Tuple, Dict, Any
 
 import pandas as pd
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from database import SessionLocal
 from models import Series, Book
@@ -41,6 +42,7 @@ HEADER_MAP: Dict[str, List[str]] = {
     "subtitle": ["subtitle", "sub title", "sub-title"],
     "author": ["author", "authors", "writer", "book author"],
     "series_name": ["series", "series name", "series title", "series names"],
+    "series_confirmed": ["series confirmed", "confirm series", "series confirmation", "is series confirmed"],
     "book_number": ["book number", "book #", "number", "order", "sequence", "seq"],
     "publication_date": ["publication date", "pub date", "published", "publish date"],
     "publisher": ["publisher", "publishing house", "imprint"],
@@ -277,6 +279,172 @@ def parse_series_finished_flag(value: Any) -> bool:
         return False
     return True
 
+
+def _normalize_series_or_title_text(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = text.rstrip(":")
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+SERIES_NUMBER_MARKER_PATTERNS = [
+    re.compile(r"\bbook\s*#?\s*\d+(?:\.\d+)?\b", re.IGNORECASE),
+    re.compile(r"#\s*\d+(?:\.\d+)?\b", re.IGNORECASE),
+    re.compile(r"\bvol(?:ume)?\.?\s*\d+(?:\.\d+)?\b", re.IGNORECASE),
+    re.compile(r"\bepisode\s*\d+(?:\.\d+)?\b", re.IGNORECASE),
+    re.compile(r"\bpart\s*\d+(?:\.\d+)?\b", re.IGNORECASE),
+]
+
+
+def _title_has_clear_series_number(title: Any) -> bool:
+    text = str(title or "").strip()
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in SERIES_NUMBER_MARKER_PATTERNS)
+
+
+def _parse_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return None
+    if normalized in {"1", "true", "t", "yes", "y", "confirmed"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "unconfirmed"}:
+        return False
+    return None
+
+
+def _should_create_series_link(book_data: Dict[str, Any]) -> bool:
+    """Require concrete evidence before attempting to link a series for a book row.
+
+    This prevents standalone books (e.g., a single title with the same series name)
+    from being auto-classified as a series.
+    """
+    series_name = str(book_data.get("series_name") or "").strip()
+    if not series_name:
+        return False
+
+    title = str(book_data.get("title") or "").strip()
+    normalized_series = _normalize_series_or_title_text(series_name)
+    normalized_title = _normalize_series_or_title_text(title)
+
+    # Evidence 1: explicit numbering for this row.
+    raw_book_number = book_data.get("book_number")
+    has_explicit_book_number = False
+    try:
+        has_explicit_book_number = raw_book_number is not None and str(raw_book_number).strip() != ""
+    except Exception:
+        has_explicit_book_number = False
+
+    # Evidence 2: explicit series total greater than 1.
+    raw_total = book_data.get("series_total_books") or book_data.get("series_total")
+    has_explicit_series_total = False
+    try:
+        has_explicit_series_total = raw_total is not None and int(raw_total) > 1
+    except Exception:
+        has_explicit_series_total = False
+
+    # Evidence 3: title contains common in-series marker.
+    title_has_series_marker = bool(re.search(r"\bbook\s*\d+", title, flags=re.IGNORECASE))
+
+    # Evidence 4: series name is clearly different from the title text.
+    name_differs_from_title = bool(normalized_series and normalized_title and normalized_series != normalized_title)
+
+    return bool(
+        has_explicit_book_number
+        or has_explicit_series_total
+        or title_has_series_marker
+        or name_differs_from_title
+    )
+
+
+def _find_existing_series_by_name(db: Session, series_name: str | None) -> Series | None:
+    """Return an existing canonical series record by name.
+
+    Import flow policy: do not auto-create new series from title-derived variations.
+    A row links to series only when the provided series_name matches an existing
+    canonical series name (exact, case-insensitive, after trim).
+    """
+    cleaned = str(series_name or "").strip()
+    if not cleaned:
+        return None
+
+    existing = db.query(Series).filter(Series.name == cleaned).first()
+    if existing:
+        return existing
+
+    return db.query(Series).filter(func.lower(Series.name) == cleaned.lower()).first()
+
+
+def _series_link_decision(db: Session, book_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Decide whether series linkage is automatic or requires user confirmation.
+
+    Rules:
+    1) Numbered title markers => auto-series only when canonical series exists.
+    2) Unnumbered title => require confirmation before series linkage.
+    3) Never infer series name from title text.
+    """
+    series_name = str(book_data.get("series_name") or "").strip()
+    title = str(book_data.get("title") or "").strip()
+    explicit_confirmation = _parse_bool(book_data.get("series_confirmed"))
+    has_number_marker = _title_has_clear_series_number(title)
+
+    if not series_name:
+        if not has_number_marker:
+            return {
+                "should_link": False,
+                "series": None,
+                "needs_confirmation": True,
+                "reason": "unnumbered_title_no_series_name_requires_confirmation",
+                "has_number_marker": False,
+            }
+        return {
+            "should_link": False,
+            "series": None,
+            "needs_confirmation": False,
+            "reason": "numbered_title_no_series_name",
+            "has_number_marker": has_number_marker,
+        }
+
+    canonical_series = _find_existing_series_by_name(db, series_name)
+
+    if has_number_marker:
+        if canonical_series:
+            return {
+                "should_link": True,
+                "series": canonical_series,
+                "needs_confirmation": False,
+                "reason": "numbered_title_auto_series",
+                "has_number_marker": True,
+            }
+        return {
+            "should_link": False,
+            "series": None,
+            "needs_confirmation": False,
+            "reason": "numbered_title_canonical_missing",
+            "has_number_marker": True,
+        }
+
+    # Unnumbered titles require explicit user confirmation.
+    if explicit_confirmation is True and canonical_series:
+        return {
+            "should_link": True,
+            "series": canonical_series,
+            "needs_confirmation": False,
+            "reason": "user_confirmed_unnumbered_title",
+            "has_number_marker": False,
+        }
+
+    return {
+        "should_link": False,
+        "series": None,
+        "needs_confirmation": True,
+        "reason": "unnumbered_title_requires_confirmation",
+        "has_number_marker": False,
+    }
+
 def get_or_create_series(db: Session, series_name: str, total_books: Any = None, series_finished_flag: Any = None) -> Series:
     if not series_name:
         return None
@@ -318,7 +486,7 @@ def get_or_create_series(db: Session, series_name: str, total_books: Any = None,
     return new_series
 
 
-def create_or_update_book(db: Session, book_data: Dict[str, Any]) -> Book:
+def create_or_update_book(db: Session, book_data: Dict[str, Any]) -> tuple[Book, Dict[str, Any]]:
     series_name = book_data.get("series_name")
     series_total_books = book_data.get("series_total_books") or book_data.get("series_total") or None
     raw_series_finished_flag = book_data.get("series_finished")
@@ -326,9 +494,30 @@ def create_or_update_book(db: Session, book_data: Dict[str, Any]) -> Book:
         raw_series_finished_flag = book_data.get("is_series_finished")
     series_finished_flag = parse_series_finished_flag(raw_series_finished_flag)
 
-    series = None
-    if series_name:
-        series = get_or_create_series(db, series_name, series_total_books, series_finished_flag)
+    decision = _series_link_decision(db, book_data)
+    series = decision.get("series") if decision.get("should_link") else None
+
+    if series:
+        # Keep canonical series metadata fresh when import includes explicit values.
+        if series_finished_flag is not None:
+            series.is_finished = bool(series_finished_flag)
+        if series_total_books is not None:
+            try:
+                series.total_books = int(series_total_books)
+            except Exception:
+                pass
+        db.commit()
+        db.refresh(series)
+
+    if decision.get("needs_confirmation"):
+        existing_row = book_data.get("import_raw_row") if isinstance(book_data.get("import_raw_row"), dict) else {}
+        book_data["import_raw_row"] = {
+            **existing_row,
+            "series_confirmation_required": True,
+            "series_confirmation_reason": decision.get("reason"),
+            "series_candidate_name": series_name,
+            "title_has_series_number": bool(decision.get("has_number_marker")),
+        }
 
     # Map PRD fields → DB fields
     db_book = Book(
@@ -370,14 +559,27 @@ def create_or_update_book(db: Session, book_data: Dict[str, Any]) -> Book:
     db.add(db_book)
     db.commit()
     db.refresh(db_book)
-    return db_book
+    return db_book, decision
 
 
 # ------------------------------------------------------------
 # Main Import Function
 # ------------------------------------------------------------
 
-def run_import(file_path: str):
+def _prompt_series_confirmation(book_data: Dict[str, Any], reason: str) -> bool:
+    title = str(book_data.get("title") or "").strip() or "(untitled)"
+    series_name = str(book_data.get("series_name") or "").strip() or "(no series name)"
+    prompt = (
+        f"\nSeries confirmation required [{reason}]\n"
+        f"  Title: {title}\n"
+        f"  Candidate series: {series_name}\n"
+        "Link this book to the candidate series? [y/N]: "
+    )
+    answer = input(prompt).strip().lower()
+    return answer in {"y", "yes"}
+
+
+def run_import(file_path: str, *, interactive_confirm: bool = False):
     db: Session = SessionLocal()
 
     print(f"Loading file: {file_path}")
@@ -392,14 +594,35 @@ def run_import(file_path: str):
         print("All headers mapped successfully.")
 
     imported_ids: List[int] = []
+    confirmation_required: List[Dict[str, Any]] = []
 
     for row in rows:
         book_data, unknown_data = import_row(headers, row)
-        book = create_or_update_book(db, book_data)
+
+        if interactive_confirm:
+            preview_decision = _series_link_decision(db, book_data)
+            if preview_decision.get("needs_confirmation"):
+                if _prompt_series_confirmation(book_data, str(preview_decision.get("reason") or "confirmation_required")):
+                    book_data["series_confirmed"] = True
+
+        book, decision = create_or_update_book(db, book_data)
         imported_ids.append(book.id)
         print(f"Imported book: {book.title} (ID: {book.id})")
 
+        if decision.get("needs_confirmation"):
+            confirmation_required.append(
+                {
+                    "book_id": book.id,
+                    "title": book.title,
+                    "author": book.author,
+                    "series_name": str(book_data.get("series_name") or "").strip() or None,
+                    "reason": decision.get("reason"),
+                }
+            )
+
     print(f"Import complete. {len(imported_ids)} books imported.")
+    if confirmation_required:
+        print(f"Series confirmation required for {len(confirmation_required)} row(s).")
 
     # Recompute intelligence after import
     try:
@@ -409,6 +632,12 @@ def run_import(file_path: str):
         print(f"Warning: failed to recompute series intelligence: {e}")
 
     db.close()
+    return {
+        "imported_count": len(imported_ids),
+        "imported_ids": imported_ids,
+        "confirmation_required_count": len(confirmation_required),
+        "confirmation_required": confirmation_required,
+    }
 
 
 def reset_database(db: Session):
@@ -441,5 +670,5 @@ if __name__ == "__main__":
         finally:
             reset_session.close()
 
-    run_import(args.file)
+    run_import(args.file, interactive_confirm=True)
 

@@ -5,6 +5,7 @@ export type BookStatusSyncPayload = {
   id: number;
   is_read: boolean;
   read_status: string;
+  record_status?: string | null;
   read_date: string | null;
   release_date: string | null;
   publication_date: string | null;
@@ -21,6 +22,7 @@ type BookStatusInput = {
   id?: number | string | null;
   is_read?: boolean | null;
   read_status?: string | null;
+  record_status?: string | null;
   read_date?: string | null;
   release_date?: string | null;
   publication_date?: string | null;
@@ -37,6 +39,7 @@ function normalizePayload(book: BookStatusInput): BookStatusSyncPayload {
     id: Number(book?.id),
     is_read: Boolean(book?.is_read),
     read_status: String(book?.read_status || (book?.is_read ? "read" : "unread")),
+    record_status: book?.record_status == null ? null : String(book.record_status),
     read_date: book?.read_date ? String(book.read_date) : null,
     release_date: book?.release_date ? String(book.release_date) : null,
     publication_date: book?.publication_date ? String(book.publication_date) : null,

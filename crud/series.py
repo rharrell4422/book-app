@@ -42,8 +42,17 @@ def update_series(db: Session, series_id: int, series):
 def delete_series(db: Session, series_id: int):
     db_series = db.query(Series).filter(Series.id == series_id).first()
     if not db_series:
-        return False
+        return None
 
+    # Hard-delete all books linked to this series so Library and Series views stay in sync.
+    deleted_books = (
+        db.query(Book)
+        .filter(Book.series_id == series_id)
+        .delete(synchronize_session=False)
+    )
     db.delete(db_series)
     db.commit()
-    return True
+    return {
+        "series_id": series_id,
+        "deleted_books": int(deleted_books or 0),
+    }

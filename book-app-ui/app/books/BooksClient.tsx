@@ -544,6 +544,7 @@ export default function BooksClient() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const seriesId = searchParams.get("series_id");
+  const returnTo = searchParams.get("returnTo");
 
   useEffect(() => {
     const rafId = window.requestAnimationFrame(() => {
@@ -573,9 +574,12 @@ export default function BooksClient() {
 
   useEffect(() => {
     if (seriesId) {
-      router.replace(`/series/${seriesId}`);
+      const safeReturnTo = typeof returnTo === "string" && returnTo.startsWith("/")
+        ? returnTo
+        : null;
+      router.replace(safeReturnTo || `/series/${seriesId}`, { scroll: false });
     }
-  }, [router, seriesId]);
+  }, [router, returnTo, seriesId]);
 
   const totalBooks = books.length;
   const readBooks = books.filter((book) => book.is_read).length;
@@ -1095,16 +1099,19 @@ export default function BooksClient() {
 
   useEffect(() => {
     const unsubscribe = subscribeBookStatusUpdates((payload) => {
-      setBooks((prev) =>
-        prev.map((book) =>
+      setBooks((prev) => {
+        if (String(payload.record_status || "").toLowerCase() === "deleted") {
+          return prev.filter((book) => book.id !== payload.id);
+        }
+        return prev.map((book) =>
           book.id === payload.id
             ? {
                 ...book,
                 ...payload,
               }
             : book,
-        ),
-      );
+        );
+      });
     });
 
     return unsubscribe;

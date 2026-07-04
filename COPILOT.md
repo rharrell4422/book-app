@@ -290,60 +290,18 @@ Keep open: main.py, models.py, schemas.py, importer.py, intelligence.py, databas
 
 # 📚 Book Search & Suggestions Feature
 
-## Current Status (Completed Work)
-- ✅ Sequential fetching for missing book suggestions (no parallel timeouts)
-- ✅ Frontend timeout increased to 90 seconds (AbortSignal.timeout(90000))
-- ✅ Backend httpx timeouts increased to 30 seconds (search_google_books, search_openlibrary)
-- ✅ CORS middleware reconfigured (explicit origins, headers, max_age=3600)
-- ✅ Schema serialization updated (BookBase includes is_read, external_rating, external_rating_count)
-- ✅ No 500 errors or CORS errors (all timeouts/errors fixed)
+## Current Status
+- Missing Book Finder UI and manual suggestion endpoints were decommissioned in July 2026.
+- Legacy routes removed: GET /books/suggest and GET /series/{series_id}/suggest.
+- Series discovery now runs through the Series Intelligence and Check for New workflows.
 
-## External API Integration
+## Current Discovery Path
+1. Use series check/discovery endpoints and agent pipeline for candidate detection.
+2. Persist validated books through normal create/import flows.
+3. Use ghost book cleanup and intelligence recalculation for data corrections.
 
-### Endpoint: GET `/books/suggest`
-**Parameters:**
-- `series_name` (required): Series title to search for
-- `book_number` (optional): Specific book number in series (#1, #2, etc.)
-- `author` (optional): Author name for filtering
-
-
-### Search Strategy
-1. Try Google Books API with multiple query variations (title, title+author, title+number, etc.)
-2. If Google fails or returns empty, try OpenLibrary with candidate queries
-3. If still empty and author provided, try author-only fallback searches
-4. Return first matching results or empty array
-
-### Current Limitation: Rate Limiting & Missing Data
-**Google Books API (Primary)**
-- Returns 429 (Too Many Requests) without API key
-- High request quota available with authenticated API key
-- Indie/self-published books may not be indexed
-
-**OpenLibrary API (Fallback)**
-- Free, no authentication required
-- Indie/self-published LitRPG books NOT indexed
-- Example searches that fail: "Unbound" series, "1% Lifesteal" series
-
-**Indie Book Limitation**
-User's library contains self-published LitRPG books not in standard databases:
-- "Unbound" by Nicoli Gonnella
-- "1% Lifesteal" by Robert Blaise
-- "The Harry Starke Novels" by Blair Howard
-
-## Next Steps: Google Books API Setup (REQUIRED)
-
-### Prerequisites
-User must set up Google Books API key:
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com)
-2. Create new project (name: "Book App")
-3. Enable "Google Books API"
-4. Create API key (type: Restricted)
-   - Restrict to Books API only
-   - Restrict to Application Type: None (unrestricted)
-5. Copy the API key
-
-```
+## Notes
+- See archive notes under archive/missing_book_finder for deprecated behavior summary.
 
 ## Timeouts & Configuration Reference
 **Frontend** (book-app-ui/app/series/[seriesId]/page.tsx):

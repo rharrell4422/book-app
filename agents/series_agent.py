@@ -330,6 +330,23 @@ class SeriesIntelligenceAgent:
         source = str(book.import_source or "").strip().lower()
         return source in self.AUTO_CLEANUP_ELIGIBLE_IMPORT_SOURCES
 
+    def _is_ghost_book(self, book: Book) -> bool:
+        return bool(book.is_missing) or bool(book.is_upcoming_auto) or bool(book.is_upcoming_final)
+
+    def _find_deleted_ghost_tombstone(self, db: Session, series_id: int, book_number: float | int) -> Book | None:
+        normalized_number = float(book_number)
+        deleted_matches = (
+            db.query(Book)
+            .filter(Book.series_id == series_id)
+            .filter(or_(Book.book_number == normalized_number, Book.series_order == normalized_number))
+            .filter(Book.record_status == "deleted")
+            .all()
+        )
+        for match in deleted_matches:
+            if self._is_ghost_book(match):
+                return match
+        return None
+
     def _strict_post_discovery_cleanup(
         self,
         db: Session,
@@ -342,7 +359,12 @@ class SeriesIntelligenceAgent:
         if not bool(series_complete) or known_series_max is None:
             return {"series_id": series.id, "deleted_count": 0, "deleted_entries": []}
 
-        candidates = db.query(Book).filter(Book.series_id == series.id).all()
+        candidates = (
+            db.query(Book)
+            .filter(Book.series_id == series.id)
+            .filter(or_(Book.record_status.is_(None), Book.record_status != "deleted"))
+            .all()
+        )
         deleted_entries: list[dict] = []
 
         for book in candidates:
@@ -387,7 +409,7 @@ class SeriesIntelligenceAgent:
                     "reason": reason,
                 }
             )
-            db.delete(book)
+            book.record_status = "deleted"
 
         if deleted_entries:
             db.commit()
@@ -1343,7 +1365,7 @@ class SeriesIntelligenceAgent:
         return (
             db.query(Book)
             .filter(Book.series_id == series_id)
-            .filter(Book.record_status != "deleted")
+            .filter(or_(Book.record_status.is_(None), Book.record_status != "deleted"))
             .all()
         )
 
@@ -1505,6 +1527,7 @@ class SeriesIntelligenceAgent:
             db.query(Book)
             .filter(Book.series_id == series_id)
             .filter(or_(Book.book_number == normalized_number, Book.series_order == normalized_number))
+            .filter(or_(Book.record_status.is_(None), Book.record_status != "deleted"))
             .first()
         )
 
@@ -1590,6 +1613,17 @@ class SeriesIntelligenceAgent:
         }
 
         existing = books_by_number.get(float(canonical_entry.book_number)) or self._find_existing_book(db, series.id, canonical_entry.book_number)
+        deleted_ghost_tombstone = self._find_deleted_ghost_tombstone(db, series.id, canonical_entry.book_number)
+        if deleted_ghost_tombstone and not existing:
+            return None, {
+                "book_number": canonical_entry.book_number,
+                "query": suggestion.get("query"),
+                "diagnostics": diagnostics,
+                "discarded_google_results": discarded_results,
+                "validated_with_google": validated_result is not None,
+                "reason": "ghost_tombstone_deleted",
+                "was_added": False,
+            }
         if existing:
             for key, value in payload.items():
                 setattr(existing, key, value)
@@ -1656,6 +1690,10 @@ class SeriesIntelligenceAgent:
     def _persist_book(self, db: Session, series: Series, book_number: int, suggestion: dict, *, is_missing: bool, known_authors: list[str]) -> Book | None:
         payload = self._build_book_payload(series, book_number, suggestion, is_missing=is_missing, known_authors=known_authors)
         if not payload:
+            return None
+
+        deleted_ghost_tombstone = self._find_deleted_ghost_tombstone(db, series.id, book_number)
+        if deleted_ghost_tombstone is not None:
             return None
 
         existing = self._find_existing_book(db, series.id, book_number)

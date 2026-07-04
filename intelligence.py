@@ -17,6 +17,84 @@ except Exception as e:
 
 
 logger = logging.getLogger(__name__)
+OMNIBUS_RANGE_PATTERN = re.compile(r"\bbooks?\s+\d+(?:\.\d+)?\s*[-–]\s*\d+(?:\.\d+)?\b", re.IGNORECASE)
+OMNIBUS_RANGE_CAPTURE_PATTERN = re.compile(
+    r"\bbooks?\s+(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\b",
+    re.IGNORECASE,
+)
+
+
+def _book_number_value(book: Book) -> float | None:
+    value = book.book_number if book.book_number is not None else book.series_order
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_strict_integer_numbering(books: list[Book]) -> bool:
+    active_books = [book for book in books if str(book.record_status or "active") != "deleted"]
+    numeric_values = [_book_number_value(book) for book in active_books]
+    present_values = [value for value in numeric_values if value is not None]
+    if len(active_books) < 2:
+        return False
+    # Strict mode means every active book has an integer series number.
+    if len(present_values) != len(active_books):
+        return False
+    return all(value > 0 and float(value).is_integer() for value in present_values)
+
+
+def _is_omnibus_range_title(title: str | None) -> bool:
+    normalized = str(title or "")
+    return bool(OMNIBUS_RANGE_PATTERN.search(normalized))
+
+
+def _uses_omnibus_range_numbering(books: list[Book]) -> bool:
+    active_books = [book for book in books if str(book.record_status or "active") != "deleted"]
+    if not active_books:
+        return False
+    matched = sum(1 for book in active_books if _is_omnibus_range_title(book.title))
+    # Treat the series as omnibus when every active row is an omnibus-range title.
+    return matched == len(active_books)
+
+
+def _covered_orders_from_omnibus_ranges(books: list[Book]) -> set[int]:
+    covered_orders: set[int] = set()
+    for book in books:
+        title = str(getattr(book, "title", "") or "")
+        for match in OMNIBUS_RANGE_CAPTURE_PATTERN.finditer(title):
+            try:
+                start_value = float(match.group(1))
+                end_value = float(match.group(2))
+            except (TypeError, ValueError):
+                continue
+
+            if not (start_value > 0 and end_value > 0):
+                continue
+            if not (start_value.is_integer() and end_value.is_integer()):
+                continue
+
+            start = int(start_value)
+            end = int(end_value)
+            if end < start:
+                start, end = end, start
+
+            for order in range(start, end + 1):
+                covered_orders.add(order)
+
+    return covered_orders
+
+
+def _is_book_upcoming(book: Book, *, today: date | None = None) -> bool:
+    current_day = today or date.today()
+    status = str(book.read_status or "").strip().lower()
+    has_status_upcoming = status in {"upcoming", "tbr", "to be read"}
+    has_upcoming_flag = bool(book.is_upcoming_auto or book.is_upcoming_final)
+    dated_release = book.release_date or book.publication_date
+    has_future_date = bool(dated_release and dated_release > current_day)
+    return has_status_upcoming or has_upcoming_flag or has_future_date
 
 def compute_series_intelligence_for_series(db, series_id: int):
     series = db.query(Series).filter(Series.id == series_id).first()
@@ -24,8 +102,10 @@ def compute_series_intelligence_for_series(db, series_id: int):
         return None
 
     books = db.query(Book).filter(Book.series_id == series_id).all()
+    active_books = [book for book in books if str(book.record_status or "active") != "deleted"]
+    deleted_books = [book for book in books if str(book.record_status or "active") == "deleted"]
 
-    if not books:
+    if not active_books:
         return {
             "series_id": series_id,
             "total_books": 0,
@@ -37,50 +117,65 @@ def compute_series_intelligence_for_series(db, series_id: int):
             "next_unread_book_number": None,
             "next_upcoming_book_number": None,
             "is_series_finished": False,
+            "missing_numbers": [],
+            "numbering_mode": "none",
+            "strict_numbering": False,
+            "mixed_numbering": False,
+            "active_count": 0,
+            "deleted_count": len(deleted_books),
+            "upcoming_count": 0,
         }
 
     # Sort by series_order
-    books.sort(key=lambda b: b.series_order or 0)
+    active_books.sort(key=lambda b: b.series_order or 0)
 
     # Determine expected series length from explicit total or known order numbers.
     explicit_total = series.total_books if series.total_books and series.total_books > 0 else None
-    actual_orders = set(int(b.series_order) for b in books if b.series_order is not None)
-    actual_book_numbers = set(int(b.book_number) for b in books if b.book_number is not None)
-    all_known_orders = actual_orders.union(actual_book_numbers)
+    uses_omnibus_ranges = _uses_omnibus_range_numbering(active_books)
+    numbering_is_strict = _is_strict_integer_numbering(active_books) and (not uses_omnibus_ranges)
+    all_known_orders: set[int] = set()
+    if numbering_is_strict:
+        all_known_orders = {
+            int(value)
+            for value in (_book_number_value(book) for book in active_books)
+            if value is not None and float(value).is_integer() and value > 0
+        }
 
     inferred_max_order = max(all_known_orders) if all_known_orders else None
-    if explicit_total is not None and inferred_max_order is not None:
-        total_books = max(explicit_total, inferred_max_order)
+    if uses_omnibus_ranges:
+        # Omnibus rows already represent grouped ranges; count bundles, not max start number.
+        total_books = len(active_books)
     else:
-        total_books = explicit_total or inferred_max_order or len(books)
+        total_candidates = [len(active_books)]
+        if explicit_total is not None:
+            total_candidates.append(int(explicit_total))
+        if inferred_max_order is not None:
+            total_candidates.append(int(inferred_max_order))
+        total_books = max(total_candidates) if total_candidates else 0
 
-    read_books = [b for b in books if b.is_read]
-    unread_books = [b for b in books if not b.is_read]
-    has_no_series_finished_flag = any(b.is_series_finished is False for b in books)
+    today = date.today()
+    upcoming_books = [b for b in active_books if _is_book_upcoming(b, today=today)]
+    upcoming_book_ids = {book.id for book in upcoming_books}
+    read_books = [b for b in active_books if b.is_read]
+    unread_books = [b for b in active_books if (not b.is_read) and (b.id not in upcoming_book_ids)]
+    has_no_series_finished_flag = any(b.is_series_finished is False for b in active_books)
 
     read_count = len(read_books)
     unread_count = len(unread_books)
 
     # Missing orders should use the expected total count, not the current book count.
-    expected_orders = set(range(1, int(total_books) + 1)) if total_books else set()
-    missing_orders = [str(order) for order in sorted(expected_orders - all_known_orders)]
+    if numbering_is_strict and total_books:
+        expected_orders = set(range(1, int(total_books) + 1))
+        missing_candidates = expected_orders - all_known_orders
+        if missing_candidates:
+            covered_by_omnibus = _covered_orders_from_omnibus_ranges(active_books)
+            missing_candidates = {order for order in missing_candidates if order not in covered_by_omnibus}
+        missing_orders = [str(order) for order in sorted(missing_candidates)]
+    else:
+        missing_orders = []
 
     # Next unread
     next_unread = unread_books[0] if unread_books else None
-
-    # Upcoming = explicit upcoming status/flags OR future release/publication date.
-    today = date.today()
-    upcoming_statuses = {"upcoming", "tbr", "to be read"}
-
-    def is_book_upcoming(book):
-        status = str(book.read_status or "").strip().lower()
-        has_status_upcoming = status in upcoming_statuses
-        has_upcoming_flag = bool(book.is_upcoming_auto or book.is_upcoming_final)
-        dated_release = book.release_date or book.publication_date
-        has_future_date = bool(dated_release and dated_release > today)
-        return has_status_upcoming or has_upcoming_flag or has_future_date
-
-    upcoming_books = [b for b in books if is_book_upcoming(b)]
 
     def upcoming_sort_key(book):
         dated_release = book.release_date or book.publication_date
@@ -102,12 +197,18 @@ def compute_series_intelligence_for_series(db, series_id: int):
             return float(book.series_order)
         return None
 
+    if uses_omnibus_ranges:
+        numbering_mode = "omnibus"
+    else:
+        numbering_mode = "strict" if numbering_is_strict else "mixed"
+
     return {
         "series_id": series_id,
         "total_books": total_books,
         "read_count": read_count,
         "unread_count": unread_count,
         "missing_orders": missing_orders,
+        "missing_numbers": missing_orders,
         "next_unread_book_id": next_unread.id if next_unread else None,
         "next_upcoming_book_id": next_upcoming.id if next_upcoming else None,
         "next_unread_book_number": resolve_book_number(next_unread),
@@ -116,6 +217,48 @@ def compute_series_intelligence_for_series(db, series_id: int):
         "has_unread_books": has_unread,
         "has_upcoming_books": has_upcoming,
         "is_caught_up": is_caught_up,
+        "numbering_mode": numbering_mode,
+        "strict_numbering": numbering_is_strict,
+        "mixed_numbering": (not numbering_is_strict),
+        "active_count": len(active_books),
+        "deleted_count": len(deleted_books),
+        "upcoming_count": len(upcoming_books),
+    }
+
+
+def recalculate_intelligence(db, series_id: int, *, scan_result: dict | None = None) -> dict | None:
+    series = db.query(Series).filter(Series.id == series_id).first()
+    if not series:
+        return None
+
+    recount_series_aggregates_for_series(db, series_id)
+    intelligence = compute_series_intelligence_for_series(db, series_id)
+    if intelligence is None:
+        return None
+
+    series.total_books = intelligence.get("total_books")
+    series.missing_books = intelligence.get("missing_orders")
+    series.next_unread_book_number = intelligence.get("next_unread_book_number")
+    series.next_upcoming_book_number = intelligence.get("next_upcoming_book_number")
+    series.is_finished = bool(intelligence.get("is_series_finished"))
+    series.series_status = "finished" if series.is_finished else "ongoing"
+
+    db.commit()
+    db.refresh(series)
+
+    state = recalculate_series_state_for_series(db, series_id, scan_result=scan_result)
+
+    return {
+        "series_id": series_id,
+        "total_books": intelligence.get("total_books"),
+        "missing_numbers": intelligence.get("missing_numbers") or intelligence.get("missing_orders") or [],
+        "numbering_mode": intelligence.get("numbering_mode", "mixed"),
+        "strict_numbering": bool(intelligence.get("strict_numbering")),
+        "mixed_numbering": bool(intelligence.get("mixed_numbering", True)),
+        "active_count": int(intelligence.get("active_count") or 0),
+        "deleted_count": int(intelligence.get("deleted_count") or 0),
+        "upcoming_count": int(intelligence.get("upcoming_count") or 0),
+        "series_state": (state or {}).get("series_state") if isinstance(state, dict) else None,
     }
 
 
@@ -132,7 +275,7 @@ def _series_state_from_books(series, books: list[Book]) -> dict:
         return has_status_upcoming or has_upcoming_flag or has_future_date
 
     active_books = [book for book in books if str(book.record_status or "active") != "deleted"]
-    has_unread_books = any(not bool(book.is_read) for book in active_books)
+    has_unread_books = any((not bool(book.is_read)) and (not is_book_upcoming(book)) for book in active_books)
     has_upcoming_books = any(is_book_upcoming(book) for book in active_books)
     is_caught_up = (not has_unread_books) and (not has_upcoming_books)
 
@@ -200,7 +343,25 @@ def recount_series_aggregates_for_series(db, series_id: int) -> dict | None:
     read_count = sum(1 for book in active_books if bool(book.is_read))
     unread_count = sum(1 for book in active_books if not bool(book.is_read))
 
-    series.total_books = len(active_books)
+    uses_omnibus_ranges = _uses_omnibus_range_numbering(active_books)
+
+    active_numbered_orders = {
+        int(value)
+        for value in (_book_number_value(book) for book in active_books)
+        if value is not None and float(value).is_integer() and value > 0
+    }
+    numbered_max = max(active_numbered_orders) if active_numbered_orders else 0
+    existing_total = 0
+    try:
+        if series.total_books is not None:
+            existing_total = max(0, int(float(series.total_books)))
+    except (TypeError, ValueError):
+        existing_total = 0
+
+    if uses_omnibus_ranges:
+        series.total_books = len(active_books)
+    else:
+        series.total_books = max(existing_total, len(active_books), numbered_max)
     db.commit()
     db.refresh(series)
 
@@ -210,16 +371,6 @@ def recount_series_aggregates_for_series(db, series_id: int) -> dict | None:
         "read_count": read_count,
         "unread_count": unread_count,
     }
-
-
-def _book_number_value(book: Book) -> float | None:
-    value = book.book_number if book.book_number is not None else book.series_order
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _is_rejected_or_unverified_source(book: Book) -> bool:
@@ -307,7 +458,7 @@ def purge_invalid_books_for_series(
             book.title,
             ",".join(reasons),
         )
-        db.delete(book)
+        book.record_status = "deleted"
 
     if deleted_entries:
         db.commit()
@@ -1324,18 +1475,7 @@ def recompute_series_intelligence(db):
     all_series = db.query(Series).all()
 
     for series in all_series:
-        intel = compute_series_intelligence_for_series(db, series.id)
-
-        if intel is None:
-            continue
-
-        # Update the Series model fields
-        series.total_books = intel.get("total_books")
-        series.is_finished = intel.get("is_series_finished")
-
-        # Commit updates
-        db.commit()
-        db.refresh(series)
+        recalculate_intelligence(db, series.id)
 
     return True
 
