@@ -45,7 +45,9 @@ type BookRow = {
   [key: string]: unknown;
 };
 
-function getBookStatus(book: BookRow) {
+type BookStatus = "unread" | "available" | "upcoming" | "read";
+
+function getBookStatus(book: BookRow): BookStatus {
   if (book.is_read) {
     return "read";
   }
@@ -54,12 +56,11 @@ function getBookStatus(book: BookRow) {
     return "upcoming";
   }
 
-  if (book.series_id && book.book_number !== null && book.book_number !== undefined) {
-    return "upcoming";
-  }
-
   if (book.read_status) {
-    return String(book.read_status);
+    const explicitStatus = String(book.read_status).trim().toLowerCase();
+    if (explicitStatus === "upcoming") return "upcoming";
+    if (explicitStatus === "available") return "available";
+    if (explicitStatus === "read") return "read";
   }
 
   const releaseDate = book.release_date || book.publication_date;
@@ -72,7 +73,12 @@ function getBookStatus(book: BookRow) {
       if (parsedDate > today) {
         return "upcoming";
       }
+      return "available";
     }
+  }
+
+  if (book.series_id && book.book_number !== null && book.book_number !== undefined) {
+    return "available";
   }
 
   return "unread";
@@ -94,6 +100,12 @@ function formatDate(value?: string | null) {
 function getStatusChipClass(status: string) {
   if (status === "read") {
     return "inline-flex rounded-full border border-emerald-300 bg-emerald-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-emerald-800";
+  }
+  if (status === "available") {
+    return "inline-flex rounded-full border border-sky-300 bg-sky-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-sky-800";
+  }
+  if (status === "unread") {
+    return "inline-flex rounded-full border border-slate-300 bg-slate-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-slate-800";
   }
   return "inline-flex rounded-full border border-rose-300 bg-rose-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-rose-800";
 }
@@ -364,7 +376,7 @@ type AddBookFormState = {
   author: string;
   seriesName: string;
   bookNumber: string;
-  status: "unread" | "upcoming" | "read";
+  status: BookStatus;
   releaseDate: string;
   publicationDate: string;
   readDate: string;
@@ -377,7 +389,7 @@ type EditBookFormState = {
   author: string;
   seriesName: string;
   bookNumber: string;
-  status: "unread" | "upcoming" | "read";
+  status: BookStatus;
   date: string;
 };
 
@@ -582,9 +594,18 @@ export default function BooksClient() {
   }, [router, returnTo, seriesId]);
 
   const totalBooks = books.length;
-  const readBooks = books.filter((book) => book.is_read).length;
-  const unreadBooks = books.filter((book) => !book.is_read).length;
-  const upcomingBooks = books.filter((book) => getBookStatus(book) === "upcoming").length;
+  const statusSummary = books.reduce(
+    (acc, book) => {
+      const status = getBookStatus(book);
+      acc[status] += 1;
+      return acc;
+    },
+    { read: 0, unread: 0, available: 0, upcoming: 0 } as Record<BookStatus, number>,
+  );
+  const readBooks = statusSummary.read;
+  const availableBooks = statusSummary.available;
+  const upcomingBooks = statusSummary.upcoming;
+  const unreadBooks = statusSummary.unread + statusSummary.available;
 
   const titleOptions = useMemo(
     () => Array.from(new Set(books.map((book) => String(book.title || "").trim()))).sort((a, b) => a.localeCompare(b)),
@@ -1121,7 +1142,6 @@ export default function BooksClient() {
     const nextIsRead = !book.is_read;
     const releaseDate = book.release_date || book.publication_date;
     const shouldStayUpcoming = Boolean(book.is_missing || book.is_upcoming_auto || book.is_upcoming_final);
-    const shouldDefaultToUpcoming = Boolean(book.series_id && book.book_number !== null && book.book_number !== undefined);
     let nextStatus = nextIsRead ? "read" : "unread";
     if (!nextIsRead && releaseDate) {
       const parsedDate = new Date(releaseDate);
@@ -1131,14 +1151,16 @@ export default function BooksClient() {
         parsedDate.setHours(0, 0, 0, 0);
         if (parsedDate > today) {
           nextStatus = "upcoming";
+        } else {
+          nextStatus = "available";
         }
       }
     }
     if (!nextIsRead && shouldStayUpcoming) {
       nextStatus = "upcoming";
     }
-    if (!nextIsRead && shouldDefaultToUpcoming) {
-      nextStatus = "upcoming";
+    if (!nextIsRead && !shouldStayUpcoming && book.series_id && book.book_number !== null && book.book_number !== undefined) {
+      nextStatus = "available";
     }
 
     try {
@@ -1315,7 +1337,7 @@ export default function BooksClient() {
       author: String(book.author || ""),
       seriesName: String(book.series_name || ""),
       bookNumber: book.book_number !== null && book.book_number !== undefined ? String(book.book_number) : "",
-      status: (getBookStatus(book) as "unread" | "upcoming" | "read") || "unread",
+      status: getBookStatus(book),
       date: toIsoDateString(getDisplayDate(book)) || "",
     });
     setEditDialogOpen(true);
@@ -1436,9 +1458,23 @@ export default function BooksClient() {
           <h1 className="text-2xl font-bold">
             {seriesId ? `Series ${seriesId} books` : "All books"}
           </h1>
-          <p className="max-w-2xl text-xs leading-5 text-muted-foreground md:hidden">
+          <p className="max-w-2xl text-xs leading-5 text-muted-foreground">
             Browse the collection with read status, release dates, and series links.
           </p>
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+            <span className="inline-flex items-center gap-1">
+              <span className="inline-flex rounded-full border border-sky-300 bg-sky-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-sky-800">
+                available
+              </span>
+              <span>released and unread</span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="inline-flex rounded-full border border-rose-300 bg-rose-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-rose-800">
+                upcoming
+              </span>
+              <span>planned for a future release</span>
+            </span>
+          </div>
         </div>
 
         <div className="flex justify-start md:justify-self-center">
@@ -1447,10 +1483,12 @@ export default function BooksClient() {
               <tr>
                 <td className="min-w-[150px] border border-border px-2 py-1">Unread: <span className="font-semibold">{unreadBooks}</span></td>
                 <td className="min-w-[150px] border border-border px-2 py-1">Read: <span className="font-semibold">{readBooks}</span></td>
+                <td className="min-w-[150px] border border-border px-2 py-1">Available: <span className="font-semibold">{availableBooks}</span></td>
               </tr>
               <tr>
                 <td className="border border-border px-2 py-1">Total: <span className="font-semibold">{totalBooks}</span></td>
                 <td className="border border-border px-2 py-1">Upcoming: <span className="font-semibold">{upcomingBooks}</span></td>
+                <td className="border border-border px-2 py-1">&nbsp;</td>
               </tr>
             </tbody>
           </table>
@@ -1826,6 +1864,7 @@ export default function BooksClient() {
                 className="h-9 w-full rounded-md border bg-background px-2 text-sm"
               >
                 <option value="unread">Unread</option>
+                <option value="available">Available</option>
                 <option value="upcoming">Upcoming</option>
                 <option value="read">Read</option>
               </select>
@@ -1948,12 +1987,13 @@ export default function BooksClient() {
                 onChange={(event) =>
                   setEditBookForm((prev) => ({
                     ...prev,
-                    status: event.target.value as "unread" | "upcoming" | "read",
+                    status: event.target.value as BookStatus,
                   }))
                 }
                 className="h-9 w-full rounded border bg-background px-2 text-sm"
               >
                 <option value="unread">unread</option>
+                <option value="available">available</option>
                 <option value="upcoming">upcoming</option>
                 <option value="read">read</option>
               </select>
