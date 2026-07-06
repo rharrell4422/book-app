@@ -27,6 +27,7 @@ from intelligence import (
     search_openlibrary,
     search_publisher_pages,
     search_serpapi_web,
+    search_bookseriesinorder_series_entries,
 )
 from models import Book, Series, SeriesCanonicalEntry
 
@@ -56,7 +57,7 @@ class AmazonProvider(Provider):
             "html_author": None,
         }
         author = author_variants[0] if author_variants else None
-        for title in title_variants[:4]:
+        for title in title_variants:
             results = search_amazon_products(title, author, 8, debug=attempt)
             if results:
                 attempt["matched"] = True
@@ -485,14 +486,6 @@ class SeriesIntelligenceAgent:
 
         labels = list(base_variants)
         for base in base_variants:
-            if "international" in base.lower():
-                stripped = re.sub(r"\bInternational\b", "", base, flags=re.IGNORECASE)
-                stripped = re.sub(r"\s+", " ", stripped).strip(" -,:;")
-                if stripped:
-                    labels.append(stripped)
-            else:
-                labels.append(re.sub(r"\s+", " ", f"{base} International").strip(" -,:;"))
-
             if ":" in base:
                 prefix = base.split(":", 1)[0].strip(" -,:;")
                 if prefix:
@@ -551,8 +544,8 @@ class SeriesIntelligenceAgent:
         if not labels:
             return {"exact": [], "normalized": [], "fuzzy": []}
 
-        full_label = next((label for label in labels if "international" in label.lower()), labels[0])
-        root_label = next((label for label in labels if "international" not in label.lower()), full_label)
+        full_label = labels[0]
+        root_label = labels[1] if len(labels) > 1 else full_label
         numeric, word = self._book_number_variants(book_number)
 
         exact_variants = [
@@ -567,7 +560,6 @@ class SeriesIntelligenceAgent:
             f"{root_label} #{numeric}",
             f"{root_label} Book {word}",
             f"{full_label} {numeric}",
-            f"{full_label}: (Book {word}) Harmon Cooper",
         ]
 
         normalized_variants = [
@@ -1681,6 +1673,11 @@ class SeriesIntelligenceAgent:
             }
         )
 
+        for date_key in ["publication_date", "release_date"]:
+            raw_value = payload.get(date_key)
+            if isinstance(raw_value, str):
+                payload[date_key] = parse_publication_date(raw_value)
+
         publication_value = normalized.get("publication_date") or selected.get("year")
         if publication_value and "publication_date" not in payload:
             payload["publication_date"] = parse_publication_date(str(publication_value))
@@ -1710,6 +1707,88 @@ class SeriesIntelligenceAgent:
         db.commit()
         db.refresh(book)
         return book
+
+    def _reconcile_from_trusted_series_sources(
+        self,
+        db: Session,
+        series: Series,
+        books: list[Book],
+        *,
+        known_authors: list[str],
+    ) -> dict:
+        author = known_authors[0] if known_authors else None
+        debug_attempt = {
+            "provider": "BookSeriesInOrderSeriesProvider",
+            "attempted": True,
+            "matched": False,
+            "reason": "no-series-page",
+            "urls_checked": [],
+        }
+        trusted_entries = search_bookseriesinorder_series_entries(series.name, author, 50, debug=debug_attempt)
+        attempts = [debug_attempt]
+
+        if not trusted_entries:
+            return {
+                "source": None,
+                "source_attempts": attempts,
+                "candidate_entries": [],
+                "added_books": [],
+                "trusted_total_books": None,
+            }
+
+        existing_numbers = self._existing_numbers(books)
+        added_books: list[dict] = []
+        trusted_total_books = max(
+            [int(float(entry.get("series_position"))) for entry in trusted_entries if entry.get("series_position") is not None]
+            or [0]
+        )
+
+        for entry in trusted_entries:
+            position = entry.get("series_position")
+            try:
+                numeric_position = int(float(position))
+            except (TypeError, ValueError):
+                continue
+            if float(numeric_position) in existing_numbers:
+                continue
+
+            publication_value = entry.get("publication_date") or entry.get("year")
+            publication_date = parse_publication_date(str(publication_value)) if publication_value else None
+            is_published = bool(publication_date and publication_date <= date.today())
+            created = self._persist_book(
+                db,
+                series,
+                numeric_position,
+                {"results": [entry]},
+                is_missing=is_published,
+                known_authors=known_authors,
+            )
+            if not created:
+                continue
+            added_books.append(
+                {
+                    "id": created.id,
+                    "title": created.title,
+                    "author": created.author,
+                    "book_number": created.book_number,
+                    "is_missing": created.is_missing,
+                    "is_upcoming_auto": created.is_upcoming_auto,
+                    "trusted_source": "bookseriesinorder",
+                }
+            )
+
+        if trusted_total_books:
+            series.total_books = max(int(series.total_books or 0), trusted_total_books)
+            db.commit()
+            db.refresh(series)
+
+        return {
+            "source": "bookseriesinorder",
+            "source_attempts": attempts,
+            "candidate_entries": trusted_entries,
+            "added_books": added_books,
+            "trusted_total_books": trusted_total_books,
+        }
 
     def run_series_check(
         self,
@@ -1913,6 +1992,7 @@ class SeriesIntelligenceAgent:
         candidate_numbers = self._candidate_numbers(series, books)
         added_books: list[dict] = []
         candidate_diagnostics: list[dict] = []
+        trusted_reconciliation: dict | None = None
         future_candidates = set(self._future_candidate_numbers(series, books))
         future_empty_streak = 0
         future_scan_exhausted = False
@@ -1990,6 +2070,15 @@ class SeriesIntelligenceAgent:
                 }
             )
 
+        if not added_books:
+            trusted_reconciliation = self._reconcile_from_trusted_series_sources(
+                db,
+                series,
+                self._owned_books(db, series_id),
+                known_authors=known_authors,
+            )
+            added_books.extend(trusted_reconciliation.get("added_books") or [])
+
         if progress_callback is not None:
             progress_callback(
                 {
@@ -2017,6 +2106,7 @@ class SeriesIntelligenceAgent:
                 "added_count": len(added_books),
                 "added_books": added_books,
                 "candidate_diagnostics": candidate_diagnostics,
+                "trusted_series_reconciliation": trusted_reconciliation,
                 "found": bool(added_books),
             },
         )
@@ -2037,6 +2127,7 @@ class SeriesIntelligenceAgent:
             "added_count": len(added_books),
             "added_books": added_books,
             "candidate_diagnostics": candidate_diagnostics,
+            "trusted_series_reconciliation": trusted_reconciliation,
             "has_new_books": series.has_new_books,
             "series_state": series.series_state,
             "last_checked": series.last_checked,

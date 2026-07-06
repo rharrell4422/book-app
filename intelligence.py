@@ -1,6 +1,7 @@
 import os
 import re
 import traceback
+from html import unescape
 from urllib.parse import quote_plus
 from urllib.parse import urlparse
 import logging
@@ -17,6 +18,13 @@ except Exception as e:
 
 
 logger = logging.getLogger(__name__)
+DEFAULT_BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
 OMNIBUS_RANGE_PATTERN = re.compile(r"\bbooks?\s+\d+(?:\.\d+)?\s*[-–]\s*\d+(?:\.\d+)?\b", re.IGNORECASE)
 OMNIBUS_RANGE_CAPTURE_PATTERN = re.compile(
     r"\bbooks?\s+(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\b",
@@ -806,6 +814,12 @@ def _classify_web_source(url: str | None) -> str:
     return "OtherWebSources"
 
 
+def _clean_html_text(value: str | None) -> str:
+    cleaned = unescape(re.sub(r"<[^>]+>", " ", str(value or "")))
+    cleaned = cleaned.replace("\xa0", " ")
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _matches_title_author(title_candidates: list[str], author: str | None, html: str, snippet: str | None) -> bool:
     source_text = f"{html} {snippet or ''}".lower()
     author_ok = True
@@ -864,6 +878,20 @@ def _extract_metadata_from_html(url: str, html: str, fallback_title: str | None,
         ],
         html,
     )
+    asin = _extract_first_match(
+        [
+            r'/dp/([A-Z0-9]{10})',
+            r'"asin"\s*[:=]\s*"([A-Z0-9]{10})"',
+            r'data-asin=["\']([A-Z0-9]{10})["\']',
+        ],
+        url,
+    ) or _extract_first_match(
+        [
+            r'"asin"\s*[:=]\s*"([A-Z0-9]{10})"',
+            r'data-asin=["\']([A-Z0-9]{10})["\']',
+        ],
+        html,
+    )
 
     return {
         "title": extracted_title,
@@ -876,7 +904,50 @@ def _extract_metadata_from_html(url: str, html: str, fallback_title: str | None,
         "year": publication_date,
         "source_url": url,
         "source": source,
+        "asin": asin,
     }
+
+
+def _looks_like_amazon_search_page(url: str, html: str) -> bool:
+    normalized_url = str(url or "")
+    if "/s?" in normalized_url or "?k=" in normalized_url:
+        return True
+
+    search_markers = (
+        'data-component-type="s-search-result"',
+        "data-component-type='s-search-result'",
+        'id="search"',
+        "id='search'",
+        'cel_widget_id="MAIN-SEARCH_RESULTS',
+    )
+    normalized_html = str(html or "")
+    return any(marker in normalized_html for marker in search_markers)
+
+
+def _is_valid_amazon_candidate(result: dict) -> bool:
+    title = re.sub(r"\s+", " ", str(result.get("title") or "")).strip()
+    author = re.sub(r"\s+", " ", str(result.get("author") or "")).strip()
+    publication_date = str(result.get("publication_date") or result.get("year") or "").strip()
+    asin = re.sub(r"\s+", "", str(result.get("asin") or "")).strip()
+
+    if not title or title in {"&nbsp;", "Amazon.com", "Amazon"}:
+        return False
+    if not author:
+        return False
+    if not publication_date:
+        return False
+    if not re.fullmatch(r"[A-Z0-9]{10}", asin):
+        return False
+    return True
+
+
+def _looks_like_amazon_unavailable_page(html: str) -> bool:
+    lowered = str(html or "").lower()
+    return (
+        "sorry! something went wrong!" in lowered
+        or "automated access to amazon data" in lowered
+        or "enter the characters you see below" in lowered
+    )
 
 
 def _search_serpapi_engines(query: str, author: str | None = None, max_results: int = 10, engines: tuple[str, ...] = ("google", "bing", "duckduckgo")) -> list[dict]:
@@ -888,7 +959,7 @@ def _search_serpapi_engines(query: str, author: str | None = None, max_results: 
     if author and author.strip() and author.lower() not in composed_query.lower():
         composed_query = f"{composed_query} {author.strip()}"
 
-    headers = {"User-Agent": "BookApp/1.0 (+https://example.com)"}
+    headers = DEFAULT_BROWSER_HEADERS
     organic_results: list[dict] = []
     for engine in engines:
         params = {
@@ -898,7 +969,7 @@ def _search_serpapi_engines(query: str, author: str | None = None, max_results: 
             "num": max_results,
         }
         try:
-            with httpx.Client(timeout=10.0, headers=headers, trust_env=False) as client:
+            with httpx.Client(timeout=10.0, headers=headers, trust_env=False, follow_redirects=True) as client:
                 response = client.get("https://serpapi.com/search.json", params=params)
                 response.raise_for_status()
                 data = response.json()
@@ -920,7 +991,7 @@ def _search_direct_pages(
     max_results: int = 6,
     debug: dict | None = None,
 ) -> list[dict]:
-    headers = {"User-Agent": "BookApp/1.0 (+https://example.com)"}
+    headers = DEFAULT_BROWSER_HEADERS
     results: list[dict] = []
     if debug is not None:
         debug.setdefault("urls_checked", [])
@@ -933,12 +1004,22 @@ def _search_direct_pages(
         if debug is not None:
             debug["urls_checked"].append(url)
         try:
-            with httpx.Client(timeout=10.0, headers=headers, trust_env=False) as client:
+            with httpx.Client(timeout=10.0, headers=headers, trust_env=False, follow_redirects=True) as client:
                 page_response = client.get(url)
                 if page_response.status_code >= 400:
                     continue
                 html = page_response.text
         except httpx.RequestError:
+            continue
+
+        if source == "amazon" and _looks_like_amazon_unavailable_page(html):
+            if debug is not None:
+                debug["reason"] = "amazon-temporarily-unavailable"
+            continue
+
+        if source == "amazon" and _looks_like_amazon_search_page(url, html):
+            if debug is not None:
+                debug["reason"] = "amazon-search-page"
             continue
 
         preview_title = _extract_first_match(
@@ -969,6 +1050,10 @@ def _search_direct_pages(
             fallback_author=author,
             source=source,
         )
+        if source == "amazon" and not _is_valid_amazon_candidate(metadata):
+            if debug is not None:
+                debug["reason"] = "amazon-invalid-metadata"
+            continue
         results.append(metadata)
         if debug is not None:
             debug["matched"] = True
@@ -1218,20 +1303,31 @@ def search_amazon_products(query: str, author: str | None = None, max_results: i
         composed = f"{composed} {author.strip()}"
 
     search_url = f"https://www.amazon.com/s?k={quote_plus(composed)}"
-    headers = {"User-Agent": "BookApp/1.0 (+https://example.com)"}
+    headers = DEFAULT_BROWSER_HEADERS
     try:
-        with httpx.Client(timeout=10.0, headers=headers, trust_env=False) as client:
+        with httpx.Client(timeout=10.0, headers=headers, trust_env=False, follow_redirects=True) as client:
             response = client.get(search_url)
+            if response.status_code == 503:
+                if debug is not None:
+                    debug["reason"] = "amazon-temporarily-unavailable"
+                return []
             if response.status_code >= 400:
                 return []
             html = response.text
     except httpx.RequestError:
         return []
 
+    if _looks_like_amazon_unavailable_page(html):
+        if debug is not None:
+            debug["reason"] = "amazon-temporarily-unavailable"
+        return []
+
     links = re.findall(r'href=["\'](/[^"\']*/dp/[A-Z0-9]{10}[^"\']*)["\']', html, flags=re.IGNORECASE)
     candidate_urls = [f"https://www.amazon.com{path}" for path in links]
     if not candidate_urls:
-        candidate_urls = [search_url]
+        if debug is not None:
+            debug["reason"] = "amazon-search-no-detail-pages"
+        return []
 
     return _search_direct_pages(candidate_urls, [query], author, "amazon", max_results=max_results, debug=debug)
 
@@ -1339,6 +1435,113 @@ def search_book_database_pages(
         max_results=max_results,
         debug=debug,
     )
+
+
+def _extract_bookseriesinorder_candidate_urls(html: str) -> list[str]:
+    urls: list[str] = []
+    for match in re.findall(r'href=["\'](https://www\.bookseriesinorder\.com/[^"\']+|/[^"\']+)["\']', html, flags=re.IGNORECASE):
+        url = match if match.startswith("http") else f"https://www.bookseriesinorder.com{match}"
+        if "/search/" in url or url.endswith("/feed/rss2/"):
+            continue
+        if url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _extract_bookseriesinorder_series_entries(html: str, series_name: str, author: str | None, source_url: str) -> list[dict]:
+    normalized_series = re.sub(r"\s+", " ", str(series_name or "")).strip().lower()
+    blocks = re.findall(
+        r'<h2[^>]*>(.*?)</h2>\s*(?:<div[^>]*class=["\']ribbon["\'][^>]*>.*?</div>\s*)?<div[^>]*class=["\']list["\'][^>]*>\s*<table[^>]*>(.*?)</table>',
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for heading_html, table_html in blocks:
+        heading = _clean_html_text(heading_html).lower()
+        if normalized_series not in heading or "book" not in heading:
+            continue
+
+        rows = re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, flags=re.IGNORECASE | re.DOTALL)
+        entries: list[dict] = []
+        for index, row_html in enumerate(rows, start=1):
+            title = _clean_html_text(_extract_first_match([r'<td[^>]*class=["\']booktitle["\'][^>]*>(.*?)</td>'], row_html))
+            if not title:
+                continue
+            year = _clean_html_text(_extract_first_match([r'<td[^>]*class=["\']bookyear["\'][^>]*>\((\d{4})\)</td>'], row_html))
+            publication_date = f"{year}-01-01" if re.fullmatch(r"\d{4}", year) else None
+            link = _extract_first_match([r'href=["\']([^"\']+)["\']'], row_html)
+            entries.append(
+                {
+                    "title": title,
+                    "author": author,
+                    "series_name": series_name,
+                    "series_position": index,
+                    "description": None,
+                    "cover_image": None,
+                    "publication_date": publication_date,
+                    "year": publication_date,
+                    "source_url": link or source_url,
+                    "source": "book_database",
+                    "source_label": "BookSeriesInOrder",
+                    "trusted_source": "bookseriesinorder",
+                }
+            )
+        if entries:
+            return entries
+    return []
+
+
+def search_bookseriesinorder_series_entries(
+    series_name: str,
+    author: str | None = None,
+    max_results: int = 25,
+    debug: dict | None = None,
+) -> list[dict]:
+    if not series_name:
+        return []
+
+    queries: list[str] = []
+    if author and author.strip():
+        queries.append(f"{series_name} {author.strip()}")
+        queries.append(author.strip())
+    queries.append(series_name)
+
+    if debug is not None:
+        debug.setdefault("urls_checked", [])
+        debug.setdefault("matched", False)
+        debug.setdefault("reason", "no-series-page")
+
+    candidate_page_urls: list[str] = []
+    for query in queries:
+        search_url = f"https://www.bookseriesinorder.com/?s={quote_plus(query)}"
+        if debug is not None:
+            debug["urls_checked"].append(search_url)
+        try:
+            with httpx.Client(timeout=10.0, headers=DEFAULT_BROWSER_HEADERS, trust_env=False, follow_redirects=True) as client:
+                response = client.get(search_url)
+                if response.status_code >= 400:
+                    continue
+                candidate_page_urls.extend(_extract_bookseriesinorder_candidate_urls(response.text))
+        except httpx.RequestError:
+            continue
+
+    for page_url in list(dict.fromkeys(candidate_page_urls))[:5]:
+        if debug is not None:
+            debug["urls_checked"].append(page_url)
+        try:
+            with httpx.Client(timeout=10.0, headers=DEFAULT_BROWSER_HEADERS, trust_env=False, follow_redirects=True) as client:
+                response = client.get(page_url)
+                if response.status_code >= 400:
+                    continue
+                entries = _extract_bookseriesinorder_series_entries(response.text, series_name, author, page_url)
+                if entries:
+                    if debug is not None:
+                        debug["matched"] = True
+                        debug["reason"] = "matched"
+                    return entries[:max_results]
+        except httpx.RequestError:
+            continue
+
+    return []
 
 
 def search_goodreads_api(query: str, author: str | None = None, max_results: int = 5) -> list[dict]:

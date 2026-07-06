@@ -55,22 +55,19 @@ class SeriesDiscoveryRegressionTest(unittest.TestCase):
         queries = [item["query"] for item in passes]
 
         expected_variants = [
-            'Cherry Blossom Girls International: (Book Seven)',
-            'Cherry Blossom Girls International (Book Seven)',
-            'Cherry Blossom Girls International: Book Seven',
-            'Cherry Blossom Girls International Book Seven',
-            'Cherry Blossom Girls International #7',
             'Cherry Blossom Girls Book 7',
             'Cherry Blossom Girls: Book Seven',
             'Cherry Blossom Girls #7',
             'Cherry Blossom Girls Book Seven',
-            'Cherry Blossom Girls International 7',
-            'Cherry Blossom Girls International Seven',
-            'Cherry Blossom Girls International: (Book Seven) Harmon Cooper',
+            'Cherry Blossom Girls 7',
+            'Cherry Blossom Girls Seven',
+            'Cherry Blossom Girls',
         ]
 
         for variant in expected_variants:
             self.assertTrue(any(variant in query for query in queries), variant)
+
+        self.assertFalse(any("International" in query for query in queries))
 
         self.assertGreaterEqual(len({item["stage"] for item in passes}), 2)
 
@@ -90,6 +87,81 @@ class SeriesDiscoveryRegressionTest(unittest.TestCase):
                 "catalog_fallback",
             ],
         )
+
+    @patch.object(
+        SeriesIntelligenceAgent,
+        "discover",
+        return_value={
+            "query": "Breakthrough: (Book Four)",
+            "results": [],
+            "diagnostics": {
+                "selected_stage": "none",
+                "provider_counts": {"amazon": 0, "book_database": 0, "publisher": 0, "web_read": 0},
+                "rejection_counts": {},
+                "stages": [],
+                "accepted_total": 0,
+                "top_score": 0.0,
+                "passes_completed": 0,
+                "sources_used": [],
+                "current_pass": "none",
+                "publication_date_filter": {
+                    "series_complete": False,
+                    "date_future": False,
+                    "date_missing": True,
+                    "accepted": False,
+                    "reason": "no_candidates",
+                },
+            },
+            "passes_completed": 0,
+            "sources_used": [],
+            "missing_books": [4],
+            "status": "no_hits",
+            "reason": "no-hit-after-all-passes",
+            "discovery_engine": "agent_v2",
+            "discovery_mode": "direct",
+            "agent_pipeline": True,
+        },
+    )
+    @patch(
+        "agents.series_agent.search_bookseriesinorder_series_entries",
+        return_value=[
+            {"title": "Breakthrough", "author": "Michael C. Grumley", "series_name": "Breakthrough", "series_position": 1, "publication_date": "2013-01-01", "source_url": "https://example.com/1", "source": "book_database"},
+            {"title": "Leap", "author": "Michael C. Grumley", "series_name": "Breakthrough", "series_position": 2, "publication_date": "2014-01-01", "source_url": "https://example.com/2", "source": "book_database"},
+            {"title": "Catalyst", "author": "Michael C. Grumley", "series_name": "Breakthrough", "series_position": 3, "publication_date": "2015-01-01", "source_url": "https://example.com/3", "source": "book_database"},
+            {"title": "Ripple", "author": "Michael C. Grumley", "series_name": "Breakthrough", "series_position": 4, "publication_date": "2016-01-01", "source_url": "https://example.com/4", "source": "book_database"},
+            {"title": "Mosaic", "author": "Michael C. Grumley", "series_name": "Breakthrough", "series_position": 5, "publication_date": "2017-01-01", "source_url": "https://example.com/5", "source": "book_database"},
+            {"title": "Echo", "author": "Michael C. Grumley", "series_name": "Breakthrough", "series_position": 6, "publication_date": "2018-01-01", "source_url": "https://example.com/6", "source": "book_database"},
+        ],
+    )
+    def test_trusted_series_reconciliation_adds_missing_books(self, _mock_trusted_source, _mock_discover):
+        series = Series(name="Breakthrough", author="Michael C. Grumley", total_books=3)
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+
+        for number, title in [(1, "Breakthrough"), (2, "Leap"), (3, "Catalyst")]:
+            self.db.add(
+                Book(
+                    title=title,
+                    author="Michael C. Grumley",
+                    series_id=series.id,
+                    series_order=number,
+                    book_number=float(number),
+                    record_status="active",
+                    is_read=True,
+                )
+            )
+        self.db.commit()
+
+        agent = SeriesIntelligenceAgent()
+        result = agent.run_series_check(self.db, series.id)
+
+        self.assertEqual(result["added_count"], 3)
+        self.assertEqual([int(book["book_number"]) for book in result["added_books"]], [4, 5, 6])
+        self.assertEqual(result["trusted_series_reconciliation"]["source"], "bookseriesinorder")
+
+        refreshed = self.db.query(Series).filter(Series.id == series.id).first()
+        self.assertEqual(refreshed.total_books, 6)
 
     def test_manual_delete_recounts_series_aggregates(self):
         # Mark one surviving book as read so read/unread counters are non-zero after delete.

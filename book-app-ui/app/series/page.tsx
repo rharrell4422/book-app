@@ -60,9 +60,12 @@ type SeriesApiRow = {
 };
 
 type SeriesDetailBook = {
+  title?: string | null;
   book_number?: number | null;
   series_order?: number | null;
 };
+
+const OMNIBUS_RANGE_PATTERN = /\bbooks?\s+(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\b/i;
 
 type SeriesDetailApiRow = SeriesApiRow & {
   books?: SeriesDetailBook[];
@@ -197,9 +200,26 @@ function inferMissingNumbersFromBooks(books: SeriesDetailBook[] | undefined): nu
   }
 
   const ownedWholeNumbers = new Set<number>();
+  const omnibusCoveredNumbers = new Set<number>();
   for (const book of books) {
-    const candidate = book?.book_number ?? book?.series_order;
-    if (typeof candidate !== "number" || !Number.isFinite(candidate)) {
+    const omnibusMatch = String(book?.title ?? "").match(OMNIBUS_RANGE_PATTERN);
+    if (omnibusMatch) {
+      const start = Number(omnibusMatch[1]);
+      const end = Number(omnibusMatch[2]);
+      if (Number.isInteger(start) && Number.isInteger(end) && start > 0 && end > 0) {
+        const lower = Math.min(start, end);
+        const upper = Math.max(start, end);
+        for (let number = lower; number <= upper; number += 1) {
+          omnibusCoveredNumbers.add(number);
+        }
+      }
+    }
+
+    const rawCandidate = book?.book_number ?? book?.series_order;
+    const candidate = typeof rawCandidate === "number" && Number.isFinite(rawCandidate)
+      ? rawCandidate
+      : null;
+    if (candidate === null) {
       continue;
     }
     if (!Number.isInteger(candidate) || candidate <= 0) {
@@ -215,7 +235,7 @@ function inferMissingNumbersFromBooks(books: SeriesDetailBook[] | undefined): nu
   const highestOwned = Math.max(...ownedWholeNumbers);
   const missing: number[] = [];
   for (let number = 1; number <= highestOwned; number += 1) {
-    if (!ownedWholeNumbers.has(number)) {
+    if (!ownedWholeNumbers.has(number) && !omnibusCoveredNumbers.has(number)) {
       missing.push(number);
     }
   }
