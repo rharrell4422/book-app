@@ -27,6 +27,7 @@ from intelligence import (
     search_openlibrary,
     search_publisher_pages,
     search_serpapi_web,
+    search_bookseriesinorder_series_entries,
 )
 from models import Book, Series, SeriesCanonicalEntry
 
@@ -200,111 +201,12 @@ class CatalogFallbackProvider(Provider):
                 attempt["matched"] = True
                 attempt["reason"] = "matched"
                 return results, attempt
+            results = search_serpapi_web(title, author, 8)
+            if results:
+                attempt["matched"] = True
+                attempt["reason"] = "matched"
+                return results, attempt
         return [], attempt
-
-
-class GoogleBooksHtmlProvider(Provider):
-    name = "google_books_html"
-
-    def search(self, title_variants, author_variants):
-        attempt = {
-            "provider": "GoogleBooksHtmlProvider",
-            "attempted": True,
-            "matched": False,
-            "reason": "no-google-books-html-hit",
-            "urls_checked": [],
-            "html_title": None,
-            "html_author": None,
-        }
-        author = author_variants[0] if author_variants else None
-        try:
-            results = search_google_books_html(title_variants, author, 8, debug=attempt)
-        except Exception:
-            attempt["reason"] = "exception"
-            return [], attempt
-        print(f"[DISCOVERY_DEBUG] provider={self.name} candidates={len(results)} reason={attempt.get('reason')}")
-        if results:
-            attempt["matched"] = True
-            attempt["reason"] = "matched"
-        return results, attempt
-
-
-class GoodreadsHtmlProvider(Provider):
-    name = "goodreads_html"
-
-    def search(self, title_variants, author_variants):
-        attempt = {
-            "provider": "GoodreadsHtmlProvider",
-            "attempted": True,
-            "matched": False,
-            "reason": "no-goodreads-html-hit",
-            "urls_checked": [],
-            "html_title": None,
-            "html_author": None,
-        }
-        author = author_variants[0] if author_variants else None
-        try:
-            results = search_goodreads_html(title_variants, author, 8, debug=attempt)
-        except Exception:
-            attempt["reason"] = "exception"
-            return [], attempt
-        print(f"[DISCOVERY_DEBUG] provider={self.name} candidates={len(results)} reason={attempt.get('reason')}")
-        if results:
-            attempt["matched"] = True
-            attempt["reason"] = "matched"
-        return results, attempt
-
-
-class OpenLibraryHtmlProvider(Provider):
-    name = "openlibrary_html"
-
-    def search(self, title_variants, author_variants):
-        attempt = {
-            "provider": "OpenLibraryHtmlProvider",
-            "attempted": True,
-            "matched": False,
-            "reason": "no-openlibrary-html-hit",
-            "urls_checked": [],
-            "html_title": None,
-            "html_author": None,
-        }
-        author = author_variants[0] if author_variants else None
-        try:
-            results = search_openlibrary_html(title_variants, author, 8, debug=attempt)
-        except Exception:
-            attempt["reason"] = "exception"
-            return [], attempt
-        print(f"[DISCOVERY_DEBUG] provider={self.name} candidates={len(results)} reason={attempt.get('reason')}")
-        if results:
-            attempt["matched"] = True
-            attempt["reason"] = "matched"
-        return results, attempt
-
-
-class AmazonHtmlProvider(Provider):
-    name = "amazon_html"
-
-    def search(self, title_variants, author_variants):
-        attempt = {
-            "provider": "AmazonHtmlProvider",
-            "attempted": True,
-            "matched": False,
-            "reason": "no-amazon-html-hit",
-            "urls_checked": [],
-            "html_title": None,
-            "html_author": None,
-        }
-        author = author_variants[0] if author_variants else None
-        try:
-            results = search_amazon_html_public(title_variants, author, 8, debug=attempt)
-        except Exception:
-            attempt["reason"] = "exception"
-            return [], attempt
-        print(f"[DISCOVERY_DEBUG] provider={self.name} candidates={len(results)} reason={attempt.get('reason')}")
-        if results:
-            attempt["matched"] = True
-            attempt["reason"] = "matched"
-        return results, attempt
 
 
 class SeriesIntelligenceAgent:
@@ -313,7 +215,7 @@ class SeriesIntelligenceAgent:
     FUTURE_SCAN_MAX_AHEAD = 20
     FUTURE_SCAN_EMPTY_STREAK_STOP = 3
     MIN_FUZZY_SCORE = 0.46
-    DISCOVERY_TIME_BUDGET_SECONDS = 20.0
+    DISCOVERY_TIME_BUDGET_SECONDS = 25.0
     CREDIBLE_DOMAIN_SUFFIXES = (
         "amazon.com",
         "fantasticfiction.com",
@@ -480,13 +382,12 @@ class SeriesIntelligenceAgent:
                 continue
 
             target_number = int(book_number)
-            discovery_result = self._discover_with_fallback(
+            discovery_result = self.discover(
                 series.name,
-                series.id,
                 target_number,
                 known_authors,
-                known_series_max,
-                series_complete,
+                known_series_max=known_series_max,
+                series_complete=series_complete,
             )
             candidate_results = discovery_result.get("results") or []
             if candidate_results:
@@ -529,35 +430,6 @@ class SeriesIntelligenceAgent:
             seen.add(key)
             deduped.append(item)
         return deduped
-
-    def _html_discovery_variants(
-        self,
-        series_name: str,
-        book_number: int,
-        variant_groups: dict[str, list[str]],
-        title_variants: list[str],
-    ) -> list[str]:
-        # Keep HTML pass query variants resilient so provider searches always have usable input.
-        combined = [
-            *(variant_groups.get("normalized") or []),
-            *(variant_groups.get("fuzzy") or []),
-            *title_variants,
-            f"{series_name} Book {book_number}",
-            f"{series_name} #{book_number}",
-        ]
-
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for value in combined:
-            key = str(value or "").strip().lower()
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            deduped.append(str(value).strip())
-
-        if deduped:
-            return deduped
-        return [f"{series_name} Book {book_number}"]
 
     def _provider_plan(self) -> list[tuple[str, list[Provider]]]:
         return [
@@ -762,10 +634,28 @@ class SeriesIntelligenceAgent:
                     "author": primary_author,
                 }
             )
+
+        for variant in variants["fuzzy"][:3]:
             passes.append(
                 {
                     "stage": "catalog_fallback",
-                    "provider": "goodreads",
+                    "provider": "serpapi",
+                    "query": variant,
+                    "author": primary_author,
+                }
+            )
+            passes.append(
+                {
+                    "stage": "catalog_fallback",
+                    "provider": "amazon",
+                    "query": variant,
+                    "author": primary_author,
+                }
+            )
+            passes.append(
+                {
+                    "stage": "catalog_fallback",
+                    "provider": "fantastic_fiction",
                     "query": variant,
                     "author": primary_author,
                 }
@@ -788,23 +678,21 @@ class SeriesIntelligenceAgent:
             return search_google_books(query, author, 8)
         if provider == "openlibrary":
             return search_openlibrary(query, author, 8)
-        if provider == "goodreads":
-            return search_goodreads_api(query, author, 8)
+        if provider == "serpapi":
+            return search_serpapi_web(query, author, 10)
+        if provider == "amazon":
+            return search_amazon_products(query, author, 10)
+        if provider == "fantastic_fiction":
+            return search_fantastic_fiction(query, author, 10)
         return []
 
     def _source_label(self, source: str | None) -> str:
         source_key = str(source or "").strip().lower()
         if source_key == "google_books":
             return "GoogleBooks"
-        if source_key == "google_books_html":
-            return "GoogleBooks"
         if source_key == "openlibrary":
             return "OpenLibrary"
-        if source_key == "openlibrary_html":
-            return "OpenLibrary"
         if source_key == "amazon":
-            return "Amazon"
-        if source_key == "amazon_html":
             return "Amazon"
         if source_key == "fantastic_fiction":
             return "FantasticFiction"
@@ -821,8 +709,6 @@ class SeriesIntelligenceAgent:
         if source_key == "book_database":
             return "BookDatabase"
         if source_key == "goodreads":
-            return "Goodreads"
-        if source_key == "goodreads_html":
             return "Goodreads"
         return source_key or "unknown"
 
@@ -844,8 +730,6 @@ class SeriesIntelligenceAgent:
             "publication_date": record.get("publication_date") or record.get("year"),
             "year": record.get("year") or record.get("publication_date"),
             "source": source,
-            "isbn": record.get("isbn"),
-            "edition": record.get("edition"),
         }
 
     def _normalized_identity_key(self, result: dict) -> tuple[str, str, str]:
@@ -886,14 +770,10 @@ class SeriesIntelligenceAgent:
         source_key = str(result.get("source") or "").strip().lower()
         if source_key in {
             "amazon",
-            "amazon_html",
             "fantastic_fiction",
             "google_books",
-            "google_books_html",
             "openlibrary",
-            "openlibrary_html",
             "goodreads",
-            "goodreads_html",
             "publisher",
             "book_database",
             "author_site",
@@ -1170,70 +1050,6 @@ class SeriesIntelligenceAgent:
         ]
         return fused
 
-    def _empty_discovery_result(self, series_name: str, book_number: int, reason: str, error: str | None = None) -> dict:
-        diagnostics = {
-            "selected_stage": "none",
-            "provider_counts": {},
-            "rejection_counts": {},
-            "stages": [],
-            "provider_order": [],
-            "accepted_total": 0,
-            "top_score": 0.0,
-            "timed_out": False,
-            "elapsed_seconds": 0.0,
-            "passes_completed": 0,
-            "sources_used": [],
-            "current_pass": "none",
-            "publication_date_filter": {
-                "series_complete": False,
-                "date_future": False,
-                "date_missing": True,
-                "accepted": False,
-                "reason": "no_candidates",
-            },
-        }
-        if error:
-            diagnostics["provider_error"] = error
-        return {
-            "query": f"{series_name} Book {book_number}",
-            "results": [],
-            "diagnostics": diagnostics,
-            "passes_completed": 0,
-            "sources_used": [],
-            "missing_books": [book_number],
-            "status": "no_hits",
-            "reason": reason,
-            "discovery_engine": "agent_v2",
-            "discovery_mode": "error",
-            "provider_attempt_order": [],
-            "provider_attempts": [],
-            "provider_selected": None,
-            "final_reason": reason,
-            "agent_pipeline": True,
-        }
-
-    def _discover_with_fallback(
-        self,
-        series_name: str,
-        series_id: int | None,
-        book_number: int,
-        known_authors: list[str],
-        known_series_max: int | None,
-        series_complete: bool,
-    ) -> dict:
-        try:
-            return self.discover(
-                series_name,
-                book_number,
-                known_authors,
-                known_series_max=known_series_max,
-                series_complete=series_complete,
-                series_id=series_id,
-            )
-        except Exception as exc:
-            logger.exception("[DISCOVERY] Provider pass failed for series=%s book=%s", series_name, book_number)
-            return self._empty_discovery_result(series_name, book_number, "provider-exception", str(exc))
-
     def discover(
         self,
         series_name: str,
@@ -1241,45 +1057,14 @@ class SeriesIntelligenceAgent:
         author: str | list[str] | None = None,
         known_series_max: int | None = None,
         series_complete: bool = False,
-        series_id: int | None = None,
     ) -> dict:
         book_number = int(book_number or 1)
         known_authors = self._resolve_known_authors(author)
         logger.info("[DISCOVERY] Using SeriesIntelligenceAgent (agent_v2)")
 
-        variant_groups = self._title_search_variants(series_name, book_number)
         title_variants = self._all_title_variants(series_name, book_number)
-        html_title_variants = self._html_discovery_variants(series_name, book_number, variant_groups, title_variants)
-        direct_providers = [
-            AmazonProvider(),
-            FantasticFictionProvider(),
-            AuthorSiteProvider(),
-            PublisherProvider(),
-            BookDatabaseProvider(),
-        ]
-        html_providers = [
-            AmazonProvider(),
-            FantasticFictionProvider(),
-            AuthorSiteProvider(),
-            PublisherProvider(),
-            BookDatabaseProvider(),
-            WebReadProvider(),
-        ]
-        print(f"[DISCOVERY_DEBUG] HTML_PROVIDER_LIST providers={[provider.name for provider in html_providers]}")
-        pass_plan: list[tuple[str, list[str], list[Provider]]] = [
-            ("exact_match", variant_groups.get("exact") or title_variants, direct_providers),
-            ("canonical_match", variant_groups.get("normalized") or title_variants, direct_providers),
-            ("fuzzy_match", variant_groups.get("fuzzy") or title_variants, [*direct_providers, WebReadProvider()]),
-            ("fallback_pass", (variant_groups.get("normalized") or variant_groups.get("fuzzy") or title_variants), [CatalogFallbackProvider()]),
-            ("html_discovery_pass", html_title_variants, html_providers),
-        ]
-
-        provider_attempt_order: list[str] = []
-        for _, _, providers in pass_plan:
-            for provider in providers:
-                provider_name = provider.__class__.__name__
-                if provider_name not in provider_attempt_order:
-                    provider_attempt_order.append(provider_name)
+        provider_plan = self._provider_plan()
+        provider_attempt_order = [provider.__class__.__name__ for _, providers in provider_plan for provider in providers]
 
         provider_counts = {
             "amazon": 0,
@@ -1289,10 +1074,6 @@ class SeriesIntelligenceAgent:
             "book_database": 0,
             "web_read": 0,
             "catalog_fallback": 0,
-            "google_books_html": 0,
-            "goodreads_html": 0,
-            "openlibrary_html": 0,
-            "amazon_html": 0,
             "google": 0,
             "openlibrary": 0,
             "serpapi": 0,
@@ -1305,7 +1086,7 @@ class SeriesIntelligenceAgent:
         sources_used: set[str] = set()
         started_at = monotonic()
         timed_out = False
-        selected_discovery_mode = "exact_match"
+        selected_discovery_mode = "web_read"
         provider_selected: str | None = None
 
         provider_attempts_by_name: dict[str, dict] = {}
@@ -1330,16 +1111,6 @@ class SeriesIntelligenceAgent:
                     "matched": False,
                     "reason": "not-attempted",
                 }
-            elif provider_name in {"GoogleBooksHtmlProvider", "GoodreadsHtmlProvider", "OpenLibraryHtmlProvider", "AmazonHtmlProvider"}:
-                provider_attempts_by_name[provider_name] = {
-                    "provider": provider_name,
-                    "attempted": False,
-                    "matched": False,
-                    "reason": "not-attempted",
-                    "urls_checked": [],
-                    "html_title": None,
-                    "html_author": None,
-                }
             else:
                 provider_attempts_by_name[provider_name] = {
                     "provider": provider_name,
@@ -1350,94 +1121,21 @@ class SeriesIntelligenceAgent:
                     "html_title": None,
                     "html_author": None,
                 }
-
+#
         pass_index = 0
         stop_discovery = False
-        for pass_name, pass_title_variants, providers in pass_plan:
-            is_html_discovery_pass = str(pass_name).strip() == "html_discovery_pass"
-            active_providers = list(providers or [])
-            if is_html_discovery_pass and not active_providers:
-                # Prevent a no-op html pass if provider list is unexpectedly empty at runtime.
-                active_providers = [
-                    AmazonProvider(),
-                    FantasticFictionProvider(),
-                    AuthorSiteProvider(),
-                    PublisherProvider(),
-                    BookDatabaseProvider(),
-                    WebReadProvider(),
-                ]
-            if is_html_discovery_pass:
-                print(
-                    f"[DISCOVERY_DEBUG] HTML_GUARD_VALUE "
-                    f"stop_discovery={stop_discovery} "
-                    f"series_id={series_id} book_number={book_number}"
-                )
-                print(
-                    f"[DISCOVERY_DEBUG] HTML_PROVIDER_LOOP_GUARD "
-                    f"condition='stop_discovery' value={stop_discovery} "
-                    f"series_id={series_id} book_number={book_number}"
-                )
-                print(
-                    f"[DISCOVERY_DEBUG] HTML_GUARD_CHECK "
-                    f"condition='if stop_discovery:' result={bool(stop_discovery)} "
-                    f"series_id={series_id} book_number={book_number}"
-                )
-            if stop_discovery and not is_html_discovery_pass:
-                if is_html_discovery_pass:
-                    print(
-                        f"[DISCOVERY_DEBUG] HTML_GUARD_BLOCKED "
-                        f"series_id={series_id} book_number={book_number}"
-                    )
+        for tier_name, providers in provider_plan:
+            if stop_discovery:
                 break
-            if is_html_discovery_pass:
-                print(
-                    f"[DISCOVERY_DEBUG] HTML_PROVIDER_LOOP_ENTRY "
-                    f"series_id={series_id} book_number={book_number}"
-                )
-            for provider in active_providers:
-                if is_html_discovery_pass:
-                    print(
-                        f"[DISCOVERY_DEBUG] HTML_PROVIDER_LOOP provider_name={provider.name} "
-                        f"provider_type={getattr(provider, 'type', None)} series_id={series_id} book_number={book_number}"
-                    )
-                    print(
-                        f"[DISCOVERY_DEBUG] HTML_PROVIDER_ATTRIBUTES "
-                        f"name={provider.name} "
-                        f"type={getattr(provider, 'type', None)} "
-                        f"disabled={getattr(provider, 'disabled', None)} "
-                        f"supports_html={getattr(provider, 'supports_html', None)} "
-                        f"timeout_exceeded={getattr(provider, 'timeout_exceeded', None)} "
-                        f"html_enabled={getattr(provider, 'html_enabled', None)}"
-                    )
+            for provider in providers:
                 pass_index += 1
-                if monotonic() - started_at >= self.DISCOVERY_TIME_BUDGET_SECONDS and not is_html_discovery_pass:
-                    if is_html_discovery_pass:
-                        print(
-                            f"[DISCOVERY_DEBUG] HTML_PROVIDER_SKIPPED provider_name={provider.name} "
-                            f"reason='monotonic() - started_at >= self.DISCOVERY_TIME_BUDGET_SECONDS' "
-                            f"series_id={series_id} book_number={book_number}"
-                        )
+                if monotonic() - started_at >= self.DISCOVERY_TIME_BUDGET_SECONDS:
                     timed_out = True
                     stop_discovery = True
                     break
 
-                logger.info("[DISCOVERY] Pass %s: %s/%s (%s)", pass_index, pass_name, provider.name, datetime.utcnow().isoformat())
-                if is_html_discovery_pass:
-                    print(f"[DISCOVERY_DEBUG] HTML_SEARCH_CALL series_id={series_id} book_number={book_number}")
-                try:
-                    raw_results, attempt_info = provider.search(pass_title_variants, known_authors)
-                except Exception as exc:
-                    logger.exception("[DISCOVERY] Provider %s failed in %s", provider.__class__.__name__, pass_name)
-                    raw_results = []
-                    attempt_info = {
-                        "provider": provider.__class__.__name__,
-                        "attempted": True,
-                        "matched": False,
-                        "reason": f"exception:{exc.__class__.__name__}",
-                        "urls_checked": [],
-                    }
-                if is_html_discovery_pass:
-                    print(f"[DISCOVERY_DEBUG] HTML_SEARCH_RETURN series_id={series_id} book_number={book_number}")
+                logger.info("[DISCOVERY] Pass %s: %s/%s (%s)", pass_index, tier_name, provider.name, datetime.utcnow().isoformat())
+                raw_results, attempt_info = provider.search(title_variants, known_authors)
                 provider_attempts_by_name[attempt_info["provider"]] = attempt_info
                 provider_counts[provider.name] = provider_counts.get(provider.name, 0) + len(raw_results)
                 logger.info("[DISCOVERY] Source: %s", self._source_label(provider.name))
@@ -1455,22 +1153,8 @@ class SeriesIntelligenceAgent:
                         provider_counts["goodreads"] += 1
 
                 accepted_count = 0
-                first_query = pass_title_variants[0] if pass_title_variants else ""
-                fallback_source_url = None
-                if isinstance(attempt_info, dict):
-                    urls_checked = attempt_info.get("urls_checked")
-                    urls_fetched = attempt_info.get("urls_fetched")
-                    if isinstance(urls_checked, list) and urls_checked:
-                        fallback_source_url = urls_checked[0]
-                    elif isinstance(urls_fetched, list) and urls_fetched:
-                        fallback_source_url = urls_fetched[0]
+                first_query = title_variants[0] if title_variants else ""
                 for result in raw_results:
-                    if not result.get("title"):
-                        result["title"] = first_query or f"{series_name} Book {book_number}"
-                    if not result.get("author") and known_authors:
-                        result["author"] = known_authors[0]
-                    if not result.get("source_url") and fallback_source_url:
-                        result["source_url"] = fallback_source_url
                     result = self._normalize_provider_record(result, provider.name)
                     key = (
                         str(result.get("title") or "").strip().lower(),
@@ -1503,22 +1187,17 @@ class SeriesIntelligenceAgent:
 
                 stages.append(
                     {
-                        "stage": pass_name,
+                        "stage": tier_name,
                         "provider": provider.name,
-                        "query": first_query,
+                        "query": title_variants[0] if title_variants else "",
                         "raw_count": len(raw_results),
                         "accepted_count": accepted_count,
                     }
                 )
 
                 if accepted_count > 0:
-                    selected_discovery_mode = pass_name
+                    selected_discovery_mode = tier_name
                     provider_selected = provider.__class__.__name__
-            if is_html_discovery_pass:
-                print(
-                    f"[DISCOVERY_DEBUG] HTML_PROVIDER_LOOP_EXIT "
-                    f"series_id={series_id} book_number={book_number}"
-                )
 
         ranked = sorted(all_candidates, key=lambda item: float(item.get("_score") or 0.0), reverse=True)
         filtered_candidates = self._apply_false_positive_filter(
@@ -1550,21 +1229,14 @@ class SeriesIntelligenceAgent:
                 "book_database": "BookDatabaseProvider",
                 "web_read": "WebReadProvider",
                 "catalog_fallback": "CatalogFallbackProvider",
-                "google_books_html": "GoogleBooksHtmlProvider",
-                "goodreads_html": "GoodreadsHtmlProvider",
-                "openlibrary_html": "OpenLibraryHtmlProvider",
-                "amazon_html": "AmazonHtmlProvider",
             }.get(str(first.get("_provider") or ""), provider_selected)
-            selected_discovery_mode = next(
-                (stage["stage"] for stage in stages if int(stage.get("accepted_count") or 0) > 0),
-                selected_discovery_mode,
-            )
+            selected_discovery_mode = next((stage["stage"] for stage in stages if stage.get("provider") == first.get("_provider")), selected_discovery_mode)
 
         fused = self._fuse_metadata(filtered_candidates, book_number, series_name)
         response_results = [fused] if fused else []
 
         diagnostics = {
-            "selected_stage": selected_discovery_mode if filtered_candidates else "none",
+            "selected_stage": stages[0]["stage"] if filtered_candidates and stages else "none",
             "provider_counts": provider_counts,
             "rejection_counts": rejection_counts,
             "stages": stages,
@@ -1887,13 +1559,12 @@ class SeriesIntelligenceAgent:
         known_series_max: int | None,
         series_complete: bool,
     ) -> tuple[Book | None, dict]:
-        suggestion = self._discover_with_fallback(
+        suggestion = self.discover(
             series.name,
-            series.id,
             int(canonical_entry.book_number),
             known_authors,
-            known_series_max,
-            series_complete,
+            known_series_max=known_series_max,
+            series_complete=series_complete,
         )
         diagnostics = suggestion.get("diagnostics") or {}
         results = suggestion.get("results") or []
@@ -2045,70 +1716,78 @@ class SeriesIntelligenceAgent:
         *,
         known_authors: list[str],
     ) -> dict:
-        return {
-            "source": None,
-            "source_attempts": [],
-            "candidate_entries": [],
-            "added_books": [],
-            "trusted_total_books": None,
+        author = known_authors[0] if known_authors else None
+        debug_attempt = {
+            "provider": "BookSeriesInOrderSeriesProvider",
+            "attempted": True,
+            "matched": False,
+            "reason": "no-series-page",
+            "urls_checked": [],
         }
+        trusted_entries = search_bookseriesinorder_series_entries(series.name, author, 50, debug=debug_attempt)
+        attempts = [debug_attempt]
 
-    def _normalize_missing_books(self, missing_books: list[str] | list[int] | list[float] | None) -> list[str]:
-        normalized: list[str] = []
-        for value in missing_books or []:
-            text = str(value).strip()
-            if text:
-                normalized.append(text)
-        return normalized
+        if not trusted_entries:
+            return {
+                "source": None,
+                "source_attempts": attempts,
+                "candidate_entries": [],
+                "added_books": [],
+                "trusted_total_books": None,
+            }
 
-    def _build_series_check_result(
-        self,
-        *,
-        series: Series,
-        highest_owned_book_number: float | None,
-        candidate_numbers: list[int] | list[float],
-        added_books: list[dict],
-        candidate_diagnostics: list[dict] | None = None,
-        trusted_series_reconciliation: dict | None = None,
-        canonical_missing_entries: list[dict] | None = None,
-        canonical_found_entries: list[dict] | None = None,
-        canonical_upcoming_entries: list[dict] | None = None,
-        canonical_rejected_entries: list[dict] | None = None,
-        status: str = "no_hits",
-        reason: str | None = None,
-        discovery_mode: str | None = None,
-    ) -> dict:
-        found = bool(added_books)
-        no_new_books = not found
+        existing_numbers = self._existing_numbers(books)
+        added_books: list[dict] = []
+        trusted_total_books = max(
+            [int(float(entry.get("series_position"))) for entry in trusted_entries if entry.get("series_position") is not None]
+            or [0]
+        )
+
+        for entry in trusted_entries:
+            position = entry.get("series_position")
+            try:
+                numeric_position = int(float(position))
+            except (TypeError, ValueError):
+                continue
+            if float(numeric_position) in existing_numbers:
+                continue
+
+            publication_value = entry.get("publication_date") or entry.get("year")
+            publication_date = parse_publication_date(str(publication_value)) if publication_value else None
+            is_published = bool(publication_date and publication_date <= date.today())
+            created = self._persist_book(
+                db,
+                series,
+                numeric_position,
+                {"results": [entry]},
+                is_missing=is_published,
+                known_authors=known_authors,
+            )
+            if not created:
+                continue
+            added_books.append(
+                {
+                    "id": created.id,
+                    "title": created.title,
+                    "author": created.author,
+                    "book_number": created.book_number,
+                    "is_missing": created.is_missing,
+                    "is_upcoming_auto": created.is_upcoming_auto,
+                    "trusted_source": "bookseriesinorder",
+                }
+            )
+
+        if trusted_total_books:
+            series.total_books = max(int(series.total_books or 0), trusted_total_books)
+            db.commit()
+            db.refresh(series)
 
         return {
-            "series_id": series.id,
-            "series_name": series.name,
-            "highest_owned_book_number": highest_owned_book_number,
-            "candidate_numbers": candidate_numbers,
-            "added_count": len(added_books),
+            "source": "bookseriesinorder",
+            "source_attempts": attempts,
+            "candidate_entries": trusted_entries,
             "added_books": added_books,
-            "found_books": added_books,
-            "candidate_diagnostics": candidate_diagnostics or [],
-            "trusted_series_reconciliation": trusted_series_reconciliation,
-            "canonical_missing_entries": canonical_missing_entries,
-            "canonical_found_entries": canonical_found_entries,
-            "canonical_upcoming_entries": canonical_upcoming_entries,
-            "canonical_rejected_entries": canonical_rejected_entries,
-            "complete": True,
-            "status": status,
-            "no_new_books": no_new_books,
-            "reason": reason,
-            "discovery_mode": discovery_mode,
-            "has_new_books": series.has_new_books,
-            "series_state": series.series_state,
-            "last_checked": series.last_checked,
-            "next_unread_book_number": series.next_unread_book_number,
-            "next_upcoming_book_number": series.next_upcoming_book_number,
-            "missing_books": self._normalize_missing_books(series.missing_books),
-            "found": found,
-            "discovery_engine": "agent_v2",
-            "agent_pipeline": True,
+            "trusted_total_books": trusted_total_books,
         }
 
     def run_series_check(
@@ -2123,12 +1802,7 @@ class SeriesIntelligenceAgent:
                 "series_id": None,
                 "found": False,
                 "added_books": [],
-                "found_books": [],
                 "added_count": 0,
-                "no_new_books": True,
-                "status": "no_hits",
-                "complete": True,
-                "reason": "series-not-found",
                 "has_new_books": False,
                 "discovery_engine": "agent_v2",
                 "agent_pipeline": True,
@@ -2155,21 +1829,11 @@ class SeriesIntelligenceAgent:
             candidate_diagnostics: list[dict] = []
 
             if progress_callback is not None:
-                progress_callback({
-                    "total": len(canonical_entries),
-                    "completed": 0,
-                    "current_book_number": None,
-                    "current_pass": "canonical-sync",
-                })
+                progress_callback({"total": len(canonical_entries), "completed": 0, "current_book_number": None})
 
             for index, entry in enumerate(canonical_entries, start=1):
                 if progress_callback is not None:
-                    progress_callback({
-                        "total": len(canonical_entries),
-                        "completed": index - 1,
-                        "current_book_number": entry.book_number,
-                        "current_pass": "canonical-sync",
-                    })
+                    progress_callback({"total": len(canonical_entries), "completed": index - 1, "current_book_number": entry.book_number})
 
                 entry_payload = {
                     "book_number": entry.book_number,
@@ -2199,20 +1863,6 @@ class SeriesIntelligenceAgent:
                     series_complete=series_complete,
                 )
                 candidate_diagnostics.append(diagnostic)
-                if progress_callback is not None:
-                    progress_callback({
-                        "total": len(canonical_entries),
-                        "completed": index - 1,
-                        "current_book_number": entry.book_number,
-                        "current_pass": (diagnostic.get("diagnostics") or {}).get("current_pass") or "canonical-sync",
-                    })
-                    for stage in (diagnostic.get("diagnostics") or {}).get("stages") or []:
-                        progress_callback({
-                            "total": len(canonical_entries),
-                            "completed": index - 1,
-                            "current_book_number": entry.book_number,
-                            "current_pass": stage.get("stage") or "canonical-sync",
-                        })
                 if book and diagnostic.get("was_added"):
                     added_books.append(
                         {
@@ -2258,12 +1908,7 @@ class SeriesIntelligenceAgent:
             )
 
             if progress_callback is not None:
-                progress_callback({
-                    "total": len(canonical_entries),
-                    "completed": len(canonical_entries),
-                    "current_book_number": None,
-                    "current_pass": None,
-                })
+                progress_callback({"total": len(canonical_entries), "completed": len(canonical_entries), "current_book_number": None})
 
             self._strict_post_discovery_cleanup(
                 db,
@@ -2275,39 +1920,28 @@ class SeriesIntelligenceAgent:
 
             recount_series_aggregates_for_series(db, series.id)
 
-            print(
-                f"[DISCOVERY_DEBUG] canonical-sync series_id={series.id} "
-                f"added={len(added_books)} missing={len(missing_entries)} upcoming={len(upcoming_entries)} "
-                f"rejected={len(rejected_entries)} found={len(found_entries)}"
-            )
-            print(
-                "[DISCOVERY_DEBUG] canonical-sync diagnostics "
-                f"series_id={series.id} reasons={[
-                    {
-                        'book_number': item.get('book_number'),
-                        'reason': item.get('reason'),
-                        'selected_stage': (item.get('diagnostics') or {}).get('selected_stage'),
-                        'accepted_total': (item.get('diagnostics') or {}).get('accepted_total'),
-                        'top_score': (item.get('diagnostics') or {}).get('top_score'),
-                    }
-                    for item in candidate_diagnostics
-                ]}"
-            )
-
-            return self._build_series_check_result(
-                series=series,
-                highest_owned_book_number=highest_owned,
-                candidate_numbers=[entry.book_number for entry in canonical_entries],
-                added_books=added_books,
-                candidate_diagnostics=candidate_diagnostics,
-                canonical_missing_entries=missing_entries,
-                canonical_found_entries=found_entries,
-                canonical_upcoming_entries=upcoming_entries,
-                canonical_rejected_entries=rejected_entries,
-                status="complete" if added_books else "no_hits",
-                reason=None if added_books else "no-hit-after-all-passes",
-                discovery_mode="canonical_sync",
-            )
+            return {
+                "series_id": series.id,
+                "series_name": series.name,
+                "highest_owned_book_number": highest_owned,
+                "candidate_numbers": [entry.book_number for entry in canonical_entries],
+                "added_count": len(added_books),
+                "added_books": added_books,
+                "candidate_diagnostics": candidate_diagnostics,
+                "canonical_missing_entries": missing_entries,
+                "canonical_found_entries": found_entries,
+                "canonical_upcoming_entries": upcoming_entries,
+                "canonical_rejected_entries": rejected_entries,
+                "has_new_books": series.has_new_books,
+                "series_state": series.series_state,
+                "last_checked": series.last_checked,
+                "next_unread_book_number": series.next_unread_book_number,
+                "next_upcoming_book_number": series.next_upcoming_book_number,
+                "missing_books": series.missing_books,
+                "found": bool(added_books),
+                "discovery_engine": "agent_v2",
+                "agent_pipeline": True,
+            }
 
         highest_owned = self._highest_owned_book_number(books)
         known_authors = self._series_author_candidates(series, books)
@@ -2337,15 +1971,23 @@ class SeriesIntelligenceAgent:
                 series_complete=series_complete,
             )
             recount_series_aggregates_for_series(db, series.id)
-            return self._build_series_check_result(
-                series=series,
-                highest_owned_book_number=highest_owned,
-                candidate_numbers=[],
-                added_books=[],
-                status="no_hits",
-                reason="missing-author-context",
-                discovery_mode="no_author_context",
-            )
+            return {
+                "series_id": series.id,
+                "series_name": series.name,
+                "highest_owned_book_number": highest_owned,
+                "candidate_numbers": [],
+                "added_count": 0,
+                "added_books": [],
+                "has_new_books": series.has_new_books,
+                "series_state": series.series_state,
+                "last_checked": series.last_checked,
+                "next_unread_book_number": series.next_unread_book_number,
+                "next_upcoming_book_number": series.next_upcoming_book_number,
+                "missing_books": series.missing_books,
+                "found": False,
+                "discovery_engine": "agent_v2",
+                "agent_pipeline": True,
+            }
 
         candidate_numbers = self._candidate_numbers(series, books)
         added_books: list[dict] = []
@@ -2379,26 +2021,15 @@ class SeriesIntelligenceAgent:
                 )
 
             is_missing = highest_owned is not None and book_number <= int(highest_owned)
-            print(f"[DISCOVERY_DEBUG] HTML_STAGE_ENTER series_id={series.id} book_number={book_number}")
-            suggestion = self._discover_with_fallback(
+            suggestion = self.discover(
                 series.name,
-                series.id,
                 book_number,
                 known_authors,
-                known_series_max,
-                series_complete,
+                known_series_max=known_series_max,
+                series_complete=series_complete,
             )
             if progress_callback is not None:
                 diagnostics = suggestion.get("diagnostics") or {}
-                for stage in diagnostics.get("stages") or []:
-                    progress_callback(
-                        {
-                            "total": len(candidate_numbers),
-                            "completed": index - 1,
-                            "current_book_number": book_number,
-                            "current_pass": stage.get("stage") or diagnostics.get("current_pass") or "fuzzy-with-author-correlation",
-                        }
-                    )
                 progress_callback(
                     {
                         "total": len(candidate_numbers),
@@ -2488,40 +2119,31 @@ class SeriesIntelligenceAgent:
         )
         recount_series_aggregates_for_series(db, series.id)
 
-        print(
-            f"[DISCOVERY_DEBUG] series-check summary series_id={series.id} "
-            f"added={len(added_books)} candidate_numbers={candidate_numbers} "
-            f"missing_books={series.missing_books} trusted_source={(trusted_reconciliation or {}).get('source')}"
-        )
-        print(
-            "[DISCOVERY_DEBUG] series-check diagnostics "
-            f"series_id={series.id} candidate_diagnostics={[
-                {
-                    'book_number': item.get('book_number'),
-                    'reason': item.get('reason'),
-                    'selected_stage': (item.get('diagnostics') or {}).get('selected_stage'),
-                    'accepted_total': (item.get('diagnostics') or {}).get('accepted_total'),
-                    'top_score': (item.get('diagnostics') or {}).get('top_score'),
-                    'provider_counts': (item.get('diagnostics') or {}).get('provider_counts'),
-                    'rejection_counts': (item.get('diagnostics') or {}).get('rejection_counts'),
-                }
-                for item in candidate_diagnostics
-            ]}"
-        )
-
-        return self._build_series_check_result(
-            series=series,
-            highest_owned_book_number=highest_owned,
-            candidate_numbers=candidate_numbers,
-            added_books=added_books,
-            candidate_diagnostics=candidate_diagnostics,
-            trusted_series_reconciliation=trusted_reconciliation,
-            status="complete" if added_books else "no_hits",
-            reason=None if added_books else "no-hit-after-all-passes",
-            discovery_mode="agent_discovery",
-        )
+        return {
+            "series_id": series.id,
+            "series_name": series.name,
+            "highest_owned_book_number": highest_owned,
+            "candidate_numbers": candidate_numbers,
+            "added_count": len(added_books),
+            "added_books": added_books,
+            "candidate_diagnostics": candidate_diagnostics,
+            "trusted_series_reconciliation": trusted_reconciliation,
+            "has_new_books": series.has_new_books,
+            "series_state": series.series_state,
+            "last_checked": series.last_checked,
+            "next_unread_book_number": series.next_unread_book_number,
+            "next_upcoming_book_number": series.next_upcoming_book_number,
+            "missing_books": series.missing_books,
+            "found": bool(added_books),
+            "discovery_engine": "agent_v2",
+            "agent_pipeline": True,
+        }
 
     def run_daily_scan(self, db: Session) -> list[dict]:
-        # Batch scanning is intentionally disabled to keep discovery entrypoints
-        # single-series only. Route-triggered jobs must call run_series_check().
-        return []
+        series_list = db.query(Series).filter(Series.is_finished.is_(False)).all()
+        results: list[dict] = []
+        for series in series_list:
+            if bool(series.has_upcoming_books):
+                continue
+            results.append(self.run_series_check(db, series.id))
+        return results

@@ -686,10 +686,9 @@ export default function BooksClient() {
       const statusB = normalizeText(getBookStatus(b));
 
       const priority = (status: string) => {
-        if (status === "available") return 0;
-        if (status === "upcoming") return 1;
-        if (status === "read") return 2;
-        return 3;
+        if (status === "upcoming") return 0;
+        if (status === "read") return 1;
+        return 2;
       };
 
       const priorityDelta = priority(statusA) - priority(statusB);
@@ -728,10 +727,9 @@ export default function BooksClient() {
           const statusA = normalizeText(getBookStatus(a));
           const statusB = normalizeText(getBookStatus(b));
           const priority = (status: string) => {
-            if (status === "available") return 0;
-            if (status === "upcoming") return 1;
-            if (status === "read") return 2;
-            return 3;
+            if (status === "upcoming") return 0;
+            if (status === "read") return 1;
+            return 2;
           };
 
           const priorityDelta = priority(statusA) - priority(statusB);

@@ -27,6 +27,8 @@ from intelligence import (
     search_openlibrary,
     search_publisher_pages,
     search_serpapi_web,
+    search_openlibrary_html,
+    search_amazon_html_public,
 )
 from models import Book, Series, SeriesCanonicalEntry
 
@@ -313,7 +315,7 @@ class SeriesIntelligenceAgent:
     FUTURE_SCAN_MAX_AHEAD = 20
     FUTURE_SCAN_EMPTY_STREAK_STOP = 3
     MIN_FUZZY_SCORE = 0.46
-    DISCOVERY_TIME_BUDGET_SECONDS = 20.0
+    DISCOVERY_TIME_BUDGET_SECONDS = 25.0
     CREDIBLE_DOMAIN_SUFFIXES = (
         "amazon.com",
         "fantasticfiction.com",
@@ -529,35 +531,6 @@ class SeriesIntelligenceAgent:
             seen.add(key)
             deduped.append(item)
         return deduped
-
-    def _html_discovery_variants(
-        self,
-        series_name: str,
-        book_number: int,
-        variant_groups: dict[str, list[str]],
-        title_variants: list[str],
-    ) -> list[str]:
-        # Keep HTML pass query variants resilient so provider searches always have usable input.
-        combined = [
-            *(variant_groups.get("normalized") or []),
-            *(variant_groups.get("fuzzy") or []),
-            *title_variants,
-            f"{series_name} Book {book_number}",
-            f"{series_name} #{book_number}",
-        ]
-
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for value in combined:
-            key = str(value or "").strip().lower()
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            deduped.append(str(value).strip())
-
-        if deduped:
-            return deduped
-        return [f"{series_name} Book {book_number}"]
 
     def _provider_plan(self) -> list[tuple[str, list[Provider]]]:
         return [
@@ -1249,7 +1222,6 @@ class SeriesIntelligenceAgent:
 
         variant_groups = self._title_search_variants(series_name, book_number)
         title_variants = self._all_title_variants(series_name, book_number)
-        html_title_variants = self._html_discovery_variants(series_name, book_number, variant_groups, title_variants)
         direct_providers = [
             AmazonProvider(),
             FantasticFictionProvider(),
@@ -1258,12 +1230,10 @@ class SeriesIntelligenceAgent:
             BookDatabaseProvider(),
         ]
         html_providers = [
-            AmazonProvider(),
-            FantasticFictionProvider(),
-            AuthorSiteProvider(),
-            PublisherProvider(),
-            BookDatabaseProvider(),
-            WebReadProvider(),
+            GoogleBooksHtmlProvider(),
+            GoodreadsHtmlProvider(),
+            OpenLibraryHtmlProvider(),
+            AmazonHtmlProvider(),
         ]
         print(f"[DISCOVERY_DEBUG] HTML_PROVIDER_LIST providers={[provider.name for provider in html_providers]}")
         pass_plan: list[tuple[str, list[str], list[Provider]]] = [
@@ -1271,7 +1241,7 @@ class SeriesIntelligenceAgent:
             ("canonical_match", variant_groups.get("normalized") or title_variants, direct_providers),
             ("fuzzy_match", variant_groups.get("fuzzy") or title_variants, [*direct_providers, WebReadProvider()]),
             ("fallback_pass", (variant_groups.get("normalized") or variant_groups.get("fuzzy") or title_variants), [CatalogFallbackProvider()]),
-            ("html_discovery_pass", html_title_variants, html_providers),
+            ("html_discovery_pass", (variant_groups.get("normalized") or title_variants), html_providers),
         ]
 
         provider_attempt_order: list[str] = []
@@ -1354,19 +1324,7 @@ class SeriesIntelligenceAgent:
         pass_index = 0
         stop_discovery = False
         for pass_name, pass_title_variants, providers in pass_plan:
-            is_html_discovery_pass = str(pass_name).strip() == "html_discovery_pass"
-            active_providers = list(providers or [])
-            if is_html_discovery_pass and not active_providers:
-                # Prevent a no-op html pass if provider list is unexpectedly empty at runtime.
-                active_providers = [
-                    AmazonProvider(),
-                    FantasticFictionProvider(),
-                    AuthorSiteProvider(),
-                    PublisherProvider(),
-                    BookDatabaseProvider(),
-                    WebReadProvider(),
-                ]
-            if is_html_discovery_pass:
+            if pass_name == "html_discovery_pass":
                 print(
                     f"[DISCOVERY_DEBUG] HTML_GUARD_VALUE "
                     f"stop_discovery={stop_discovery} "
@@ -1382,20 +1340,20 @@ class SeriesIntelligenceAgent:
                     f"condition='if stop_discovery:' result={bool(stop_discovery)} "
                     f"series_id={series_id} book_number={book_number}"
                 )
-            if stop_discovery and not is_html_discovery_pass:
-                if is_html_discovery_pass:
+            if stop_discovery and pass_name != "html_discovery_pass":
+                if pass_name == "html_discovery_pass":
                     print(
                         f"[DISCOVERY_DEBUG] HTML_GUARD_BLOCKED "
                         f"series_id={series_id} book_number={book_number}"
                     )
                 break
-            if is_html_discovery_pass:
+            if pass_name == "html_discovery_pass":
                 print(
                     f"[DISCOVERY_DEBUG] HTML_PROVIDER_LOOP_ENTRY "
                     f"series_id={series_id} book_number={book_number}"
                 )
-            for provider in active_providers:
-                if is_html_discovery_pass:
+            for provider in providers:
+                if pass_name == "html_discovery_pass":
                     print(
                         f"[DISCOVERY_DEBUG] HTML_PROVIDER_LOOP provider_name={provider.name} "
                         f"provider_type={getattr(provider, 'type', None)} series_id={series_id} book_number={book_number}"
@@ -1410,8 +1368,8 @@ class SeriesIntelligenceAgent:
                         f"html_enabled={getattr(provider, 'html_enabled', None)}"
                     )
                 pass_index += 1
-                if monotonic() - started_at >= self.DISCOVERY_TIME_BUDGET_SECONDS and not is_html_discovery_pass:
-                    if is_html_discovery_pass:
+                if monotonic() - started_at >= self.DISCOVERY_TIME_BUDGET_SECONDS:
+                    if pass_name == "html_discovery_pass":
                         print(
                             f"[DISCOVERY_DEBUG] HTML_PROVIDER_SKIPPED provider_name={provider.name} "
                             f"reason='monotonic() - started_at >= self.DISCOVERY_TIME_BUDGET_SECONDS' "
@@ -1422,7 +1380,7 @@ class SeriesIntelligenceAgent:
                     break
 
                 logger.info("[DISCOVERY] Pass %s: %s/%s (%s)", pass_index, pass_name, provider.name, datetime.utcnow().isoformat())
-                if is_html_discovery_pass:
+                if pass_name == "html_discovery_pass":
                     print(f"[DISCOVERY_DEBUG] HTML_SEARCH_CALL series_id={series_id} book_number={book_number}")
                 try:
                     raw_results, attempt_info = provider.search(pass_title_variants, known_authors)
@@ -1436,7 +1394,7 @@ class SeriesIntelligenceAgent:
                         "reason": f"exception:{exc.__class__.__name__}",
                         "urls_checked": [],
                     }
-                if is_html_discovery_pass:
+                if pass_name == "html_discovery_pass":
                     print(f"[DISCOVERY_DEBUG] HTML_SEARCH_RETURN series_id={series_id} book_number={book_number}")
                 provider_attempts_by_name[attempt_info["provider"]] = attempt_info
                 provider_counts[provider.name] = provider_counts.get(provider.name, 0) + len(raw_results)
@@ -1456,21 +1414,7 @@ class SeriesIntelligenceAgent:
 
                 accepted_count = 0
                 first_query = pass_title_variants[0] if pass_title_variants else ""
-                fallback_source_url = None
-                if isinstance(attempt_info, dict):
-                    urls_checked = attempt_info.get("urls_checked")
-                    urls_fetched = attempt_info.get("urls_fetched")
-                    if isinstance(urls_checked, list) and urls_checked:
-                        fallback_source_url = urls_checked[0]
-                    elif isinstance(urls_fetched, list) and urls_fetched:
-                        fallback_source_url = urls_fetched[0]
                 for result in raw_results:
-                    if not result.get("title"):
-                        result["title"] = first_query or f"{series_name} Book {book_number}"
-                    if not result.get("author") and known_authors:
-                        result["author"] = known_authors[0]
-                    if not result.get("source_url") and fallback_source_url:
-                        result["source_url"] = fallback_source_url
                     result = self._normalize_provider_record(result, provider.name)
                     key = (
                         str(result.get("title") or "").strip().lower(),
@@ -1514,7 +1458,7 @@ class SeriesIntelligenceAgent:
                 if accepted_count > 0:
                     selected_discovery_mode = pass_name
                     provider_selected = provider.__class__.__name__
-            if is_html_discovery_pass:
+            if pass_name == "html_discovery_pass":
                 print(
                     f"[DISCOVERY_DEBUG] HTML_PROVIDER_LOOP_EXIT "
                     f"series_id={series_id} book_number={book_number}"

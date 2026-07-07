@@ -32,6 +32,29 @@ from crud import (
     delete_series,
 )
 
+###From Joe
+# --- Background Task Wrapper ---
+from agents.series_agent import SeriesIntelligenceAgent
+from database import SessionLocal
+
+agent = SeriesIntelligenceAgent()
+
+def run_series_check_job(series_id: int):
+    print(f"BACKGROUND TASK FIRED for series {series_id}")
+    db = SessionLocal()
+    try:
+        result = agent.run_series_check(db, series_id)
+        print(f"BACKGROUND TASK COMPLETED for series {series_id}")
+        return result
+    except Exception as e:
+        print(f"BACKGROUND TASK ERROR for series {series_id}: {e}")
+        raise
+    finally:
+        db.close()
+###From Joe
+
+
+
 # Create database tables
 models.Base.metadata.create_all(bind=engine)
 
@@ -355,8 +378,10 @@ def _is_upcoming_future_book(book: models.Book, *, today: date) -> bool:
         return False
     return publication_date > today
 
+###Changed from def run_series_check_job(series_id: int) -> None:
+### to def run_series_check_job_full(series_id: int) -> None:
 
-def run_series_check_job(series_id: int) -> None:
+def run_series_check_job_full(series_id: int) -> None:
     db = SessionLocal()
     try:
         db_series = crud.get_series(db, series_id)
@@ -692,9 +717,18 @@ def mark_series_finished(series_id: int, db: Session = Depends(get_db)):
         "series_status": "finished" if is_finished else "ongoing",
     }
 
+##From Joe
+def test_background_task():
+    print("TEST BACKGROUND TASK RAN")
+###From Joe
 
+############ Joe Replacements
 @app.post("/series/{series_id}/check")
-def check_series_for_new_books(series_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def check_series_for_new_books(
+    series_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
     db_series = crud.get_series(db, series_id)
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
@@ -724,23 +758,23 @@ def check_series_for_new_books(series_id: int, background_tasks: BackgroundTasks
             **completion,
         }
 
-    session_id = f"check_{series_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+    # NEW: schedule the background task
+    print(f"ENDPOINT: scheduling background task for series {series_id}")
 
+    # REAL: your agent background task (changed from:run_series_check_job) )
+    background_tasks.add_task(run_series_check_job_full, series_id)
+
+
+    # NEW: initialize job state:
+    session_id = f"check_{series_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     series_check_jobs[series_id] = {
-        "status": "running",
         "session_id": session_id,
-        "result": None,
-        "error": None,
-        "completion": None,
-        "started_at": datetime.utcnow().isoformat(),
-        "updated_at": datetime.utcnow().isoformat(),
-        "progress_total": 0,
-        "progress_completed": 0,
+        "status": "running",
         "progress_percent": 0,
-        "current_book_number": None,
         "current_pass": "exact match",
+        "result": None,
+        "completion": None,
     }
-    background_tasks.add_task(run_series_check_job, series_id)
 
     return {
         "series_id": series_id,
@@ -749,6 +783,7 @@ def check_series_for_new_books(series_id: int, background_tasks: BackgroundTasks
         "progress": 0,
         "current_pass": "exact match",
     }
+#########Joe Replacements
 
 
 @app.get("/series/{series_id}/check")
