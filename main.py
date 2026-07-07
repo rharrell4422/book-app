@@ -32,29 +32,6 @@ from crud import (
     delete_series,
 )
 
-###From Joe
-# --- Background Task Wrapper ---
-from agents.series_agent import SeriesIntelligenceAgent
-from database import SessionLocal
-
-agent = SeriesIntelligenceAgent()
-
-def run_series_check_job(series_id: int):
-    print(f"BACKGROUND TASK FIRED for series {series_id}")
-    db = SessionLocal()
-    try:
-        result = agent.run_series_check(db, series_id)
-        print(f"BACKGROUND TASK COMPLETED for series {series_id}")
-        return result
-    except Exception as e:
-        print(f"BACKGROUND TASK ERROR for series {series_id}: {e}")
-        raise
-    finally:
-        db.close()
-###From Joe
-
-
-
 # Create database tables
 models.Base.metadata.create_all(bind=engine)
 
@@ -428,31 +405,6 @@ def run_series_check_job_full(series_id: int) -> None:
             result = future.result(timeout=SERIES_CHECK_HARD_TIMEOUT_SECONDS)
             completion = summarize_completion(result)
         except FutureTimeoutError:
-            # Even when full discovery times out, run strict cleanup-only pass so
-            # completed-series outliers can still be purged safely.
-            try:
-                timeout_series = crud.get_series(db, series_id)
-                if timeout_series:
-                    timeout_books = series_agent._owned_books(db, series_id)
-                    timeout_complete = bool(timeout_series.is_finished) or str(timeout_series.series_status or "").strip().lower() in {"completed", "finished"}
-                    timeout_authors = series_agent._series_author_candidates(timeout_series, timeout_books)
-                    timeout_intelligence = compute_series_intelligence_for_series(db, series_id) or {}
-                    if timeout_complete:
-                        timeout_known_max = series_agent._completed_series_known_max(timeout_series, timeout_books, timeout_intelligence)
-                    else:
-                        timeout_known_max_value = timeout_intelligence.get("total_books") or timeout_series.total_books
-                        timeout_known_max = int(timeout_known_max_value) if timeout_known_max_value else None
-
-                    series_agent._strict_post_discovery_cleanup(
-                        db,
-                        timeout_series,
-                        known_authors=timeout_authors,
-                        known_series_max=timeout_known_max,
-                        series_complete=timeout_complete,
-                    )
-            except Exception:
-                logger.exception("Strict timeout cleanup failed for series %s", series_id)
-
             completion = summarize_completion(
                 {
                     "series_id": series_id,
@@ -531,7 +483,7 @@ def run_series_check_job_full(series_id: int) -> None:
 
 
 async def start_series_check_job(series_id: int) -> None:
-    await asyncio.to_thread(run_series_check_job, series_id)
+    await asyncio.to_thread(run_series_check_job_full, series_id)
 
 
 def backfill_series_state() -> None:
@@ -717,12 +669,6 @@ def mark_series_finished(series_id: int, db: Session = Depends(get_db)):
         "series_status": "finished" if is_finished else "ongoing",
     }
 
-##From Joe
-def test_background_task():
-    print("TEST BACKGROUND TASK RAN")
-###From Joe
-
-############ Joe Replacements
 @app.post("/series/{series_id}/check")
 async def check_series_for_new_books(
     series_id: int,
@@ -758,14 +704,8 @@ async def check_series_for_new_books(
             **completion,
         }
 
-    # NEW: schedule the background task
-    print(f"ENDPOINT: scheduling background task for series {series_id}")
-
-    # REAL: your agent background task (changed from:run_series_check_job) )
     background_tasks.add_task(run_series_check_job_full, series_id)
 
-
-    # NEW: initialize job state:
     session_id = f"check_{series_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     series_check_jobs[series_id] = {
         "session_id": session_id,
@@ -783,7 +723,6 @@ async def check_series_for_new_books(
         "progress": 0,
         "current_pass": "exact match",
     }
-#########Joe Replacements
 
 
 @app.get("/series/{series_id}/check")
