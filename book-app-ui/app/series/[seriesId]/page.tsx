@@ -85,13 +85,27 @@ type EditBookFormState = {
 
 type SeriesCheckStatusPayload = {
   session_id?: string | null;
-  status: "idle" | "started" | "running" | "complete";
+  status: "idle" | "started" | "running" | "success" | "no_new_books" | "error" | "complete";
   progress?: number;
   current_pass?: string | null;
   elapsed_seconds?: number;
   timed_out?: boolean;
   missing_books?: Array<number | string>;
   no_new_books?: boolean;
+  message?: string;
+  new_books?: Array<Record<string, unknown>>;
+  counters?: {
+    total_books?: number;
+    unread_books?: number;
+    read_books?: number;
+    upcoming_books?: number;
+  };
+  status_bar?: {
+    status?: string | null;
+    next_unread?: number | null;
+    next_upcoming?: number | null;
+    missing?: Array<number | string>;
+  };
   result?: {
     added_books?: unknown[];
     missing_books?: string[];
@@ -1464,7 +1478,7 @@ export default function SeriesDetailPage() {
         current_pass: "exact match",
       };
 
-      while (statusPayload.status === "running") {
+      while (statusPayload.status === "running" || statusPayload.status === "started") {
         await delay(2500);
         const statusPath = sessionId
           ? `/series/${series.id}/check/status?session_id=${encodeURIComponent(sessionId)}`
@@ -1477,7 +1491,7 @@ export default function SeriesDetailPage() {
         setSeriesCheckStillChecking(Boolean(statusPayload.timed_out) || Number(statusPayload.elapsed_seconds ?? 0) >= 120);
 
         if (statusPayload.status === "idle") {
-          statusPayload = { ...statusPayload, status: "complete", no_new_books: true };
+          statusPayload = { ...statusPayload, status: "no_new_books", no_new_books: true };
         }
       }
 
@@ -1486,18 +1500,22 @@ export default function SeriesDetailPage() {
       }
 
       const data = statusPayload.result ?? {};
-      const addedCount = Array.isArray(data.added_books) ? data.added_books.length : 0;
+      const contractNewBooks = Array.isArray(statusPayload.new_books) ? statusPayload.new_books : [];
+      const addedCount = contractNewBooks.length > 0
+        ? contractNewBooks.length
+        : Array.isArray(data.added_books)
+          ? data.added_books.length
+          : 0;
       const missingList = Array.isArray(statusPayload.missing_books)
         ? statusPayload.missing_books
         : Array.isArray(data.missing_books)
           ? data.missing_books
           : [];
-      const missingCount = missingList.length;
-      const message = addedCount > 0
-        ? `${series.name}: Check complete. ${addedCount} book${addedCount === 1 ? "" : "s"} added.`
-        : missingCount > 0
-          ? `${series.name}: Check complete. Missing books: ${missingList.join(", ")}.`
-          : `${series.name}: Check complete. No new books found.`;
+      const message = statusPayload.status === "success"
+        ? "NEW BOOKS found and added to library."
+        : statusPayload.status === "no_new_books"
+          ? "NO NEW BOOKS FOUND."
+          : statusPayload.message || (missingList.length > 0 ? `Missing books: ${missingList.join(", ")}.` : "NO NEW BOOKS FOUND.");
 
       await refreshSeriesFromApi();
       flashAddedMessage(message);
@@ -1967,20 +1985,20 @@ export default function SeriesDetailPage() {
       const result = await response.json();
       const updatedCount = Number(result?.updated_count || 0);
       const skippedCount = Number(result?.skipped_upcoming_count || 0);
-      const diagnostics = result?.normalization_diagnostics && typeof result.normalization_diagnostics === "object"
-        ? result.normalization_diagnostics
-        : null;
-      const unchangedCount = Number(diagnostics?.unchanged_count || 0);
-      const consideredCount = Number(diagnostics?.considered_count || 0);
+      const diagnostics = ((result as any)?.normalization_diagnostics ?? null) as any;
+      const unchangedCount = Number(diagnostics?.unchanged_count ?? 0);
+      const consideredCount = Number(diagnostics?.considered_count ?? 0);
 
       // Broadcast normalized title updates so the Main Library view stays in sync.
-      const updatedBooks = Array.isArray(result?.updated_books) ? result.updated_books : [];
+      const updatedBooks = Array.isArray((result as any)?.updated_books)
+        ? ((result as any).updated_books as any[])
+        : [];
       const currentSeriesBooks = Array.isArray(series?.books) ? series.books : [];
       const booksById = new Map(currentSeriesBooks.map((book) => [Number(book.id), book]));
 
       for (const row of updatedBooks) {
-        const bookId = Number(row?.id);
-        const normalizedTitle = String(row?.to || "").trim();
+        const bookId = Number((row as any)?.id);
+        const normalizedTitle = typeof (row as any)?.to === "string" ? String((row as any).to).trim() : "";
         if (!Number.isFinite(bookId) || !normalizedTitle) {
           continue;
         }

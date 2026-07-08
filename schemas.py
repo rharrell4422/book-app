@@ -153,7 +153,7 @@ class SeriesDetailResponse(BaseModel):
     series_status: str
     next_unread_book_number: float | None = None
     next_upcoming_book_number: float | None = None
-    missing_books: list[str] | None = None
+    missing_books: list[int] | None = None
     has_new_books: bool = False
     has_unread_books: bool = False
     has_upcoming_books: bool = False

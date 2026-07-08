@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from book_metadata_utils import parse_publication_date
 from intelligence import compute_series_intelligence_for_series, lookup_book_summary, recalculate_intelligence, recalculate_series_state_for_series, recount_series_aggregates_for_series
+import library_sync
 from importer.importer import run_import
 from database import SessionLocal, engine
 from agents.book_agent import BookAgent
@@ -355,6 +356,142 @@ def _is_upcoming_future_book(book: models.Book, *, today: date) -> bool:
         return False
     return publication_date > today
 
+
+def _normalize_discovered_title(value: str | None) -> str:
+    cleaned = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+    return re.sub(r"[^a-z0-9]+", "", cleaned)
+
+
+def _normalize_identity_text(value: str | None) -> str:
+    cleaned = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    return re.sub(r"[^a-z0-9]+", " ", cleaned).strip()
+
+
+def _normalize_series_name_for_identity(value: str | None) -> str:
+    text = _normalize_identity_text(value)
+    text = re.sub(r"\b(series|book series)\b", "", text).strip()
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalize_title_for_identity(value: str | None) -> str:
+    text = str(value or "").strip()
+    text = re.sub(
+        r"\((?:audible|audible audio|audio cd|kindle|kindle edition|paperback|hardcover|mass market paperback)[^)]*\)",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\s*[:\-]\s*(audible|kindle|paperback|hardcover)\b.*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+,\s+book\s+\d+\b", "", text, flags=re.IGNORECASE)
+    return _normalize_identity_text(text)
+
+
+def _normalized_book_number_value(value) -> int | None:
+    try:
+        if value is None or str(value).strip() == "":
+            return None
+        parsed = int(float(value))
+        return parsed if parsed > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _series_book_identity_key(series_name: str | None, book_number) -> str | None:
+    normalized_series = _normalize_series_name_for_identity(series_name)
+    normalized_book_number = _normalized_book_number_value(book_number)
+    if not normalized_series or normalized_book_number is None:
+        return None
+    return f"{normalized_series}|{normalized_book_number}"
+
+
+def _canonical_title_identity_key(title: str | None) -> str | None:
+    normalized_title = _normalize_title_for_identity(title)
+    return normalized_title or None
+
+
+def _edition_priority(value: str | None) -> int:
+    edition = str(value or "").strip().lower()
+    priorities = {
+        "hardcover": 5,
+        "paperback": 4,
+        "ebook": 3,
+        "audio": 2,
+        "unknown": 1,
+        "": 1,
+    }
+    return priorities.get(edition, 1)
+
+
+def _parse_candidate_date(value: str | None) -> date | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
+    parsed = parse_publication_date(raw)
+    return parsed if isinstance(parsed, date) else None
+
+
+def _classify_discovered_status(candidate: dict, today: date) -> tuple[str, date | None, date | None]:
+    publication_date = _parse_candidate_date(candidate.get("publication_date"))
+    expected_date = _parse_candidate_date(candidate.get("expected_date"))
+    status_hint = str(candidate.get("status_hint") or "").strip().lower()
+    title_hint = str(candidate.get("title") or "").strip().lower()
+
+    upcoming_by_hint = any(token in status_hint for token in ("upcoming", "preorder", "pre-order"))
+    upcoming_by_title = any(token in title_hint for token in ("upcoming", "preorder", "pre-order"))
+    upcoming_by_date = (expected_date is not None and expected_date > today) or (publication_date is not None and publication_date > today)
+
+    if upcoming_by_hint or upcoming_by_title or upcoming_by_date:
+        if expected_date is None and publication_date is not None and publication_date > today:
+            expected_date = publication_date
+        return "upcoming", publication_date, expected_date
+
+    return "available", publication_date, expected_date
+
+
+def _build_series_counters(db: Session, series_id: int) -> dict:
+    books = (
+        db.query(models.Book)
+        .filter(models.Book.series_id == series_id)
+        .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
+        .all()
+    )
+
+    read_books = 0
+    upcoming_books = 0
+    unread_books = 0
+
+    for book in books:
+        read_status = str(getattr(book, "read_status", "") or "").strip().lower()
+        is_read = bool(getattr(book, "is_read", False)) or read_status == "read"
+        is_upcoming = read_status == "upcoming" or bool(getattr(book, "is_upcoming_auto", False)) or bool(getattr(book, "is_upcoming_final", False))
+        if is_upcoming:
+            upcoming_books += 1
+        elif is_read:
+            read_books += 1
+        else:
+            unread_books += 1
+
+    return {
+        "total_books": len(books),
+        "unread_books": unread_books,
+        "read_books": read_books,
+        "upcoming_books": upcoming_books,
+    }
+
+
+def _build_status_bar(series: models.Series) -> dict:
+    return {
+        "status": "finished" if bool(series.is_finished) else "ongoing",
+        "next_unread": series.next_unread_book_number,
+        "next_upcoming": series.next_upcoming_book_number,
+        "missing": [int(float(value)) for value in (series.missing_books or []) if str(value).strip()],
+    }
+
 ###Changed from def run_series_check_job(series_id: int) -> None:
 ### to def run_series_check_job_full(series_id: int) -> None:
 
@@ -362,6 +499,8 @@ def run_series_check_job_full(series_id: int) -> None:
     db = SessionLocal()
     try:
         db_series = crud.get_series(db, series_id)
+        if db_series:
+            logger.info("CHECK NOW triggered for series_id=%s, series_name=%s", series_id, db_series.name)
         fallback_missing = [7]
         if db_series and isinstance(db_series.missing_books, list) and db_series.missing_books:
             try:
@@ -369,65 +508,425 @@ def run_series_check_job_full(series_id: int) -> None:
             except (TypeError, ValueError):
                 fallback_missing = [7]
 
-        def summarize_completion(payload: dict | None, reason: str | None = None) -> dict:
-            result = payload or {}
-            missing_books = result.get("missing_books") or []
-            found_books = result.get("added_books") or []
-            no_new_books = not bool(found_books)
-            completion = {
-                "status": "complete",
-                "complete": True,
-                "missing_books": missing_books,
-                "found_books": found_books,
-                "no_new_books": no_new_books,
-                "discovery_engine": result.get("discovery_engine") or "agent_v2",
-            }
-            if reason:
-                completion["reason"] = reason
-            return completion
-
         def update_progress(progress: dict) -> None:
             existing = series_check_jobs.get(series_id, {})
+            total = int(progress.get("total", 0) or 0)
+            completed = int(progress.get("completed", 0) or 0)
             series_check_jobs[series_id] = {
                 **existing,
                 "status": "running",
                 "updated_at": datetime.utcnow().isoformat(),
-                "progress_total": progress.get("total", 0),
-                "progress_completed": progress.get("completed", 0),
-                "progress_percent": int((float(progress.get("completed", 0)) / float(progress.get("total", 1))) * 100) if float(progress.get("total", 0) or 0) > 0 else 0,
+                "progress_total": total,
+                "progress_completed": completed,
+                "progress_percent": int((completed / total) * 100) if total > 0 else 0,
                 "current_book_number": progress.get("current_book_number"),
                 "current_pass": progress.get("current_pass") or existing.get("current_pass") or "exact match",
+                "current_asin": progress.get("current_asin"),
+                "asins_discovered": progress.get("asins_discovered", existing.get("asins_discovered", 0)),
+                "asins_processed": progress.get("asins_processed", existing.get("asins_processed", completed)),
+                "asin_fetch_success": progress.get("asin_fetch_success", existing.get("asin_fetch_success", 0)),
+                "asin_fetch_failed": progress.get("asin_fetch_failed", existing.get("asin_fetch_failed", 0)),
             }
 
         executor = ThreadPoolExecutor(max_workers=1)
         future = executor.submit(series_agent.run_series_check, db, series_id, update_progress)
         try:
             result = future.result(timeout=SERIES_CHECK_HARD_TIMEOUT_SECONDS)
-            completion = summarize_completion(result)
         except FutureTimeoutError:
-            completion = summarize_completion(
-                {
-                    "series_id": series_id,
-                    "missing_books": fallback_missing,
-                    "added_books": [],
-                    "discovery_engine": "agent_v2",
-                },
-                reason="timed_out",
-            )
             result = {
                 "series_id": series_id,
-                "missing_books": completion["missing_books"],
+                "missing_books": fallback_missing,
                 "added_books": [],
                 "found": False,
                 "discovery_engine": "agent_v2",
                 "agent_pipeline": True,
                 "status": "no_hits",
+                "provider_failures": [],
+                "all_providers_failed": False,
+                "timed_out": True,
             }
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
-        missing_log = ", ".join(str(item) for item in completion.get("missing_books") or []) or "none"
-        logger.info("[DISCOVERY] Series %s check complete (missing: %s)", series_id, missing_log)
+        provider_failures = result.get("provider_failures") or []
+        for failure in provider_failures:
+            logger.error(
+                "[CHECK_NOW_PROVIDER_FAILURE] provider=%s series_id=%s timestamp=%s error=%s",
+                failure.get("provider"),
+                series_id,
+                datetime.utcnow().isoformat(),
+                failure.get("error") or "unknown",
+            )
+            logger.error(
+                "Provider %s failed for series_id=%s: %s",
+                failure.get("provider"),
+                series_id,
+                failure.get("error") or "unknown",
+            )
+
+        db_series = crud.get_series(db, series_id)
+        if not db_series:
+            raise RuntimeError(f"Series {series_id} not found during check job")
+
+        today = date.today()
+        existing_books = (
+            db.query(models.Book)
+            .filter(models.Book.series_id == series_id)
+            .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
+            .all()
+        )
+
+        existing_by_asin: dict[str, models.Book] = {}
+        existing_by_series_book: dict[str, models.Book] = {}
+        existing_by_canonical_title: dict[str, models.Book] = {}
+
+        for existing in existing_books:
+            existing_asin = str(existing.asin or "").strip().upper()
+            if existing_asin and existing_asin not in existing_by_asin:
+                existing_by_asin[existing_asin] = existing
+
+            series_book_key = _series_book_identity_key(existing.series_name or db_series.name, existing.book_number)
+            if series_book_key and series_book_key not in existing_by_series_book:
+                existing_by_series_book[series_book_key] = existing
+
+            canonical_title_key = _canonical_title_identity_key(existing.title)
+            if canonical_title_key and canonical_title_key not in existing_by_canonical_title:
+                existing_by_canonical_title[canonical_title_key] = existing
+
+        persisted_new_books: list[dict] = []
+        discovered_candidates = result.get("added_books") or []
+        seen_batch_identity_keys: set[str] = set()
+        db_changed = False
+
+        try:
+            for candidate in discovered_candidates:
+                title = str(candidate.get("title") or "").strip()
+                if not title:
+                    continue
+
+                canonical_metadata = candidate.get("canonical_metadata") if isinstance(candidate.get("canonical_metadata"), dict) else {}
+
+                normalized_title = str(canonical_metadata.get("title_normalized") or title).strip()
+                normalized_series_name = str(
+                    canonical_metadata.get("series_name_normalized")
+                    or candidate.get("series_name")
+                    or db_series.name
+                    or ""
+                ).strip()
+                normalized_author = str(candidate.get("author") or db_series.author or "").strip() or "Unknown"
+                normalized_book_number = canonical_metadata.get("book_number_normalized")
+                if normalized_book_number is None:
+                    normalized_book_number = candidate.get("book_number")
+                candidate_asin = str(candidate.get("asin_or_id") or "").strip().upper()
+
+                series_book_key = _series_book_identity_key(normalized_series_name, normalized_book_number)
+                canonical_title_key = _canonical_title_identity_key(normalized_title)
+
+                matched_existing: models.Book | None = None
+                dedupe_reason_code = ""
+                if candidate_asin and candidate_asin in existing_by_asin:
+                    matched_existing = existing_by_asin[candidate_asin]
+                    dedupe_reason_code = "DEDUPE_UPDATE_BY_ASIN"
+                elif series_book_key and series_book_key in existing_by_series_book:
+                    matched_existing = existing_by_series_book[series_book_key]
+                    dedupe_reason_code = "DEDUPE_UPDATE_BY_SERIES_BOOK"
+                elif canonical_title_key and canonical_title_key in existing_by_canonical_title:
+                    matched_existing = existing_by_canonical_title[canonical_title_key]
+                    dedupe_reason_code = "DEDUPE_UPDATE_BY_CANONICAL_TITLE"
+
+                identity_fingerprint = candidate_asin or series_book_key or canonical_title_key or _normalize_discovered_title(normalized_title)
+                if identity_fingerprint in seen_batch_identity_keys and matched_existing is None:
+                    logger.info(
+                        "[DEDUPE_SKIP_BATCH_DUPLICATE] series_id=%s title=%s identity=%s",
+                        series_id,
+                        normalized_title,
+                        identity_fingerprint,
+                    )
+                    continue
+                seen_batch_identity_keys.add(identity_fingerprint)
+
+                status, publication_date, expected_date = _classify_discovered_status(candidate, today)
+                if status == "upcoming":
+                    logger.info("Classified %s as UPCOMING", normalized_title)
+                else:
+                    logger.info("Classified %s as AVAILABLE", normalized_title)
+
+                publication_date = publication_date or _parse_candidate_date(canonical_metadata.get("publish_date_normalized"))
+                expected_date = expected_date or _parse_candidate_date(canonical_metadata.get("upcoming_date_normalized"))
+
+                raw_book_number = normalized_book_number
+                book_number: float | None = None
+                try:
+                    if raw_book_number is not None and str(raw_book_number).strip() != "":
+                        book_number = float(raw_book_number)
+                except (TypeError, ValueError):
+                    book_number = None
+
+                incoming_edition_type = str(canonical_metadata.get("edition_type") or "unknown").strip().lower()
+
+                if matched_existing is not None:
+                    logger.info(
+                        "[%s] series_id=%s candidate_title=%s existing_id=%s",
+                        dedupe_reason_code,
+                        series_id,
+                        normalized_title,
+                        matched_existing.id,
+                    )
+
+                    matched_existing.title = normalized_title or matched_existing.title
+                    matched_existing.author = normalized_author or matched_existing.author
+                    if candidate_asin:
+                        matched_existing.asin = candidate_asin
+
+                    if book_number is not None and (matched_existing.book_number is None or matched_existing.book_number <= 0):
+                        matched_existing.book_number = book_number
+                    if matched_existing.series_order is None and matched_existing.book_number is not None and float(matched_existing.book_number).is_integer():
+                        matched_existing.series_order = int(matched_existing.book_number)
+
+                    if matched_existing.publication_date is None and publication_date is not None:
+                        matched_existing.publication_date = publication_date
+                    elif matched_existing.publication_date is not None and publication_date is not None:
+                        matched_existing.publication_date = min(matched_existing.publication_date, publication_date)
+
+                    if matched_existing.release_date is None and expected_date is not None:
+                        matched_existing.release_date = expected_date
+
+                    current_edition_type = (matched_existing.edition or matched_existing.format or "unknown")
+                    if _edition_priority(incoming_edition_type) > _edition_priority(current_edition_type):
+                        matched_existing.edition = incoming_edition_type
+                        matched_existing.format = incoming_edition_type
+                        logger.info(
+                            "[DEDUPE_MERGE_EDITION] series_id=%s book_id=%s from=%s to=%s",
+                            series_id,
+                            matched_existing.id,
+                            current_edition_type,
+                            incoming_edition_type,
+                        )
+
+                    if status == "upcoming":
+                        matched_existing.read_status = "upcoming"
+                        matched_existing.is_upcoming_auto = True
+                    elif str(matched_existing.read_status or "").strip().lower() != "read":
+                        matched_existing.read_status = "available"
+                        matched_existing.is_upcoming_auto = False
+
+                    matched_existing.is_missing = bool(matched_existing.is_missing and bool(candidate.get("is_missing")))
+                    matched_existing.record_status = "active"
+                    db.flush()
+                    db_changed = True
+                    continue
+
+                db_book = models.Book(
+                    title=normalized_title,
+                    author=normalized_author,
+                    series_id=series_id,
+                    book_number=book_number,
+                    series_order=int(book_number) if book_number is not None and float(book_number).is_integer() else None,
+                    publication_date=publication_date,
+                    release_date=expected_date,
+                    date_added=today,
+                    asin=candidate_asin or None,
+                    format=incoming_edition_type if incoming_edition_type != "unknown" else None,
+                    edition=incoming_edition_type if incoming_edition_type != "unknown" else None,
+                    is_read=False,
+                    read_status="upcoming" if status == "upcoming" else "available",
+                    is_upcoming_auto=(status == "upcoming"),
+                    is_upcoming_final=False,
+                    is_missing=bool(candidate.get("is_missing")),
+                    record_status="active",
+                )
+                logger.info(
+                    "[DEDUPE_INSERT_NEW] Persisting new book to series_id=%s and main library: %s",
+                    series_id,
+                    normalized_title,
+                )
+                db.add(db_book)
+                db.flush()
+                db_changed = True
+
+                if db_book.asin:
+                    existing_by_asin[str(db_book.asin).strip().upper()] = db_book
+                inserted_series_book_key = _series_book_identity_key(db_series.name, db_book.book_number)
+                if inserted_series_book_key:
+                    existing_by_series_book[inserted_series_book_key] = db_book
+                inserted_title_key = _canonical_title_identity_key(db_book.title)
+                if inserted_title_key:
+                    existing_by_canonical_title[inserted_title_key] = db_book
+
+                persisted_new_books.append(
+                    {
+                        "id": int(db_book.id),
+                        "title": db_book.title,
+                        "author": db_book.author,
+                        "asin": db_book.asin,
+                        "is_missing": bool(db_book.is_missing),
+                        "status": status,
+                        "date_published": db_book.publication_date.isoformat() if db_book.publication_date else None,
+                        "expected_date": db_book.release_date.isoformat() if db_book.release_date else None,
+                        "series_id": series_id,
+                        "library_position": "top",
+                    }
+                )
+
+            accepted_asins: set[str] = set()
+            accepted_series_book_keys: set[str] = set()
+            accepted_title_keys: set[str] = set()
+            for candidate in discovered_candidates:
+                meta = candidate.get("canonical_metadata") if isinstance(candidate.get("canonical_metadata"), dict) else {}
+                candidate_asin = str(candidate.get("asin_or_id") or "").strip().upper()
+                if candidate_asin:
+                    accepted_asins.add(candidate_asin)
+
+                normalized_series_name = str(meta.get("series_name_normalized") or candidate.get("series_name") or db_series.name or "").strip()
+                normalized_book_number = meta.get("book_number_normalized") if meta.get("book_number_normalized") is not None else candidate.get("book_number")
+                series_book_key = _series_book_identity_key(normalized_series_name, normalized_book_number)
+                if series_book_key:
+                    accepted_series_book_keys.add(series_book_key)
+
+                normalized_title = str(meta.get("title_normalized") or candidate.get("title") or "").strip()
+                canonical_title_key = _canonical_title_identity_key(normalized_title)
+                if canonical_title_key:
+                    accepted_title_keys.add(canonical_title_key)
+
+            active_books_after = (
+                db.query(models.Book)
+                .filter(models.Book.series_id == series_id)
+                .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
+                .all()
+            )
+
+            # Remove stale ambiguous rows from earlier permissive runs.
+            for existing in active_books_after:
+                existing_asin = str(existing.asin or "").strip().upper()
+                existing_series_book_key = _series_book_identity_key(existing.series_name or db_series.name, existing.book_number)
+                existing_title_key = _canonical_title_identity_key(existing.title)
+
+                is_accepted_identity = (
+                    (existing_asin and existing_asin in accepted_asins)
+                    or (existing_series_book_key and existing_series_book_key in accepted_series_book_keys)
+                    or (existing_title_key and existing_title_key in accepted_title_keys)
+                )
+                if is_accepted_identity:
+                    continue
+
+                if bool(existing.is_missing) and not bool(existing.is_read):
+                    logger.info(
+                        "[DEDUPE_REJECT_AMBIGUOUS_EXISTING] series_id=%s book_id=%s title=%s",
+                        series_id,
+                        existing.id,
+                        existing.title,
+                    )
+                    existing.record_status = "deleted"
+                    db_changed = True
+
+            # Collapse duplicates that share canonical identity keys.
+            identity_keeper: dict[str, models.Book] = {}
+            refreshed_active_books = (
+                db.query(models.Book)
+                .filter(models.Book.series_id == series_id)
+                .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
+                .all()
+            )
+            for existing in refreshed_active_books:
+                key = str(existing.asin or "").strip().upper()
+                if not key:
+                    key = _series_book_identity_key(existing.series_name or db_series.name, existing.book_number) or ""
+                if not key:
+                    key = _canonical_title_identity_key(existing.title) or ""
+                if not key:
+                    continue
+
+                keeper = identity_keeper.get(key)
+                if keeper is None:
+                    identity_keeper[key] = existing
+                    continue
+
+                keeper_score = (
+                    1 if bool(keeper.is_read) else 0,
+                    _edition_priority(keeper.edition or keeper.format),
+                    1 if keeper.publication_date else 0,
+                )
+                existing_score = (
+                    1 if bool(existing.is_read) else 0,
+                    _edition_priority(existing.edition or existing.format),
+                    1 if existing.publication_date else 0,
+                )
+                if existing_score > keeper_score:
+                    loser = keeper
+                    identity_keeper[key] = existing
+                else:
+                    loser = existing
+
+                logger.info(
+                    "[DEDUPE_PRUNE_DUPLICATE_EXISTING] series_id=%s keep_id=%s drop_id=%s key=%s",
+                    series_id,
+                    identity_keeper[key].id,
+                    loser.id,
+                    key,
+                )
+                loser.record_status = "deleted"
+                db_changed = True
+
+            # Final strict pass: collapse all duplicates by normalized series+book number,
+            # even when one row has ASIN and another row does not.
+            series_book_keeper: dict[str, models.Book] = {}
+            refreshed_after_identity_prune = (
+                db.query(models.Book)
+                .filter(models.Book.series_id == series_id)
+                .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
+                .all()
+            )
+            for existing in refreshed_after_identity_prune:
+                series_book_key = _series_book_identity_key(existing.series_name or db_series.name, existing.book_number)
+                if not series_book_key:
+                    continue
+
+                keeper = series_book_keeper.get(series_book_key)
+                if keeper is None:
+                    series_book_keeper[series_book_key] = existing
+                    continue
+
+                keeper_score = (
+                    1 if str(keeper.asin or "").strip() else 0,
+                    1 if bool(keeper.is_read) else 0,
+                    _edition_priority(keeper.edition or keeper.format),
+                    1 if keeper.publication_date else 0,
+                )
+                existing_score = (
+                    1 if str(existing.asin or "").strip() else 0,
+                    1 if bool(existing.is_read) else 0,
+                    _edition_priority(existing.edition or existing.format),
+                    1 if existing.publication_date else 0,
+                )
+
+                if existing_score > keeper_score:
+                    loser = keeper
+                    series_book_keeper[series_book_key] = existing
+                else:
+                    loser = existing
+
+                logger.info(
+                    "[DEDUPE_PRUNE_SERIES_BOOK_DUPLICATE] series_id=%s keep_id=%s drop_id=%s key=%s",
+                    series_id,
+                    series_book_keeper[series_book_key].id,
+                    loser.id,
+                    series_book_key,
+                )
+                loser.record_status = "deleted"
+                db_changed = True
+
+            if db_changed:
+                db.commit()
+                db.refresh(db_series)
+
+            logger.info("LIBRARY_SYNC_TRIGGERED series_id=%s", series_id)
+            library_sync.update_from_series(series_id)
+        except Exception:
+            db.rollback()
+            raise
+
+        result["added_books"] = persisted_new_books
+        result["added_count"] = len(persisted_new_books)
 
         rebuild_snapshot = recalculate_intelligence(db, series_id, scan_result=result if isinstance(result, dict) else None)
         if isinstance(result, dict) and rebuild_snapshot:
@@ -438,16 +937,78 @@ def run_series_check_job_full(series_id: int) -> None:
                 "upcoming_count": rebuild_snapshot.get("upcoming_count"),
             }
 
+        db.refresh(db_series)
+        counters = _build_series_counters(db, series_id)
+        status_bar = _build_status_bar(db_series)
+        logger.info(
+            "Updated counters for series_id=%s: total=%s, unread=%s, read=%s, upcoming=%s",
+            series_id,
+            counters.get("total_books"),
+            counters.get("unread_books"),
+            counters.get("read_books"),
+            counters.get("upcoming_books"),
+        )
+        logger.info(
+            "Updated status bar for series_id=%s: status=%s, next_unread=%s, next_upcoming=%s, missing=%s",
+            series_id,
+            status_bar.get("status"),
+            status_bar.get("next_unread"),
+            status_bar.get("next_upcoming"),
+            status_bar.get("missing"),
+        )
+        all_providers_failed = bool(result.get("all_providers_failed"))
+
+        if all_providers_failed:
+            response_status = "error"
+            response_message = "All providers failed for this series."
+            logger.info("CHECK NOW completed for series_id=%s: ALL PROVIDERS FAILED", series_id)
+        elif persisted_new_books:
+            response_status = "success"
+            response_message = "NEW BOOKS found and added to library."
+            logger.info("CHECK NOW completed for series_id=%s: NEW BOOKS FOUND", series_id)
+        else:
+            response_status = "no_new_books"
+            response_message = "NO NEW BOOKS FOUND."
+            logger.info("CHECK NOW completed for series_id=%s: NO NEW BOOKS FOUND", series_id)
+
+        completion = {
+            "status": response_status,
+            "message": response_message,
+            "new_books": persisted_new_books,
+            "counters": counters,
+            "status_bar": status_bar,
+            "complete": True,
+            "missing_books": status_bar.get("missing") or [],
+            "found_books": persisted_new_books,
+            "no_new_books": response_status != "success",
+            "discovery_engine": result.get("discovery_engine") or "new_book_checker",
+            "asin_discovery": result.get("asin_discovery") or {
+                "discovered": 0,
+                "processed": 0,
+                "fetch_success": 0,
+                "fetch_failed": 0,
+                "metadata_hits": 0,
+            },
+        }
+
+        missing_log = ", ".join(str(item) for item in completion.get("missing_books") or []) or "none"
+        logger.info("[DISCOVERY] Series %s check complete (missing: %s)", series_id, missing_log)
+
         series_check_jobs[series_id] = {
             "status": "completed",
             "result": result,
             "error": None,
             "completion": completion,
             "updated_at": datetime.utcnow().isoformat(),
-            "progress_total": len(result.get("candidate_numbers") or []),
-            "progress_completed": len(result.get("candidate_numbers") or []),
+            "progress_total": int((result.get("asin_discovery") or {}).get("discovered") or len(result.get("candidate_numbers") or []) or 0),
+            "progress_completed": int((result.get("asin_discovery") or {}).get("processed") or len(result.get("candidate_numbers") or []) or 0),
             "current_book_number": None,
             "current_pass": None,
+            "current_asin": None,
+            "asins_discovered": int((result.get("asin_discovery") or {}).get("discovered") or 0),
+            "asins_processed": int((result.get("asin_discovery") or {}).get("processed") or 0),
+            "asin_fetch_success": int((result.get("asin_discovery") or {}).get("fetch_success") or 0),
+            "asin_fetch_failed": int((result.get("asin_discovery") or {}).get("fetch_failed") or 0),
         }
     except Exception as exc:
         logger.exception("Series check job failed for series %s", series_id)
@@ -466,17 +1027,43 @@ def run_series_check_job_full(series_id: int) -> None:
             "result": fallback_result,
             "error": str(exc),
             "completion": {
-                "status": "complete",
+                "status": "error",
+                "message": "All providers failed for this series.",
+                "new_books": [],
+                "counters": {
+                    "total_books": 0,
+                    "unread_books": 0,
+                    "read_books": 0,
+                    "upcoming_books": 0,
+                },
+                "status_bar": {
+                    "status": "ongoing",
+                    "next_unread": None,
+                    "next_upcoming": None,
+                    "missing": fallback_missing,
+                },
                 "complete": True,
                 "missing_books": fallback_missing,
                 "found_books": [],
                 "no_new_books": True,
-                "reason": "no-hit-after-all-passes",
+                "reason": "check-now-error",
                 "discovery_engine": "agent_v2",
+                "asin_discovery": {
+                    "discovered": 0,
+                    "processed": 0,
+                    "fetch_success": 0,
+                    "fetch_failed": 0,
+                    "metadata_hits": 0,
+                },
             },
             "updated_at": datetime.utcnow().isoformat(),
             "current_book_number": None,
             "current_pass": None,
+            "current_asin": None,
+            "asins_discovered": 0,
+            "asins_processed": 0,
+            "asin_fetch_success": 0,
+            "asin_fetch_failed": 0,
         }
     finally:
         db.close()
@@ -679,6 +1266,8 @@ async def check_series_for_new_books(
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
 
+    logger.info("CHECK NOW triggered for series_id=%s, series_name=%s", series_id, db_series.name)
+
     existing_job = series_check_jobs.get(series_id)
     if existing_job and existing_job.get("status") == "running":
         return {
@@ -748,6 +1337,11 @@ def get_series_check_status(series_id: int, db: Session = Depends(get_db)):
         "progress": int(job.get("progress_percent") or 0),
         "current_book_number": job.get("current_book_number"),
         "current_pass": job.get("current_pass"),
+        "current_asin": job.get("current_asin"),
+        "asins_discovered": int(job.get("asins_discovered") or 0),
+        "asins_processed": int(job.get("asins_processed") or 0),
+        "asin_fetch_success": int(job.get("asin_fetch_success") or 0),
+        "asin_fetch_failed": int(job.get("asin_fetch_failed") or 0),
     }
     if job.get("status") == "completed":
         payload.update(job.get("completion") or {"status": "complete"})
@@ -806,6 +1400,11 @@ def get_series_check_progress_status(series_id: int, session_id: str | None = No
             "status": "running",
             "progress": progress,
             "current_pass": job.get("current_pass") or "exact match",
+            "current_asin": job.get("current_asin"),
+            "asins_discovered": int(job.get("asins_discovered") or 0),
+            "asins_processed": int(job.get("asins_processed") or 0),
+            "asin_fetch_success": int(job.get("asin_fetch_success") or 0),
+            "asin_fetch_failed": int(job.get("asin_fetch_failed") or 0),
             "elapsed_seconds": elapsed_seconds,
             "timed_out": elapsed_seconds >= SERIES_CHECK_TIMEOUT_SECONDS,
         }

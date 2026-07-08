@@ -4,15 +4,14 @@ from datetime import date
 
 from sqlalchemy.orm import Session
 
-from intelligence import (
-    compute_series_intelligence_for_series,
-    recalculate_series_state_for_series,
-    recount_series_aggregates_for_series,
-)
-from models import Series
+from models import Book, Series
+from new_book_checker import check_for_new_book
 
 
 class SeriesIntelligenceAgent:
+    def run_daily_scan(self, db) -> None:
+        return None
+
     def run_series_check(
         self,
         db: Session,
@@ -51,39 +50,84 @@ class SeriesIntelligenceAgent:
                 "agent_pipeline": False,
             }
 
-        intelligence = compute_series_intelligence_for_series(db, series_id) or {}
-        series.total_books = intelligence.get("total_books", series.total_books)
-        series.is_finished = intelligence.get("is_series_finished", series.is_finished)
-        series.series_status = "finished" if series.is_finished else "ongoing"
-        series.missing_books = intelligence.get("missing_orders", series.missing_books)
-        series.next_unread_book_number = intelligence.get("next_unread_book_number", series.next_unread_book_number)
-        series.next_upcoming_book_number = intelligence.get("next_upcoming_book_number", series.next_upcoming_book_number)
+        checker_result = check_for_new_book(series, progress_callback=progress_callback)
+        found = bool(checker_result.get("found"))
+        candidate = checker_result.get("candidate") or None
+        provider_failures = checker_result.get("provider_failures") or []
+        all_providers_failed = bool(checker_result.get("all_providers_failed"))
+        amazon_book_candidates = checker_result.get("amazon_book_candidates") or []
+
+        series.has_new_books = found
         series.last_checked = date.today()
         db.commit()
         db.refresh(series)
 
-        recalculate_series_state_for_series(
-            db,
-            series_id,
-            scan_result={
-                "added_count": 0,
-                "added_books": [],
-                "candidate_diagnostics": [],
-                "trusted_series_reconciliation": None,
-                "found": False,
-            },
-        )
-        recount_series_aggregates_for_series(db, series.id)
-
         missing_books = [str(value).strip() for value in (series.missing_books or []) if str(value).strip()]
+        added_books = []
+        if candidate:
+            added_books = [
+                {
+                    "title": candidate.get("title"),
+                    "author": candidate.get("author") or series.author,
+                    "book_number": candidate.get("number"),
+                    "source_url": candidate.get("url"),
+                    "provider": candidate.get("provider"),
+                    "publication_date": candidate.get("publication_date"),
+                    "expected_date": candidate.get("expected_date"),
+                    "status_hint": candidate.get("status_hint"),
+                    "asin_or_id": candidate.get("asin_or_id"),
+                    "is_missing": False,
+                }
+            ]
+
+        seen_added_asins = {
+            str(item.get("asin_or_id") or "").strip().upper()
+            for item in added_books
+            if str(item.get("asin_or_id") or "").strip()
+        }
+
+        for amazon_candidate in amazon_book_candidates:
+            asin = str(amazon_candidate.get("asin_or_id") or "").strip().upper()
+            if not asin:
+                continue
+            if asin in seen_added_asins:
+                continue
+
+            added_books.append(
+                {
+                    "title": str(amazon_candidate.get("title") or series.name).strip() or series.name,
+                    "author": str(amazon_candidate.get("author") or series.author or "").strip() or series.author,
+                    "series_name": str(amazon_candidate.get("series_name") or series.name or "").strip() or series.name,
+                    "book_number": amazon_candidate.get("book_number"),
+                    "source_url": str(amazon_candidate.get("url") or "").strip(),
+                    "provider": "amazon_books",
+                    "publication_date": amazon_candidate.get("publish_date") or amazon_candidate.get("release_date"),
+                    "expected_date": amazon_candidate.get("upcoming_date"),
+                    "status_hint": str(amazon_candidate.get("availability") or "unknown").strip() or "unknown",
+                    "asin_or_id": asin,
+                    "is_missing": True,
+                    "canonical_metadata": {
+                        "title_normalized": str(amazon_candidate.get("title") or series.name).strip() or series.name,
+                        "series_name_normalized": str(amazon_candidate.get("series_name") or series.name or "").strip() or series.name,
+                        "book_number_normalized": amazon_candidate.get("book_number"),
+                        "publish_date_normalized": amazon_candidate.get("publish_date") or amazon_candidate.get("release_date"),
+                        "upcoming_date_normalized": amazon_candidate.get("upcoming_date"),
+                        "availability": amazon_candidate.get("availability") or "unknown",
+                        "edition_type": amazon_candidate.get("edition_type") or "unknown",
+                        "title_selector": amazon_candidate.get("title_selector"),
+                    },
+                }
+            )
+            seen_added_asins.add(asin)
+
         return {
             "series_id": series.id,
             "series_name": series.name,
             "highest_owned_book_number": None,
             "candidate_numbers": [],
-            "added_count": 0,
-            "added_books": [],
-            "found_books": [],
+            "added_count": len(added_books),
+            "added_books": added_books,
+            "found_books": added_books,
             "candidate_diagnostics": [],
             "trusted_series_reconciliation": None,
             "canonical_missing_entries": [],
@@ -91,9 +135,9 @@ class SeriesIntelligenceAgent:
             "canonical_upcoming_entries": [],
             "canonical_rejected_entries": [],
             "complete": True,
-            "status": "no_hits",
-            "no_new_books": True,
-            "reason": "legacy-discovery-removed",
+            "status": "complete" if found else "no_hits",
+            "no_new_books": not found,
+            "reason": None if found else "no-hit-after-new-book-check",
             "discovery_mode": None,
             "has_new_books": series.has_new_books,
             "series_state": series.series_state,
@@ -101,7 +145,20 @@ class SeriesIntelligenceAgent:
             "next_unread_book_number": series.next_unread_book_number,
             "next_upcoming_book_number": series.next_upcoming_book_number,
             "missing_books": missing_books,
-            "found": False,
-            "discovery_engine": "none",
-            "agent_pipeline": False,
+            "found": found,
+            "candidate": candidate,
+            "provider_failures": provider_failures,
+            "all_providers_failed": all_providers_failed,
+            "asin_discovery": checker_result.get("asin_discovery") or {
+                "discovered": 0,
+                "processed": 0,
+                "fetch_success": 0,
+                "fetch_failed": 0,
+                "metadata_hits": 0,
+            },
+            "amazon_asin_candidates": checker_result.get("amazon_asin_candidates") or [],
+            "first_extracted_product_metadata": checker_result.get("first_extracted_product_metadata"),
+            "first_product_extraction_failure": checker_result.get("first_product_extraction_failure"),
+            "discovery_engine": "new_book_checker",
+            "agent_pipeline": True,
         }
