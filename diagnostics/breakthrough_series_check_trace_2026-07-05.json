@@ -1,0 +1,3062 @@
+{
+  "books": [
+    {
+      "author": "Michael C. Grumley",
+      "book_number": 1.0,
+      "id": 2341,
+      "is_read": true,
+      "is_upcoming_final": false,
+      "record_status": "active",
+      "title": "Breakthrough: (Breakthrough Book 1)"
+    },
+    {
+      "author": "Michael C. Grumley",
+      "book_number": 2.0,
+      "id": 1884,
+      "is_read": true,
+      "is_upcoming_final": false,
+      "record_status": "active",
+      "title": "Leap: (Breakthrough Book 2)"
+    },
+    {
+      "author": "Michael C. Grumley",
+      "book_number": 3.0,
+      "id": 1885,
+      "is_read": true,
+      "is_upcoming_final": false,
+      "record_status": "active",
+      "title": "Catalyst: (Breakthrough Book 3)"
+    }
+  ],
+  "discoveries": [
+    {
+      "book_number": 4,
+      "http_requests": [
+        {
+          "params": null,
+          "url": "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International+%28Book+Four%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International%3A+Book+Four+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International+Book+Four+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://michaelcgrumley.com"
+        },
+        {
+          "params": null,
+          "url": "https://michaelcgrumleybooks.com"
+        },
+        {
+          "params": null,
+          "url": "https://michaelcgrumleywrites.com"
+        },
+        {
+          "params": null,
+          "url": "https://michaelcgrumley.com/books"
+        },
+        {
+          "params": null,
+          "url": "https://www.tor.com/search/Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.orbitbooks.net/?s=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.baen.com/search/?q=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.penguinrandomhouse.com/search/Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.bookseriesinorder.com/?s=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: (Book Four)+inauthor:\"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: (Book Four)"
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: (Book Four) \"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "limit": 8,
+            "q": "Breakthrough International: (Book Four) author:\"Michael C. Grumley\""
+          },
+          "url": "https://openlibrary.org/search.json"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International (Book Four)+inauthor:\"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International (Book Four)"
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International (Book Four) \"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "limit": 8,
+            "q": "Breakthrough International (Book Four) author:\"Michael C. Grumley\""
+          },
+          "url": "https://openlibrary.org/search.json"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: Book Four+inauthor:\"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: Book Four"
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: Book Four \"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "limit": 8,
+            "q": "Breakthrough International: Book Four author:\"Michael C. Grumley\""
+          },
+          "url": "https://openlibrary.org/search.json"
+        }
+      ],
+      "provider_calls": [
+        {
+          "args": [
+            "Breakthrough International: (Book Four)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "&nbsp;",
+            "matched": true,
+            "provider": "AmazonProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley"
+            ]
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "AmazonProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "derived_endpoints": {
+            "amazon_search_url": "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley",
+            "candidate_detail_urls": [
+              "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley"
+            ]
+          },
+          "function": "search_amazon_products",
+          "kwargs": {},
+          "returned_results": [
+            {
+              "author": "Michael C. Grumley",
+              "cover_image": null,
+              "description": null,
+              "publication_date": null,
+              "series_name": null,
+              "series_position": null,
+              "source": "amazon",
+              "source_url": "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley",
+              "title": "&nbsp;",
+              "year": null
+            }
+          ]
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Four)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_fantastic_fiction",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International (Book Four)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_fantastic_fiction",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: Book Four",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_fantastic_fiction",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International Book Four",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_fantastic_fiction",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            [
+              "Breakthrough International: (Book Four)",
+              "Breakthrough International (Book Four)",
+              "Breakthrough International: Book Four",
+              "Breakthrough International Book Four",
+              "Breakthrough International #4",
+              "Breakthrough International Four",
+              "Breakthrough Book 4",
+              "Breakthrough: Book Four",
+              "Breakthrough #4",
+              "Breakthrough Book Four",
+              "Breakthrough International 4",
+              "Breakthrough International: (Book Four) Harmon Cooper",
+              "Breakthrough International Book 4",
+              "Breakthrough 4",
+              "Breakthrough Four",
+              "Breakthrough International",
+              "Breakthrough"
+            ],
+            [
+              "Michael C. Grumley"
+            ],
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "AuthorSiteProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": [
+              "https://michaelcgrumley.com",
+              "https://michaelcgrumleybooks.com",
+              "https://michaelcgrumleywrites.com",
+              "https://michaelcgrumley.com/books"
+            ]
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "AuthorSiteProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_author_site_pages",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            [
+              "Breakthrough International: (Book Four)",
+              "Breakthrough International (Book Four)",
+              "Breakthrough International: Book Four",
+              "Breakthrough International Book Four",
+              "Breakthrough International #4",
+              "Breakthrough International Four",
+              "Breakthrough Book 4",
+              "Breakthrough: Book Four",
+              "Breakthrough #4",
+              "Breakthrough Book Four",
+              "Breakthrough International 4",
+              "Breakthrough International: (Book Four) Harmon Cooper",
+              "Breakthrough International Book 4",
+              "Breakthrough 4",
+              "Breakthrough Four",
+              "Breakthrough International",
+              "Breakthrough"
+            ],
+            [
+              "Michael C. Grumley"
+            ],
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "Search Results | Penguin Random House",
+            "matched": true,
+            "provider": "PublisherProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.tor.com/search/Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley",
+              "https://www.orbitbooks.net/?s=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley",
+              "https://www.baen.com/search/?q=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley",
+              "https://www.penguinrandomhouse.com/search/Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley"
+            ]
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "PublisherProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_publisher_pages",
+          "kwargs": {},
+          "returned_results": [
+            {
+              "author": "the author",
+              "cover_image": "https://www.penguinrandomhouse.com/wp-content/themes/penguinrandomhouse/images/prh-social.jpg",
+              "description": null,
+              "publication_date": null,
+              "series_name": null,
+              "series_position": null,
+              "source": "publisher",
+              "source_url": "https://www.penguinrandomhouse.com/search/Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley",
+              "title": "Search Results | Penguin Random House",
+              "year": null
+            }
+          ]
+        },
+        {
+          "args": [
+            [
+              "Breakthrough International: (Book Four)",
+              "Breakthrough International (Book Four)",
+              "Breakthrough International: Book Four",
+              "Breakthrough International Book Four",
+              "Breakthrough International #4",
+              "Breakthrough International Four",
+              "Breakthrough Book 4",
+              "Breakthrough: Book Four",
+              "Breakthrough #4",
+              "Breakthrough Book Four",
+              "Breakthrough International 4",
+              "Breakthrough International: (Book Four) Harmon Cooper",
+              "Breakthrough International Book 4",
+              "Breakthrough 4",
+              "Breakthrough Four",
+              "Breakthrough International",
+              "Breakthrough"
+            ],
+            [
+              "Michael C. Grumley"
+            ],
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "You searched for Breakthrough International: (Book Four) Michael C. Grumley - Book Series in Order",
+            "matched": true,
+            "provider": "BookDatabaseProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.bookseriesinorder.com/?s=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley"
+            ]
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "BookDatabaseProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_book_database_pages",
+          "kwargs": {},
+          "returned_results": [
+            {
+              "author": "author Nick Petrie",
+              "cover_image": "https://www.bookseriesinorder.com/wp-content/uploads/2023/04/bsio-facebook-1.png",
+              "description": null,
+              "publication_date": null,
+              "series_name": "You searched for Breakthrough International",
+              "series_position": null,
+              "source": "book_database",
+              "source_url": "https://www.bookseriesinorder.com/?s=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley",
+              "title": "You searched for Breakthrough International: (Book Four) Michael C. Grumley - Book Series in Order",
+              "year": null
+            }
+          ]
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Four)",
+            [
+              "Breakthrough International: (Book Four)",
+              "Breakthrough International (Book Four)",
+              "Breakthrough International: Book Four",
+              "Breakthrough International Book Four",
+              "Breakthrough International #4",
+              "Breakthrough International Four",
+              "Breakthrough Book 4",
+              "Breakthrough: Book Four",
+              "Breakthrough #4",
+              "Breakthrough Book Four",
+              "Breakthrough International 4",
+              "Breakthrough International: (Book Four) Harmon Cooper",
+              "Breakthrough International Book 4",
+              "Breakthrough 4",
+              "Breakthrough Four",
+              "Breakthrough International",
+              "Breakthrough"
+            ],
+            "Michael C. Grumley",
+            10
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_authors": [],
+            "html_titles": [],
+            "matched": false,
+            "organic_results": [],
+            "provider": "WebReadProvider",
+            "reason": "no-organic-results",
+            "search_engines": [
+              "google",
+              "bing",
+              "duckduckgo"
+            ],
+            "urls_fetched": [],
+            "variant_matches": []
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_authors": [],
+            "html_titles": [],
+            "matched": false,
+            "organic_results": [],
+            "provider": "WebReadProvider",
+            "reason": "no-organic-result-matched",
+            "search_engines": [
+              "google",
+              "bing",
+              "duckduckgo"
+            ],
+            "urls_fetched": [],
+            "variant_matches": []
+          },
+          "function": "search_web_read_candidates",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Four)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_google_books",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Four)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_openlibrary",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Four)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_goodreads_api",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Four)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_serpapi_web",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International (Book Four)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_google_books",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International (Book Four)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_openlibrary",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International (Book Four)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_goodreads_api",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International (Book Four)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_serpapi_web",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: Book Four",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_google_books",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: Book Four",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_openlibrary",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: Book Four",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_goodreads_api",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: Book Four",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_serpapi_web",
+          "kwargs": {},
+          "returned_results": []
+        }
+      ],
+      "result": {
+        "agent_pipeline": true,
+        "diagnostics": {
+          "accepted_total": 0,
+          "current_pass": "catalog_fallback",
+          "elapsed_seconds": 6.63,
+          "false_positive_filter": {
+            "publication_date_check": true,
+            "series_number_check": true,
+            "source_credibility_check": true
+          },
+          "passes_completed": 7,
+          "provider_counts": {
+            "amazon": 1,
+            "author_site": 0,
+            "book_database": 1,
+            "catalog_fallback": 0,
+            "fantastic_fiction": 0,
+            "goodreads": 0,
+            "google": 0,
+            "openlibrary": 0,
+            "publisher": 1,
+            "serpapi": 0,
+            "web_read": 0
+          },
+          "provider_order": [
+            "AmazonProvider",
+            "FantasticFictionProvider",
+            "AuthorSiteProvider",
+            "PublisherProvider",
+            "BookDatabaseProvider",
+            "WebReadProvider",
+            "CatalogFallbackProvider"
+          ],
+          "publication_date_filter": {
+            "accepted": false,
+            "date_future": false,
+            "date_missing": true,
+            "reason": "publication_date_missing",
+            "series_complete": false
+          },
+          "rejection_counts": {
+            "author_mismatch": 2,
+            "low_confidence": 2,
+            "publication_date_missing": 1
+          },
+          "selected_stage": "none",
+          "sources_used": [
+            "Amazon",
+            "BookDatabase",
+            "Publisher"
+          ],
+          "stages": [
+            {
+              "accepted_count": 0,
+              "provider": "amazon",
+              "query": "Breakthrough International: (Book Four)",
+              "raw_count": 1,
+              "stage": "direct"
+            },
+            {
+              "accepted_count": 0,
+              "provider": "fantastic_fiction",
+              "query": "Breakthrough International: (Book Four)",
+              "raw_count": 0,
+              "stage": "direct"
+            },
+            {
+              "accepted_count": 0,
+              "provider": "author_site",
+              "query": "Breakthrough International: (Book Four)",
+              "raw_count": 0,
+              "stage": "direct"
+            },
+            {
+              "accepted_count": 0,
+              "provider": "publisher",
+              "query": "Breakthrough International: (Book Four)",
+              "raw_count": 1,
+              "stage": "direct"
+            },
+            {
+              "accepted_count": 1,
+              "provider": "book_database",
+              "query": "Breakthrough International: (Book Four)",
+              "raw_count": 1,
+              "stage": "direct"
+            },
+            {
+              "accepted_count": 0,
+              "provider": "web_read",
+              "query": "Breakthrough International: (Book Four)",
+              "raw_count": 0,
+              "stage": "web_read"
+            },
+            {
+              "accepted_count": 0,
+              "provider": "catalog_fallback",
+              "query": "Breakthrough International: (Book Four)",
+              "raw_count": 0,
+              "stage": "catalog_fallback"
+            }
+          ],
+          "timed_out": false,
+          "top_score": 35.352112676056336
+        },
+        "discovery_engine": "agent_v2",
+        "discovery_mode": "direct",
+        "final_reason": "no-hit-after-all-providers",
+        "missing_books": [
+          4
+        ],
+        "passes_completed": 7,
+        "provider_attempt_order": [
+          "AmazonProvider",
+          "FantasticFictionProvider",
+          "AuthorSiteProvider",
+          "PublisherProvider",
+          "BookDatabaseProvider",
+          "WebReadProvider",
+          "CatalogFallbackProvider"
+        ],
+        "provider_attempts": [
+          {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "&nbsp;",
+            "matched": true,
+            "provider": "AmazonProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley"
+            ]
+          },
+          {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "AuthorSiteProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": [
+              "https://michaelcgrumley.com",
+              "https://michaelcgrumleybooks.com",
+              "https://michaelcgrumleywrites.com",
+              "https://michaelcgrumley.com/books"
+            ]
+          },
+          {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "Search Results | Penguin Random House",
+            "matched": true,
+            "provider": "PublisherProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.tor.com/search/Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley",
+              "https://www.orbitbooks.net/?s=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley",
+              "https://www.baen.com/search/?q=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley",
+              "https://www.penguinrandomhouse.com/search/Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley"
+            ]
+          },
+          {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "You searched for Breakthrough International: (Book Four) Michael C. Grumley - Book Series in Order",
+            "matched": true,
+            "provider": "BookDatabaseProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.bookseriesinorder.com/?s=Breakthrough+International%3A+%28Book+Four%29+Michael+C.+Grumley"
+            ]
+          },
+          {
+            "attempted": true,
+            "html_authors": [],
+            "html_titles": [],
+            "matched": false,
+            "organic_results": [],
+            "provider": "WebReadProvider",
+            "reason": "no-organic-results",
+            "search_engines": [
+              "google",
+              "bing",
+              "duckduckgo"
+            ],
+            "urls_fetched": [],
+            "variant_matches": []
+          },
+          {
+            "attempted": true,
+            "matched": false,
+            "provider": "CatalogFallbackProvider",
+            "reason": "no-catalog-hit"
+          }
+        ],
+        "provider_selected": null,
+        "query": "Breakthrough International: (Book Four)",
+        "reason": "no-hit-after-all-passes",
+        "results": [],
+        "sources_used": [
+          "Amazon",
+          "BookDatabase",
+          "Publisher"
+        ],
+        "status": "no_hits"
+      }
+    },
+    {
+      "book_number": 5,
+      "http_requests": [
+        {
+          "params": null,
+          "url": "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International+%28Book+Five%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International%3A+Book+Five+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International+Book+Five+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://michaelcgrumley.com"
+        },
+        {
+          "params": null,
+          "url": "https://michaelcgrumleybooks.com"
+        },
+        {
+          "params": null,
+          "url": "https://michaelcgrumleywrites.com"
+        },
+        {
+          "params": null,
+          "url": "https://michaelcgrumley.com/books"
+        },
+        {
+          "params": null,
+          "url": "https://www.tor.com/search/Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.orbitbooks.net/?s=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.baen.com/search/?q=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.penguinrandomhouse.com/search/Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.bookseriesinorder.com/?s=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: (Book Five)+inauthor:\"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: (Book Five)"
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: (Book Five) \"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "limit": 8,
+            "q": "Breakthrough International: (Book Five) author:\"Michael C. Grumley\""
+          },
+          "url": "https://openlibrary.org/search.json"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International (Book Five)+inauthor:\"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International (Book Five)"
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International (Book Five) \"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "limit": 8,
+            "q": "Breakthrough International (Book Five) author:\"Michael C. Grumley\""
+          },
+          "url": "https://openlibrary.org/search.json"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: Book Five+inauthor:\"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: Book Five"
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: Book Five \"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "limit": 8,
+            "q": "Breakthrough International: Book Five author:\"Michael C. Grumley\""
+          },
+          "url": "https://openlibrary.org/search.json"
+        }
+      ],
+      "provider_calls": [
+        {
+          "args": [
+            "Breakthrough International: (Book Five)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "&nbsp;",
+            "matched": true,
+            "provider": "AmazonProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley"
+            ]
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "AmazonProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "derived_endpoints": {
+            "amazon_search_url": "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley",
+            "candidate_detail_urls": [
+              "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley"
+            ]
+          },
+          "function": "search_amazon_products",
+          "kwargs": {},
+          "returned_results": [
+            {
+              "author": "Michael C. Grumley",
+              "cover_image": null,
+              "description": null,
+              "publication_date": null,
+              "series_name": null,
+              "series_position": null,
+              "source": "amazon",
+              "source_url": "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley",
+              "title": "&nbsp;",
+              "year": null
+            }
+          ]
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Five)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_fantastic_fiction",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International (Book Five)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_fantastic_fiction",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: Book Five",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_fantastic_fiction",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International Book Five",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_fantastic_fiction",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            [
+              "Breakthrough International: (Book Five)",
+              "Breakthrough International (Book Five)",
+              "Breakthrough International: Book Five",
+              "Breakthrough International Book Five",
+              "Breakthrough International #5",
+              "Breakthrough International Five",
+              "Breakthrough Book 5",
+              "Breakthrough: Book Five",
+              "Breakthrough #5",
+              "Breakthrough Book Five",
+              "Breakthrough International 5",
+              "Breakthrough International: (Book Five) Harmon Cooper",
+              "Breakthrough International Book 5",
+              "Breakthrough 5",
+              "Breakthrough Five",
+              "Breakthrough International",
+              "Breakthrough"
+            ],
+            [
+              "Michael C. Grumley"
+            ],
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "AuthorSiteProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": [
+              "https://michaelcgrumley.com",
+              "https://michaelcgrumleybooks.com",
+              "https://michaelcgrumleywrites.com",
+              "https://michaelcgrumley.com/books"
+            ]
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "AuthorSiteProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_author_site_pages",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            [
+              "Breakthrough International: (Book Five)",
+              "Breakthrough International (Book Five)",
+              "Breakthrough International: Book Five",
+              "Breakthrough International Book Five",
+              "Breakthrough International #5",
+              "Breakthrough International Five",
+              "Breakthrough Book 5",
+              "Breakthrough: Book Five",
+              "Breakthrough #5",
+              "Breakthrough Book Five",
+              "Breakthrough International 5",
+              "Breakthrough International: (Book Five) Harmon Cooper",
+              "Breakthrough International Book 5",
+              "Breakthrough 5",
+              "Breakthrough Five",
+              "Breakthrough International",
+              "Breakthrough"
+            ],
+            [
+              "Michael C. Grumley"
+            ],
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "Search Results | Penguin Random House",
+            "matched": true,
+            "provider": "PublisherProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.tor.com/search/Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley",
+              "https://www.orbitbooks.net/?s=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley",
+              "https://www.baen.com/search/?q=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley",
+              "https://www.penguinrandomhouse.com/search/Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley"
+            ]
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "PublisherProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_publisher_pages",
+          "kwargs": {},
+          "returned_results": [
+            {
+              "author": "the author",
+              "cover_image": "https://www.penguinrandomhouse.com/wp-content/themes/penguinrandomhouse/images/prh-social.jpg",
+              "description": null,
+              "publication_date": null,
+              "series_name": null,
+              "series_position": null,
+              "source": "publisher",
+              "source_url": "https://www.penguinrandomhouse.com/search/Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley",
+              "title": "Search Results | Penguin Random House",
+              "year": null
+            }
+          ]
+        },
+        {
+          "args": [
+            [
+              "Breakthrough International: (Book Five)",
+              "Breakthrough International (Book Five)",
+              "Breakthrough International: Book Five",
+              "Breakthrough International Book Five",
+              "Breakthrough International #5",
+              "Breakthrough International Five",
+              "Breakthrough Book 5",
+              "Breakthrough: Book Five",
+              "Breakthrough #5",
+              "Breakthrough Book Five",
+              "Breakthrough International 5",
+              "Breakthrough International: (Book Five) Harmon Cooper",
+              "Breakthrough International Book 5",
+              "Breakthrough 5",
+              "Breakthrough Five",
+              "Breakthrough International",
+              "Breakthrough"
+            ],
+            [
+              "Michael C. Grumley"
+            ],
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "You searched for Breakthrough International: (Book Five) Michael C. Grumley - Book Series in Order",
+            "matched": true,
+            "provider": "BookDatabaseProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.bookseriesinorder.com/?s=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley"
+            ]
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "BookDatabaseProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_book_database_pages",
+          "kwargs": {},
+          "returned_results": [
+            {
+              "author": "author Nick Petrie",
+              "cover_image": "https://www.bookseriesinorder.com/wp-content/uploads/2023/04/bsio-facebook-1.png",
+              "description": null,
+              "publication_date": null,
+              "series_name": "You searched for Breakthrough International",
+              "series_position": null,
+              "source": "book_database",
+              "source_url": "https://www.bookseriesinorder.com/?s=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley",
+              "title": "You searched for Breakthrough International: (Book Five) Michael C. Grumley - Book Series in Order",
+              "year": null
+            }
+          ]
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Five)",
+            [
+              "Breakthrough International: (Book Five)",
+              "Breakthrough International (Book Five)",
+              "Breakthrough International: Book Five",
+              "Breakthrough International Book Five",
+              "Breakthrough International #5",
+              "Breakthrough International Five",
+              "Breakthrough Book 5",
+              "Breakthrough: Book Five",
+              "Breakthrough #5",
+              "Breakthrough Book Five",
+              "Breakthrough International 5",
+              "Breakthrough International: (Book Five) Harmon Cooper",
+              "Breakthrough International Book 5",
+              "Breakthrough 5",
+              "Breakthrough Five",
+              "Breakthrough International",
+              "Breakthrough"
+            ],
+            "Michael C. Grumley",
+            10
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_authors": [],
+            "html_titles": [],
+            "matched": false,
+            "organic_results": [],
+            "provider": "WebReadProvider",
+            "reason": "no-organic-results",
+            "search_engines": [
+              "google",
+              "bing",
+              "duckduckgo"
+            ],
+            "urls_fetched": [],
+            "variant_matches": []
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_authors": [],
+            "html_titles": [],
+            "matched": false,
+            "organic_results": [],
+            "provider": "WebReadProvider",
+            "reason": "no-organic-result-matched",
+            "search_engines": [
+              "google",
+              "bing",
+              "duckduckgo"
+            ],
+            "urls_fetched": [],
+            "variant_matches": []
+          },
+          "function": "search_web_read_candidates",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Five)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_google_books",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Five)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_openlibrary",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Five)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_goodreads_api",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Five)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_serpapi_web",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International (Book Five)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_google_books",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International (Book Five)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_openlibrary",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International (Book Five)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_goodreads_api",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International (Book Five)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_serpapi_web",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: Book Five",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_google_books",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: Book Five",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_openlibrary",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: Book Five",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_goodreads_api",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: Book Five",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_serpapi_web",
+          "kwargs": {},
+          "returned_results": []
+        }
+      ],
+      "result": {
+        "agent_pipeline": true,
+        "diagnostics": {
+          "accepted_total": 0,
+          "current_pass": "catalog_fallback",
+          "elapsed_seconds": 6.75,
+          "false_positive_filter": {
+            "publication_date_check": true,
+            "series_number_check": true,
+            "source_credibility_check": true
+          },
+          "passes_completed": 7,
+          "provider_counts": {
+            "amazon": 1,
+            "author_site": 0,
+            "book_database": 1,
+            "catalog_fallback": 0,
+            "fantastic_fiction": 0,
+            "goodreads": 0,
+            "google": 0,
+            "openlibrary": 0,
+            "publisher": 1,
+            "serpapi": 0,
+            "web_read": 0
+          },
+          "provider_order": [
+            "AmazonProvider",
+            "FantasticFictionProvider",
+            "AuthorSiteProvider",
+            "PublisherProvider",
+            "BookDatabaseProvider",
+            "WebReadProvider",
+            "CatalogFallbackProvider"
+          ],
+          "publication_date_filter": {
+            "accepted": false,
+            "date_future": false,
+            "date_missing": true,
+            "reason": "publication_date_missing",
+            "series_complete": false
+          },
+          "rejection_counts": {
+            "author_mismatch": 2,
+            "low_confidence": 2,
+            "publication_date_missing": 1
+          },
+          "selected_stage": "none",
+          "sources_used": [
+            "Amazon",
+            "BookDatabase",
+            "Publisher"
+          ],
+          "stages": [
+            {
+              "accepted_count": 0,
+              "provider": "amazon",
+              "query": "Breakthrough International: (Book Five)",
+              "raw_count": 1,
+              "stage": "direct"
+            },
+            {
+              "accepted_count": 0,
+              "provider": "fantastic_fiction",
+              "query": "Breakthrough International: (Book Five)",
+              "raw_count": 0,
+              "stage": "direct"
+            },
+            {
+              "accepted_count": 0,
+              "provider": "author_site",
+              "query": "Breakthrough International: (Book Five)",
+              "raw_count": 0,
+              "stage": "direct"
+            },
+            {
+              "accepted_count": 0,
+              "provider": "publisher",
+              "query": "Breakthrough International: (Book Five)",
+              "raw_count": 1,
+              "stage": "direct"
+            },
+            {
+              "accepted_count": 1,
+              "provider": "book_database",
+              "query": "Breakthrough International: (Book Five)",
+              "raw_count": 1,
+              "stage": "direct"
+            },
+            {
+              "accepted_count": 0,
+              "provider": "web_read",
+              "query": "Breakthrough International: (Book Five)",
+              "raw_count": 0,
+              "stage": "web_read"
+            },
+            {
+              "accepted_count": 0,
+              "provider": "catalog_fallback",
+              "query": "Breakthrough International: (Book Five)",
+              "raw_count": 0,
+              "stage": "catalog_fallback"
+            }
+          ],
+          "timed_out": false,
+          "top_score": 35.352112676056336
+        },
+        "discovery_engine": "agent_v2",
+        "discovery_mode": "direct",
+        "final_reason": "no-hit-after-all-providers",
+        "missing_books": [
+          5
+        ],
+        "passes_completed": 7,
+        "provider_attempt_order": [
+          "AmazonProvider",
+          "FantasticFictionProvider",
+          "AuthorSiteProvider",
+          "PublisherProvider",
+          "BookDatabaseProvider",
+          "WebReadProvider",
+          "CatalogFallbackProvider"
+        ],
+        "provider_attempts": [
+          {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "&nbsp;",
+            "matched": true,
+            "provider": "AmazonProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley"
+            ]
+          },
+          {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "AuthorSiteProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": [
+              "https://michaelcgrumley.com",
+              "https://michaelcgrumleybooks.com",
+              "https://michaelcgrumleywrites.com",
+              "https://michaelcgrumley.com/books"
+            ]
+          },
+          {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "Search Results | Penguin Random House",
+            "matched": true,
+            "provider": "PublisherProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.tor.com/search/Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley",
+              "https://www.orbitbooks.net/?s=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley",
+              "https://www.baen.com/search/?q=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley",
+              "https://www.penguinrandomhouse.com/search/Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley"
+            ]
+          },
+          {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "You searched for Breakthrough International: (Book Five) Michael C. Grumley - Book Series in Order",
+            "matched": true,
+            "provider": "BookDatabaseProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.bookseriesinorder.com/?s=Breakthrough+International%3A+%28Book+Five%29+Michael+C.+Grumley"
+            ]
+          },
+          {
+            "attempted": true,
+            "html_authors": [],
+            "html_titles": [],
+            "matched": false,
+            "organic_results": [],
+            "provider": "WebReadProvider",
+            "reason": "no-organic-results",
+            "search_engines": [
+              "google",
+              "bing",
+              "duckduckgo"
+            ],
+            "urls_fetched": [],
+            "variant_matches": []
+          },
+          {
+            "attempted": true,
+            "matched": false,
+            "provider": "CatalogFallbackProvider",
+            "reason": "no-catalog-hit"
+          }
+        ],
+        "provider_selected": null,
+        "query": "Breakthrough International: (Book Five)",
+        "reason": "no-hit-after-all-passes",
+        "results": [],
+        "sources_used": [
+          "Amazon",
+          "BookDatabase",
+          "Publisher"
+        ],
+        "status": "no_hits"
+      }
+    },
+    {
+      "book_number": 6,
+      "http_requests": [
+        {
+          "params": null,
+          "url": "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International+%28Book+Six%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International%3A+Book+Six+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International+Book+Six+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://michaelcgrumley.com"
+        },
+        {
+          "params": null,
+          "url": "https://michaelcgrumleybooks.com"
+        },
+        {
+          "params": null,
+          "url": "https://michaelcgrumleywrites.com"
+        },
+        {
+          "params": null,
+          "url": "https://michaelcgrumley.com/books"
+        },
+        {
+          "params": null,
+          "url": "https://www.tor.com/search/Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.orbitbooks.net/?s=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.baen.com/search/?q=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.penguinrandomhouse.com/search/Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+        },
+        {
+          "params": null,
+          "url": "https://www.bookseriesinorder.com/?s=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: (Book Six)+inauthor:\"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: (Book Six)"
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: (Book Six) \"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "limit": 8,
+            "q": "Breakthrough International: (Book Six) author:\"Michael C. Grumley\""
+          },
+          "url": "https://openlibrary.org/search.json"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International (Book Six)+inauthor:\"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International (Book Six)"
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International (Book Six) \"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "limit": 8,
+            "q": "Breakthrough International (Book Six) author:\"Michael C. Grumley\""
+          },
+          "url": "https://openlibrary.org/search.json"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: Book Six+inauthor:\"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: Book Six"
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "maxResults": 8,
+            "orderBy": "relevance",
+            "printType": "books",
+            "q": "Breakthrough International: Book Six \"Michael C. Grumley\""
+          },
+          "url": "https://www.googleapis.com/books/v1/volumes"
+        },
+        {
+          "params": {
+            "limit": 8,
+            "q": "Breakthrough International: Book Six author:\"Michael C. Grumley\""
+          },
+          "url": "https://openlibrary.org/search.json"
+        }
+      ],
+      "provider_calls": [
+        {
+          "args": [
+            "Breakthrough International: (Book Six)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "&nbsp;",
+            "matched": true,
+            "provider": "AmazonProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+            ]
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "AmazonProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "derived_endpoints": {
+            "amazon_search_url": "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley",
+            "candidate_detail_urls": [
+              "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+            ]
+          },
+          "function": "search_amazon_products",
+          "kwargs": {},
+          "returned_results": [
+            {
+              "author": "Michael C. Grumley",
+              "cover_image": null,
+              "description": null,
+              "publication_date": null,
+              "series_name": null,
+              "series_position": null,
+              "source": "amazon",
+              "source_url": "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley",
+              "title": "&nbsp;",
+              "year": null
+            }
+          ]
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Six)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_fantastic_fiction",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International (Book Six)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_fantastic_fiction",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: Book Six",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_fantastic_fiction",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International Book Six",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_fantastic_fiction",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            [
+              "Breakthrough International: (Book Six)",
+              "Breakthrough International (Book Six)",
+              "Breakthrough International: Book Six",
+              "Breakthrough International Book Six",
+              "Breakthrough International #6",
+              "Breakthrough International Six",
+              "Breakthrough Book 6",
+              "Breakthrough: Book Six",
+              "Breakthrough #6",
+              "Breakthrough Book Six",
+              "Breakthrough International 6",
+              "Breakthrough International: (Book Six) Harmon Cooper",
+              "Breakthrough International Book 6",
+              "Breakthrough 6",
+              "Breakthrough Six",
+              "Breakthrough International",
+              "Breakthrough"
+            ],
+            [
+              "Michael C. Grumley"
+            ],
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "AuthorSiteProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": [
+              "https://michaelcgrumley.com",
+              "https://michaelcgrumleybooks.com",
+              "https://michaelcgrumleywrites.com",
+              "https://michaelcgrumley.com/books"
+            ]
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "AuthorSiteProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_author_site_pages",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            [
+              "Breakthrough International: (Book Six)",
+              "Breakthrough International (Book Six)",
+              "Breakthrough International: Book Six",
+              "Breakthrough International Book Six",
+              "Breakthrough International #6",
+              "Breakthrough International Six",
+              "Breakthrough Book 6",
+              "Breakthrough: Book Six",
+              "Breakthrough #6",
+              "Breakthrough Book Six",
+              "Breakthrough International 6",
+              "Breakthrough International: (Book Six) Harmon Cooper",
+              "Breakthrough International Book 6",
+              "Breakthrough 6",
+              "Breakthrough Six",
+              "Breakthrough International",
+              "Breakthrough"
+            ],
+            [
+              "Michael C. Grumley"
+            ],
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "Search Results | Penguin Random House",
+            "matched": true,
+            "provider": "PublisherProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.tor.com/search/Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley",
+              "https://www.orbitbooks.net/?s=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley",
+              "https://www.baen.com/search/?q=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley",
+              "https://www.penguinrandomhouse.com/search/Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+            ]
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "PublisherProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_publisher_pages",
+          "kwargs": {},
+          "returned_results": [
+            {
+              "author": "the author",
+              "cover_image": "https://www.penguinrandomhouse.com/wp-content/themes/penguinrandomhouse/images/prh-social.jpg",
+              "description": null,
+              "publication_date": null,
+              "series_name": null,
+              "series_position": null,
+              "source": "publisher",
+              "source_url": "https://www.penguinrandomhouse.com/search/Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley",
+              "title": "Search Results | Penguin Random House",
+              "year": null
+            }
+          ]
+        },
+        {
+          "args": [
+            [
+              "Breakthrough International: (Book Six)",
+              "Breakthrough International (Book Six)",
+              "Breakthrough International: Book Six",
+              "Breakthrough International Book Six",
+              "Breakthrough International #6",
+              "Breakthrough International Six",
+              "Breakthrough Book 6",
+              "Breakthrough: Book Six",
+              "Breakthrough #6",
+              "Breakthrough Book Six",
+              "Breakthrough International 6",
+              "Breakthrough International: (Book Six) Harmon Cooper",
+              "Breakthrough International Book 6",
+              "Breakthrough 6",
+              "Breakthrough Six",
+              "Breakthrough International",
+              "Breakthrough"
+            ],
+            [
+              "Michael C. Grumley"
+            ],
+            8
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "You searched for Breakthrough International: (Book Six) Michael C. Grumley - Book Series in Order",
+            "matched": true,
+            "provider": "BookDatabaseProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.bookseriesinorder.com/?s=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+            ]
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "BookDatabaseProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          "function": "search_book_database_pages",
+          "kwargs": {},
+          "returned_results": [
+            {
+              "author": "author Nick Petrie",
+              "cover_image": "https://www.bookseriesinorder.com/wp-content/uploads/2023/04/bsio-facebook-1.png",
+              "description": null,
+              "publication_date": null,
+              "series_name": "You searched for Breakthrough International",
+              "series_position": null,
+              "source": "book_database",
+              "source_url": "https://www.bookseriesinorder.com/?s=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley",
+              "title": "You searched for Breakthrough International: (Book Six) Michael C. Grumley - Book Series in Order",
+              "year": null
+            }
+          ]
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Six)",
+            [
+              "Breakthrough International: (Book Six)",
+              "Breakthrough International (Book Six)",
+              "Breakthrough International: Book Six",
+              "Breakthrough International Book Six",
+              "Breakthrough International #6",
+              "Breakthrough International Six",
+              "Breakthrough Book 6",
+              "Breakthrough: Book Six",
+              "Breakthrough #6",
+              "Breakthrough Book Six",
+              "Breakthrough International 6",
+              "Breakthrough International: (Book Six) Harmon Cooper",
+              "Breakthrough International Book 6",
+              "Breakthrough 6",
+              "Breakthrough Six",
+              "Breakthrough International",
+              "Breakthrough"
+            ],
+            "Michael C. Grumley",
+            10
+          ],
+          "debug_after": {
+            "attempted": true,
+            "html_authors": [],
+            "html_titles": [],
+            "matched": false,
+            "organic_results": [],
+            "provider": "WebReadProvider",
+            "reason": "no-organic-results",
+            "search_engines": [
+              "google",
+              "bing",
+              "duckduckgo"
+            ],
+            "urls_fetched": [],
+            "variant_matches": []
+          },
+          "debug_before": {
+            "attempted": true,
+            "html_authors": [],
+            "html_titles": [],
+            "matched": false,
+            "organic_results": [],
+            "provider": "WebReadProvider",
+            "reason": "no-organic-result-matched",
+            "search_engines": [
+              "google",
+              "bing",
+              "duckduckgo"
+            ],
+            "urls_fetched": [],
+            "variant_matches": []
+          },
+          "function": "search_web_read_candidates",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Six)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_google_books",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Six)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_openlibrary",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Six)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_goodreads_api",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: (Book Six)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_serpapi_web",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International (Book Six)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_google_books",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International (Book Six)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_openlibrary",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International (Book Six)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_goodreads_api",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International (Book Six)",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_serpapi_web",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: Book Six",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_google_books",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: Book Six",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_openlibrary",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: Book Six",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_goodreads_api",
+          "kwargs": {},
+          "returned_results": []
+        },
+        {
+          "args": [
+            "Breakthrough International: Book Six",
+            "Michael C. Grumley",
+            8
+          ],
+          "debug_after": null,
+          "debug_before": null,
+          "function": "search_serpapi_web",
+          "kwargs": {},
+          "returned_results": []
+        }
+      ],
+      "result": {
+        "agent_pipeline": true,
+        "diagnostics": {
+          "accepted_total": 0,
+          "current_pass": "catalog_fallback",
+          "elapsed_seconds": 6.72,
+          "false_positive_filter": {
+            "publication_date_check": true,
+            "series_number_check": true,
+            "source_credibility_check": true
+          },
+          "passes_completed": 7,
+          "provider_counts": {
+            "amazon": 1,
+            "author_site": 0,
+            "book_database": 1,
+            "catalog_fallback": 0,
+            "fantastic_fiction": 0,
+            "goodreads": 0,
+            "google": 0,
+            "openlibrary": 0,
+            "publisher": 1,
+            "serpapi": 0,
+            "web_read": 0
+          },
+          "provider_order": [
+            "AmazonProvider",
+            "FantasticFictionProvider",
+            "AuthorSiteProvider",
+            "PublisherProvider",
+            "BookDatabaseProvider",
+            "WebReadProvider",
+            "CatalogFallbackProvider"
+          ],
+          "publication_date_filter": {
+            "accepted": false,
+            "date_future": false,
+            "date_missing": true,
+            "reason": "publication_date_missing",
+            "series_complete": false
+          },
+          "rejection_counts": {
+            "author_mismatch": 2,
+            "low_confidence": 2,
+            "publication_date_missing": 1
+          },
+          "selected_stage": "none",
+          "sources_used": [
+            "Amazon",
+            "BookDatabase",
+            "Publisher"
+          ],
+          "stages": [
+            {
+              "accepted_count": 0,
+              "provider": "amazon",
+              "query": "Breakthrough International: (Book Six)",
+              "raw_count": 1,
+              "stage": "direct"
+            },
+            {
+              "accepted_count": 0,
+              "provider": "fantastic_fiction",
+              "query": "Breakthrough International: (Book Six)",
+              "raw_count": 0,
+              "stage": "direct"
+            },
+            {
+              "accepted_count": 0,
+              "provider": "author_site",
+              "query": "Breakthrough International: (Book Six)",
+              "raw_count": 0,
+              "stage": "direct"
+            },
+            {
+              "accepted_count": 0,
+              "provider": "publisher",
+              "query": "Breakthrough International: (Book Six)",
+              "raw_count": 1,
+              "stage": "direct"
+            },
+            {
+              "accepted_count": 1,
+              "provider": "book_database",
+              "query": "Breakthrough International: (Book Six)",
+              "raw_count": 1,
+              "stage": "direct"
+            },
+            {
+              "accepted_count": 0,
+              "provider": "web_read",
+              "query": "Breakthrough International: (Book Six)",
+              "raw_count": 0,
+              "stage": "web_read"
+            },
+            {
+              "accepted_count": 0,
+              "provider": "catalog_fallback",
+              "query": "Breakthrough International: (Book Six)",
+              "raw_count": 0,
+              "stage": "catalog_fallback"
+            }
+          ],
+          "timed_out": false,
+          "top_score": 35.14285714285714
+        },
+        "discovery_engine": "agent_v2",
+        "discovery_mode": "direct",
+        "final_reason": "no-hit-after-all-providers",
+        "missing_books": [
+          6
+        ],
+        "passes_completed": 7,
+        "provider_attempt_order": [
+          "AmazonProvider",
+          "FantasticFictionProvider",
+          "AuthorSiteProvider",
+          "PublisherProvider",
+          "BookDatabaseProvider",
+          "WebReadProvider",
+          "CatalogFallbackProvider"
+        ],
+        "provider_attempts": [
+          {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "&nbsp;",
+            "matched": true,
+            "provider": "AmazonProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+            ]
+          },
+          {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "FantasticFictionProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": []
+          },
+          {
+            "attempted": true,
+            "html_author": null,
+            "html_title": null,
+            "matched": false,
+            "provider": "AuthorSiteProvider",
+            "reason": "no-title-author-match",
+            "urls_checked": [
+              "https://michaelcgrumley.com",
+              "https://michaelcgrumleybooks.com",
+              "https://michaelcgrumleywrites.com",
+              "https://michaelcgrumley.com/books"
+            ]
+          },
+          {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "Search Results | Penguin Random House",
+            "matched": true,
+            "provider": "PublisherProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.tor.com/search/Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley",
+              "https://www.orbitbooks.net/?s=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley",
+              "https://www.baen.com/search/?q=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley",
+              "https://www.penguinrandomhouse.com/search/Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+            ]
+          },
+          {
+            "attempted": true,
+            "html_author": null,
+            "html_title": "You searched for Breakthrough International: (Book Six) Michael C. Grumley - Book Series in Order",
+            "matched": true,
+            "provider": "BookDatabaseProvider",
+            "reason": "matched",
+            "urls_checked": [
+              "https://www.bookseriesinorder.com/?s=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+            ]
+          },
+          {
+            "attempted": true,
+            "html_authors": [],
+            "html_titles": [],
+            "matched": false,
+            "organic_results": [],
+            "provider": "WebReadProvider",
+            "reason": "no-organic-results",
+            "search_engines": [
+              "google",
+              "bing",
+              "duckduckgo"
+            ],
+            "urls_fetched": [],
+            "variant_matches": []
+          },
+          {
+            "attempted": true,
+            "matched": false,
+            "provider": "CatalogFallbackProvider",
+            "reason": "no-catalog-hit"
+          }
+        ],
+        "provider_selected": null,
+        "query": "Breakthrough International: (Book Six)",
+        "reason": "no-hit-after-all-passes",
+        "results": [],
+        "sources_used": [
+          "Amazon",
+          "BookDatabase",
+          "Publisher"
+        ],
+        "status": "no_hits"
+      }
+    }
+  ],
+  "http_requests": [
+    {
+      "params": null,
+      "url": "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+    },
+    {
+      "params": null,
+      "url": "https://www.amazon.com/s?k=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+    },
+    {
+      "params": null,
+      "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+    },
+    {
+      "params": null,
+      "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International+%28Book+Six%29+Michael+C.+Grumley"
+    },
+    {
+      "params": null,
+      "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International%3A+Book+Six+Michael+C.+Grumley"
+    },
+    {
+      "params": null,
+      "url": "https://www.fantasticfiction.com/search/?searchfor=book&keywords=Breakthrough+International+Book+Six+Michael+C.+Grumley"
+    },
+    {
+      "params": null,
+      "url": "https://michaelcgrumley.com"
+    },
+    {
+      "params": null,
+      "url": "https://michaelcgrumleybooks.com"
+    },
+    {
+      "params": null,
+      "url": "https://michaelcgrumleywrites.com"
+    },
+    {
+      "params": null,
+      "url": "https://michaelcgrumley.com/books"
+    },
+    {
+      "params": null,
+      "url": "https://www.tor.com/search/Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+    },
+    {
+      "params": null,
+      "url": "https://www.orbitbooks.net/?s=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+    },
+    {
+      "params": null,
+      "url": "https://www.baen.com/search/?q=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+    },
+    {
+      "params": null,
+      "url": "https://www.penguinrandomhouse.com/search/Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+    },
+    {
+      "params": null,
+      "url": "https://www.bookseriesinorder.com/?s=Breakthrough+International%3A+%28Book+Six%29+Michael+C.+Grumley"
+    },
+    {
+      "params": {
+        "maxResults": 8,
+        "orderBy": "relevance",
+        "printType": "books",
+        "q": "Breakthrough International: (Book Six)+inauthor:\"Michael C. Grumley\""
+      },
+      "url": "https://www.googleapis.com/books/v1/volumes"
+    },
+    {
+      "params": {
+        "maxResults": 8,
+        "orderBy": "relevance",
+        "printType": "books",
+        "q": "Breakthrough International: (Book Six)"
+      },
+      "url": "https://www.googleapis.com/books/v1/volumes"
+    },
+    {
+      "params": {
+        "maxResults": 8,
+        "orderBy": "relevance",
+        "printType": "books",
+        "q": "Breakthrough International: (Book Six) \"Michael C. Grumley\""
+      },
+      "url": "https://www.googleapis.com/books/v1/volumes"
+    },
+    {
+      "params": {
+        "limit": 8,
+        "q": "Breakthrough International: (Book Six) author:\"Michael C. Grumley\""
+      },
+      "url": "https://openlibrary.org/search.json"
+    },
+    {
+      "params": {
+        "maxResults": 8,
+        "orderBy": "relevance",
+        "printType": "books",
+        "q": "Breakthrough International (Book Six)+inauthor:\"Michael C. Grumley\""
+      },
+      "url": "https://www.googleapis.com/books/v1/volumes"
+    },
+    {
+      "params": {
+        "maxResults": 8,
+        "orderBy": "relevance",
+        "printType": "books",
+        "q": "Breakthrough International (Book Six)"
+      },
+      "url": "https://www.googleapis.com/books/v1/volumes"
+    },
+    {
+      "params": {
+        "maxResults": 8,
+        "orderBy": "relevance",
+        "printType": "books",
+        "q": "Breakthrough International (Book Six) \"Michael C. Grumley\""
+      },
+      "url": "https://www.googleapis.com/books/v1/volumes"
+    },
+    {
+      "params": {
+        "limit": 8,
+        "q": "Breakthrough International (Book Six) author:\"Michael C. Grumley\""
+      },
+      "url": "https://openlibrary.org/search.json"
+    },
+    {
+      "params": {
+        "maxResults": 8,
+        "orderBy": "relevance",
+        "printType": "books",
+        "q": "Breakthrough International: Book Six+inauthor:\"Michael C. Grumley\""
+      },
+      "url": "https://www.googleapis.com/books/v1/volumes"
+    },
+    {
+      "params": {
+        "maxResults": 8,
+        "orderBy": "relevance",
+        "printType": "books",
+        "q": "Breakthrough International: Book Six"
+      },
+      "url": "https://www.googleapis.com/books/v1/volumes"
+    },
+    {
+      "params": {
+        "maxResults": 8,
+        "orderBy": "relevance",
+        "printType": "books",
+        "q": "Breakthrough International: Book Six \"Michael C. Grumley\""
+      },
+      "url": "https://www.googleapis.com/books/v1/volumes"
+    },
+    {
+      "params": {
+        "limit": 8,
+        "q": "Breakthrough International: Book Six author:\"Michael C. Grumley\""
+      },
+      "url": "https://openlibrary.org/search.json"
+    }
+  ],
+  "planning": {
+    "candidate_numbers": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23
+    ],
+    "existing_numbers": [
+      1.0,
+      2.0,
+      3.0
+    ],
+    "future_candidates": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23
+    ],
+    "known_authors": [
+      "Michael C. Grumley"
+    ],
+    "known_series_max": 3,
+    "missing_candidates": [],
+    "series_complete": false
+  },
+  "series": {
+    "author": null,
+    "id": 268,
+    "is_finished": false,
+    "missing_books": [],
+    "name": "Breakthrough",
+    "series_status": "ongoing",
+    "total_books": 3
+  }
+}
