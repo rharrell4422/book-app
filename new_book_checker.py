@@ -9,7 +9,12 @@ from urllib.parse import quote_plus, unquote, urlparse
 
 import httpx
 from playwright.sync_api import sync_playwright
-from providers.amazon.html_adapter import extract_amazon_asins_from_search_html
+from dom_pattern_harvester import harvest_dom_patterns
+from provider_core.html_attribute_extractor import extract_html_attribute_metadata
+from provider_core.json_extractor import extract_json_objects_from_html
+from provider_core.json_parser import parse_json_objects_to_candidates_debug
+from providers.amazon.html_adapter import extract_amazon_asins_from_search_html, extract_amazon_candidates_from_html
+from providers.amazon.json_adapter import extract_amazon_candidates_from_json
 from providers.amazon.product_page_extractor import extract_amazon_product_metadata_from_html
 
 from models import Series
@@ -67,9 +72,7 @@ PROVIDER_PRIORITY = {
 
 
 def _log(message: str) -> None:
-    logger.info(message)
-    if ENABLE_CHECKER_LOGS:
-        print(f"[new_book_checker] {message}")
+    print(f"[new_book_checker] {message}", flush=True)
 
 
 def _to_int(value) -> int | None:
@@ -103,6 +106,10 @@ def determine_next_book_number(series: Series) -> int:
         if missing_numbers:
             candidates.append(missing_numbers[0])
 
+    highest_owned = _to_int(getattr(series, "highest_owned_book_number", None))
+    if highest_owned:
+        candidates.append(highest_owned + 1)
+
     total_books = _to_int(getattr(series, "total_books", None))
     if total_books:
         candidates.append(total_books + 1)
@@ -119,7 +126,14 @@ def _google_html_url(query: str) -> str:
 def _amazon_url(series_name: str, author_name: str, next_number: int) -> str:
     clean_series = re.sub(r"\s+", " ", str(series_name or "")).strip()
     clean_author = re.sub(r"\s+", " ", str(author_name or "")).strip()
-    query = f"{clean_series} {clean_author} book {next_number}".strip()
+
+    if not clean_author:
+        query = f"{clean_series} book series".strip()
+    elif isinstance(next_number, int) and next_number > 1:
+        query = f"{clean_series} {clean_author} book {next_number}".strip()
+    else:
+        query = f"{clean_series} {clean_author} book series".strip()
+
     encoded_query = quote_plus(query)
     url = f"https://m.amazon.com/s?k={encoded_query}&ref=nb_sb_noss"
     _log(f"amazon_books url generated: {url}")
@@ -160,8 +174,18 @@ def _strip_tags(text: str) -> str:
     return re.sub(r"\s+", " ", collapsed).strip()
 
 
-def _emit_amazon_html_capture(html: str) -> None:
-    # Intentionally no-op: HTML debug output is handled by the limited snippet block only.
+def _safe_html_preview(html: str, max_chars: int = 200) -> str:
+    snippet = re.sub(r"\s+", " ", str(html or "")).strip()
+    if len(snippet) <= max_chars:
+        return snippet
+    return f"{snippet[:max_chars]}…(truncated)"
+
+
+def _emit_provider_html_capture(provider_name: str, html: str) -> None:
+    _log(f"{provider_name} HTML snippet captured")
+    preview = _safe_html_preview(html, max_chars=200)
+    if preview:
+        _log(f"{provider_name} HTML preview: {preview}")
     return None
 
 
@@ -195,11 +219,13 @@ def fetch_provider_html(provider_name: str, url: str, amazon_mode: str = "search
         )
     final_url = url
     final_headers = headers
-    _log(f"Provider {provider_name} final request URL: {url}")
-    _log(f"Provider {provider_name} request headers: {headers}")
+    if provider_name == "amazon_books":
+        _log(f"Amazon query URL: {url}")
+    else:
+        _log(f"Provider query URL for {provider_name}: {url}")
     if not str(url or "").strip().lower().startswith("https://"):
         reason = "invalid-url"
-        _log(f"Provider {provider_name} failed: {reason} url={url}")
+        _log(f"Provider {provider_name} failed: {reason}")
         return {
             "ok": False,
             "provider": provider_name,
@@ -311,7 +337,7 @@ def fetch_provider_html(provider_name: str, url: str, amazon_mode: str = "search
                 response = _PlaywrightResponse(goto_response.status if goto_response else 200)
                 context.close()
 
-            _emit_amazon_html_capture(html)
+            _emit_provider_html_capture(provider_name, html)
         else:
             with httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS, headers=headers, trust_env=False, follow_redirects=True) as client:
                 response = client.get(url)
@@ -320,6 +346,8 @@ def fetch_provider_html(provider_name: str, url: str, amazon_mode: str = "search
                 except Exception:
                     html = str(response.text or "")
 
+            _emit_provider_html_capture(provider_name, html)
+
         content_length = len(html or "")
         _log(
             f"Provider {provider_name} GET completed "
@@ -327,7 +355,7 @@ def fetch_provider_html(provider_name: str, url: str, amazon_mode: str = "search
         )
         if response.status_code != 200:
             reason = f"http-{response.status_code}"
-            _log(f"Provider {provider_name} failed: {reason} url={url}")
+            logger.info("Provider %s failed: %s", provider_name, reason)
             return {
                 "ok": False,
                 "provider": provider_name,
@@ -340,7 +368,7 @@ def fetch_provider_html(provider_name: str, url: str, amazon_mode: str = "search
 
         if html is None:
             reason = "html-none"
-            _log(f"Provider {provider_name} failed: {reason} url={url}")
+            logger.info("Provider %s failed: %s", provider_name, reason)
             return {
                 "ok": False,
                 "provider": provider_name,
@@ -353,7 +381,7 @@ def fetch_provider_html(provider_name: str, url: str, amazon_mode: str = "search
 
         if not str(html).strip():
             reason = "html-empty"
-            _log(f"Provider {provider_name} failed: {reason} url={url}")
+            logger.info("Provider %s failed: %s", provider_name, reason)
             return {
                 "ok": False,
                 "provider": provider_name,
@@ -375,7 +403,7 @@ def fetch_provider_html(provider_name: str, url: str, amazon_mode: str = "search
         }
     except httpx.TimeoutException:
         reason = "timeout"
-        _log(f"Provider {provider_name} failed: {reason} url={url}")
+        logger.info("Provider %s failed: %s", provider_name, reason)
         return {
             "ok": False,
             "provider": provider_name,
@@ -387,7 +415,7 @@ def fetch_provider_html(provider_name: str, url: str, amazon_mode: str = "search
         }
     except httpx.ConnectError:
         reason = "connection-error"
-        _log(f"Provider {provider_name} failed: {reason} url={url}")
+        logger.info("Provider %s failed: %s", provider_name, reason)
         return {
             "ok": False,
             "provider": provider_name,
@@ -399,7 +427,19 @@ def fetch_provider_html(provider_name: str, url: str, amazon_mode: str = "search
         }
     except httpx.RequestError:
         reason = "request-error"
-        _log(f"Provider {provider_name} failed: {reason} url={url}")
+        logger.info("Provider %s failed: %s", provider_name, reason)
+        return {
+            "ok": False,
+            "provider": provider_name,
+            "url": url,
+            "html": None,
+            "content_length": 0,
+            "status_code": None,
+            "error": reason,
+        }
+    except Exception as exc:
+        reason = f"provider-exception:{type(exc).__name__}"
+        logger.info("Provider %s failed: %s", provider_name, reason)
         return {
             "ok": False,
             "provider": provider_name,
@@ -616,6 +656,189 @@ def parse_google_organic_candidates(html: str, series_name: str) -> list[dict]:
     return candidates
 
 
+def _provider_output_name(provider_name: str) -> str:
+    if provider_name == "amazon_books":
+        return "amazon"
+    return provider_name
+
+
+def _build_provider_output(provider: ProviderSpec, raw_html: str, series_name: str) -> dict:
+    strict_candidates = provider.parser(raw_html, series_name) or []
+    if provider.name == "amazon_books":
+        strict_candidates = extract_amazon_candidates_from_html(raw_html, series_name) or []
+
+    fallback_candidates = parse_publisher_or_author_candidates(raw_html, series_name) or []
+    if provider.name == "amazon_books":
+        fallback_candidates = (provider.parser(raw_html, series_name) or []) + fallback_candidates
+
+    return {
+        "provider_name": _provider_output_name(provider.name),
+        "raw_html": raw_html,
+        "strict_candidates": strict_candidates if isinstance(strict_candidates, list) else [],
+        "fallback_candidates": fallback_candidates if isinstance(fallback_candidates, list) else [],
+    }
+
+
+def _normalize_candidate_schema(candidate: dict, provider_name: str, source_layer: str, series_name: str) -> dict:
+    title = str(candidate.get("title") or "").strip()
+    series_value = str(candidate.get("series") or candidate.get("series_name") or series_name).strip()
+    asin = str(candidate.get("asin") or candidate.get("asin_or_id") or "").strip().upper()
+    isbn = str(candidate.get("isbn") or "").strip()
+    release_date = candidate.get("release_date") or candidate.get("publication_date") or candidate.get("publish_date")
+    snippet = str(candidate.get("snippet") or "").strip()
+    book_number = candidate.get("book_number")
+    if book_number is None:
+        book_number = _extract_series_number_pattern(f"{title} {snippet}".strip(), series_value or series_name)
+
+    status_signal_text = f"{title} {snippet} {candidate.get('status_hint') or ''} {candidate.get('availability') or ''}".strip().lower()
+    if any(token in status_signal_text for token in ("coming soon", "pre-order", "preorder", "releases on")):
+        status = "upcoming"
+    else:
+        status = "published"
+
+    return {
+        "title": title,
+        "series": series_value,
+        "series_name": series_value,
+        "book_number": book_number,
+        "asin": asin or None,
+        "asin_or_id": asin,
+        "isbn": isbn or None,
+        "release_date": release_date,
+        "publication_date": candidate.get("publication_date") or candidate.get("publish_date") or release_date,
+        "expected_date": candidate.get("expected_date") or candidate.get("upcoming_date") or release_date,
+        "status": status,
+        "provider_name": provider_name,
+        "provider": provider_name,
+        "source_layer": source_layer,
+        "extraction_layer": source_layer,
+        "author": str(candidate.get("author") or "").strip(),
+        "url": str(candidate.get("url") or "").strip(),
+        "snippet": snippet,
+        "status_hint": str(candidate.get("status_hint") or status).strip().lower() or status,
+    }
+
+
+def _run_dom_harvester_layers(provider_output: dict, series_name: str) -> list[dict]:
+    provider_name = str(provider_output.get("provider_name") or "").strip()
+    raw_html = str(provider_output.get("raw_html") or "")
+    base_url = ""
+
+    json_candidates: list[dict] = []
+    decoded_json_blobs = extract_json_objects_from_html(raw_html)
+    if provider_name == "amazon":
+        adapter_candidates = extract_amazon_candidates_from_json(raw_html) or []
+        parsed_candidates, _ = parse_json_objects_to_candidates_debug(decoded_json_blobs)
+        json_candidates = adapter_candidates + parsed_candidates
+    else:
+        generic_json_candidates, _ = parse_json_objects_to_candidates_debug(decoded_json_blobs)
+        json_candidates = generic_json_candidates
+
+    html_attribute_candidates: list[dict] = []
+    for item in extract_html_attribute_metadata(raw_html):
+        asin = str(item.get("asin") or "").strip().upper()
+        url = f"https://www.amazon.com/dp/{asin}" if provider_name == "amazon" and asin else base_url
+        html_attribute_candidates.append(
+            {
+                "title": str(item.get("title") or "").strip(),
+                "author": str(item.get("author") or "").strip(),
+                "series_name": str(item.get("series_name") or "").strip(),
+                "book_number": _extract_series_number_pattern(
+                    f"{item.get('title') or ''} {item.get('author') or ''}".strip(),
+                    series_name,
+                ),
+                "asin_or_id": asin,
+                "url": url,
+                "snippet": "dom-html-harvester",
+            }
+        )
+
+    pattern_candidates: list[dict] = []
+    pattern_report = harvest_dom_patterns(raw_html)
+    title_match = re.search(r"<title>(.*?)</title>", raw_html, flags=re.IGNORECASE | re.DOTALL)
+    title_text = _strip_tags(title_match.group(1)) if title_match else ""
+    plain_text = _strip_tags(raw_html)
+    if provider_name == "amazon":
+        recovered_asins = extract_amazon_asins_from_search_html(raw_html, series_name)
+        for recovered_asin in recovered_asins:
+            pattern_candidates.append(
+                {
+                    "title": title_text or series_name,
+                    "author": _extract_author_from_text(plain_text) or "",
+                    "series_name": series_name,
+                    "book_number": _extract_series_number_pattern(plain_text, series_name),
+                    "asin_or_id": str(recovered_asin or "").strip().upper(),
+                    "url": f"https://www.amazon.com/dp/{str(recovered_asin or '').strip().upper()}",
+                    "snippet": "dom-pattern-harvester-amazon",
+                }
+            )
+    else:
+        if title_text:
+            pattern_candidates.append(
+                {
+                    "title": title_text,
+                    "author": _extract_author_from_text(plain_text) or "",
+                    "series_name": series_name,
+                    "book_number": _extract_series_number_pattern(plain_text, series_name),
+                    "asin_or_id": "",
+                    "url": "",
+                    "snippet": "dom-pattern-harvester-generic",
+                }
+            )
+
+    if pattern_report and "pre-order" in pattern_report.lower() and pattern_candidates:
+        for item in pattern_candidates:
+            item["status_hint"] = "upcoming"
+
+    dom_candidates = []
+    dom_candidates.extend(json_candidates)
+    dom_candidates.extend(html_attribute_candidates)
+    dom_candidates.extend(pattern_candidates)
+    return dom_candidates
+
+
+def _extract_candidates_three_layer(provider_output: dict, series_name: str) -> dict:
+    provider_name = str(provider_output.get("provider_name") or "")
+    dom_candidates = _run_dom_harvester_layers(provider_output, series_name)
+    strict_candidates = provider_output.get("strict_candidates") if isinstance(provider_output.get("strict_candidates"), list) else []
+    fallback_candidates = provider_output.get("fallback_candidates") if isinstance(provider_output.get("fallback_candidates"), list) else []
+
+    normalized_strict = [_normalize_candidate_schema(item, provider_name, "strict", series_name) for item in strict_candidates]
+    normalized_fallback = [_normalize_candidate_schema(item, provider_name, "fallback", series_name) for item in fallback_candidates]
+    normalized_dom = [_normalize_candidate_schema(item, provider_name, "dom", series_name) for item in dom_candidates]
+
+    merged: list[dict] = []
+    seen_keys: set[str] = set()
+    for bucket in (normalized_strict, normalized_fallback, normalized_dom):
+        for candidate in bucket:
+            title = str(candidate.get("title") or "").strip()
+            if not title:
+                continue
+            key = "|".join(
+                [
+                    str(candidate.get("asin") or candidate.get("asin_or_id") or "").strip().upper(),
+                    str(candidate.get("isbn") or "").strip().upper(),
+                    _normalize_match_text(title),
+                    str(candidate.get("book_number") if candidate.get("book_number") is not None else ""),
+                ]
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            merged.append(candidate)
+
+    _log(
+        f"Candidate extraction layers for {provider_name}: "
+        f"strict={len(normalized_strict)} fallback={len(normalized_fallback)} dom={len(normalized_dom)} merged={len(merged)}"
+    )
+    return {
+        "strict": normalized_strict,
+        "fallback": normalized_fallback,
+        "dom": normalized_dom,
+        "merged": merged,
+    }
+
+
 PROVIDERS: list[ProviderSpec] = [
     ProviderSpec(name="amazon_books", source_type="retail", url_builder=_amazon_url, parser=parse_publisher_or_author_candidates),
     ProviderSpec(name="fantasticfiction", source_type="retail", url_builder=_fantastic_fiction_url, parser=parse_fantastic_fiction_candidates),
@@ -668,6 +891,39 @@ def _micro_filter_reasons(candidate: dict, series_name: str, source_type: str) -
     return reasons
 
 
+def _classify_candidate_signal(candidate: dict, series_name: str, author_name: str) -> str:
+    title = str(candidate.get("title") or "").strip()
+    candidate_series = str(candidate.get("series") or candidate.get("series_name") or "").strip()
+    candidate_author = str(candidate.get("author") or "").strip()
+    asin = str(candidate.get("asin") or candidate.get("asin_or_id") or "").strip().upper()
+    isbn = str(candidate.get("isbn") or "").strip().upper()
+    availability = str(candidate.get("availability") or candidate.get("status_hint") or candidate.get("status") or "").strip().lower()
+    snippet = str(candidate.get("snippet") or "").strip().lower()
+    url = str(candidate.get("url") or "").strip().lower()
+    has_series_signal = bool(series_name and (series_name.lower() in title.lower() or series_name.lower() in candidate_series.lower()))
+    if not has_series_signal:
+        return "invalid"
+    if not _author_matches(author_name, candidate_author):
+        return "invalid"
+    if any(token in f"{snippet} {url}" for token in METADATA_WAREHOUSE_TOKENS):
+        return "invalid"
+
+    if asin or isbn or any(token in availability for token in ("available", "in stock", "published", "released")):
+        return "published"
+
+    has_upcoming_signal = any(
+        token in f"{title.lower()} {snippet} {availability}"
+        for token in ("coming soon", "pre-order", "preorder", "releases on")
+    )
+    if has_upcoming_signal:
+        return "upcoming"
+
+    if title and candidate.get("book_number") is not None and not asin and not isbn:
+        return "upcoming"
+
+    return "invalid"
+
+
 def _passes_minimal_scoring(candidate: dict, series_name: str, author_name: str, expected_number: int) -> bool:
     title = str(candidate.get("title") or "")
     candidate_series_name = str(candidate.get("series_name") or "")
@@ -675,7 +931,7 @@ def _passes_minimal_scoring(candidate: dict, series_name: str, author_name: str,
     number = candidate.get("book_number")
 
     title_ok = series_name.lower() in title.lower() or series_name.lower() in candidate_series_name.lower()
-    author_ok = bool(author_name) and author_name.lower() in author.lower()
+    author_ok = _author_matches(author_name, author)
     number_ok = number == expected_number
 
     return title_ok and author_ok and number_ok
@@ -688,7 +944,7 @@ def _rank_candidate(candidate: dict, series_name: str, author_name: str, expecte
     number = candidate.get("book_number")
 
     title_score = 1 if (series_name.lower() in title.lower() or series_name.lower() in candidate_series_name.lower()) else 0
-    author_score = 1 if (author_name and author_name.lower() in author.lower()) else 0
+    author_score = 1 if _author_matches(author_name, author) else 0
     number_score = 1 if number == expected_number else 0
     provider_score = PROVIDER_PRIORITY.get(provider_name, 0)
     return title_score + author_score + number_score + provider_score
@@ -895,27 +1151,77 @@ def _series_names_match(target_series: str, observed_series: str) -> bool:
 
 
 def _author_matches(target_author: str, observed_author: str) -> bool:
-    target_norm = _normalize_match_text(target_author)
-    observed_norm = _normalize_match_text(observed_author)
+    target_norm = _normalize_match_text(_normalize_author_name(target_author))
+    observed_norm = _normalize_match_text(_normalize_author_name(observed_author))
     if not target_norm or not observed_norm:
         return False
-    if target_norm in observed_norm or observed_norm in target_norm:
-        return True
+    return target_norm == observed_norm
 
-    target_tokens = [token for token in target_norm.split() if token]
-    observed_tokens = [token for token in observed_norm.split() if token]
-    if not target_tokens or not observed_tokens:
+
+def _passes_early_author_gate(target_author: str, candidate_author: str) -> bool:
+    return _author_matches(target_author, candidate_author)
+
+
+def _passes_title_series_fallback(
+    *,
+    target_series_name: str,
+    candidate_title: str,
+    candidate_series_name: str,
+) -> bool:
+    target_series_norm = _normalize_match_text(target_series_name)
+    title_norm = _normalize_match_text(candidate_title)
+    candidate_series_norm = _normalize_match_text(candidate_series_name)
+    if not target_series_norm:
         return False
+    return bool(
+        (title_norm and target_series_norm in title_norm)
+        or (candidate_series_norm and target_series_norm in candidate_series_norm)
+    )
 
-    target_last = target_tokens[-1]
-    observed_last = observed_tokens[-1]
-    if target_last == observed_last:
-        target_first_initial = target_tokens[0][0]
-        observed_first_initial = observed_tokens[0][0]
-        if target_first_initial == observed_first_initial:
-            return True
 
-    return False
+def _evaluate_hybrid_author_gate(
+    *,
+    target_author: str,
+    candidate_author: str,
+    target_series_name: str,
+    candidate_title: str,
+    candidate_series_name: str,
+) -> tuple[bool, bool, str]:
+    # Rule order: strict author match is always the first gate.
+    if _passes_early_author_gate(target_author, candidate_author):
+        return True, False, "strict-author-match"
+
+    # Fallback is allowed only when strict matching cannot operate (missing author data).
+    target_author_norm = _normalize_match_text(_normalize_author_name(target_author))
+    candidate_author_norm = _normalize_match_text(_normalize_author_name(candidate_author))
+    strict_inoperable = not target_author_norm or not candidate_author_norm
+    if not strict_inoperable:
+        return False, False, "author-mismatch"
+
+    if _passes_title_series_fallback(
+        target_series_name=target_series_name,
+        candidate_title=candidate_title,
+        candidate_series_name=candidate_series_name,
+    ):
+        return True, True, "fallback-title-series-match"
+
+    return False, False, "fallback-title-series-mismatch"
+
+
+def _extract_asin_from_value(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    direct = raw.upper()
+    if re.fullmatch(r"[A-Z0-9]{10}", direct):
+        return direct
+    match = re.search(r"/dp/([A-Z0-9]{10})", raw, flags=re.IGNORECASE)
+    if match:
+        return str(match.group(1) or "").strip().upper()
+    match = re.search(r"/gp/product/([A-Z0-9]{10})", raw, flags=re.IGNORECASE)
+    if match:
+        return str(match.group(1) or "").strip().upper()
+    return ""
 
 
 def _passes_amazon_membership_reconciliation(
@@ -935,7 +1241,9 @@ def _passes_amazon_membership_reconciliation(
     elif not _series_names_match(target_series_name, extracted_series_name):
         reasons.append("series-name-mismatch")
 
-    if not extracted_author:
+    if not target_author_name:
+        reasons.append("missing-target-author")
+    elif not extracted_author:
         reasons.append("missing-author")
     elif not _author_matches(target_author_name, extracted_author):
         reasons.append("author-mismatch")
@@ -975,6 +1283,9 @@ def _candidate_summary(candidate: dict, score: int) -> str:
 
 
 def _print_candidate_extraction(provider_name: str, candidate: dict) -> None:
+    title = str(candidate.get("title") or "").strip() or "Unknown title"
+    asin = str(candidate.get("asin_or_id") or candidate.get("asin") or "").strip().upper() or "NO-ASIN"
+    _log(f"Candidate: {title} {asin}")
     return None
 
 
@@ -982,11 +1293,11 @@ def check_for_new_book(series: Series, progress_callback: Callable[[dict], None]
     series_id = getattr(series, "id", None)
     series_name = str(getattr(series, "name", "") or "").strip()
     author_name = str(getattr(series, "author", "") or "").strip()
-    _log(f"CHECK NOW triggered for series_id={series_id}, series_name={series_name}")
+    _log(f"CHECK NOW triggered for series: {series_name}")
 
     next_number = determine_next_book_number(series)
 
-    if not series_name or not author_name:
+    if not series_name:
         return {"found": False, "candidate": None}
 
     ranked: list[tuple[int, dict, str]] = []
@@ -1003,18 +1314,20 @@ def check_for_new_book(series: Series, progress_callback: Callable[[dict], None]
 
     for provider in PROVIDERS:
         query_url = provider.url_builder(series_name, author_name, next_number)
-        _log(f"Querying provider {provider.name} for series_id={series_id}")
-        _log(f"provider={provider.name} query={query_url}")
+        if provider.name == "amazon_books":
+            _log(f"Amazon query URL: {query_url}")
+        else:
+            _log(f"Checking provider {provider.name}")
 
         if provider.name == "amazon_books" and not query_url.startswith("https://m.amazon.com/s?k="):
-            _log(f"Provider amazon_books failed for series_id={series_id}: malformed-query-url")
+            _log("Classification result: INVALID")
         if provider.name == "fantasticfiction" and not query_url.startswith("https://www.fantasticfiction.com/search/"):
-            _log(f"Provider fantasticfiction failed for series_id={series_id}: malformed-query-url")
+            _log("Classification result: INVALID")
 
         fetch_result = fetch_provider_html_by_name(provider.name, query_url)
         if not fetch_result.get("ok"):
             error_message = str(fetch_result.get("error") or "no-html")
-            _log(f"Provider {provider.name} failed for series_id={series_id}: {error_message}")
+            _log(f"Provider {provider.name} returned no usable results: {error_message}")
             provider_failures.append(
                 {
                     "provider": provider.name,
@@ -1024,27 +1337,87 @@ def check_for_new_book(series: Series, progress_callback: Callable[[dict], None]
             )
             continue
         html = str(fetch_result.get("html") or "")
-        _log(f"Provider {provider.name} returned valid response for series_id={series_id}")
+        _log(f"Provider {provider.name} returned HTML")
         successful_html_count += 1
+
+        provider_output = _build_provider_output(provider, html, series_name)
+        extraction_result = _extract_candidates_three_layer(provider_output, series_name)
 
         if provider.name == "amazon_books":
             asin_hits = extract_amazon_asins_from_search_html(html, series_name)
+            search_page_candidates = extraction_result.get("merged") or []
             parsed_candidates = []
             amazon_book_candidates = []
             amazon_asin_candidates = []
+
+            search_page_author_by_asin: dict[str, str] = {}
+            search_page_title_by_asin: dict[str, str] = {}
+            search_page_series_by_asin: dict[str, str] = {}
+            for search_candidate in search_page_candidates:
+                search_asin = _extract_asin_from_value(
+                    str(search_candidate.get("asin_or_id") or search_candidate.get("asin") or search_candidate.get("url") or "")
+                )
+                if not search_asin:
+                    continue
+                search_author = str(search_candidate.get("author") or "").strip()
+                search_title = str(search_candidate.get("title") or "").strip()
+                search_series = str(search_candidate.get("series_name") or "").strip()
+                if search_asin not in search_page_author_by_asin:
+                    search_page_author_by_asin[search_asin] = search_author
+                if search_asin not in search_page_title_by_asin:
+                    search_page_title_by_asin[search_asin] = search_title
+                if search_asin not in search_page_series_by_asin:
+                    search_page_series_by_asin[search_asin] = search_series
 
             for asin_hit in asin_hits:
                 asin_value = str(asin_hit or "").strip().upper()
                 if not asin_value or asin_value in seen_amazon_asins:
                     continue
+
+                predicted_author = str(search_page_author_by_asin.get(asin_value) or "").strip()
+                predicted_title = str(search_page_title_by_asin.get(asin_value) or "").strip()
+                predicted_series_name = str(search_page_series_by_asin.get(asin_value) or "").strip()
+
+                allow_candidate, used_fallback, gate_reason = _evaluate_hybrid_author_gate(
+                    target_author=author_name,
+                    candidate_author=predicted_author,
+                    target_series_name=series_name,
+                    candidate_title=predicted_title,
+                    candidate_series_name=predicted_series_name,
+                )
+                if not allow_candidate:
+                    _log("Classification result: INVALID")
+                    if progress_callback is not None:
+                        progress_callback(
+                            {
+                                "total": len(asin_hits),
+                                "completed": 0,
+                                "current_book_number": None,
+                                "current_pass": "amazon-early-author-gate",
+                                "current_asin": asin_value,
+                                "asins_discovered": len(asin_hits),
+                                "asins_processed": 0,
+                                "asin_fetch_success": amazon_product_fetch_success,
+                                "asin_fetch_failed": amazon_product_fetch_failed,
+                            }
+                        )
+                    continue
+
                 seen_amazon_asins.add(asin_value)
                 amazon_asin_candidates.append(
                     {
                         "asin": asin_value,
-                        "title": "",
+                        "title": predicted_title,
+                        "author": predicted_author,
+                        "series_name": predicted_series_name,
+                        "used_title_fallback": used_fallback,
+                        "early_gate_reason": gate_reason,
                         "url": f"https://www.amazon.com/dp/{asin_value}",
                     }
                 )
+
+            _log(f"ASINs extracted: {[item.get('asin') for item in amazon_asin_candidates]}")
+            _log(f"Candidates found: {len(amazon_asin_candidates)}")
 
             if progress_callback is not None:
                 progress_callback(
@@ -1135,20 +1508,10 @@ def check_for_new_book(series: Series, progress_callback: Callable[[dict], None]
                         },
                     )
                     if canonical is None:
-                        _log(
-                            "amazon-product-rejected "
-                            f"asin={asin_value} "
-                            f"reasons={','.join(normalization_reasons)} "
-                            f"stage=normalization"
-                        )
+                        _log("Classification result: INVALID")
                         continue
                     if normalization_reasons:
-                        _log(
-                            "amazon-product-rejected "
-                            f"asin={canonical.get('asin_or_id') or asin_value} "
-                            f"reasons={','.join(normalization_reasons)} "
-                            f"stage=normalization"
-                        )
+                        _log("Classification result: INVALID")
                         continue
 
                     candidate_asin = str(canonical.get("asin_or_id") or asin_value).strip().upper()
@@ -1162,6 +1525,11 @@ def check_for_new_book(series: Series, progress_callback: Callable[[dict], None]
                     release_date = canonical.get("release_date")
                     candidate_url = str(canonical.get("url") or product_url).strip() or product_url
 
+                    # Fallback path always requires strict author validation after product fetch.
+                    if not _passes_early_author_gate(author_name, author):
+                        _log("Classification result: INVALID")
+                        continue
+
                     is_member_match, membership_reasons = _passes_amazon_membership_reconciliation(
                         target_series_name=series_name,
                         target_author_name=author_name,
@@ -1172,15 +1540,7 @@ def check_for_new_book(series: Series, progress_callback: Callable[[dict], None]
                         extracted_book_number=resolved_book_number,
                     )
                     if not is_member_match:
-                        _log(
-                            "amazon-product-rejected "
-                            f"asin={candidate_asin or asin_value} "
-                            f"reasons={','.join(membership_reasons)} "
-                            f"title={title!r} "
-                            f"series_name={extracted_series_name!r} "
-                            f"author={author!r} "
-                            f"book_number={resolved_book_number}"
-                        )
+                        _log("Classification result: INVALID")
                         continue
 
                     dedupe_key = (candidate_asin or asin_value, title.lower())
@@ -1278,30 +1638,46 @@ def check_for_new_book(series: Series, progress_callback: Callable[[dict], None]
                     }
                 )
         else:
-            parsed_candidates = provider.parser(html, series_name)
+            parsed_candidates = extraction_result.get("merged") or []
+        _log(f"Candidates found: {len(parsed_candidates)}")
         if provider.name in {"amazon_books", "fantasticfiction"}:
             for parsed_candidate in parsed_candidates:
                 _print_candidate_extraction(provider.name, parsed_candidate)
 
         for candidate in parsed_candidates:
-            status_hint = str(candidate.get("status_hint") or "unknown").strip().lower() or "unknown"
-            _log(
-                "Candidate discovered: "
-                f"title={str(candidate.get('title') or '').strip()}, "
-                f"author={str(candidate.get('author') or '').strip()}, "
-                f"pub_date={candidate.get('publication_date')}, "
-                f"status_hint={status_hint}"
+            candidate_author = str(candidate.get("author") or "").strip()
+            candidate_title = str(candidate.get("title") or "").strip()
+            candidate_series_name = str(candidate.get("series_name") or "").strip()
+            allow_candidate, used_fallback, gate_reason = _evaluate_hybrid_author_gate(
+                target_author=author_name,
+                candidate_author=candidate_author,
+                target_series_name=series_name,
+                candidate_title=candidate_title,
+                candidate_series_name=candidate_series_name,
             )
+            if not allow_candidate:
+                _log("Classification result: INVALID")
+                continue
+
+            # Shared-loop fallback requires post-fetch strict validation capability.
+            # Amazon fallback candidates are re-validated with strict author matching after product fetch.
+            if used_fallback and provider.name != "amazon_books":
+                _log("Classification result: INVALID")
+                continue
+
+            classification = _classify_candidate_signal(candidate, series_name, author_name)
+            if classification == "invalid":
+                _log("Classification result: INVALID")
+                continue
+            candidate["status"] = classification
+            candidate["status_hint"] = classification
+
             reasons = _micro_filter_reasons(candidate, series_name, provider.source_type)
             if reasons:
-                _log(
-                    f"provider={provider.name} rejected reasons={','.join(reasons)} "
-                    f"title={str(candidate.get('title') or '').strip()!r}"
-                )
+                _log("Classification result: INVALID")
                 continue
 
             score = _rank_candidate(candidate, series_name, author_name, next_number, provider.name)
-            _log(f"provider={provider.name} candidate {_candidate_summary(candidate, score)}")
             ranked.append((score, candidate, provider.name))
 
     if ranked:
@@ -1313,7 +1689,9 @@ def check_for_new_book(series: Series, progress_callback: Callable[[dict], None]
             reverse=True,
         )
         best_score, best_candidate, best_provider = ranked[0]
-        _log(f"selected provider={best_provider} score={best_score}")
+        final_classification = str(best_candidate.get("status") or "published").strip().lower()
+        _log(f"Classification result: {final_classification.upper()}")
+        _log(f"CHECK NOW completed successfully for series: {series_name}")
         return {
             "found": True,
             "candidate": {

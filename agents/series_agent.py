@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import logging
 from datetime import date
 
 from sqlalchemy.orm import Session
 
 from models import Book, Series
 from new_book_checker import check_for_new_book
+
+
+logger = logging.getLogger(__name__)
+
+
+def _console_log(message: str) -> None:
+    print(f"[series_agent] {message}", flush=True)
 
 
 class SeriesIntelligenceAgent:
@@ -50,12 +58,31 @@ class SeriesIntelligenceAgent:
                 "agent_pipeline": False,
             }
 
+        _console_log(f"CHECK NOW triggered for series: {series.name}")
+
+        active_series_books = [
+            book
+            for book in db.query(Book).filter(Book.series_id == series_id).all()
+            if (book.record_status or "") != "deleted"
+        ]
+        highest_owned_book_number = max(
+            (
+                int(float(book.book_number))
+                for book in active_series_books
+                if book.book_number is not None and not bool(book.is_missing)
+            ),
+            default=None,
+        )
+        setattr(series, "highest_owned_book_number", highest_owned_book_number)
+
         checker_result = check_for_new_book(series, progress_callback=progress_callback)
         found = bool(checker_result.get("found"))
         candidate = checker_result.get("candidate") or None
         provider_failures = checker_result.get("provider_failures") or []
         all_providers_failed = bool(checker_result.get("all_providers_failed"))
         amazon_book_candidates = checker_result.get("amazon_book_candidates") or []
+
+        _console_log(f"Candidates found: {len(amazon_book_candidates) + (1 if candidate else 0)}")
 
         series.has_new_books = found
         series.last_checked = date.today()
@@ -93,6 +120,10 @@ class SeriesIntelligenceAgent:
             if asin in seen_added_asins:
                 continue
 
+            _console_log(
+                f"Candidate: {str(amazon_candidate.get('title') or series.name).strip() or series.name} {asin}"
+            )
+
             added_books.append(
                 {
                     "title": str(amazon_candidate.get("title") or series.name).strip() or series.name,
@@ -120,10 +151,12 @@ class SeriesIntelligenceAgent:
             )
             seen_added_asins.add(asin)
 
+        _console_log(f"CHECK NOW completed successfully for series: {series.name}")
+
         return {
             "series_id": series.id,
             "series_name": series.name,
-            "highest_owned_book_number": None,
+            "highest_owned_book_number": highest_owned_book_number,
             "candidate_numbers": [],
             "added_count": len(added_books),
             "added_books": added_books,

@@ -77,6 +77,10 @@ def normalize_title_normalization_mode(value: str | None) -> str | None:
 
 app = FastAPI()
 logger = logging.getLogger(__name__)
+
+
+def _console_log(message: str) -> None:
+    print(f"[main] {message}", flush=True)
 series_agent = SeriesIntelligenceAgent()
 series_scan_task: asyncio.Task | None = None
 series_check_jobs: dict[int, dict] = {}
@@ -367,6 +371,21 @@ def _normalize_identity_text(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", " ", cleaned).strip()
 
 
+def _normalize_author_for_identity(value: str | None) -> str:
+    text = _normalize_identity_text(value)
+    text = re.sub(r"\band\s+\d+\s+more\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(author|narrator|editor)\b", "", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _authors_match_exact(series_author: str | None, candidate_author: str | None) -> bool:
+    series_norm = _normalize_author_for_identity(series_author)
+    candidate_norm = _normalize_author_for_identity(candidate_author)
+    if not series_norm or not candidate_norm:
+        return False
+    return series_norm == candidate_norm
+
+
 def _normalize_series_name_for_identity(value: str | None) -> str:
     text = _normalize_identity_text(value)
     text = re.sub(r"\b(series|book series)\b", "", text).strip()
@@ -550,17 +569,9 @@ def run_series_check_job_full(series_id: int) -> None:
 
         provider_failures = result.get("provider_failures") or []
         for failure in provider_failures:
-            logger.error(
-                "[CHECK_NOW_PROVIDER_FAILURE] provider=%s series_id=%s timestamp=%s error=%s",
+            logger.info(
+                "Provider %s failed: %s",
                 failure.get("provider"),
-                series_id,
-                datetime.utcnow().isoformat(),
-                failure.get("error") or "unknown",
-            )
-            logger.error(
-                "Provider %s failed for series_id=%s: %s",
-                failure.get("provider"),
-                series_id,
                 failure.get("error") or "unknown",
             )
 
@@ -604,6 +615,12 @@ def run_series_check_job_full(series_id: int) -> None:
                 if not title:
                     continue
 
+                series_author = str(db_series.author or "").strip()
+                candidate_author = str(candidate.get("author") or "").strip()
+                if not _authors_match_exact(series_author, candidate_author):
+                    logger.info("Classification result: INVALID")
+                    continue
+
                 canonical_metadata = candidate.get("canonical_metadata") if isinstance(candidate.get("canonical_metadata"), dict) else {}
 
                 normalized_title = str(canonical_metadata.get("title_normalized") or title).strip()
@@ -613,7 +630,7 @@ def run_series_check_job_full(series_id: int) -> None:
                     or db_series.name
                     or ""
                 ).strip()
-                normalized_author = str(candidate.get("author") or db_series.author or "").strip() or "Unknown"
+                normalized_author = candidate_author
                 normalized_book_number = canonical_metadata.get("book_number_normalized")
                 if normalized_book_number is None:
                     normalized_book_number = candidate.get("book_number")
@@ -665,13 +682,7 @@ def run_series_check_job_full(series_id: int) -> None:
                 incoming_edition_type = str(canonical_metadata.get("edition_type") or "unknown").strip().lower()
 
                 if matched_existing is not None:
-                    logger.info(
-                        "[%s] series_id=%s candidate_title=%s existing_id=%s",
-                        dedupe_reason_code,
-                        series_id,
-                        normalized_title,
-                        matched_existing.id,
-                    )
+                    logger.info("Classification result: EXISTING")
 
                     matched_existing.title = normalized_title or matched_existing.title
                     matched_existing.author = normalized_author or matched_existing.author
@@ -735,11 +746,8 @@ def run_series_check_job_full(series_id: int) -> None:
                     is_missing=bool(candidate.get("is_missing")),
                     record_status="active",
                 )
-                logger.info(
-                    "[DEDUPE_INSERT_NEW] Persisting new book to series_id=%s and main library: %s",
-                    series_id,
-                    normalized_title,
-                )
+                logger.info("Classification result: NEW")
+                _console_log(f"Persisted new book: {normalized_title}")
                 db.add(db_book)
                 db.flush()
                 db_changed = True
@@ -961,15 +969,15 @@ def run_series_check_job_full(series_id: int) -> None:
         if all_providers_failed:
             response_status = "error"
             response_message = "All providers failed for this series."
-            logger.info("CHECK NOW completed for series_id=%s: ALL PROVIDERS FAILED", series_id)
+            logger.info("CHECK NOW completed successfully for series: %s", db_series.name)
         elif persisted_new_books:
             response_status = "success"
             response_message = "NEW BOOKS found and added to library."
-            logger.info("CHECK NOW completed for series_id=%s: NEW BOOKS FOUND", series_id)
+            logger.info("CHECK NOW completed successfully for series: %s", db_series.name)
         else:
             response_status = "no_new_books"
             response_message = "NO NEW BOOKS FOUND."
-            logger.info("CHECK NOW completed for series_id=%s: NO NEW BOOKS FOUND", series_id)
+            logger.info("CHECK NOW completed successfully for series: %s", db_series.name)
 
         completion = {
             "status": response_status,
@@ -991,8 +999,7 @@ def run_series_check_job_full(series_id: int) -> None:
             },
         }
 
-        missing_log = ", ".join(str(item) for item in completion.get("missing_books") or []) or "none"
-        logger.info("[DISCOVERY] Series %s check complete (missing: %s)", series_id, missing_log)
+        logger.info("CHECK NOW completed successfully for series: %s", db_series.name)
 
         series_check_jobs[series_id] = {
             "status": "completed",

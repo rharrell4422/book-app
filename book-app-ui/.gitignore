@@ -21,7 +21,6 @@
 /build
 
 # misc
-.DS_Store
 *.pem
 
 # debug
@@ -39,3 +38,27 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# workspace artifacts and local runtime data
+.history/
+pycache/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+*.log
+*.tmp
+*.cache
+.amazon-playwright-profile/
+playwright/.cache/
+playwright/.auth/
+playwright/.browser/
+playwright/.downloads/
+playwright/.storage/
+playwright/.trace/
+playwright-report/
+*.sqlite
+*.db
+*.bak
+*.swp
+*.swo
