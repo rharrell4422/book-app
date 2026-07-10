@@ -111,10 +111,16 @@ def _extract_json_strings_from_script(script_text: str) -> list[str]:
     return fragments
 
 
-def extract_json_objects_from_html(raw_html: str) -> list[Any]:
+def _extract_json_objects_from_html_impl(raw_html: str) -> tuple[list[Any], dict[str, int]]:
     html_text = raw_html if isinstance(raw_html, str) else str(raw_html or "")
     if not html_text.strip():
-        return []
+        return [], {
+            "script_tags_scanned": 0,
+            "json_blobs_extracted": 0,
+            "decode_failures": 0,
+            "product_json_candidates": 0,
+            "product_json_decode_failures": 0,
+        }
 
     json_objects: list[Any] = []
     seen: set[str] = set()
@@ -189,10 +195,19 @@ def extract_json_objects_from_html(raw_html: str) -> list[Any]:
     for metadata_blob in extract_html_attribute_metadata(html_text):
         append_unique(metadata_blob)
 
-    print(f"PRODUCT JSON EXTRACTOR: product-json candidates = {product_json_candidates}")
-    print(f"PRODUCT JSON EXTRACTOR: product-json decode failures = {product_json_decode_failures}")
-    print(f"JSON EXTRACTOR: script tags scanned = {script_tags_scanned}")
-    print(f"JSON EXTRACTOR: JSON blobs extracted = {len(json_objects)}")
-    print(f"JSON EXTRACTOR: decode failures = {decode_failures}")
+    return json_objects, {
+        "script_tags_scanned": script_tags_scanned,
+        "json_blobs_extracted": len(json_objects),
+        "decode_failures": decode_failures,
+        "product_json_candidates": product_json_candidates,
+        "product_json_decode_failures": product_json_decode_failures,
+    }
 
+
+def extract_json_objects_from_html(raw_html: str) -> list[Any]:
+    json_objects, _ = _extract_json_objects_from_html_impl(raw_html)
     return json_objects
+
+
+def extract_json_objects_from_html_with_metrics(raw_html: str) -> tuple[list[Any], dict[str, int]]:
+    return _extract_json_objects_from_html_impl(raw_html)

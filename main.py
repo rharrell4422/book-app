@@ -81,6 +81,88 @@ logger = logging.getLogger(__name__)
 
 def _console_log(message: str) -> None:
     print(f"[main] {message}", flush=True)
+
+
+def _console_log_provider_ledger(result: dict) -> None:
+    provider_ledger = result.get("provider_ledger")
+    if provider_ledger is None:
+        provider_ledger = []
+    _console_log("===== PROVIDER EXECUTION LEDGER START =====")
+    for entry in provider_ledger:
+        _console_log(f"provider={entry.get('provider_name')}")
+        _console_log(f"url={entry.get('provider_url') or entry.get('url')}")
+        _console_log(f"status={entry.get('status')}")
+        _console_log(f"http_status={entry.get('http_status')}")
+        _console_log(f"fetch_attempts={entry.get('fetch_attempts')}")
+        _console_log(f"header_profile={entry.get('header_profile')}")
+        _console_log(f"cache_fallback={entry.get('cache_fallback')}")
+        _console_log(f"bot_blocked={entry.get('bot_blocked')}")
+        _console_log(f"html_returned={entry.get('html_returned')}")
+        _console_log(f"dom_elements_scanned={entry.get('dom_elements_scanned')}")
+        _console_log(f"metadata_candidates={entry.get('metadata_candidates')}")
+        _console_log(f"asin_groups={entry.get('asin_groups')}")
+        _console_log(f"json_blobs_extracted={entry.get('json_blobs_extracted')}")
+        _console_log(f"json_book_blobs={entry.get('json_book_blobs')}")
+        _console_log(f"dom_primary_candidates={entry.get('dom_primary_candidates')}")
+        _console_log(f"json_secondary_candidates={entry.get('json_secondary_candidates')}")
+        _console_log(f"asin_tertiary_candidates={entry.get('asin_tertiary_candidates')}")
+        _console_log(f"canonical_candidates={entry.get('canonical_candidates')}")
+        _console_log(f"classification_valid={entry.get('classification_valid')}")
+        _console_log(f"classification_invalid={entry.get('classification_invalid')}")
+        _console_log(f"title_pattern_match={entry.get('title_pattern_match')}")
+        _console_log(f"number_inferred={entry.get('number_inferred')}")
+        _console_log(f"partial_series_match={entry.get('partial_series_match')}")
+        _console_log(f"author_match={entry.get('author_match')}")
+        _console_log(f"author_weight={entry.get('author_weight')}")
+        _console_log(f"author_fallback_used={entry.get('author_fallback_used')}")
+        _console_log(f"author_fallback_reason={entry.get('author_fallback_reason')}")
+        _console_log(f"series_author_relaxed={entry.get('series_author_relaxed')}")
+        _console_log(f"asin_seed_count={entry.get('asin_seed_count')}")
+        _console_log(f"asin_seed_pages_fetched={entry.get('asin_seed_pages_fetched')}")
+        _console_log(f"asin_seed_pages_failed={entry.get('asin_seed_pages_failed')}")
+        _console_log(f"asin_related_asins={entry.get('asin_related_asins')}")
+        _console_log(f"asin_series_candidates={entry.get('asin_series_candidates')}")
+        _console_log(f"asin_present={entry.get('asin_present')}")
+        _console_log(f"multi_signal_score={entry.get('multi_signal_score')}")
+        _console_log(f"accepted_as_missing={entry.get('accepted_as_missing')}")
+        _console_log(f"added_books_count={entry.get('added_books_count')}")
+        _console_log(f"added_books_asins={entry.get('added_books_asins')}")
+        _console_log(f"added_books_titles={entry.get('added_books_titles')}")
+        if entry.get("error"):
+            _console_log(f"error={entry.get('error')}")
+    _console_log("===== PROVIDER EXECUTION LEDGER END =====")
+
+
+def log_discovery_summary(*, result: dict, terminal_error: str | None = None) -> None:
+    asin_discovery = result.get("asin_discovery") or {}
+    provider_failures = result.get("provider_failures") or []
+    validated_candidates = result.get("validated_candidates") or []
+    missing_books = result.get("missing_books") or []
+    upcoming_books = result.get("upcoming_books") or []
+
+    _console_log_provider_ledger(result)
+    _console_log("===== CHECK NOW DISCOVERY SUMMARY START =====")
+    _console_log(f"series_id={result.get('series_id')}")
+    _console_log(f"series_name={result.get('series_name')}")
+    _console_log(f"status={result.get('status')}")
+    _console_log(f"found={bool(result.get('found'))}")
+    _console_log(f"added_count={int(result.get('added_count') or 0)}")
+    _console_log(f"validated_candidates={len(validated_candidates)}")
+    _console_log(f"missing_books={len(missing_books)}")
+    _console_log(f"upcoming_books={len(upcoming_books)}")
+    _console_log(f"provider_failures={len(provider_failures)}")
+    _console_log(f"all_providers_failed={bool(result.get('all_providers_failed'))}")
+    _console_log(
+        "asin_discovery="
+        f"discovered:{int(asin_discovery.get('discovered') or 0)} "
+        f"processed:{int(asin_discovery.get('processed') or 0)} "
+        f"fetch_success:{int(asin_discovery.get('fetch_success') or 0)} "
+        f"fetch_failed:{int(asin_discovery.get('fetch_failed') or 0)} "
+        f"metadata_hits:{int(asin_discovery.get('metadata_hits') or 0)}"
+    )
+    if terminal_error:
+        _console_log(f"terminal_error={terminal_error}")
+    _console_log("===== CHECK NOW DISCOVERY SUMMARY END =====")
 series_agent = SeriesIntelligenceAgent()
 series_scan_task: asyncio.Task | None = None
 series_check_jobs: dict[int, dict] = {}
@@ -548,7 +630,7 @@ def run_series_check_job_full(series_id: int) -> None:
             }
 
         executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(series_agent.run_series_check, db, series_id, update_progress)
+        future = executor.submit(series_agent.run_series_check, db, series_id, update_progress, False)
         try:
             result = future.result(timeout=SERIES_CHECK_HARD_TIMEOUT_SECONDS)
         except FutureTimeoutError:
@@ -644,12 +726,6 @@ def run_series_check_job_full(series_id: int) -> None:
                 if candidate_asin and candidate_asin in existing_by_asin:
                     matched_existing = existing_by_asin[candidate_asin]
                     dedupe_reason_code = "DEDUPE_UPDATE_BY_ASIN"
-                elif series_book_key and series_book_key in existing_by_series_book:
-                    matched_existing = existing_by_series_book[series_book_key]
-                    dedupe_reason_code = "DEDUPE_UPDATE_BY_SERIES_BOOK"
-                elif canonical_title_key and canonical_title_key in existing_by_canonical_title:
-                    matched_existing = existing_by_canonical_title[canonical_title_key]
-                    dedupe_reason_code = "DEDUPE_UPDATE_BY_CANONICAL_TITLE"
 
                 identity_fingerprint = candidate_asin or series_book_key or canonical_title_key or _normalize_discovered_title(normalized_title)
                 if identity_fingerprint in seen_batch_identity_keys and matched_existing is None:
@@ -987,6 +1063,9 @@ def run_series_check_job_full(series_id: int) -> None:
             "status_bar": status_bar,
             "complete": True,
             "missing_books": status_bar.get("missing") or [],
+            "available_missing": result.get("available_missing") or [],
+            "upcoming_books": result.get("upcoming_books") or [],
+            "validated_candidates": result.get("validated_candidates") or [],
             "found_books": persisted_new_books,
             "no_new_books": response_status != "success",
             "discovery_engine": result.get("discovery_engine") or "new_book_checker",
@@ -998,6 +1077,8 @@ def run_series_check_job_full(series_id: int) -> None:
                 "metadata_hits": 0,
             },
         }
+
+        log_discovery_summary(result=result)
 
         logger.info("CHECK NOW completed successfully for series: %s", db_series.name)
 
@@ -1025,10 +1106,22 @@ def run_series_check_job_full(series_id: int) -> None:
             "added_count": 0,
             "added_books": [],
             "missing_books": fallback_missing,
+            "upcoming_books": [],
+            "validated_candidates": [],
+            "provider_failures": [],
+            "all_providers_failed": True,
+            "asin_discovery": {
+                "discovered": 0,
+                "processed": 0,
+                "fetch_success": 0,
+                "fetch_failed": 0,
+                "metadata_hits": 0,
+            },
             "status": "no_hits",
             "discovery_engine": "agent_v2",
             "agent_pipeline": True,
         }
+        log_discovery_summary(result=fallback_result, terminal_error=f"{type(exc).__name__}: {exc}")
         series_check_jobs[series_id] = {
             "status": "completed",
             "result": fallback_result,
@@ -1051,6 +1144,9 @@ def run_series_check_job_full(series_id: int) -> None:
                 },
                 "complete": True,
                 "missing_books": fallback_missing,
+                "available_missing": [],
+                "upcoming_books": [],
+                "validated_candidates": [],
                 "found_books": [],
                 "no_new_books": True,
                 "reason": "check-now-error",

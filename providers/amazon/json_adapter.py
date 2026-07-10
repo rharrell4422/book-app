@@ -4,79 +4,56 @@ import re
 from typing import Any
 
 from provider_core.json_extractor import extract_json_objects_from_html
-from provider_core.json_parser import parse_json_object_to_candidates_debug, parse_json_objects_to_candidates_debug
-
-_AMAZON_KEYS = {
-    "asin",
-    "productdetails",
-    "productoverview",
-    "producttype",
-    "brand",
-    "title",
-    "author",
-    "store",
-}
-
-_REJECT_TITLE_TOKENS = (
-    "kindle unlimited",
-    "free trial",
-    "deals",
-    "best sellers",
-    "results for",
-    "shop",
-    "coupon",
-    "prime day",
-    "sponsored",
-    "filter",
-    "storefront",
-)
-
-_BOOKISH_PRODUCTTYPE_TOKENS = (
-    "book",
-    "kindle",
-    "paperback",
-    "hardcover",
-    "audiobook",
-)
-
 _DETAIL_URL_RE = re.compile(r"https?://(?:www\.)?amazon\.[^/]+/.*/dp/([A-Z0-9]{10})(?:[/?#]|$)", flags=re.IGNORECASE)
 
+_AMAZON_SCHEMA_CONTAINER_KEYS = {
+    "searchresults",
+    "items",
+    "product",
+    "productoverview",
+    "productdetails",
+    "metadata",
+    "seriesinfo",
+}
 
-def _collect_keys(node: Any, sink: set[str]) -> None:
-    if isinstance(node, dict):
-        for key, value in node.items():
-            sink.add(str(key).lower())
-            _collect_keys(value, sink)
-    elif isinstance(node, list):
-        for item in node:
-            _collect_keys(item, sink)
+_AMAZON_SCHEMA_FIELD_KEYS = {
+    "detailpageurl",
+    "asin",
+    "title",
+    "author",
+    "contributors",
+    "publicationdate",
+    "seriesinfo",
+}
 
 
-def _amazon_blob_key_score(blob: Any) -> int:
-    keys: set[str] = set()
-    _collect_keys(blob, keys)
-    return sum(1 for key in _AMAZON_KEYS if key in keys)
+def _walk_nodes(node: Any):
+    stack: list[Any] = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        if isinstance(current, dict):
+            for value in current.values():
+                stack.append(value)
+        elif isinstance(current, list):
+            for item in current:
+                stack.append(item)
 
 
-def _json_blob_score(blob: Any) -> int:
-    score = 0
+def _iter_dict_nodes(node: Any):
+    for current in _walk_nodes(node):
+        if isinstance(current, dict):
+            yield current
 
-    def walk(node: Any) -> None:
-        nonlocal score
-        if isinstance(node, dict):
-            for key, value in node.items():
-                lowered = str(key).lower()
-                if lowered in {"asin", "title", "name", "author", "authors", "product", "book", "release_date", "releasedate", "publicationdate"}:
-                    score += 2
-                if "book" in lowered or "product" in lowered:
-                    score += 1
-                walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
 
-    walk(blob)
-    return score
+def _text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)):
+        return str(value).strip()
+    return ""
 
 
 def _is_valid_asin(value: str) -> bool:
@@ -93,123 +70,182 @@ def _is_valid_detail_url(value: str) -> bool:
     return bool(_DETAIL_URL_RE.search(url))
 
 
-def _is_rejected_title(value: str) -> bool:
-    title = str(value or "").strip().lower()
-    if not title:
-        return True
-    if len(title) < 3:
-        return True
-    if re.fullmatch(r"[\W_\d]+", title):
-        return True
-    return any(token in title for token in _REJECT_TITLE_TOKENS)
+def _first_value(node: Any, keys: tuple[str, ...]) -> str:
+    wanted = {key.lower() for key in keys}
+    for current in _iter_dict_nodes(node):
+        for key, value in current.items():
+            if str(key).lower() not in wanted:
+                continue
+            text = _text(value)
+            if text:
+                return text
+    return ""
 
 
-def _collect_values_for_keys(node: Any, keys: set[str], sink: dict[str, list[str]]) -> None:
-    if isinstance(node, dict):
-        for key, value in node.items():
-            lowered = str(key).lower()
-            if lowered in keys:
-                if isinstance(value, (str, int, float)):
-                    sink.setdefault(lowered, []).append(str(value).strip())
-            _collect_values_for_keys(value, keys, sink)
-    elif isinstance(node, list):
-        for item in node:
-            _collect_values_for_keys(item, keys, sink)
+def _extract_asin(node: Any) -> str:
+    asin = _first_value(node, ("asin",))
+    if _is_valid_asin(asin):
+        return asin.upper()
+
+    detail_url = _extract_detail_url(node)
+    match = _DETAIL_URL_RE.search(detail_url)
+    if match:
+        candidate = str(match.group(1) or "").strip().upper()
+        if _is_valid_asin(candidate):
+            return candidate
+    return ""
 
 
-def _has_valid_book_metadata_fields(blob: Any) -> bool:
-    watched_keys = {"producttype", "parentasin", "detailpageurl", "canonicalurl", "producturl"}
-    values_by_key: dict[str, list[str]] = {}
-    _collect_values_for_keys(blob, watched_keys, values_by_key)
-
-    product_type_values = [v.lower() for v in values_by_key.get("producttype", []) if v]
-    if product_type_values and not any(any(token in value for token in _BOOKISH_PRODUCTTYPE_TOKENS) for value in product_type_values):
-        return False
-
-    parent_asin_values = [v for v in values_by_key.get("parentasin", []) if v]
-    if parent_asin_values and not any(_is_valid_asin(value) for value in parent_asin_values):
-        return False
-
-    detail_like_values = [v for key in ("detailpageurl", "canonicalurl", "producturl") for v in values_by_key.get(key, []) if v]
-    if detail_like_values and not any(_is_valid_detail_url(value) for value in detail_like_values):
-        return False
-
-    return True
+def _extract_title(node: Any) -> str:
+    return _first_value(node, ("title", "name"))
 
 
-def _blob_has_valid_book_candidate(blob: Any) -> bool:
-    candidates, _ = parse_json_object_to_candidates_debug(blob)
-    for candidate in candidates:
-        title = str(candidate.get("title") or "").strip()
-        asin = str(candidate.get("asin_or_id") or "").strip().upper()
-        url = str(candidate.get("url") or "").strip()
+def _extract_author(node: Any) -> str:
+    direct_author = _first_value(node, ("author",))
+    if direct_author:
+        return direct_author
 
-        if _is_rejected_title(title):
+    for current in _iter_dict_nodes(node):
+        for key, value in current.items():
+            if str(key).lower() != "contributors":
+                continue
+            if isinstance(value, list):
+                names: list[str] = []
+                for contributor in value:
+                    if isinstance(contributor, dict):
+                        candidate_name = _text(contributor.get("name") or contributor.get("displayName") or contributor.get("author"))
+                        if candidate_name:
+                            names.append(candidate_name)
+                    else:
+                        candidate_name = _text(contributor)
+                        if candidate_name:
+                            names.append(candidate_name)
+                if names:
+                    return ", ".join(names)
+            elif isinstance(value, dict):
+                candidate_name = _text(value.get("name") or value.get("displayName") or value.get("author"))
+                if candidate_name:
+                    return candidate_name
+            else:
+                candidate_name = _text(value)
+                if candidate_name:
+                    return candidate_name
+    return ""
+
+def _extract_publication_date(node: Any) -> str:
+    return _first_value(node, ("publicationDate", "publishDate", "releaseDate"))
+
+
+def _extract_detail_url(node: Any) -> str:
+    detail_url = _first_value(node, ("detailPageUrl", "canonicalUrl", "productUrl", "url"))
+    if detail_url and _is_valid_detail_url(detail_url):
+        return detail_url
+    return ""
+
+def _extract_series_info(node: Any) -> tuple[str, int | None]:
+    series_name = ""
+    series_number: int | None = None
+
+    for current in _iter_dict_nodes(node):
+        series_payload = None
+        for key, value in current.items():
+            if str(key).lower() == "seriesinfo":
+                series_payload = value
+                break
+
+        if series_payload is None:
             continue
-        if not _is_valid_asin(asin):
-            continue
-        if not _is_valid_detail_url(url):
-            continue
-        if f"/dp/{asin.lower()}" not in url.lower():
-            continue
-        return True
 
-    return False
+        if isinstance(series_payload, dict):
+            if not series_name:
+                series_name = _text(series_payload.get("name") or series_payload.get("seriesName") or series_payload.get("title"))
+            if series_number is None:
+                raw_number = _text(series_payload.get("number") or series_payload.get("seriesNumber") or series_payload.get("bookNumber"))
+                if raw_number:
+                    match = re.search(r"\d+", raw_number)
+                    if match:
+                        series_number = int(match.group(0))
+        elif isinstance(series_payload, str):
+            if not series_name:
+                series_name = series_payload.strip()
 
+        if series_name and series_number is not None:
+            return series_name, series_number
 
-def _is_book_blob(blob: Any) -> bool:
-    keys: set[str] = set()
-    _collect_keys(blob, keys)
+    return series_name, series_number
 
-    has_id = any(key in keys for key in {"asin", "id", "isbn", "identifier", "productid", "sku"})
-    has_title = any(key in keys for key in {"title", "name", "booktitle", "producttitle"})
-    has_book_context = any(token in key for key in keys for token in {"book", "product", "author", "release", "publication", "detailpageurl", "parentasin", "producttype"})
+def _node_has_amazon_schema_keys(node: dict[str, Any]) -> bool:
+    lowered_keys = {str(key).lower() for key in node.keys()}
+    return bool(lowered_keys & (_AMAZON_SCHEMA_CONTAINER_KEYS | _AMAZON_SCHEMA_FIELD_KEYS))
 
-    if not (has_id and has_title and has_book_context):
-        return False
+def _as_canonical_candidate(node: Any) -> dict[str, Any] | None:
+    asin = _extract_asin(node)
+    title = _extract_title(node)
+    author = _extract_author(node)
+    publication_date = _extract_publication_date(node)
+    detail_page_url = _extract_detail_url(node)
+    series_name, series_number = _extract_series_info(node)
 
-    if not _has_valid_book_metadata_fields(blob):
-        return False
+    has_any_book_fields = bool(asin or title or author or publication_date or series_name or series_number is not None)
+    if not has_any_book_fields:
+        return None
 
-    return _blob_has_valid_book_candidate(blob)
+    # Partial rows are skipped so downstream ranking only receives stable candidates.
+    if not asin or not title:
+        return None
 
+    return {
+        "asin": asin,
+        "title": title,
+        "author": author,
+        "publication_date": publication_date,
+        "series_name": series_name,
+        "series_number": series_number,
+        "provider": "amazon",
+        "source": "json",
+        "asin_or_id": asin,
+        "publish_date": publication_date,
+        "series": series_name,
+        "book_number": series_number,
+        "url": detail_page_url or f"https://www.amazon.com/dp/{asin}",
+        "snippet": "amazon-json",
+    }
 
-def extract_amazon_candidates_from_json(raw_html: str) -> list[dict[str, Any]]:
+def extract_amazon_candidates_from_json(raw_html: str) -> dict[str, Any]:
     blobs = extract_json_objects_from_html(raw_html)
-    adapter_debug_lines: list[str] = []
-    adapter_debug_lines.append(f"AMAZON JSON ADAPTER: blobs received = {len(blobs)}")
-    if not blobs:
-        for line in adapter_debug_lines:
-            print(line)
-        return []
+    json_blobs_scanned = len(blobs)
 
-    scored_entries = []
-    for index, blob in enumerate(blobs):
-        amazon_score = _amazon_blob_key_score(blob)
-        generic_score = _json_blob_score(blob)
-        adapter_debug_lines.append(f"AMAZON JSON ADAPTER: blob index {index} score = {amazon_score}")
-        scored_entries.append((index, blob, amazon_score, generic_score))
+    seen_keys: set[str] = set()
+    book_candidates: list[dict[str, Any]] = []
 
-    book_blobs: list[Any] = []
-    for _, blob, amazon_score, generic_score in scored_entries:
-        if amazon_score <= 0 and generic_score <= 0:
-            continue
-        if not _is_book_blob(blob):
-            continue
-        book_blobs.append(blob)
+    for blob in blobs:
+        for node in _iter_dict_nodes(blob):
+            if not _node_has_amazon_schema_keys(node):
+                continue
 
-    adapter_debug_lines.append(f"AMAZON JSON ADAPTER: book blobs selected = {len(book_blobs)}")
+            candidate = _as_canonical_candidate(node)
+            if candidate is None:
+                continue
 
-    if not book_blobs:
-        for line in adapter_debug_lines:
-            print(line)
-        return []
+            dedupe_key = "|".join(
+                [
+                    str(candidate.get("asin") or "").strip().upper(),
+                    str(candidate.get("title") or "").strip().lower(),
+                    str(candidate.get("series_number") if candidate.get("series_number") is not None else ""),
+                ]
+            )
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            book_candidates.append(candidate)
 
-    candidates, parser_debug_lines = parse_json_objects_to_candidates_debug(book_blobs)
+    json_blobs_valid = len(book_candidates)
 
-    for line in adapter_debug_lines:
-        print(line)
-    for line in parser_debug_lines:
-        print(line)
+    print(f"AMAZON JSON ADAPTER: blobs scanned = {json_blobs_scanned}")
+    print(f"AMAZON JSON ADAPTER: book blobs extracted = {json_blobs_valid}")
 
-    return candidates
+    return {
+        "book_candidates": book_candidates,
+        "json_blobs_scanned": json_blobs_scanned,
+        "json_blobs_valid": json_blobs_valid,
+    }

@@ -70,6 +70,8 @@ def _is_attribute_metadata_blob(node: Any) -> bool:
 def _parse_json_object_to_candidates_with_debug(json_object: Any) -> tuple[list[dict[str, Any]], list[str]]:
     candidates: list[dict[str, Any]] = []
     debug_lines: list[str] = []
+    attribute_mode_hits = 0
+    generic_mode_hits = 0
 
     for node in _walk_json(json_object):
         if _is_attribute_metadata_blob(node):
@@ -84,26 +86,7 @@ def _parse_json_object_to_candidates_with_debug(json_object: Any) -> tuple[list[
 
             url = f"https://www.amazon.com/dp/{asin_or_id}"
 
-            extracted_fields: list[str] = ["title", "asin_or_id", "url"]
-            if author:
-                extracted_fields.append("author")
-            if release_date:
-                extracted_fields.append("release_date")
-            if price:
-                extracted_fields.append("price")
-
-            missing_fields = [
-                field
-                for field, value in (
-                    ("author", author),
-                    ("release_date", release_date),
-                )
-                if not value
-            ]
-
-            debug_lines.append("AMAZON JSON PARSER: attribute-metadata mode activated")
-            debug_lines.append(f"AMAZON JSON PARSER: fields extracted = {extracted_fields}")
-            debug_lines.append(f"AMAZON JSON PARSER: missing fields = {missing_fields}")
+            attribute_mode_hits += 1
 
             candidates.append(
                 {
@@ -115,12 +98,6 @@ def _parse_json_object_to_candidates_with_debug(json_object: Any) -> tuple[list[
                 }
             )
 
-            short_title = str(title)[:80]
-            short_asin = str(asin_or_id)[:40]
-            debug_lines.append(
-                f"AMAZON JSON PARSER: candidate {len(candidates)} = "
-                f"title='{short_title}', asin='{short_asin}'"
-            )
             continue
 
         title = _first_text(node, _TITLE_KEYS)
@@ -134,29 +111,7 @@ def _parse_json_object_to_candidates_with_debug(json_object: Any) -> tuple[list[
         if not any((author, asin_or_id, release_date, url)):
             continue
 
-        extracted_fields: list[str] = ["title"]
-        if author:
-            extracted_fields.append("author")
-        if asin_or_id:
-            extracted_fields.append("asin_or_id")
-        if release_date:
-            extracted_fields.append("release_date")
-        if url:
-            extracted_fields.append("url")
-
-        missing_fields = [
-            field
-            for field, value in (
-                ("author", author),
-                ("asin_or_id", asin_or_id),
-                ("release_date", release_date),
-                ("url", url),
-            )
-            if not value
-        ]
-
-        debug_lines.append(f"AMAZON JSON PARSER: fields extracted = {extracted_fields}")
-        debug_lines.append(f"AMAZON JSON PARSER: missing fields = {missing_fields}")
+        generic_mode_hits += 1
 
         candidates.append(
             {
@@ -168,13 +123,8 @@ def _parse_json_object_to_candidates_with_debug(json_object: Any) -> tuple[list[
             }
         )
 
-        short_title = str(title)[:80]
-        short_asin = str(asin_or_id or "")[:40]
-        debug_lines.append(
-            f"AMAZON JSON PARSER: candidate {len(candidates)} = "
-            f"title='{short_title}', asin='{short_asin}'"
-        )
-
+    debug_lines.append(f"AMAZON JSON PARSER: attribute-metadata hits = {attribute_mode_hits}")
+    debug_lines.append(f"AMAZON JSON PARSER: generic-node hits = {generic_mode_hits}")
     debug_lines.append(f"AMAZON JSON PARSER: candidates produced = {len(candidates)}")
 
     return candidates, debug_lines
@@ -183,13 +133,15 @@ def _parse_json_object_to_candidates_with_debug(json_object: Any) -> tuple[list[
 def parse_json_objects_to_candidates_debug(json_objects: list[Any]) -> tuple[list[dict[str, Any]], list[str]]:
     all_candidates: list[dict[str, Any]] = []
     all_debug_lines: list[str] = []
+    blobs_parsed = 0
 
-    for blob_index, json_object in enumerate(json_objects):
+    for json_object in json_objects:
+        blobs_parsed += 1
         candidates, debug_lines = _parse_json_object_to_candidates_with_debug(json_object)
-        all_debug_lines.append(f"AMAZON JSON PARSER: parsing blob index = {blob_index}")
         all_debug_lines.extend(debug_lines)
         all_candidates.extend(candidates)
 
+    all_debug_lines.append(f"AMAZON JSON PARSER: blobs parsed = {blobs_parsed}")
     all_debug_lines.append(f"AMAZON JSON PARSER: total candidates produced = {len(all_candidates)}")
     return all_candidates, all_debug_lines
 

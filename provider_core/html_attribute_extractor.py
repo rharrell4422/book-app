@@ -199,10 +199,15 @@ def _merge_group_metadata(group_nodes: list[dict[str, Any]]) -> dict[str, Any]:
     return merged
 
 
-def extract_html_attribute_metadata(raw_html: str) -> list[dict[str, Any]]:
+def _extract_html_attribute_metadata_impl(raw_html: str) -> tuple[list[dict[str, Any]], dict[str, int]]:
     html_text = raw_html if isinstance(raw_html, str) else str(raw_html or "")
     if not html_text.strip():
-        return []
+        return [], {
+            "elements_scanned": 0,
+            "metadata_candidates": 0,
+            "title_nodes": 0,
+            "asin_groups": 0,
+        }
 
     candidate_nodes: list[dict[str, Any]] = []
     debug_lines: list[str] = []
@@ -278,7 +283,6 @@ def extract_html_attribute_metadata(raw_html: str) -> list[dict[str, Any]]:
             continue
 
         attached_titles_by_asin[asin] = title_node["title_text"]
-        debug_lines.append(f"HTML TITLE EXTRACTOR: title attached to asin={asin}")
 
     for node in candidate_nodes:
         metadata = node["metadata"]
@@ -320,11 +324,19 @@ def extract_html_attribute_metadata(raw_html: str) -> list[dict[str, Any]]:
     debug_lines.append(f"HTML ATTRIBUTE EXTRACTOR: product-metadata candidates = {len(candidate_nodes)}")
     debug_lines.append(f"HTML TITLE EXTRACTOR: title nodes found = {len(title_nodes)}")
     debug_lines.append(f"HTML ATTRIBUTE MERGER: asin groups = {len(merged_candidates)}")
-    for index, candidate in enumerate(merged_candidates, start=1):
-        keys = sorted([key for key, value in candidate.items() if value])
-        debug_lines.append(f"HTML ATTRIBUTE MERGER: merged candidate {index} keys = {keys}")
 
-    for line in debug_lines:
-        print(line)
+    return merged_candidates, {
+        "elements_scanned": scanned,
+        "metadata_candidates": len(candidate_nodes),
+        "title_nodes": len(title_nodes),
+        "asin_groups": len(merged_candidates),
+    }
 
+
+def extract_html_attribute_metadata(raw_html: str) -> list[dict[str, Any]]:
+    merged_candidates, _ = _extract_html_attribute_metadata_impl(raw_html)
     return merged_candidates
+
+
+def extract_html_attribute_metadata_with_metrics(raw_html: str) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    return _extract_html_attribute_metadata_impl(raw_html)
