@@ -1,7 +1,6 @@
 from datetime import date, datetime
-from typing import List, Optional
-from pydantic import BaseModel
-from pydantic import BaseModel, ConfigDict, Field
+from typing import List, Literal, Optional
+from pydantic import BaseModel, ConfigDict
 
 # ------------------------------------------------------------
 # Book Schemas
@@ -161,7 +160,6 @@ class SeriesDetailResponse(BaseModel):
     read_count: int = 0
     unread_count: int = 0
     title_normalization_mode_override: str | None = None
-    title_normalization_mode_override: str | None = None
     series_state: SeriesState | None = None
 
     created_at: datetime
@@ -174,56 +172,50 @@ class SeriesDetailResponse(BaseModel):
 
 
 # ------------------------------------------------------------
-# Suggestion Schemas
+# Agent request/response Schemas
 # ------------------------------------------------------------
 
-class SuggestionRecord(BaseModel):
+class AgentRunRequest(BaseModel):
     title: str
     author: str | None = None
-    year: str | int | None = None
-    description: str | None = None
-    source_url: str | None = None
-    series_name: str | list[str] | None = None
-    series_position: int | str | float | None = None
-    source: str | None = None
 
 
-class SuggestionStageDiagnostic(BaseModel):
-    stage: str
-    provider: str
-    query: str
-    raw_count: int = 0
-    accepted_count: int = 0
+class AgentApproveRequest(BaseModel):
+    metadata: dict
+    found: bool | None = None
 
 
-class SuggestionDiagnostics(BaseModel):
-    selected_stage: str | None = None
-    provider_counts: dict[str, int] = Field(default_factory=dict)
-    stages: list[SuggestionStageDiagnostic] = Field(default_factory=list)
-    accepted_total: int = 0
-    rejection_counts: dict[str, int] = Field(default_factory=dict)
-    top_score: float = 0.0
-    timed_out: bool = False
-    elapsed_seconds: float = 0.0
-    passes_completed: int = 0
-    sources_used: list[str] = Field(default_factory=list)
-    current_pass: str | None = None
-    false_positive_filter: dict[str, bool] = Field(default_factory=dict)
-    publication_date_filter: dict[str, object] = Field(default_factory=dict)
+# ------------------------------------------------------------
+# Series action request Schemas
+# ------------------------------------------------------------
+
+class KnownSeriesListEntry(BaseModel):
+    bookNumber: float
+    title: str
+    publicationYear: int | None = None
+    note: str | None = None
 
 
-class SuggestionResponse(BaseModel):
-    query: str
-    results: list[SuggestionRecord]
-    diagnostics: SuggestionDiagnostics | None = None
-    status: str | None = None
-    passes_completed: int = 0
-    sources_used: list[str] = Field(default_factory=list)
-    missing_books: list[int] = Field(default_factory=list)
-    discovery_engine: str | None = None
-    discovery_mode: str | None = None
-    provider_attempt_order: list[str] = Field(default_factory=list)
-    provider_attempts: list[dict] = Field(default_factory=list)
-    provider_selected: str | None = None
-    final_reason: str | None = None
-    agent_pipeline: bool = False
+class KnownSeriesListApplyRequest(BaseModel):
+    entries: list[KnownSeriesListEntry]
+
+
+class NormalizeTitlesRequest(BaseModel):
+    normalization_mode: str
+    custom_pattern: str | None = None
+    exclude_upcoming: bool = True
+
+
+# ------------------------------------------------------------
+# Import confirmation request Schemas
+# ------------------------------------------------------------
+
+class SeriesImportConfirmationDecision(BaseModel):
+    book_id: int
+    decision: Literal["yes", "no", "dont_know"]
+    series_name: str | None = None
+    note: str | None = None
+
+
+class SeriesImportConfirmationResolveRequest(BaseModel):
+    decisions: list[SeriesImportConfirmationDecision]
