@@ -38,7 +38,21 @@ load_dotenv()
 
 GOOGLE_BOOKS_ENDPOINT = "https://www.googleapis.com/books/v1/volumes"
 OPENLIBRARY_ENDPOINT = "https://openlibrary.org/search.json"
+HARDCOVER_ENDPOINT = "https://api.hardcover.app/v1/graphql"
 REQUEST_TIMEOUT_SECONDS = 12.0
+
+# Hardcover's own search index tags each hit with its position within a
+# series (when it has one), which is a far more reliable source of a book's
+# number than trying to parse it out of free-text title formatting -- so a
+# result from this provider carries that as an explicit hint rather than
+# leaving it to title-text inference.
+_HARDCOVER_SEARCH_QUERY = """
+query Search($query: String!, $perPage: Int!) {
+  search(query: $query, query_type: "Book", per_page: $perPage) {
+    results
+  }
+}
+"""
 
 # OpenLibrary (and, less aggressively, Google Books) apply basic
 # bot-mitigation heuristics that can reject requests using generic HTTP
@@ -311,6 +325,58 @@ def _fetch_openlibrary(query: str, max_results: int = 40) -> list[dict]:
     return results
 
 
+def _fetch_hardcover(query: str, max_results: int = 25) -> list[dict]:
+    api_key = os.environ.get("HARDCOVER_API_KEY", "").strip()
+    if not api_key:
+        return []
+
+    headers = {**REQUEST_HEADERS, "Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {"query": _HARDCOVER_SEARCH_QUERY, "variables": {"query": query, "perPage": max_results}}
+    response = httpx.post(HARDCOVER_ENDPOINT, json=payload, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+
+    body = response.json() or {}
+    if body.get("errors"):
+        raise RuntimeError(str(body["errors"])[:300])
+
+    hits = (((body.get("data") or {}).get("search") or {}).get("results") or {}).get("hits") or []
+    results: list[dict] = []
+    for hit in hits:
+        doc = hit.get("document") or {}
+        title = str(doc.get("title") or "").strip()
+        if not title:
+            continue
+
+        isbns = doc.get("isbns") or []
+        isbn13 = next((i for i in isbns if len(str(i)) == 13), None)
+
+        featured_series = doc.get("featured_series") or {}
+        series_position = None
+        raw_position = featured_series.get("position")
+        if raw_position is not None:
+            try:
+                series_position = int(round(float(raw_position)))
+            except (TypeError, ValueError):
+                series_position = None
+
+        results.append(
+            {
+                "source": "hardcover",
+                "source_id": doc.get("id"),
+                "title": title,
+                "authors": doc.get("author_names") or [],
+                "published_date": str(doc.get("release_date") or "").strip(),
+                "description": doc.get("description"),
+                "isbn13": str(isbn13 or "").strip() or None,
+                "source_url": f"https://hardcover.app/books/{doc.get('slug')}" if doc.get("slug") else None,
+                "language": "",
+                "series_number_hint": series_position,
+                "upcoming_hint": bool(featured_series.get("unreleased")),
+            }
+        )
+    return results
+
+
 def _filter_and_merge(raw_results: list[dict], author: str, exclude_title_keys: set[str], confidence: str) -> list[dict]:
     merged: list[dict] = []
     seen_keys: set[str] = set()
@@ -393,7 +459,22 @@ def discover_candidates_for_series(
     except Exception as exc:
         provider_failures.append({"provider": "openlibrary", "error": str(exc)})
 
-    combined = _filter_and_merge([*google_raw, *openlibrary_raw], author, exclude_title_keys, confidence="targeted")
+    hardcover_raw: list[dict] = []
+    try:
+        hardcover_raw = _fetch_hardcover(targeted_query_text)
+        if hardcover_raw or os.environ.get("HARDCOVER_API_KEY", "").strip():
+            any_provider_succeeded = True
+    except Exception as exc:
+        provider_failures.append({"provider": "hardcover", "error": str(exc)})
+
+    # Hardcover listed first: when multiple sources return the same book,
+    # dedup keeps whichever copy appears first, and Hardcover's explicit
+    # series-position/release-status fields are more trustworthy than
+    # Google Books/OpenLibrary free-text for indie/self-published LitRPG,
+    # which both of those APIs tend to index/cover poorly.
+    combined = _filter_and_merge(
+        [*hardcover_raw, *google_raw, *openlibrary_raw], author, exclude_title_keys, confidence="targeted"
+    )
 
     used_author_fallback = False
     if not combined and allow_author_fallback:
@@ -415,8 +496,19 @@ def discover_candidates_for_series(
         except Exception as exc:
             provider_failures.append({"provider": "openlibrary_fallback", "error": str(exc)})
 
+        hardcover_fallback: list[dict] = []
+        try:
+            hardcover_fallback = _fetch_hardcover(query_author)
+            if hardcover_fallback or os.environ.get("HARDCOVER_API_KEY", "").strip():
+                any_provider_succeeded = True
+        except Exception as exc:
+            provider_failures.append({"provider": "hardcover_fallback", "error": str(exc)})
+
         combined = _filter_and_merge(
-            [*google_fallback, *openlibrary_fallback], author, exclude_title_keys, confidence="author_fallback"
+            [*hardcover_fallback, *google_fallback, *openlibrary_fallback],
+            author,
+            exclude_title_keys,
+            confidence="author_fallback",
         )
 
     # "All providers failed" should mean we got no usable data at all (every

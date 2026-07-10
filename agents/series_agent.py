@@ -371,7 +371,13 @@ class SeriesIntelligenceAgent:
             for raw in candidates:
                 title = str(raw.get("title") or "").strip()
                 title_key = discovery_engine.core_title_key(title)
-                inferred_number = discovery_engine.infer_number_from_title(title, series.name)
+                # Hardcover's search index tags each hit with its actual
+                # position in the series -- when present, that's a more
+                # reliable source of the book number than parsing free-text
+                # title formatting, so prefer it over inference.
+                inferred_number = raw.get("series_number_hint") or discovery_engine.infer_number_from_title(
+                    title, series.name
+                )
                 resolved_number = _normalize_identity_number(inferred_number) if inferred_number else ""
 
                 # Targeted-search results were already matched by the API's
@@ -419,7 +425,12 @@ class SeriesIntelligenceAgent:
                     continue
 
                 parsed_date = discovery_engine.parse_flexible_date(raw.get("published_date"))
-                is_upcoming = bool(parsed_date and parsed_date > today)
+                # Hardcover explicitly flags books it knows aren't out yet
+                # even when it has no parseable release date -- fall back to
+                # that hint only when there's no date to compare against.
+                is_upcoming = bool(parsed_date and parsed_date > today) or bool(
+                    parsed_date is None and raw.get("upcoming_hint")
+                )
 
                 canonical = {
                     "title": title,
