@@ -7,7 +7,7 @@ from urllib.parse import quote_plus
 
 from models import Series
 from providers.amazon.asin_series_provider import discover_series_candidates_from_seed_asins
-from providers.amazon.html_adapter import extract_amazon_asins_from_search_html
+from providers.amazon.html_adapter import extract_amazon_asins_from_search_html, extract_amazon_candidates_from_html
 from providers.amazon.product_page_extractor import extract_amazon_product_metadata_from_html
 
 from checker_providers import PROVIDERS, _build_provider_output, _extract_candidates_three_layer, fetch_provider_html_by_name, run_author_discovery_amazon, run_author_discovery_google_html
@@ -91,18 +91,9 @@ def _build_google_author_fallback_url(author_name: str, series_name: str, next_n
     if isinstance(next_number, int) and next_number > 0:
         query_parts.append(f"book {next_number}")
 
-    query_parts.extend(
-        [
-            "book",
-            "novel",
-            "release",
-            "series",
-            "Honour Rae",
-            "All The Skills",
-        ]
-    )
+    query_parts.extend(["book", "novel", "release", "series"])
 
-    query = " ".join(part for part in query_parts if str(part).strip()).strip() or "book novel release series Honour Rae All The Skills"
+    query = " ".join(part for part in query_parts if str(part).strip()).strip() or "book novel release series"
     return f"https://www.google.com/search?q={quote_plus(query)}"
 
 
@@ -345,6 +336,162 @@ def _asin_fallback_discovery(library_entry) -> list[dict]:
         )
 
     return fallback_candidates
+
+
+def _search_amazon_asin_for_title(title: str, author_name: str, series_name: str) -> str:
+    """Resolve a bare title discovered via author-page/Google discovery (no
+    ASIN attached) to a specific Amazon ASIN, by running an Amazon search and
+    picking the closest title match. This is the "find it on Amazon" step
+    that must run AFTER discovery, before any DOM/JSON enrichment happens.
+    Returns "" if no confident match is found.
+    """
+    clean_title = re.sub(r"\s+", " ", str(title or "")).strip()
+    if not clean_title:
+        return ""
+    clean_author = re.sub(r"\s+", " ", str(author_name or "")).strip()
+    query = f"{clean_title} {clean_author}".strip()
+    search_url = f"https://m.amazon.com/s?k={quote_plus(query)}&i=stripbooks"
+
+    fetch_result = fetch_provider_html_by_name("amazon_books", search_url, amazon_mode="search")
+    if not fetch_result.get("ok"):
+        return ""
+
+    html = str(fetch_result.get("raw_html") or fetch_result.get("html") or "")
+    if not html:
+        return ""
+
+    candidates = extract_amazon_candidates_from_html(html, series_name)
+    normalized_lead = _normalize_loose_text(clean_title)
+    best_asin = ""
+    best_ratio = 0.0
+    for candidate in candidates:
+        candidate_asin = str(candidate.get("asin") or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]{10}", candidate_asin):
+            continue
+        candidate_title = _normalize_loose_text(str(candidate.get("title") or ""))
+        ratio = SequenceMatcher(None, normalized_lead, candidate_title).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_asin = candidate_asin
+
+    return best_asin if best_ratio >= 0.55 else ""
+
+
+def _enrich_discovery_leads_via_amazon(
+    leads: list[dict],
+    series_name: str,
+    author_name: str,
+    next_number: int | None,
+) -> tuple[list[dict], dict]:
+    """Take title-only discovery leads (from author-page/Google discovery, or
+    any non-retail discovery source) and enrich them with real Amazon product
+    metadata: resolve an ASIN if the lead doesn't already have one, fetch the
+    product page, extract full DOM/JSON metadata, then require the same
+    strict series-membership reconciliation as any other non-retail-sourced
+    candidate before accepting it. This function must stay fully generic --
+    no series/author/ASIN-specific branching.
+    """
+    enriched: list[dict] = []
+    metrics = {
+        "leads": len(leads),
+        "resolved_asin": 0,
+        "fetch_success": 0,
+        "fetch_failed": 0,
+        "accepted": 0,
+        "rejected": 0,
+    }
+    seen_asins: set[str] = set()
+
+    for lead in leads:
+        lead_asin = str(lead.get("asin") or lead.get("asin_or_id") or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]{10}", lead_asin):
+            lead_asin = _search_amazon_asin_for_title(str(lead.get("title") or ""), author_name, series_name)
+        if not lead_asin or lead_asin in seen_asins:
+            continue
+        seen_asins.add(lead_asin)
+        metrics["resolved_asin"] += 1
+
+        product_url = f"https://m.amazon.com/dp/{lead_asin}"
+        product_fetch_result = fetch_provider_html_by_name("amazon_books", product_url, amazon_mode="product")
+        if not product_fetch_result.get("ok"):
+            metrics["fetch_failed"] += 1
+            continue
+        metrics["fetch_success"] += 1
+
+        product_html = str(product_fetch_result.get("html") or "")
+        metadata_candidate = extract_amazon_product_metadata_from_html(product_html, product_url, expected_asin=lead_asin)
+        if str(metadata_candidate.get("failure_reason") or "").strip():
+            metrics["rejected"] += 1
+            continue
+
+        canonical, normalization_reasons = _build_canonical_amazon_metadata(
+            target_series_name=series_name,
+            metadata_candidate={
+                **metadata_candidate,
+                "asin_or_id": lead_asin,
+                "url": str(metadata_candidate.get("url") or product_url).strip() or product_url,
+            },
+        )
+        if canonical is None or normalization_reasons:
+            metrics["rejected"] += 1
+            continue
+
+        is_member_match, _reasons = _passes_amazon_membership_reconciliation(
+            target_series_name=series_name,
+            target_author_name=author_name,
+            expected_next_number=next_number,
+            title=str(canonical.get("title") or ""),
+            extracted_series_name=str(canonical.get("series_name") or ""),
+            extracted_author=str(canonical.get("author") or ""),
+            extracted_book_number=canonical.get("book_number"),
+        )
+        if not is_member_match:
+            metrics["rejected"] += 1
+            continue
+
+        availability = str(canonical.get("availability") or "").strip().lower()
+        if availability == "upcoming":
+            status_value = "upcoming"
+        elif availability == "available":
+            status_value = "published"
+        else:
+            status_value = _status_hint_for_amazon(
+                f"{canonical.get('title') or ''} {canonical.get('author') or ''}".strip(),
+                canonical.get("release_date"),
+            )
+            status_value = "upcoming" if status_value == "upcoming" else "published"
+
+        enriched.append(
+            {
+                "title": canonical.get("title"),
+                "author": canonical.get("author"),
+                "series_name": canonical.get("series_name"),
+                "book_number": canonical.get("book_number"),
+                "asin": canonical.get("asin_or_id"),
+                "asin_or_id": canonical.get("asin_or_id"),
+                "url": canonical.get("url"),
+                "publication_date": canonical.get("publish_date"),
+                "release_date": canonical.get("release_date"),
+                "expected_date": canonical.get("upcoming_date"),
+                "status": status_value,
+                "status_hint": status_value,
+                "provider": str(lead.get("provider") or "author_discovery").strip() or "author_discovery",
+                "source_layer": "enriched_from_discovery",
+                "canonical_metadata": {
+                    "title_normalized": canonical.get("title"),
+                    "series_name_normalized": canonical.get("series_name"),
+                    "book_number_normalized": canonical.get("book_number"),
+                    "publish_date_normalized": canonical.get("publish_date"),
+                    "upcoming_date_normalized": canonical.get("upcoming_date"),
+                    "availability": canonical.get("availability"),
+                    "edition_type": canonical.get("edition_type"),
+                    "title_selector": canonical.get("title_selector"),
+                },
+            }
+        )
+        metrics["accepted"] += 1
+
+    return enriched, metrics
 
 
 def _title_loosely_matches(candidate_title: str, canonical_title: str) -> bool:
@@ -652,6 +799,45 @@ def check_for_new_book(
     provider_ledger.append(amazon_author_discovery_ledger_entry)
     provider_ledger.append(google_author_discovery_ledger_entry)
 
+    # Discovery = author pages + Google fallback (above). Metadata enrichment
+    # via Amazon DOM/JSON happens ONLY AFTER a candidate has been discovered,
+    # and acceptance (via _passes_amazon_membership_reconciliation, applied
+    # inside _enrich_discovery_leads_via_amazon) happens only after that
+    # enrichment -- never before. Leads that already carry a valid ASIN
+    # (e.g. scraped directly off an Amazon author page) skip straight to the
+    # product-page fetch instead of re-searching for one.
+    author_discovery_enrichment_ledger_entry = _provider_ledger_entry("author_discovery_enrichment", "")
+    enriched_author_candidates, author_enrichment_metrics = _enrich_discovery_leads_via_amazon(
+        author_discovered_candidates,
+        series_name,
+        author_name,
+        next_number,
+    )
+    author_discovery_enrichment_ledger_entry["status"] = "success"
+    author_discovery_enrichment_ledger_entry["asin_seed_count"] = author_enrichment_metrics.get("leads", 0)
+    author_discovery_enrichment_ledger_entry["asin_series_candidates"] = author_enrichment_metrics.get("resolved_asin", 0)
+    author_discovery_enrichment_ledger_entry["classification_valid"] = author_enrichment_metrics.get("accepted", 0)
+    author_discovery_enrichment_ledger_entry["classification_invalid"] = author_enrichment_metrics.get("rejected", 0)
+    provider_ledger.append(author_discovery_enrichment_ledger_entry)
+
+    for enriched_candidate in enriched_author_candidates:
+        canonical_validated = _to_canonical_validated_candidate(enriched_candidate, str(enriched_candidate.get("provider") or "author_discovery"), series_name)
+        candidate_key = "|".join(
+            [
+                str(canonical_validated.get("asin") or "").strip().upper(),
+                _normalize_match_text(str(canonical_validated.get("title") or "")),
+                str(canonical_validated.get("series_number") if canonical_validated.get("series_number") is not None else ""),
+            ]
+        )
+        if candidate_key in validated_candidate_keys:
+            continue
+        validated_candidate_keys.add(candidate_key)
+        validated_candidates.append(canonical_validated)
+        all_candidates.append(canonical_validated)
+
+        score = _rank_candidate(enriched_candidate, series_name, author_name, next_number, str(enriched_candidate.get("provider") or "author_discovery"))
+        ranked.append((score, enriched_candidate, str(enriched_candidate.get("provider") or "author_discovery")))
+
     for provider in PROVIDERS:
         provider_ledger_entry = _provider_ledger_entry(provider.name, "")
         if provider.name == "amazon_books" and has_series_and_author and not amazon_series_page_failed:
@@ -727,6 +913,7 @@ def check_for_new_book(
                     if candidate_key not in validated_candidate_keys:
                         validated_candidate_keys.add(candidate_key)
                         validated_candidates.append(canonical_validated)
+                        all_candidates.append(canonical_validated)
 
                 provider_ledger_entry["status"] = "success"
                 continue

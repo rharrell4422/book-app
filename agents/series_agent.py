@@ -12,108 +12,119 @@ from new_book_checker import check_for_new_book
 
 logger = logging.getLogger(__name__)
 
-AUTHOR_RELAXED_SERIES_TOKENS = {
-    "breakthrough",
-}
-
-ASIN_FALLBACK_ALLOWED_ASINS = {
-    "B0DV1KF592",  # All the Skills Book 5
-    "B0GZ7JPY6M",  # All the Skills Book 6
-}
-
-PRIMARY_REJECTED_DRAGON_ASINS = {
-    "B0DH5ZMJ51",
-    "B0GTZ8CBKJ",
-    "B0GHNMTWH3",
-    "B0GHNJ2HZL",
-    "B0GYQ3D1KH",
-}
+# Minimum combined signal score (title/series/number/asin overlap, see
+# _build_multi_signal_diagnostics) required before a discovered candidate is
+# accepted as a genuinely missing/upcoming book for ANY series. This must stay
+# series-agnostic -- do not add series-, author-, or ASIN-specific carve-outs
+# here. If a specific series is producing false positives/negatives, fix the
+# general signal logic below instead.
+MIN_ACCEPTANCE_SCORE = 6
 
 
 def _console_log(message: str) -> None:
     print(f"[series_agent] {message}", flush=True)
 
 
-def _console_log_provider_ledger(result: dict) -> None:
-    provider_ledger = result.get("provider_ledger")
-    if provider_ledger is None:
-        provider_ledger = []
-    _console_log("===== PROVIDER EXECUTION LEDGER START =====")
+def _condense_provider_ledger(provider_ledger: list[dict]) -> list[str]:
+    """Turn the detailed per-provider ledger (30+ fields each) into ONE short
+    line per provider, so the total log size doesn't grow with how much raw
+    scraping happened. Full detail is still available in the returned result
+    dict for anything that needs it (e.g. an API response) -- this is just
+    for what gets printed to the console.
+    """
+    lines: list[str] = []
     for entry in provider_ledger:
-        _console_log(f"provider={entry.get('provider_name')}")
-        _console_log(f"url={entry.get('provider_url') or entry.get('url')}")
-        _console_log(f"status={entry.get('status')}")
-        _console_log(f"http_status={entry.get('http_status')}")
-        _console_log(f"fetch_attempts={entry.get('fetch_attempts')}")
-        _console_log(f"header_profile={entry.get('header_profile')}")
-        _console_log(f"cache_fallback={entry.get('cache_fallback')}")
-        _console_log(f"bot_blocked={entry.get('bot_blocked')}")
-        _console_log(f"html_returned={entry.get('html_returned')}")
-        _console_log(f"dom_elements_scanned={entry.get('dom_elements_scanned')}")
-        _console_log(f"metadata_candidates={entry.get('metadata_candidates')}")
-        _console_log(f"asin_groups={entry.get('asin_groups')}")
-        _console_log(f"json_blobs_extracted={entry.get('json_blobs_extracted')}")
-        _console_log(f"json_book_blobs={entry.get('json_book_blobs')}")
-        _console_log(f"dom_primary_candidates={entry.get('dom_primary_candidates')}")
-        _console_log(f"json_secondary_candidates={entry.get('json_secondary_candidates')}")
-        _console_log(f"asin_tertiary_candidates={entry.get('asin_tertiary_candidates')}")
-        _console_log(f"canonical_candidates={entry.get('canonical_candidates')}")
-        _console_log(f"classification_valid={entry.get('classification_valid')}")
-        _console_log(f"classification_invalid={entry.get('classification_invalid')}")
-        _console_log(f"title_pattern_match={entry.get('title_pattern_match')}")
-        _console_log(f"number_inferred={entry.get('number_inferred')}")
-        _console_log(f"partial_series_match={entry.get('partial_series_match')}")
-        _console_log(f"author_match={entry.get('author_match')}")
-        _console_log(f"author_weight={entry.get('author_weight')}")
-        _console_log(f"author_fallback_used={entry.get('author_fallback_used')}")
-        _console_log(f"author_fallback_reason={entry.get('author_fallback_reason')}")
-        _console_log(f"series_author_relaxed={entry.get('series_author_relaxed')}")
-        _console_log(f"asin_seed_count={entry.get('asin_seed_count')}")
-        _console_log(f"asin_seed_pages_fetched={entry.get('asin_seed_pages_fetched')}")
-        _console_log(f"asin_seed_pages_failed={entry.get('asin_seed_pages_failed')}")
-        _console_log(f"asin_related_asins={entry.get('asin_related_asins')}")
-        _console_log(f"asin_series_candidates={entry.get('asin_series_candidates')}")
-        _console_log(f"asin_present={entry.get('asin_present')}")
-        _console_log(f"multi_signal_score={entry.get('multi_signal_score')}")
-        _console_log(f"accepted_as_missing={entry.get('accepted_as_missing')}")
-        _console_log(f"added_books_count={entry.get('added_books_count')}")
-        _console_log(f"added_books_asins={entry.get('added_books_asins')}")
-        _console_log(f"added_books_titles={entry.get('added_books_titles')}")
-        if entry.get("error"):
-            _console_log(f"error={entry.get('error')}")
-    _console_log("===== PROVIDER EXECUTION LEDGER END =====")
+        parts = [f"provider={entry.get('provider_name')}", f"status={entry.get('status')}"]
+
+        http_status = entry.get("http_status")
+        if http_status:
+            parts.append(f"http={http_status}")
+        if entry.get("bot_blocked"):
+            parts.append("bot_blocked=yes")
+        if entry.get("cache_fallback"):
+            parts.append("cached=yes")
+
+        candidates = entry.get("canonical_candidates") or 0
+        valid = entry.get("classification_valid") or 0
+        invalid = entry.get("classification_invalid") or 0
+        if candidates or valid or invalid:
+            parts.append(f"candidates={candidates} valid={valid} invalid={invalid}")
+
+        discovered_books = entry.get("author_discovered_books")
+        if discovered_books:
+            parts.append(f"discovered={discovered_books}")
+
+        asin_seed_count = entry.get("asin_seed_count") or 0
+        if asin_seed_count:
+            parts.append(
+                f"asin_seeds={asin_seed_count} "
+                f"pages_ok={entry.get('asin_seed_pages_fetched') or 0} "
+                f"pages_failed={entry.get('asin_seed_pages_failed') or 0}"
+            )
+
+        if entry.get("accepted_as_missing"):
+            parts.append("ACCEPTED_AS_MISSING=YES")
+
+        added = entry.get("added_books_count") or 0
+        if added:
+            parts.append(f"added={added}")
+
+        error = entry.get("error")
+        if error:
+            parts.append(f"error={error}")
+
+        lines.append(" | ".join(parts))
+    return lines
 
 
 def log_discovery_summary(*, result: dict, terminal_error: str | None = None) -> None:
+    """Prints ONE short, bounded-size block summarizing a Check Now run --
+    at most a few dozen lines, no matter how many web pages were scraped or
+    candidates were scanned. Everything between the START and END markers
+    is meant to be copy/pasted whole for debugging.
+    """
+    provider_ledger = result.get("provider_ledger") or []
     asin_discovery = result.get("asin_discovery") or {}
     provider_failures = result.get("provider_failures") or []
     validated_candidates = result.get("validated_candidates") or []
     missing_books = result.get("missing_books") or []
     upcoming_books = result.get("upcoming_books") or []
 
-    _console_log_provider_ledger(result)
-    _console_log("===== CHECK NOW DISCOVERY SUMMARY START =====")
-    _console_log(f"series_id={result.get('series_id')}")
-    _console_log(f"series_name={result.get('series_name')}")
-    _console_log(f"status={result.get('status')}")
-    _console_log(f"found={bool(result.get('found'))}")
-    _console_log(f"added_count={int(result.get('added_count') or 0)}")
-    _console_log(f"validated_candidates={len(validated_candidates)}")
-    _console_log(f"missing_books={len(missing_books)}")
-    _console_log(f"upcoming_books={len(upcoming_books)}")
-    _console_log(f"provider_failures={len(provider_failures)}")
-    _console_log(f"all_providers_failed={bool(result.get('all_providers_failed'))}")
+    _console_log("===== CHECK NOW DEBUG SUMMARY START =====")
+    _console_log(f"series_id={result.get('series_id')} series_name={result.get('series_name')}")
+    _console_log(f"status={result.get('status')} found={bool(result.get('found'))} added_count={int(result.get('added_count') or 0)}")
+    _console_log(f"all_providers_failed={bool(result.get('all_providers_failed'))} provider_failures={len(provider_failures)}")
     _console_log(
-        "asin_discovery="
-        f"discovered:{int(asin_discovery.get('discovered') or 0)} "
-        f"processed:{int(asin_discovery.get('processed') or 0)} "
-        f"fetch_success:{int(asin_discovery.get('fetch_success') or 0)} "
-        f"fetch_failed:{int(asin_discovery.get('fetch_failed') or 0)} "
-        f"metadata_hits:{int(asin_discovery.get('metadata_hits') or 0)}"
+        "asin_discovery: "
+        f"discovered={int(asin_discovery.get('discovered') or 0)} "
+        f"processed={int(asin_discovery.get('processed') or 0)} "
+        f"fetch_success={int(asin_discovery.get('fetch_success') or 0)} "
+        f"fetch_failed={int(asin_discovery.get('fetch_failed') or 0)} "
+        f"metadata_hits={int(asin_discovery.get('metadata_hits') or 0)}"
     )
+
+    _console_log(f"--- providers (one line each, {len(provider_ledger)} total) ---")
+    for line in _condense_provider_ledger(provider_ledger):
+        _console_log(line)
+
+    _console_log(f"--- validated_candidates={len(validated_candidates)} ---")
+
+    _console_log(f"--- missing_books (found, not yet owned) = {len(missing_books)} ---")
+    for book in missing_books[:15]:
+        _console_log(f"  MISSING: {book.get('title')} | asin={book.get('asin')} | number={book.get('series_number')}")
+
+    _console_log(f"--- upcoming_books (pre-order / future release) = {len(upcoming_books)} ---")
+    for book in upcoming_books[:15]:
+        _console_log(f"  UPCOMING: {book.get('title')} | asin={book.get('asin')} | expected={book.get('publication_date')}")
+
+    if provider_failures:
+        _console_log(f"--- provider_failures (first 10 of {len(provider_failures)}) ---")
+        for failure in provider_failures[:10]:
+            _console_log(f"  FAILED: {failure.get('provider')} | {failure.get('error')}")
+
     if terminal_error:
         _console_log(f"terminal_error={terminal_error}")
-    _console_log("===== CHECK NOW DISCOVERY SUMMARY END =====")
+    _console_log("===== CHECK NOW DEBUG SUMMARY END =====")
 
 
 def _normalize_author(value: str | None) -> str:
@@ -170,11 +181,13 @@ def _token_overlap_ratio(left: set[str], right: set[str]) -> float:
     return len(left & right) / max(1, min(len(left), len(right)))
 
 
-def _series_allows_author_relaxation(series_name: str) -> bool:
-    normalized = _normalize_title_text(series_name)
-    if not normalized:
-        return False
-    return any(token in normalized for token in AUTHOR_RELAXED_SERIES_TOKENS)
+def _series_allows_author_relaxation(series_author: str) -> bool:
+    """Relax the author-match requirement when the library has no author on
+    file for this series -- there is nothing to match against, so author
+    mismatch cannot be used to reject a candidate. This must remain a
+    data-driven condition (missing author), not a per-series allowlist.
+    """
+    return not str(series_author or "").strip()
 
 
 def _normalize_identity_number(value) -> str:
@@ -331,10 +344,27 @@ def _build_multi_signal_diagnostics(
     title_pattern_match = _title_pattern_match(title, series_name, known_series_titles)
     partial_series_match = _partial_series_match(title, candidate_series_name, series_name)
 
+    normalized_series_name = _normalize_title_text(series_name)
+    normalized_candidate_series_name = _normalize_title_text(candidate_series_name)
+
+    # A candidate can carry its OWN genuine series metadata (e.g. discovered
+    # via a related-ASIN crawl off a seed book's product page) that clearly
+    # names a different series -- most commonly another series by the same
+    # author. That is strong, reliable evidence of a wrong-series match that
+    # author/number/asin overlap cannot override, so it hard-vetoes
+    # acceptance below regardless of score. Series-agnostic: only fires when
+    # the candidate's own series field is non-empty and shares no meaningful
+    # overlap with the target series.
+    series_clearly_mismatched = bool(
+        normalized_candidate_series_name
+        and normalized_candidate_series_name != normalized_series_name
+        and not partial_series_match
+    )
+
     candidate_author = str(candidate.get("author") or "").strip()
     author_present = bool(candidate_author)
     author_match = _authors_match_exact(series_author, candidate_author) if author_present else False
-    series_author_relaxed = _series_allows_author_relaxation(series_name)
+    series_author_relaxed = _series_allows_author_relaxation(series_author)
 
     known_asin_match = asin_present and asin in known_series_asins
     known_title_match = bool(normalized_title and normalized_title in known_series_titles)
@@ -384,19 +414,17 @@ def _build_multi_signal_diagnostics(
             author_gate_pass = False
             author_fallback_reason = "author-mismatch"
 
-    accepted_as_missing = bool(score >= 6 and strong_combination and author_gate_pass)
-
-    primary_strict_accept = bool(
-        not is_asin_fallback
-        and str(candidate_author).strip() == "Honour Rae"
-        and str(candidate_series_name).strip() == "All The Skills"
-        and ("all the skills" in title.lower())
-        and asin_present
-        and asin not in PRIMARY_REJECTED_DRAGON_ASINS
+    accepted_as_missing = bool(
+        score >= MIN_ACCEPTANCE_SCORE and strong_combination and author_gate_pass and not series_clearly_mismatched
     )
 
-    normalized_series_name = _normalize_title_text(series_name)
-    normalized_candidate_series_name = _normalize_title_text(candidate_series_name)
+    # ASIN-fallback candidates come from re-fetching a *known owned* ASIN's
+    # product page (see checker_core._asin_fallback_discovery), so they carry
+    # less independent discovery signal than a freshly-discovered candidate.
+    # Require a tighter, but still fully general, identity match: author and
+    # series must match the library exactly (or be absent on the candidate
+    # side), and the title must clearly reference this series (by name or by
+    # the resolved book number).
     series_match_or_empty = (not normalized_candidate_series_name) or (normalized_candidate_series_name == normalized_series_name)
     author_match_or_empty = (not author_present) or author_match
     title_has_series_name = bool(normalized_series_name and normalized_series_name in normalized_title)
@@ -405,16 +433,13 @@ def _build_multi_signal_diagnostics(
     asin_fallback_strict_accept = bool(
         is_asin_fallback
         and valid_asin
-        and str(candidate_author).strip() == "Honour Rae"
-        and str(candidate_series_name).strip() == "All The Skills"
+        and author_match_or_empty
+        and series_match_or_empty
         and (title_has_series_name or title_has_number)
-        and asin in ASIN_FALLBACK_ALLOWED_ASINS
     )
 
     if is_asin_fallback:
         accepted_as_missing = asin_fallback_strict_accept
-    else:
-        accepted_as_missing = primary_strict_accept
 
     return {
         "title_pattern_match": title_pattern_match,
@@ -430,6 +455,7 @@ def _build_multi_signal_diagnostics(
         "asin_present": asin_present,
         "multi_signal_score": score,
         "non_author_score": non_author_score,
+        "series_clearly_mismatched": series_clearly_mismatched,
         "accepted_as_missing": accepted_as_missing,
         "asin_fallback_relaxed_accept": asin_fallback_strict_accept,
         "source_layer": source_layer,
@@ -596,6 +622,15 @@ class SeriesIntelligenceAgent:
             known_title_number_keys = _build_known_title_number_keys(active_library_books)
             _ensure_provider_ledger_detection_fields(provider_ledger)
 
+            # NOTE: checker_core.check_for_new_book already applies strict
+            # identity/canonical-pattern filtering (see _apply_strict_post_filtering,
+            # _matches_any_canonical_pattern, _looks_plausibly_real) before returning
+            # validated_candidates, and by design most of those candidates will have
+            # been enriched with real Amazon product metadata before reaching here
+            # (see checker_core's ASIN enrichment stage). We must NOT re-filter by
+            # provider name here -- doing so previously discarded every legitimately
+            # discovered candidate that didn't come from an "amazon*"-named provider,
+            # silently breaking author-page/Google discovery for every series.
             canonical_validated_candidates: list[dict] = []
             for raw_candidate in validated_candidates_raw:
                 canonical = _to_canonical_book(raw_candidate, str(raw_candidate.get("provider") or ""), series.name, series_author)
@@ -605,12 +640,8 @@ class SeriesIntelligenceAgent:
                     continue
                 canonical_validated_candidates.append(canonical)
 
-            amazon_validated_candidates = [
-                candidate
-                for candidate in canonical_validated_candidates
-                if str(candidate.get("provider") or "").strip().lower().startswith("amazon")
-            ]
-            amazon_validated_candidates.sort(
+            discovery_validated_candidates = list(canonical_validated_candidates)
+            discovery_validated_candidates.sort(
                 key=lambda candidate: 1 if str(candidate.get("provider") or "").strip().lower() == "amazon_asin_series" else 0,
                 reverse=True,
             )
@@ -621,7 +652,7 @@ class SeriesIntelligenceAgent:
             discovered_series_numbers: set[str] = set()
             candidate_diagnostics: list[dict] = []
 
-            for canonical in amazon_validated_candidates:
+            for canonical in discovery_validated_candidates:
                 diagnostics = _build_multi_signal_diagnostics(
                     candidate=canonical,
                     series_name=series.name,
@@ -823,12 +854,12 @@ class SeriesIntelligenceAgent:
                 "missing_books": missing_books,
                 "available_missing": available_missing,
                 "upcoming_books": upcoming_books,
-                "validated_candidates": amazon_validated_candidates,
+                "validated_candidates": discovery_validated_candidates,
                 "discovered_series_asins": sorted(discovered_series_asins),
                 "discovered_series_titles": sorted(discovered_series_titles),
                 "discovered_series_numbers": sorted(discovered_series_numbers),
                 "found": found,
-                "candidate": candidate or (amazon_validated_candidates[0] if amazon_validated_candidates else None),
+                "candidate": candidate or (discovery_validated_candidates[0] if discovery_validated_candidates else None),
                 "provider_failures": provider_failures,
                 "all_providers_failed": all_providers_failed,
                 "asin_discovery": checker_result.get("asin_discovery") or {

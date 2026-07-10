@@ -676,7 +676,10 @@ def run_author_discovery_google_html(author_name: str, series_phrase: str = "", 
     if not resolved_query_url:
         resolved_query_url = provider.url_builder(series_phrase, author_name, 0)
     if not resolved_query_url:
-        resolved_query_url = _google_html_url('"Honour Rae" "All The Skills" book novel release series')
+        clean_author = str(author_name or "").strip()
+        clean_series = str(series_phrase or "").strip()
+        fallback_terms = " ".join(part for part in (clean_author, clean_series, "book novel release series") if part)
+        resolved_query_url = _google_html_url(fallback_terms)
 
     search_result = fetch_provider_html_by_name(provider.name, resolved_query_url)
     if not search_result.get("ok"):

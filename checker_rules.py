@@ -427,6 +427,19 @@ def _classify_candidate_signal(candidate: dict, series_name: str, author_name: s
         if _is_clearly_non_book_candidate(candidate):
             return "invalid"
 
+        # Some amazon-sourced candidates (e.g. amazon_asin_series, which
+        # crawls "related product" ASINs off a seed book's own page) carry
+        # the *candidate's own* real series metadata straight from its
+        # product page -- not a value defaulted to the target series. When
+        # that field is present and clearly names a different series (no
+        # meaningful token overlap with the target), it is strong, reliable
+        # evidence the book belongs to a different series -- e.g. another
+        # series by the same author that Amazon surfaced as "related". This
+        # must reject regardless of author/number/asin match, since those
+        # signals can't distinguish "same author, different series."
+        if candidate_series and series_name and not _series_names_match(series_name, candidate_series):
+            return "invalid"
+
         if any(token in availability for token in ("coming soon", "pre-order", "preorder", "releases on")) or any(
             token in f"{title.lower()} {snippet} {availability}"
             for token in ("coming soon", "pre-order", "preorder", "releases on")

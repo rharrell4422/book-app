@@ -83,86 +83,106 @@ def _console_log(message: str) -> None:
     print(f"[main] {message}", flush=True)
 
 
-def _console_log_provider_ledger(result: dict) -> None:
-    provider_ledger = result.get("provider_ledger")
-    if provider_ledger is None:
-        provider_ledger = []
-    _console_log("===== PROVIDER EXECUTION LEDGER START =====")
+def _condense_provider_ledger(provider_ledger: list[dict]) -> list[str]:
+    """Turn the detailed per-provider ledger (30+ fields each) into ONE short
+    line per provider, so the total log size doesn't grow with how much raw
+    scraping happened. Full detail is still available in the returned result
+    dict for anything that needs it (e.g. an API response) -- this is just
+    for what gets printed to the console.
+    """
+    lines: list[str] = []
     for entry in provider_ledger:
-        _console_log(f"provider={entry.get('provider_name')}")
-        _console_log(f"url={entry.get('provider_url') or entry.get('url')}")
-        _console_log(f"status={entry.get('status')}")
-        _console_log(f"http_status={entry.get('http_status')}")
-        _console_log(f"fetch_attempts={entry.get('fetch_attempts')}")
-        _console_log(f"header_profile={entry.get('header_profile')}")
-        _console_log(f"cache_fallback={entry.get('cache_fallback')}")
-        _console_log(f"bot_blocked={entry.get('bot_blocked')}")
-        _console_log(f"html_returned={entry.get('html_returned')}")
-        _console_log(f"dom_elements_scanned={entry.get('dom_elements_scanned')}")
-        _console_log(f"metadata_candidates={entry.get('metadata_candidates')}")
-        _console_log(f"asin_groups={entry.get('asin_groups')}")
-        _console_log(f"json_blobs_extracted={entry.get('json_blobs_extracted')}")
-        _console_log(f"json_book_blobs={entry.get('json_book_blobs')}")
-        _console_log(f"dom_primary_candidates={entry.get('dom_primary_candidates')}")
-        _console_log(f"json_secondary_candidates={entry.get('json_secondary_candidates')}")
-        _console_log(f"asin_tertiary_candidates={entry.get('asin_tertiary_candidates')}")
-        _console_log(f"canonical_candidates={entry.get('canonical_candidates')}")
-        _console_log(f"classification_valid={entry.get('classification_valid')}")
-        _console_log(f"classification_invalid={entry.get('classification_invalid')}")
-        _console_log(f"title_pattern_match={entry.get('title_pattern_match')}")
-        _console_log(f"number_inferred={entry.get('number_inferred')}")
-        _console_log(f"partial_series_match={entry.get('partial_series_match')}")
-        _console_log(f"author_match={entry.get('author_match')}")
-        _console_log(f"author_weight={entry.get('author_weight')}")
-        _console_log(f"author_fallback_used={entry.get('author_fallback_used')}")
-        _console_log(f"author_fallback_reason={entry.get('author_fallback_reason')}")
-        _console_log(f"series_author_relaxed={entry.get('series_author_relaxed')}")
-        _console_log(f"asin_seed_count={entry.get('asin_seed_count')}")
-        _console_log(f"asin_seed_pages_fetched={entry.get('asin_seed_pages_fetched')}")
-        _console_log(f"asin_seed_pages_failed={entry.get('asin_seed_pages_failed')}")
-        _console_log(f"asin_related_asins={entry.get('asin_related_asins')}")
-        _console_log(f"asin_series_candidates={entry.get('asin_series_candidates')}")
-        _console_log(f"asin_present={entry.get('asin_present')}")
-        _console_log(f"multi_signal_score={entry.get('multi_signal_score')}")
-        _console_log(f"accepted_as_missing={entry.get('accepted_as_missing')}")
-        _console_log(f"added_books_count={entry.get('added_books_count')}")
-        _console_log(f"added_books_asins={entry.get('added_books_asins')}")
-        _console_log(f"added_books_titles={entry.get('added_books_titles')}")
-        if entry.get("error"):
-            _console_log(f"error={entry.get('error')}")
-    _console_log("===== PROVIDER EXECUTION LEDGER END =====")
+        parts = [f"provider={entry.get('provider_name')}", f"status={entry.get('status')}"]
+
+        http_status = entry.get("http_status")
+        if http_status:
+            parts.append(f"http={http_status}")
+        if entry.get("bot_blocked"):
+            parts.append("bot_blocked=yes")
+        if entry.get("cache_fallback"):
+            parts.append("cached=yes")
+
+        candidates = entry.get("canonical_candidates") or 0
+        valid = entry.get("classification_valid") or 0
+        invalid = entry.get("classification_invalid") or 0
+        if candidates or valid or invalid:
+            parts.append(f"candidates={candidates} valid={valid} invalid={invalid}")
+
+        discovered_books = entry.get("author_discovered_books")
+        if discovered_books:
+            parts.append(f"discovered={discovered_books}")
+
+        asin_seed_count = entry.get("asin_seed_count") or 0
+        if asin_seed_count:
+            parts.append(
+                f"asin_seeds={asin_seed_count} "
+                f"pages_ok={entry.get('asin_seed_pages_fetched') or 0} "
+                f"pages_failed={entry.get('asin_seed_pages_failed') or 0}"
+            )
+
+        if entry.get("accepted_as_missing"):
+            parts.append("ACCEPTED_AS_MISSING=YES")
+
+        added = entry.get("added_books_count") or 0
+        if added:
+            parts.append(f"added={added}")
+
+        error = entry.get("error")
+        if error:
+            parts.append(f"error={error}")
+
+        lines.append(" | ".join(parts))
+    return lines
 
 
 def log_discovery_summary(*, result: dict, terminal_error: str | None = None) -> None:
+    """Prints ONE short, bounded-size block summarizing a Check Now run --
+    at most a few dozen lines, no matter how many web pages were scraped or
+    candidates were scanned. Everything between the START and END markers
+    is meant to be copy/pasted whole for debugging.
+    """
+    provider_ledger = result.get("provider_ledger") or []
     asin_discovery = result.get("asin_discovery") or {}
     provider_failures = result.get("provider_failures") or []
     validated_candidates = result.get("validated_candidates") or []
     missing_books = result.get("missing_books") or []
     upcoming_books = result.get("upcoming_books") or []
 
-    _console_log_provider_ledger(result)
-    _console_log("===== CHECK NOW DISCOVERY SUMMARY START =====")
-    _console_log(f"series_id={result.get('series_id')}")
-    _console_log(f"series_name={result.get('series_name')}")
-    _console_log(f"status={result.get('status')}")
-    _console_log(f"found={bool(result.get('found'))}")
-    _console_log(f"added_count={int(result.get('added_count') or 0)}")
-    _console_log(f"validated_candidates={len(validated_candidates)}")
-    _console_log(f"missing_books={len(missing_books)}")
-    _console_log(f"upcoming_books={len(upcoming_books)}")
-    _console_log(f"provider_failures={len(provider_failures)}")
-    _console_log(f"all_providers_failed={bool(result.get('all_providers_failed'))}")
+    _console_log("===== CHECK NOW DEBUG SUMMARY START =====")
+    _console_log(f"series_id={result.get('series_id')} series_name={result.get('series_name')}")
+    _console_log(f"status={result.get('status')} found={bool(result.get('found'))} added_count={int(result.get('added_count') or 0)}")
+    _console_log(f"all_providers_failed={bool(result.get('all_providers_failed'))} provider_failures={len(provider_failures)}")
     _console_log(
-        "asin_discovery="
-        f"discovered:{int(asin_discovery.get('discovered') or 0)} "
-        f"processed:{int(asin_discovery.get('processed') or 0)} "
-        f"fetch_success:{int(asin_discovery.get('fetch_success') or 0)} "
-        f"fetch_failed:{int(asin_discovery.get('fetch_failed') or 0)} "
-        f"metadata_hits:{int(asin_discovery.get('metadata_hits') or 0)}"
+        "asin_discovery: "
+        f"discovered={int(asin_discovery.get('discovered') or 0)} "
+        f"processed={int(asin_discovery.get('processed') or 0)} "
+        f"fetch_success={int(asin_discovery.get('fetch_success') or 0)} "
+        f"fetch_failed={int(asin_discovery.get('fetch_failed') or 0)} "
+        f"metadata_hits={int(asin_discovery.get('metadata_hits') or 0)}"
     )
+
+    _console_log(f"--- providers (one line each, {len(provider_ledger)} total) ---")
+    for line in _condense_provider_ledger(provider_ledger):
+        _console_log(line)
+
+    _console_log(f"--- validated_candidates={len(validated_candidates)} ---")
+
+    _console_log(f"--- missing_books (found, not yet owned) = {len(missing_books)} ---")
+    for book in missing_books[:15]:
+        _console_log(f"  MISSING: {book.get('title')} | asin={book.get('asin')} | number={book.get('series_number')}")
+
+    _console_log(f"--- upcoming_books (pre-order / future release) = {len(upcoming_books)} ---")
+    for book in upcoming_books[:15]:
+        _console_log(f"  UPCOMING: {book.get('title')} | asin={book.get('asin')} | expected={book.get('publication_date')}")
+
+    if provider_failures:
+        _console_log(f"--- provider_failures (first 10 of {len(provider_failures)}) ---")
+        for failure in provider_failures[:10]:
+            _console_log(f"  FAILED: {failure.get('provider')} | {failure.get('error')}")
+
     if terminal_error:
         _console_log(f"terminal_error={terminal_error}")
-    _console_log("===== CHECK NOW DISCOVERY SUMMARY END =====")
+    _console_log("===== CHECK NOW DEBUG SUMMARY END =====")
 series_agent = SeriesIntelligenceAgent()
 series_scan_task: asyncio.Task | None = None
 series_check_jobs: dict[int, dict] = {}
