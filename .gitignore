@@ -22,3 +22,11 @@ playwright-report/
 *.bak
 *.swp
 *.swo
+
+# Personal library data -- these are your own spreadsheet exports/imports,
+# not project source, and shouldn't live in git history.
+*.xlsx
+*.xls
+
+# Build/lint tool output, not source.
+eslint-report.json
