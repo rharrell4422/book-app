@@ -8,15 +8,6 @@ __pycache__/
 *.log
 *.tmp
 *.cache
-.amazon-playwright-profile/
-playwright/
-playwright/.cache/
-playwright/.auth/
-playwright/.browser/
-playwright/.downloads/
-playwright/.storage/
-playwright/.trace/
-playwright-report/
 *.sqlite
 *.db
 *.bak
