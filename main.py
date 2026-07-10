@@ -1,4 +1,5 @@
 import asyncio
+import os
 from datetime import datetime, date
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import re
@@ -872,56 +873,17 @@ def run_series_check_job_full(series_id: int) -> None:
                     }
                 )
 
-            accepted_asins: set[str] = set()
-            accepted_series_book_keys: set[str] = set()
-            accepted_title_keys: set[str] = set()
-            for candidate in discovered_candidates:
-                meta = candidate.get("canonical_metadata") if isinstance(candidate.get("canonical_metadata"), dict) else {}
-                candidate_asin = str(candidate.get("asin_or_id") or "").strip().upper()
-                if candidate_asin:
-                    accepted_asins.add(candidate_asin)
-
-                normalized_series_name = str(meta.get("series_name_normalized") or candidate.get("series_name") or db_series.name or "").strip()
-                normalized_book_number = meta.get("book_number_normalized") if meta.get("book_number_normalized") is not None else candidate.get("book_number")
-                series_book_key = _series_book_identity_key(normalized_series_name, normalized_book_number)
-                if series_book_key:
-                    accepted_series_book_keys.add(series_book_key)
-
-                normalized_title = str(meta.get("title_normalized") or candidate.get("title") or "").strip()
-                canonical_title_key = _canonical_title_identity_key(normalized_title)
-                if canonical_title_key:
-                    accepted_title_keys.add(canonical_title_key)
-
-            active_books_after = (
-                db.query(models.Book)
-                .filter(models.Book.series_id == series_id)
-                .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
-                .all()
-            )
-
-            # Remove stale ambiguous rows from earlier permissive runs.
-            for existing in active_books_after:
-                existing_asin = str(existing.asin or "").strip().upper()
-                existing_series_book_key = _series_book_identity_key(existing.series_name or db_series.name, existing.book_number)
-                existing_title_key = _canonical_title_identity_key(existing.title)
-
-                is_accepted_identity = (
-                    (existing_asin and existing_asin in accepted_asins)
-                    or (existing_series_book_key and existing_series_book_key in accepted_series_book_keys)
-                    or (existing_title_key and existing_title_key in accepted_title_keys)
-                )
-                if is_accepted_identity:
-                    continue
-
-                if bool(existing.is_missing) and not bool(existing.is_read):
-                    logger.info(
-                        "[DEDUPE_REJECT_AMBIGUOUS_EXISTING] series_id=%s book_id=%s title=%s",
-                        series_id,
-                        existing.id,
-                        existing.title,
-                    )
-                    existing.record_status = "deleted"
-                    db_changed = True
+            # NOTE: this used to also delete any existing not-yet-read "ghost"
+            # book that this run's candidate set didn't happen to re-surface
+            # (a leftover behavior from the old HTML-scraper pipeline, meant
+            # to clean up its noisier results). That's actively unsafe with
+            # live third-party search APIs: a book correctly discovered on
+            # one Check Now can simply not come back in the exact same
+            # ranked result set on a later call (pagination/ranking/quota
+            # variance), which would silently delete a perfectly valid,
+            # already-confirmed book. True duplicate cleanup among rows that
+            # currently coexist is handled by the identity-collapse passes
+            # below instead, which don't depend on this run's API results.
 
             # Collapse duplicates that share canonical identity keys.
             identity_keeper: dict[str, models.Book] = {}
@@ -1391,6 +1353,11 @@ async def check_series_for_new_books(
 
     logger.info("CHECK NOW triggered for series_id=%s, series_name=%s", series_id, db_series.name)
 
+    # Only avoid double-starting a check that's *actively* running right now.
+    # A previously *completed* job must never block a fresh Check Now click
+    # from actually re-running discovery -- otherwise a stale/failed result
+    # (e.g. a transient provider 503) would get replayed forever instead of
+    # being retried, until the server restarts.
     existing_job = series_check_jobs.get(series_id)
     if existing_job and existing_job.get("status") == "running":
         return {
@@ -1399,21 +1366,6 @@ async def check_series_for_new_books(
             "status": "running",
             "progress": int(existing_job.get("progress_percent") or 0),
             "current_pass": existing_job.get("current_pass") or "exact match",
-        }
-
-    if existing_job and existing_job.get("status") == "completed":
-        completion = existing_job.get("completion") or {
-            "status": "complete",
-            "complete": True,
-            "missing_books": (existing_job.get("result") or {}).get("missing_books") or [],
-            "found_books": (existing_job.get("result") or {}).get("added_books") or [],
-            "no_new_books": not bool((existing_job.get("result") or {}).get("added_books")),
-            "discovery_engine": (existing_job.get("result") or {}).get("discovery_engine") or "agent_v2",
-        }
-        return {
-            "series_id": series_id,
-            "session_id": existing_job.get("session_id"),
-            **completion,
         }
 
     background_tasks.add_task(run_series_check_job_full, series_id)
@@ -1903,18 +1855,32 @@ def run_daily_series_scan() -> None:
 
 
 async def daily_series_scan_loop() -> None:
+    # Sleep BEFORE the first run, not after -- discovery now calls real
+    # public APIs (Google Books/OpenLibrary) per series, so firing
+    # immediately on every server restart would blast a couple hundred
+    # requests at once, every time. That's a good way to get rate-limited.
     while True:
+        await asyncio.sleep(24 * 60 * 60)
         try:
             await asyncio.to_thread(run_daily_series_scan)
         except Exception:
             logger.exception("Daily series scan failed")
-        await asyncio.sleep(24 * 60 * 60)
+
+
+# Automated background scanning across the whole library is off by default.
+# Manual "Check Now" (POST /series/{id}/check) always works regardless of
+# this setting -- this only controls the unattended daily sweep. Turn it on
+# once manual discovery is verified solid: set ENABLE_DAILY_SERIES_SCAN=1.
+DAILY_SERIES_SCAN_ENABLED = str(os.environ.get("ENABLE_DAILY_SERIES_SCAN", "")).strip().lower() in {"1", "true", "yes"}
 
 
 @app.on_event("startup")
 async def start_series_scan_loop() -> None:
     global series_scan_task
     await asyncio.to_thread(backfill_series_state)
+    if not DAILY_SERIES_SCAN_ENABLED:
+        logger.info("Daily series scan disabled (set ENABLE_DAILY_SERIES_SCAN=1 to enable).")
+        return
     if series_scan_task is None or series_scan_task.done():
         series_scan_task = asyncio.create_task(daily_series_scan_loop())
 

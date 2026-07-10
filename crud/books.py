@@ -4,11 +4,27 @@ import re
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
-from models import Book
+from models import Book, Series
 from intelligence import recalculate_intelligence
 
 
 BOOK_COLUMN_KEYS = {column.key for column in Book.__table__.columns}
+
+
+def _backfill_series_author_if_missing(db: Session, series_id: int | None, book_author: str | None) -> None:
+    """Discovery searches by Series.author, so keep it populated. If a series
+    has no author on file yet, adopt the author of a book being added/edited
+    on it rather than leaving discovery permanently unable to run for that
+    series.
+    """
+    author = str(book_author or "").strip()
+    if not series_id or not author:
+        return
+
+    series = db.query(Series).filter(Series.id == series_id).first()
+    if series and not str(series.author or "").strip():
+        series.author = author
+        db.commit()
 
 
 def _infer_series_numbers_from_title(title: str | None) -> tuple[float | None, int | None]:
@@ -75,6 +91,7 @@ def create_book(db: Session, book):
     db.commit()
     db.refresh(db_book)
     if db_book.series_id is not None:
+        _backfill_series_author_if_missing(db, db_book.series_id, db_book.author)
         recalculate_intelligence(db, db_book.series_id)
     return db_book
 
@@ -115,6 +132,7 @@ def update_book(db: Session, book_id: int, book):
     db.commit()
     db.refresh(db_book)
     if db_book.series_id is not None:
+        _backfill_series_author_if_missing(db, db_book.series_id, db_book.author)
         recalculate_intelligence(db, db_book.series_id)
     if previous_series_id is not None and previous_series_id != db_book.series_id:
         recalculate_intelligence(db, previous_series_id)

@@ -506,6 +506,12 @@ def create_or_update_book(db: Session, book_data: Dict[str, Any]) -> tuple[Book,
                 series.total_books = int(series_total_books)
             except Exception:
                 pass
+        # Discovery searches by Series.author, so backfill it from the
+        # imported row rather than leaving discovery permanently unable to
+        # run for series that were created without one.
+        import_author = str(book_data.get("author") or "").strip()
+        if import_author and not str(series.author or "").strip():
+            series.author = import_author
         db.commit()
         db.refresh(series)
 

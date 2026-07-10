@@ -5,6 +5,8 @@ import logging
 import httpx
 from datetime import date
 
+import discovery_engine
+
 try:
     from models import Series, Book
 except Exception:
@@ -101,42 +103,58 @@ def lookup_book_summary(title: str, author: str | None = None) -> dict:
     author_candidates.append(None)
 
     best_fallback: dict | None = None
-
-    for query in lookup_queries:
-        for author_candidate in author_candidates:
-            google_results = search_google_books(query, author_candidate, max_results=3)
-            for result in google_results:
-                if result.get("description"):
-                    return result_payload(result, author_candidate)
-
-            open_results = search_openlibrary(query, author_candidate, max_results=3)
-            for result in open_results:
-                if result.get("description"):
-                    return result_payload(result, author_candidate)
-
-            serp_results = search_serpapi_web(query, author_candidate, max_results=5)
-            for result in serp_results:
-                if result.get("description"):
-                    return result_payload(result, author_candidate)
-
-            if not best_fallback:
-                if open_results:
-                    best_fallback = result_payload(open_results[0], author_candidate)
-                elif google_results:
-                    best_fallback = result_payload(google_results[0], author_candidate)
-                elif serp_results:
-                    best_fallback = result_payload(serp_results[0], author_candidate)
-
-    if best_fallback:
-        return best_fallback
-
-    return {
+    not_found = {
         "found": False,
         "summary": None,
         "source_url": None,
         "matched_title": None,
         "matched_author": None,
     }
+
+    # This previously called search_google_books/search_openlibrary/
+    # search_serpapi_web, which were removed in an earlier cleanup pass and
+    # would raise NameError on every call. discovery_engine.py now has a
+    # real, working Google Books/OpenLibrary client (built for series
+    # discovery) -- reuse it here too rather than leaving this broken.
+    for query in lookup_queries:
+        for author_candidate in author_candidates:
+            try:
+                google_results = discovery_engine._fetch_google_books(  # noqa: SLF001
+                    f'intitle:"{query}"' + (f' inauthor:"{author_candidate}"' if author_candidate else "")
+                )
+            except Exception as exc:
+                logger.info("Book summary lookup: Google Books unavailable (%s)", exc)
+                google_results = []
+
+            for result in google_results:
+                description = result.get("description")
+                if description:
+                    return result_payload(
+                        {
+                            "description": description,
+                            "source_url": result.get("source_url"),
+                            "title": result.get("title"),
+                            "author": ", ".join(result.get("authors") or []) or None,
+                        },
+                        author_candidate,
+                    )
+
+            if not best_fallback and google_results:
+                first = google_results[0]
+                best_fallback = result_payload(
+                    {
+                        "description": first.get("description"),
+                        "source_url": first.get("source_url"),
+                        "title": first.get("title"),
+                        "author": ", ".join(first.get("authors") or []) or None,
+                    },
+                    author_candidate,
+                )
+
+    if best_fallback:
+        return best_fallback
+
+    return not_found
 
 
 def recount_series_aggregates_for_series(db, series_id: int) -> dict:
