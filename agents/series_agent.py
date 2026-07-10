@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 from datetime import date
 
 from sqlalchemy.orm import Session
@@ -251,36 +250,6 @@ def _build_added_book_entry(canonical: dict, *, status: str) -> dict:
 
 
 class SeriesIntelligenceAgent:
-    def run_daily_scan(self, db: Session) -> dict:
-        """Run Check Now for every series that has an author on file, so new
-        releases surface automatically instead of only on manual click.
-        Series without an author are skipped -- there is nothing to search
-        by -- and any single series failing does not stop the rest.
-        """
-        series_list = db.query(Series).filter(Series.author.isnot(None)).all()
-        scanned = 0
-        found_new_books = 0
-        errors: list[dict] = []
-
-        for series in series_list:
-            if not str(series.author or "").strip():
-                continue
-            try:
-                result = self.run_series_check(db, series.id, emit_summary=False)
-                scanned += 1
-                if result.get("found"):
-                    found_new_books += 1
-            except Exception as exc:
-                logger.exception("Daily scan failed for series_id=%s", series.id)
-                errors.append({"series_id": series.id, "error": str(exc)})
-            # Be a good citizen toward free public APIs -- no need to hammer
-            # them back-to-back across hundreds of series.
-            time.sleep(0.2)
-
-        summary = {"scanned": scanned, "series_with_new_books": found_new_books, "errors": errors}
-        _console_log(f"Daily scan complete: {summary}")
-        return summary
-
     def run_series_check(
         self,
         db: Session,

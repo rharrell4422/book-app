@@ -1,17 +1,335 @@
 import unittest
+from datetime import date
 from unittest.mock import patch
 
-from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import crud
+import discovery_engine
 from agents.series_agent import SeriesIntelligenceAgent
 from database import Base
 from models import Book, Series
 
 
-class SeriesDiscoveryRegressionTest(unittest.TestCase):
+class DiscoveryEngineHelperTest(unittest.TestCase):
+    """Unit tests for the pure text-normalization/matching helpers that the
+    live API-based discovery pipeline depends on to identify which API
+    results are new books versus ones already owned.
+    """
+
+    def test_core_title_key_matches_across_differently_formatted_titles(self):
+        owned_style = "1% Lifesteal (Volume 4): A LitRPG: (1% Lifesteal Book 4)"
+        api_style = "1% Lifesteal (Volume 4): A LitRPG Adventure"
+        self.assertEqual(discovery_engine.core_title_key(owned_style), discovery_engine.core_title_key(api_style))
+
+    def test_core_title_key_distinguishes_volumes_with_shared_prefix(self):
+        # Regression: volume number lives inside the "(...)" segment for this
+        # series, so truncating there (without folding the number back in)
+        # collapsed every volume to the same key.
+        key_4 = discovery_engine.core_title_key("1% Lifesteal (Volume 4): A LitRPG Adventure")
+        key_5 = discovery_engine.core_title_key("1% Lifesteal (Volume 5): A LitRPG Adventure")
+        self.assertNotEqual(key_4, key_5)
+
+    def test_infer_number_from_title_recognizes_common_patterns(self):
+        self.assertEqual(discovery_engine.infer_number_from_title("Cherry Blossom Girls Book 7"), 7)
+        self.assertEqual(discovery_engine.infer_number_from_title("Cherry Blossom Girls Volume 7"), 7)
+        self.assertEqual(discovery_engine.infer_number_from_title("Cherry Blossom Girls #7"), 7)
+        self.assertEqual(discovery_engine.infer_number_from_title("Cherry Blossom Girls Book Seven"), 7)
+
+    def test_infer_number_from_title_recognizes_bare_trailing_number(self):
+        # Many rapid-release indie/LitRPG series just number titles as
+        # "<Series Name> <N>" with no "book"/"vol"/"#" keyword at all.
+        self.assertEqual(discovery_engine.infer_number_from_title("All the Skills 5", "All The Skills"), 5)
+
+    def test_looks_like_non_new_release_filters_bundles_and_editions(self):
+        self.assertTrue(discovery_engine.looks_like_non_new_release("Cherry Blossom Girls Books 1-3 Box Set"))
+        self.assertTrue(discovery_engine.looks_like_non_new_release("Cherry Blossom Girls: French Edition"))
+        self.assertFalse(discovery_engine.looks_like_non_new_release("Cherry Blossom Girls Book 7"))
+
+    def test_parse_flexible_date_handles_partial_precision(self):
+        self.assertEqual(discovery_engine.parse_flexible_date("2024-03-12"), date(2024, 3, 12))
+        self.assertEqual(discovery_engine.parse_flexible_date("2024-03"), date(2024, 3, 1))
+        self.assertEqual(discovery_engine.parse_flexible_date("2024"), date(2024, 1, 1))
+        self.assertIsNone(discovery_engine.parse_flexible_date(""))
+
+
+class DiscoverCandidatesForSeriesTest(unittest.TestCase):
+    """Tests discovery_engine.discover_candidates_for_series's merge/priority
+    behavior across the three providers, with all three network calls
+    mocked out so this runs offline and deterministically.
+    """
+
+    def test_hardcover_result_wins_over_google_on_same_book(self):
+        # Hardcover tags each hit with its actual series position and
+        # release status, which is more trustworthy than Google's free-text
+        # match for indie/self-published titles -- so when both providers
+        # return the same book, Hardcover's copy (with its number hint)
+        # should be the one that survives the merge.
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[
+                {
+                    "source": "hardcover",
+                    "source_id": "hc-1",
+                    "title": "Cherry Blossom Girls Book 7",
+                    "authors": ["Harmon Cooper"],
+                    "published_date": "2024-02-20",
+                    "isbn13": None,
+                    "source_url": None,
+                    "language": "",
+                    "series_number_hint": 7,
+                    "upcoming_hint": False,
+                }
+            ],
+        ), patch.object(
+            discovery_engine,
+            "_fetch_google_books",
+            return_value=[
+                {
+                    "source": "google_books",
+                    "source_id": "gb-1",
+                    "title": "Cherry Blossom Girls Book 7",
+                    "authors": ["Harmon Cooper"],
+                    "published_date": "2024-02-20",
+                    "isbn13": None,
+                    "source_url": None,
+                    "language": "",
+                }
+            ],
+        ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]):
+            result = discovery_engine.discover_candidates_for_series("Cherry Blossom Girls", "Harmon Cooper")
+
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["candidates"][0]["source"], "hardcover")
+        self.assertEqual(result["candidates"][0]["series_number_hint"], 7)
+
+    def test_excludes_titles_already_owned(self):
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[
+                {
+                    "source": "hardcover",
+                    "source_id": "hc-1",
+                    "title": "Cherry Blossom Girls Book 7",
+                    "authors": ["Harmon Cooper"],
+                    "published_date": "2024-02-20",
+                    "isbn13": None,
+                    "source_url": None,
+                    "language": "",
+                    "series_number_hint": 7,
+                    "upcoming_hint": False,
+                }
+            ],
+        ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ):
+            owned_key = discovery_engine.core_title_key("Cherry Blossom Girls Book 7")
+            result = discovery_engine.discover_candidates_for_series(
+                "Cherry Blossom Girls", "Harmon Cooper", exclude_title_keys={owned_key}
+            )
+
+        self.assertEqual(result["candidates"], [])
+
+    def test_all_providers_failing_is_reported_distinctly_from_no_results(self):
+        with patch.object(discovery_engine, "_fetch_hardcover", side_effect=RuntimeError("boom")), patch.object(
+            discovery_engine, "_fetch_google_books", side_effect=RuntimeError("boom")
+        ), patch.object(discovery_engine, "_fetch_openlibrary", side_effect=RuntimeError("boom")):
+            result = discovery_engine.discover_candidates_for_series(
+                "Cherry Blossom Girls", "Harmon Cooper", allow_author_fallback=False
+            )
+
+        self.assertTrue(result["all_providers_failed"])
+        self.assertEqual(len(result["provider_failures"]), 3)
+
+    def test_partial_provider_failure_is_not_all_providers_failed(self):
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
+            discovery_engine, "_fetch_google_books", side_effect=RuntimeError("503")
+        ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]):
+            result = discovery_engine.discover_candidates_for_series(
+                "Cherry Blossom Girls", "Harmon Cooper", allow_author_fallback=False
+            )
+
+        self.assertFalse(result["all_providers_failed"])
+        self.assertEqual(len(result["provider_failures"]), 1)
+
+
+class SeriesCheckIntegrationTest(unittest.TestCase):
+    """Integration tests for SeriesIntelligenceAgent.run_series_check against
+    an in-memory database, with discovery_engine mocked so behavior is
+    deterministic and doesn't depend on live third-party APIs.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=cls.engine)
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        Base.metadata.drop_all(bind=cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        self.db = self.SessionLocal()
+        series = Series(name="Cherry Blossom Girls", author="Harmon Cooper")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+        self.series = series
+
+        for number in [1, 2, 3, 4, 5, 6, 8, 9]:
+            self.db.add(
+                Book(
+                    title=f"Cherry Blossom Girls Book {number}",
+                    author="Harmon Cooper",
+                    series_id=series.id,
+                    series_order=number,
+                    book_number=float(number),
+                    record_status="active",
+                    is_read=False,
+                )
+            )
+        self.db.commit()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _mock_discovery(self, candidates, **overrides):
+        result = {
+            "candidates": candidates,
+            "provider_failures": [],
+            "all_providers_failed": False,
+            "used_author_fallback": False,
+        }
+        result.update(overrides)
+        return patch("discovery_engine.discover_candidates_for_series", return_value=result)
+
+    def test_available_book_is_added_and_classified_available(self):
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "Cherry Blossom Girls Book 7",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 7,
+                "upcoming_hint": False,
+            }
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertTrue(result["found"])
+        self.assertEqual(len(result["available_missing"]), 1)
+        self.assertEqual(result["available_missing"][0]["series_number"], 7)
+        self.assertEqual(result["upcoming_books"], [])
+
+    def test_future_dated_book_is_classified_upcoming(self):
+        far_future_year = date.today().year + 5
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-10",
+                "title": "Cherry Blossom Girls Book 10",
+                "authors": ["Harmon Cooper"],
+                "published_date": f"{far_future_year}-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 10,
+                "upcoming_hint": False,
+            }
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertTrue(result["found"])
+        self.assertEqual(result["available_missing"], [])
+        self.assertEqual(len(result["upcoming_books"]), 1)
+        self.assertEqual(result["upcoming_books"][0]["series_number"], 10)
+
+    def test_unreleased_hint_marks_upcoming_even_without_a_parseable_date(self):
+        # Hardcover can flag a book as not-yet-released without providing a
+        # release date at all -- that hint alone should be enough.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-10",
+                "title": "Cherry Blossom Girls Book 10",
+                "authors": ["Harmon Cooper"],
+                "published_date": "",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 10,
+                "upcoming_hint": True,
+            }
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertEqual(result["available_missing"], [])
+        self.assertEqual(len(result["upcoming_books"]), 1)
+
+    def test_already_owned_book_number_is_not_reported_as_new(self):
+        candidates = [
+            {
+                "source": "google_books",
+                "source_id": "gb-2",
+                "title": "Cherry Blossom Girls Book 2 -- Special Reissue",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            }
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertFalse(result["found"])
+        self.assertEqual(result["available_missing"], [])
+        self.assertEqual(result["upcoming_books"], [])
+
+    def test_no_author_on_file_returns_empty_result_without_calling_apis(self):
+        series = Series(name="No Author Series")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+
+        with patch("discovery_engine.discover_candidates_for_series") as mock_discover:
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, series.id, emit_summary=False)
+
+        mock_discover.assert_not_called()
+        self.assertEqual(result["reason"], "series-missing-author")
+        self.assertFalse(result["found"])
+
+
+class ManualDeleteRecalculationTest(unittest.TestCase):
+    """total_books tracks the highest known book number in the series (not
+    a plain count), so deleting a book that isn't the highest-numbered one
+    should leave total_books unchanged while read/unread counts still
+    reflect the smaller active set.
+    """
+
     @classmethod
     def setUpClass(cls):
         cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
@@ -48,123 +366,7 @@ class SeriesDiscoveryRegressionTest(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
-    def test_title_search_variants_cover_book_seven_patterns(self):
-        agent = SeriesIntelligenceAgent()
-
-        passes = agent._build_discovery_passes("Cherry Blossom Girls", 7, ["Harmon Cooper"])
-        queries = [item["query"] for item in passes]
-
-        expected_variants = [
-            'Cherry Blossom Girls Book 7',
-            'Cherry Blossom Girls: Book Seven',
-            'Cherry Blossom Girls #7',
-            'Cherry Blossom Girls Book Seven',
-            'Cherry Blossom Girls 7',
-            'Cherry Blossom Girls Seven',
-            'Cherry Blossom Girls',
-        ]
-
-        for variant in expected_variants:
-            self.assertTrue(any(variant in query for query in queries), variant)
-
-        self.assertFalse(any("International" in query for query in queries))
-
-        self.assertGreaterEqual(len({item["stage"] for item in passes}), 2)
-
-    def test_provider_order_is_enforced(self):
-        agent = SeriesIntelligenceAgent()
-        plan = agent._provider_plan()
-        provider_names = [provider.name for _, providers in plan for provider in providers]
-        self.assertEqual(
-            provider_names,
-            [
-                "amazon",
-                "fantastic_fiction",
-                "author_site",
-                "publisher",
-                "book_database",
-                "web_read",
-                "catalog_fallback",
-            ],
-        )
-
-    @patch.object(
-        SeriesIntelligenceAgent,
-        "discover",
-        return_value={
-            "query": "Breakthrough: (Book Four)",
-            "results": [],
-            "diagnostics": {
-                "selected_stage": "none",
-                "provider_counts": {"amazon": 0, "book_database": 0, "publisher": 0, "web_read": 0},
-                "rejection_counts": {},
-                "stages": [],
-                "accepted_total": 0,
-                "top_score": 0.0,
-                "passes_completed": 0,
-                "sources_used": [],
-                "current_pass": "none",
-                "publication_date_filter": {
-                    "series_complete": False,
-                    "date_future": False,
-                    "date_missing": True,
-                    "accepted": False,
-                    "reason": "no_candidates",
-                },
-            },
-            "passes_completed": 0,
-            "sources_used": [],
-            "missing_books": [4],
-            "status": "no_hits",
-            "reason": "no-hit-after-all-passes",
-            "discovery_engine": "agent_v2",
-            "discovery_mode": "direct",
-            "agent_pipeline": True,
-        },
-    )
-    @patch(
-        "agents.series_agent.search_bookseriesinorder_series_entries",
-        return_value=[
-            {"title": "Breakthrough", "author": "Michael C. Grumley", "series_name": "Breakthrough", "series_position": 1, "publication_date": "2013-01-01", "source_url": "https://example.com/1", "source": "book_database"},
-            {"title": "Leap", "author": "Michael C. Grumley", "series_name": "Breakthrough", "series_position": 2, "publication_date": "2014-01-01", "source_url": "https://example.com/2", "source": "book_database"},
-            {"title": "Catalyst", "author": "Michael C. Grumley", "series_name": "Breakthrough", "series_position": 3, "publication_date": "2015-01-01", "source_url": "https://example.com/3", "source": "book_database"},
-            {"title": "Ripple", "author": "Michael C. Grumley", "series_name": "Breakthrough", "series_position": 4, "publication_date": "2016-01-01", "source_url": "https://example.com/4", "source": "book_database"},
-            {"title": "Mosaic", "author": "Michael C. Grumley", "series_name": "Breakthrough", "series_position": 5, "publication_date": "2017-01-01", "source_url": "https://example.com/5", "source": "book_database"},
-            {"title": "Echo", "author": "Michael C. Grumley", "series_name": "Breakthrough", "series_position": 6, "publication_date": "2018-01-01", "source_url": "https://example.com/6", "source": "book_database"},
-        ],
-    )
-    def test_trusted_series_reconciliation_adds_missing_books(self, _mock_trusted_source, _mock_discover):
-        series = Series(name="Breakthrough", author="Michael C. Grumley", total_books=3)
-        self.db.add(series)
-        self.db.commit()
-        self.db.refresh(series)
-
-        for number, title in [(1, "Breakthrough"), (2, "Leap"), (3, "Catalyst")]:
-            self.db.add(
-                Book(
-                    title=title,
-                    author="Michael C. Grumley",
-                    series_id=series.id,
-                    series_order=number,
-                    book_number=float(number),
-                    record_status="active",
-                    is_read=True,
-                )
-            )
-        self.db.commit()
-
-        agent = SeriesIntelligenceAgent()
-        result = agent.run_series_check(self.db, series.id)
-
-        self.assertEqual(result["added_count"], 3)
-        self.assertEqual([int(book["book_number"]) for book in result["added_books"]], [4, 5, 6])
-        self.assertEqual(result["trusted_series_reconciliation"]["source"], "bookseriesinorder")
-
-        refreshed = self.db.query(Series).filter(Series.id == series.id).first()
-        self.assertEqual(refreshed.total_books, 6)
-
     def test_manual_delete_recounts_series_aggregates(self):
-        # Mark one surviving book as read so read/unread counters are non-zero after delete.
         keep_read = self.db.query(Book).filter(Book.series_id == self.series.id, Book.book_number == 2.0).first()
         delete_target = self.db.query(Book).filter(Book.series_id == self.series.id, Book.book_number == 1.0).first()
         self.assertIsNotNone(keep_read)
@@ -177,802 +379,10 @@ class SeriesDiscoveryRegressionTest(unittest.TestCase):
 
         refreshed = self.db.query(Series).filter(Series.id == self.series.id).first()
         self.assertIsNotNone(refreshed)
-        self.assertEqual(refreshed.total_books, 7)
+        self.assertEqual(refreshed.total_books, 9)
         self.assertEqual(refreshed.read_count, 1)
         self.assertEqual(refreshed.unread_count, 6)
 
-    def test_strict_cleanup_purges_only_provably_invalid_non_user_books(self):
-        self.series.is_finished = True
-        self.series.series_status = "completed"
-        self.series.total_books = 9
-        self.db.commit()
-
-        invalid = Book(
-            title="Phantom Book 15",
-            author="Harmon Cooper",
-            series_id=self.series.id,
-            series_order=15,
-            book_number=15.0,
-            record_status="active",
-            is_read=False,
-            import_source="unverified",
-        )
-        user_added = Book(
-            title="User Added Phantom Book 16",
-            author="Harmon Cooper",
-            series_id=self.series.id,
-            series_order=16,
-            book_number=16.0,
-            record_status="active",
-            is_read=False,
-            import_source="manual",
-        )
-        self.db.add(invalid)
-        self.db.add(user_added)
-        self.db.commit()
-
-        agent = SeriesIntelligenceAgent()
-        with patch.object(
-            SeriesIntelligenceAgent,
-            "discover",
-            return_value={"results": [], "status": "no_hits"},
-        ):
-            result = agent._strict_post_discovery_cleanup(
-                self.db,
-                self.series,
-                known_authors=["Harmon Cooper"],
-                known_series_max=9,
-                series_complete=True,
-            )
-
-        self.assertIsNotNone(result)
-        self.assertEqual(result["deleted_count"], 1)
-        self.assertEqual(result["deleted_entries"][0]["book_number"], 15.0)
-
-        remaining = self.db.query(Book).filter(Book.series_id == self.series.id).all()
-        self.assertEqual(len(remaining), 9)
-        self.assertTrue(any(book.book_number == 16.0 for book in remaining))
-        refreshed = self.db.query(Series).filter(Series.id == self.series.id).first()
-        self.assertEqual(refreshed.total_books, 9)
-
-    @patch("agents.series_agent.search_book_database_pages", return_value=[])
-    @patch("agents.series_agent.search_publisher_pages", return_value=[])
-    @patch("agents.series_agent.search_author_site_pages", return_value=[])
-    @patch("agents.series_agent.search_web_read_candidates", return_value=[])
-    @patch("agents.series_agent.search_goodreads_api", return_value=[])
-    @patch("agents.series_agent.search_serpapi_web", return_value=[])
-    @patch("agents.series_agent.search_openlibrary", return_value=[])
-    @patch("agents.series_agent.search_google_books", return_value=[])
-    @patch("agents.series_agent.search_fantastic_fiction", return_value=[])
-    @patch(
-        "agents.series_agent.search_amazon_products",
-        return_value=[
-            {
-                "title": "Cherry Blossom Girls International: (Book Seven)",
-                "author": "Harmon Cooper",
-                "series_name": "Cherry Blossom Girls International",
-                "series_position": 7,
-                "description": "Amazon listing",
-                "cover_image": "https://images.example/cover.jpg",
-                "publication_date": "2024-02-20",
-                "source_url": "https://www.amazon.com/dp/B07RS4RN2G",
-                "source": "amazon",
-            }
-        ],
-    )
-    def test_any_direct_provider_can_succeed(
-        self,
-        mock_amazon,
-        mock_fantastic,
-        mock_google,
-        mock_openlibrary,
-        mock_serpapi,
-        mock_goodreads,
-        mock_web_read,
-        mock_author_site,
-        mock_publisher,
-        mock_book_db,
-    ):
-        agent = SeriesIntelligenceAgent()
-
-        result = agent.discover("Cherry Blossom Girls", 7, ["Harmon Cooper"])
-
-        self.assertTrue(result["results"])
-        for field in ["title", "author", "series_name", "series_position", "description", "cover_image", "publication_date", "source"]:
-            self.assertIn(field, result["results"][0])
-        self.assertEqual(result["status"], "complete")
-        self.assertEqual(result["discovery_mode"], "direct")
-        self.assertIn("Amazon", result["sources_used"])
-        self.assertIn("publication_date_filter", result["diagnostics"])
-        self.assertTrue(result["diagnostics"]["publication_date_filter"]["accepted"])
-        self.assertTrue(mock_amazon.called)
-        self.assertTrue(mock_web_read.called)
-        self.assertTrue(mock_google.called)
-        self.assertTrue(mock_openlibrary.called)
-        self.assertTrue(mock_serpapi.called)
-        self.assertTrue(mock_goodreads.called)
-        self.assertTrue(mock_author_site.called)
-        self.assertTrue(mock_publisher.called)
-        self.assertTrue(mock_book_db.called)
-
-    @patch("agents.series_agent.search_web_read_candidates", return_value=[])
-    @patch("agents.series_agent.search_serpapi_web", return_value=[])
-    @patch("agents.series_agent.search_fantastic_fiction", return_value=[])
-    @patch("agents.series_agent.search_amazon_products", return_value=[])
-    @patch("agents.series_agent.search_openlibrary", return_value=[])
-    @patch("agents.series_agent.search_google_books", return_value=[])
-    def test_discover_returns_missing_books_when_no_metadata_is_found(
-        self,
-        mock_google,
-        mock_openlibrary,
-        mock_amazon,
-        mock_fantastic,
-        mock_serpapi,
-        mock_web_read,
-    ):
-        agent = SeriesIntelligenceAgent()
-
-        result = agent.discover("Cherry Blossom Girls", 7, ["Harmon Cooper"])
-
-        self.assertEqual(result["results"], [])
-        self.assertEqual(result["missing_books"], [7])
-        self.assertEqual(result["status"], "no_hits")
-        self.assertEqual(result["reason"], "no-hit-after-all-passes")
-        self.assertEqual(result["discovery_engine"], "agent_v2")
-        self.assertEqual(result["discovery_mode"], "web_read")
-        self.assertTrue(result["agent_pipeline"])
-        self.assertIn("publication_date_filter", result["diagnostics"])
-        self.assertTrue(mock_web_read.called)
-        self.assertTrue(mock_google.called)
-        self.assertTrue(mock_openlibrary.called)
-        self.assertTrue(mock_amazon.called)
-        self.assertTrue(mock_fantastic.called)
-        self.assertTrue(mock_serpapi.called)
-
-    @patch("agents.series_agent.search_book_database_pages", return_value=[])
-    @patch("agents.series_agent.search_publisher_pages", return_value=[])
-    @patch("agents.series_agent.search_author_site_pages", return_value=[])
-    @patch("agents.series_agent.search_goodreads_api", return_value=[])
-    @patch("agents.series_agent.search_serpapi_web", return_value=[])
-    @patch("agents.series_agent.search_openlibrary", return_value=[])
-    @patch("agents.series_agent.search_google_books", return_value=[])
-    @patch("agents.series_agent.search_fantastic_fiction", return_value=[])
-    @patch("agents.series_agent.search_amazon_products", return_value=[])
-    def test_discover_finds_metadata_from_any_web_source(
-        self,
-        _mock_amazon,
-        _mock_fantastic,
-        mock_google,
-        mock_openlibrary,
-        _mock_serpapi,
-        _mock_goodreads,
-        _mock_author_site,
-        _mock_publisher,
-        _mock_book_db,
-    ):
-        agent = SeriesIntelligenceAgent()
-
-        source_cases = [
-            ("amazon", "Amazon", "https://www.amazon.com/Cherry-Blossom-Girls-International-Seven-ebook/dp/B07RS4RN2G"),
-            ("fantastic_fiction", "FantasticFiction", "https://www.fantasticfiction.com/c/harmon-cooper/cherry-blossom-girls-international-7.htm"),
-            ("otherwebsources", "OtherWebSources", "https://example.org/blog/cherry-blossom-girls-book-seven-review"),
-        ]
-
-        for source_key, source_label, source_url in source_cases:
-            with self.subTest(source=source_label):
-                web_results = [
-                    {
-                        "title": "Cherry Blossom Girls International: (Book Seven)",
-                        "author": "Harmon Cooper",
-                        "description": "Book Seven metadata found on the web.",
-                        "publication_date": "2021-01-01",
-                        "cover_image": "https://example.org/cover.jpg",
-                        "series_name": "Cherry Blossom Girls",
-                        "source_url": source_url,
-                        "series_position": 7,
-                        "source": source_key,
-                    }
-                ]
-                if source_key == "otherwebsources":
-                    web_results.append(
-                        {
-                            "title": "Cherry Blossom Girls International: (Book Seven)",
-                            "author": "Harmon Cooper",
-                            "description": "Second source confirms metadata.",
-                            "publication_date": "2021-01-01",
-                            "cover_image": "https://example.net/cover.jpg",
-                            "series_name": "Cherry Blossom Girls",
-                            "source_url": "https://sample.net/library/cherry-blossom-girls-book-seven",
-                            "series_position": 7,
-                            "source": source_key,
-                        }
-                    )
-                with patch("agents.series_agent.search_web_read_candidates", return_value=web_results) as mock_web_read:
-                    result = agent.discover("Cherry Blossom Girls", 7, ["Harmon Cooper"])
-
-                self.assertTrue(result["results"])
-                for field in ["title", "author", "series_name", "series_position", "description", "cover_image", "publication_date", "source"]:
-                    self.assertIn(field, result["results"][0])
-                self.assertEqual(result["status"], "complete")
-                self.assertEqual(result["missing_books"], [])
-                self.assertEqual(result["discovery_engine"], "agent_v2")
-                self.assertEqual(result["discovery_mode"], "web_read")
-                self.assertIn(source_label, result["sources_used"])
-                self.assertTrue(mock_web_read.called)
-
-            self.assertTrue(mock_google.called)
-            self.assertTrue(mock_openlibrary.called)
-
-    @patch("agents.series_agent.search_web_read_candidates", return_value=[])
-    @patch("agents.series_agent.search_fantastic_fiction", return_value=[])
-    @patch("agents.series_agent.search_amazon_products", return_value=[])
-    @patch("agents.series_agent.search_author_site_pages", return_value=[])
-    @patch("agents.series_agent.search_publisher_pages", return_value=[])
-    @patch("agents.series_agent.search_book_database_pages", return_value=[])
-    @patch("agents.series_agent.search_goodreads_api", return_value=[])
-    @patch("agents.series_agent.search_serpapi_web", return_value=[])
-    @patch("agents.series_agent.search_openlibrary", return_value=[])
-    @patch(
-        "agents.series_agent.search_google_books",
-        return_value=[
-            {
-                "title": "Cherry Blossom Girls International: (Book Seven)",
-                "author": "Harmon Cooper",
-                "series_position": 7,
-                "description": "Catalog fallback",
-                "publication_date": "2020-02-01",
-                "cover_image": "https://books.google.com/cover.jpg",
-                "series_name": "Cherry Blossom Girls",
-                "source_url": "https://books.google.com/example",
-                "source": "google_books",
-            }
-        ],
-    )
-    def test_catalog_fallback_only_runs_last(
-        self,
-        mock_google,
-        mock_openlibrary,
-        mock_serpapi,
-        mock_goodreads,
-        mock_book_db,
-        mock_publisher,
-        mock_author_site,
-        mock_amazon,
-        mock_fantastic,
-        mock_web_read,
-    ):
-        agent = SeriesIntelligenceAgent()
-
-        result = agent.discover("Cherry Blossom Girls", 7, ["Harmon Cooper"])
-
-        self.assertEqual(result["status"], "complete")
-        for field in ["title", "author", "series_name", "series_position", "description", "cover_image", "publication_date", "source"]:
-            self.assertIn(field, result["results"][0])
-        self.assertEqual(result["discovery_mode"], "catalog_fallback")
-        self.assertIn("GoogleBooks", result["sources_used"])
-        self.assertTrue(mock_amazon.called)
-        self.assertTrue(mock_fantastic.called)
-        self.assertTrue(mock_author_site.called)
-        self.assertTrue(mock_publisher.called)
-        self.assertTrue(mock_book_db.called)
-        self.assertTrue(mock_web_read.called)
-        self.assertTrue(mock_google.called)
-        self.assertFalse(mock_openlibrary.called)
-        self.assertFalse(mock_serpapi.called)
-        self.assertFalse(mock_goodreads.called)
-
-    @patch("agents.series_agent.search_book_database_pages", return_value=[])
-    @patch("agents.series_agent.search_publisher_pages", return_value=[])
-    @patch("agents.series_agent.search_fantastic_fiction", return_value=[])
-    @patch("agents.series_agent.search_amazon_products", return_value=[])
-    @patch(
-        "agents.series_agent.search_author_site_pages",
-        return_value=[
-            {
-                "title": "Cherry Blossom Girls International: (Book Seven)",
-                "author": "Harmon Cooper",
-                "series_name": "Cherry Blossom Girls International",
-                "series_position": 7,
-                "description": "Found on a random indie site",
-                "cover_image": "https://harmoncooper.com/covers/book7.jpg",
-                "publication_date": "2022-03-01",
-                "source_url": "https://harmoncooper.com/books/cherry-blossom-girls-7",
-                "source": "author_site",
-            }
-        ],
-    )
-    def test_any_unknown_site_can_succeed_via_direct_generic_provider(
-        self,
-        mock_author_site,
-        mock_amazon,
-        mock_fantastic,
-        mock_publisher,
-        mock_book_db,
-    ):
-        agent = SeriesIntelligenceAgent()
-
-        result = agent.discover("Cherry Blossom Girls", 7, ["Harmon Cooper"])
-
-        self.assertEqual(result["status"], "complete")
-        for field in ["title", "author", "series_name", "series_position", "description", "cover_image", "publication_date", "source"]:
-            self.assertIn(field, result["results"][0])
-        self.assertEqual(result["discovery_mode"], "direct")
-        self.assertIn("AuthorSite", result["sources_used"])
-        self.assertTrue(mock_amazon.called)
-        self.assertTrue(mock_fantastic.called)
-        self.assertTrue(mock_author_site.called)
-        self.assertTrue(mock_publisher.called)
-        self.assertTrue(mock_book_db.called)
-
-    @patch("agents.series_agent.search_book_database_pages", return_value=[])
-    @patch("agents.series_agent.search_publisher_pages", return_value=[])
-    @patch("agents.series_agent.search_author_site_pages", return_value=[])
-    @patch("agents.series_agent.search_web_read_candidates", return_value=[])
-    @patch("agents.series_agent.search_goodreads_api", return_value=[])
-    @patch("agents.series_agent.search_serpapi_web", return_value=[])
-    @patch("agents.series_agent.search_openlibrary", return_value=[])
-    @patch("agents.series_agent.search_google_books", return_value=[])
-    @patch("agents.series_agent.search_fantastic_fiction", return_value=[])
-    @patch(
-        "agents.series_agent.search_amazon_products",
-        return_value=[
-            {
-                "title": "Cherry Blossom Girls International: (Book Fifteen)",
-                "author": "Harmon Cooper",
-                "series_name": "Cherry Blossom Girls International",
-                "series_position": 15,
-                "description": "Speculative listing",
-                "cover_image": "https://example.com/spec.jpg",
-                "publication_date": "2021-01-01",
-                "source_url": "https://www.amazon.com/speculative",
-                "source": "amazon",
-            }
-        ],
-    )
-    def test_rejects_speculative_titles_above_known_series_length(
-        self,
-        _mock_amazon,
-        _mock_fantastic,
-        _mock_google,
-        _mock_openlibrary,
-        _mock_serpapi,
-        _mock_goodreads,
-        _mock_web_read,
-        _mock_author_site,
-        _mock_publisher,
-        _mock_book_db,
-    ):
-        agent = SeriesIntelligenceAgent()
-
-        for speculative_number in [15, 18, 20]:
-            with self.subTest(book_number=speculative_number):
-                result = agent.discover("Cherry Blossom Girls", speculative_number, ["Harmon Cooper"], known_series_max=9)
-                self.assertEqual(result["status"], "no_hits")
-                self.assertEqual(result["final_reason"], "no-hit-after-all-providers")
-                self.assertTrue(result["diagnostics"]["false_positive_filter"]["series_number_check"])
-                self.assertGreaterEqual(result["diagnostics"]["rejection_counts"].get("series_number_speculative", 0), 1)
-
-    @patch("agents.series_agent.search_book_database_pages", return_value=[])
-    @patch("agents.series_agent.search_publisher_pages", return_value=[])
-    @patch("agents.series_agent.search_author_site_pages", return_value=[])
-    @patch("agents.series_agent.search_web_read_candidates", return_value=[])
-    @patch("agents.series_agent.search_goodreads_api", return_value=[])
-    @patch("agents.series_agent.search_serpapi_web", return_value=[])
-    @patch("agents.series_agent.search_openlibrary", return_value=[])
-    @patch("agents.series_agent.search_google_books", return_value=[])
-    @patch("agents.series_agent.search_fantastic_fiction", return_value=[])
-    @patch(
-        "agents.series_agent.search_amazon_products",
-        return_value=[
-            {
-                "title": "Cherry Blossom Girls International: (Book Seven)",
-                "author": "Harmon Cooper",
-                "series_name": "Cherry Blossom Girls International",
-                "series_position": 7,
-                "description": "Valid listing",
-                "cover_image": "https://images.example/book7.jpg",
-                "publication_date": "2022-05-01",
-                "source_url": "https://www.amazon.com/valid",
-                "source": "amazon",
-            }
-        ],
-    )
-    def test_accepts_valid_titles_within_known_series_length(
-        self,
-        _mock_amazon,
-        _mock_fantastic,
-        _mock_google,
-        _mock_openlibrary,
-        _mock_serpapi,
-        _mock_goodreads,
-        _mock_web_read,
-        _mock_author_site,
-        _mock_publisher,
-        _mock_book_db,
-    ):
-        agent = SeriesIntelligenceAgent()
-
-        result = agent.discover("Cherry Blossom Girls", 7, ["Harmon Cooper"], known_series_max=9)
-
-        self.assertEqual(result["status"], "complete")
-        self.assertEqual(result["discovery_mode"], "direct")
-        self.assertEqual(result["provider_selected"], "AmazonProvider")
-        self.assertTrue(result["diagnostics"]["false_positive_filter"]["publication_date_check"])
-        self.assertTrue(result["diagnostics"]["false_positive_filter"]["source_credibility_check"])
-        self.assertTrue(result["diagnostics"]["false_positive_filter"]["series_number_check"])
-        self.assertTrue(result["diagnostics"]["publication_date_filter"]["accepted"])
-
-    @patch("agents.series_agent.search_book_database_pages", return_value=[])
-    @patch("agents.series_agent.search_publisher_pages", return_value=[])
-    @patch("agents.series_agent.search_author_site_pages", return_value=[])
-    @patch(
-        "agents.series_agent.search_web_read_candidates",
-        return_value=[
-            {
-                "title": "Cherry Blossom Girls International: (Book Seven)",
-                "author": "Harmon Cooper",
-                "series_name": "Cherry Blossom Girls International",
-                "series_position": 7,
-                "description": "Rumor and release date speculation post",
-                "cover_image": "https://bookseriesupdates.net/cover.jpg",
-                "publication_date": "2025-02-01",
-                "source_url": "https://bookseriesupdates.net/cherry-blossom-girls-7-release-date-rumor",
-                "source": "otherwebsources",
-            },
-            {
-                "title": "Cherry Blossom Girls International: (Book Seven)",
-                "author": "Harmon Cooper",
-                "series_name": "Cherry Blossom Girls International",
-                "series_position": 7,
-                "description": "Rumor mirror",
-                "cover_image": "https://bookseriesupdates.org/cover.jpg",
-                "publication_date": "2025-02-01",
-                "source_url": "https://bookseriesupdates.org/cherry-blossom-girls-7-release-date-rumor",
-                "source": "otherwebsources",
-            },
-        ],
-    )
-    @patch("agents.series_agent.search_goodreads_api", return_value=[])
-    @patch("agents.series_agent.search_serpapi_web", return_value=[])
-    @patch("agents.series_agent.search_openlibrary", return_value=[])
-    @patch("agents.series_agent.search_google_books", return_value=[])
-    @patch("agents.series_agent.search_fantastic_fiction", return_value=[])
-    @patch("agents.series_agent.search_amazon_products", return_value=[])
-    def test_rejects_unknown_domain_seo_network_and_keywords(
-        self,
-        _mock_amazon,
-        _mock_fantastic,
-        _mock_google,
-        _mock_openlibrary,
-        _mock_serpapi,
-        _mock_goodreads,
-        _mock_web_read,
-        _mock_author_site,
-        _mock_publisher,
-        _mock_book_db,
-    ):
-        agent = SeriesIntelligenceAgent()
-
-        result = agent.discover("Cherry Blossom Girls", 7, ["Harmon Cooper"], series_complete=False)
-
-        self.assertEqual(result["status"], "no_hits")
-        self.assertGreaterEqual(result["diagnostics"]["rejection_counts"].get("unknown_domain_network_blocked", 0), 1)
-        self.assertGreaterEqual(result["diagnostics"]["rejection_counts"].get("unknown_domain_keyword_blocked", 0), 1)
-
-    @patch("agents.series_agent.search_book_database_pages", return_value=[])
-    @patch("agents.series_agent.search_publisher_pages", return_value=[])
-    @patch("agents.series_agent.search_author_site_pages", return_value=[])
-    @patch(
-        "agents.series_agent.search_web_read_candidates",
-        return_value=[
-            {
-                "title": "Cherry Blossom Girls International: (Book Seven)",
-                "author": "Harmon Cooper",
-                "series_name": "Cherry Blossom Girls International",
-                "series_position": 7,
-                "description": "Independent corroboration A",
-                "cover_image": "https://novelarchive.net/cover.jpg",
-                "publication_date": "2025-02-01",
-                "source_url": "https://novelarchive.net/cherry-blossom-girls-7",
-                "source": "otherwebsources",
-            },
-            {
-                "title": "Cherry Blossom Girls International: (Book Seven)",
-                "author": "Harmon Cooper",
-                "series_name": "Cherry Blossom Girls International",
-                "series_position": 7,
-                "description": "Independent corroboration B",
-                "cover_image": "https://readtracker.org/cover.jpg",
-                "publication_date": "2025-02-01",
-                "source_url": "https://readtracker.org/cherry-blossom-girls-7",
-                "source": "otherwebsources",
-            },
-        ],
-    )
-    @patch("agents.series_agent.search_goodreads_api", return_value=[])
-    @patch("agents.series_agent.search_serpapi_web", return_value=[])
-    @patch("agents.series_agent.search_openlibrary", return_value=[])
-    @patch("agents.series_agent.search_google_books", return_value=[])
-    @patch("agents.series_agent.search_fantastic_fiction", return_value=[])
-    @patch("agents.series_agent.search_amazon_products", return_value=[])
-    def test_rejects_unknown_domains_when_series_complete_even_with_corroboration(
-        self,
-        _mock_amazon,
-        _mock_fantastic,
-        _mock_google,
-        _mock_openlibrary,
-        _mock_serpapi,
-        _mock_goodreads,
-        _mock_web_read,
-        _mock_author_site,
-        _mock_publisher,
-        _mock_book_db,
-    ):
-        agent = SeriesIntelligenceAgent()
-
-        result = agent.discover("Cherry Blossom Girls", 7, ["Harmon Cooper"], series_complete=True)
-
-        self.assertEqual(result["status"], "no_hits")
-        self.assertGreaterEqual(result["diagnostics"]["rejection_counts"].get("unknown_domain_on_complete_series", 0), 1)
-
-    @patch("agents.series_agent.search_book_database_pages", return_value=[])
-    @patch("agents.series_agent.search_publisher_pages", return_value=[])
-    @patch("agents.series_agent.search_author_site_pages", return_value=[])
-    @patch("agents.series_agent.search_web_read_candidates", return_value=[])
-    @patch("agents.series_agent.search_goodreads_api", return_value=[])
-    @patch("agents.series_agent.search_serpapi_web", return_value=[])
-    @patch("agents.series_agent.search_openlibrary", return_value=[])
-    @patch("agents.series_agent.search_google_books", return_value=[])
-    @patch("agents.series_agent.search_fantastic_fiction", return_value=[])
-    @patch(
-        "agents.series_agent.search_amazon_products",
-        return_value=[
-            {
-                "title": "Cherry Blossom Girls International: (Book Seven)",
-                "author": "Harmon Cooper",
-                "series_name": "Cherry Blossom Girls International",
-                "series_position": 7,
-                "description": "Trusted metadata should survive filtering",
-                "cover_image": "https://images.example/book7.jpg",
-                "publication_date": "2022-05-01",
-                "source_url": "https://www.amazon.com/valid",
-                "source": "amazon",
-            },
-            {
-                "title": "Cherry Blossom Girls International: (Book Seven)",
-                "author": "Harmon Cooper",
-                "series_name": "Cherry Blossom Girls International",
-                "series_position": 7,
-                "description": "Rumor release date speculation and spoilers",
-                "cover_image": "https://bookseriesupdates.net/rumor.jpg",
-                "publication_date": "2022-05-01",
-                "source_url": "https://bookseriesupdates.net/cherry-blossom-girls-book-seven-rumor",
-                "source": "otherwebsources",
-            },
-        ],
-    )
-    def test_response_results_use_filtered_candidates_only(
-        self,
-        _mock_amazon,
-        _mock_fantastic,
-        _mock_google,
-        _mock_openlibrary,
-        _mock_serpapi,
-        _mock_goodreads,
-        _mock_web_read,
-        _mock_author_site,
-        _mock_publisher,
-        _mock_book_db,
-    ):
-        agent = SeriesIntelligenceAgent()
-
-        result = agent.discover("Cherry Blossom Girls", 7, ["Harmon Cooper"], series_complete=False)
-
-        self.assertEqual(result["status"], "complete")
-        self.assertEqual(len(result["results"]), 1)
-        self.assertEqual(result["results"][0]["source"], "amazon")
-        self.assertNotIn("bookseriesupdates.net", str(result["results"][0]))
-
-    @patch("agents.series_agent.search_book_database_pages", return_value=[])
-    @patch("agents.series_agent.search_publisher_pages", return_value=[])
-    @patch("agents.series_agent.search_author_site_pages", return_value=[])
-    @patch("agents.series_agent.search_web_read_candidates", return_value=[])
-    @patch("agents.series_agent.search_goodreads_api", return_value=[])
-    @patch("agents.series_agent.search_serpapi_web", return_value=[])
-    @patch("agents.series_agent.search_openlibrary", return_value=[])
-    @patch("agents.series_agent.search_google_books", return_value=[])
-    @patch("agents.series_agent.search_fantastic_fiction", return_value=[])
-    @patch(
-        "agents.series_agent.search_amazon_products",
-        return_value=[
-            {
-                "title": "Cherry Blossom Girls International: (Book Ten)",
-                "author": "Harmon Cooper",
-                "series_name": "Cherry Blossom Girls International",
-                "series_position": 10,
-                "description": "Announced listing",
-                "cover_image": "https://images.example/book10.jpg",
-                "publication_date": "2099-01-01",
-                "source_url": "https://www.amazon.com/future",
-                "source": "amazon",
-            }
-        ],
-    )
-    def test_future_date_is_allowed_when_series_not_complete(
-        self,
-        _mock_amazon,
-        _mock_fantastic,
-        _mock_google,
-        _mock_openlibrary,
-        _mock_serpapi,
-        _mock_goodreads,
-        _mock_web_read,
-        _mock_author_site,
-        _mock_publisher,
-        _mock_book_db,
-    ):
-        agent = SeriesIntelligenceAgent()
-
-        result = agent.discover("Cherry Blossom Girls", 10, ["Harmon Cooper"], series_complete=False)
-
-        self.assertEqual(result["status"], "complete")
-        self.assertTrue(result["diagnostics"]["publication_date_filter"]["accepted"])
-        self.assertFalse(result["diagnostics"]["publication_date_filter"]["series_complete"])
-        self.assertTrue(result["diagnostics"]["publication_date_filter"]["date_future"])
-        self.assertEqual(result["diagnostics"]["publication_date_filter"]["reason"], "future_date_allowed_series_not_complete")
-
-    @patch("agents.series_agent.search_book_database_pages", return_value=[])
-    @patch("agents.series_agent.search_publisher_pages", return_value=[])
-    @patch("agents.series_agent.search_author_site_pages", return_value=[])
-    @patch("agents.series_agent.search_web_read_candidates", return_value=[])
-    @patch("agents.series_agent.search_goodreads_api", return_value=[])
-    @patch("agents.series_agent.search_serpapi_web", return_value=[])
-    @patch("agents.series_agent.search_openlibrary", return_value=[])
-    @patch("agents.series_agent.search_google_books", return_value=[])
-    @patch("agents.series_agent.search_fantastic_fiction", return_value=[])
-    @patch(
-        "agents.series_agent.search_amazon_products",
-        return_value=[
-            {
-                "title": "Cherry Blossom Girls International: (Book Ten)",
-                "author": "Harmon Cooper",
-                "series_name": "Cherry Blossom Girls International",
-                "series_position": 10,
-                "description": "Erroneous future listing",
-                "cover_image": "https://images.example/book10.jpg",
-                "publication_date": "2099-01-01",
-                "source_url": "https://www.amazon.com/future",
-                "source": "amazon",
-            }
-        ],
-    )
-    def test_future_date_is_rejected_when_series_complete(
-        self,
-        _mock_amazon,
-        _mock_fantastic,
-        _mock_google,
-        _mock_openlibrary,
-        _mock_serpapi,
-        _mock_goodreads,
-        _mock_web_read,
-        _mock_author_site,
-        _mock_publisher,
-        _mock_book_db,
-    ):
-        agent = SeriesIntelligenceAgent()
-
-        result = agent.discover("Cherry Blossom Girls", 10, ["Harmon Cooper"], series_complete=True)
-
-        self.assertEqual(result["status"], "no_hits")
-        self.assertFalse(result["diagnostics"]["publication_date_filter"]["accepted"])
-        self.assertTrue(result["diagnostics"]["publication_date_filter"]["series_complete"])
-        self.assertTrue(result["diagnostics"]["publication_date_filter"]["date_future"])
-        self.assertEqual(result["diagnostics"]["publication_date_filter"]["reason"], "publication_date_future_on_complete_series")
-        self.assertGreaterEqual(result["diagnostics"]["rejection_counts"].get("publication_date_future", 0), 1)
-
-    @patch("agents.series_agent.search_book_database_pages", return_value=[])
-    @patch("agents.series_agent.search_publisher_pages", return_value=[])
-    @patch("agents.series_agent.search_author_site_pages", return_value=[])
-    @patch("agents.series_agent.search_web_read_candidates", return_value=[])
-    @patch("agents.series_agent.search_goodreads_api", return_value=[])
-    @patch("agents.series_agent.search_serpapi_web", return_value=[])
-    @patch("agents.series_agent.search_openlibrary", return_value=[])
-    @patch("agents.series_agent.search_google_books", return_value=[])
-    @patch("agents.series_agent.search_fantastic_fiction", return_value=[])
-    @patch(
-        "agents.series_agent.search_amazon_products",
-        return_value=[
-            {
-                "title": "Cherry Blossom Girls International: (Book Ten)",
-                "author": "Harmon Cooper",
-                "series_name": "Cherry Blossom Girls International",
-                "series_position": 10,
-                "description": "Filtered out speculative listing",
-                "cover_image": "https://images.example/book10.jpg",
-                "publication_date": "2025-01-01",
-                "source_url": "https://www.amazon.com/speculative",
-                "source": "amazon",
-            }
-        ],
-    )
-    def test_completed_series_no_hits_are_classified_as_complete_mode(
-        self,
-        _mock_amazon,
-        _mock_fantastic,
-        _mock_google,
-        _mock_openlibrary,
-        _mock_serpapi,
-        _mock_goodreads,
-        _mock_web_read,
-        _mock_author_site,
-        _mock_publisher,
-        _mock_book_db,
-    ):
-        agent = SeriesIntelligenceAgent()
-
-        result = agent.discover(
-            "Cherry Blossom Girls",
-            10,
-            ["Harmon Cooper"],
-            known_series_max=9,
-            series_complete=True,
-        )
-
-        self.assertEqual(result["status"], "no_hits")
-        self.assertEqual(result["discovery_mode"], "complete")
-        self.assertEqual(result["final_reason"], "no-hit-after-all-providers")
-
-    @patch.object(
-        SeriesIntelligenceAgent,
-        "discover",
-        return_value={
-            "query": "Cherry Blossom Girls International: (Book Seven)",
-            "results": [],
-            "diagnostics": {
-                "selected_stage": "none",
-                "provider_counts": {"web_read": 0, "google": 0, "openlibrary": 0, "serpapi": 0},
-                "rejection_counts": {},
-                "stages": [],
-                "accepted_total": 0,
-                "top_score": 0.0,
-                "passes_completed": 0,
-                "sources_used": [],
-                "current_pass": "none",
-                "publication_date_filter": {
-                    "series_complete": False,
-                    "date_future": False,
-                    "date_missing": True,
-                    "accepted": False,
-                    "reason": "no_candidates",
-                },
-            },
-            "passes_completed": 0,
-            "sources_used": [],
-            "missing_books": [7],
-            "status": "no_hits",
-            "reason": "no-hit-after-all-passes",
-            "discovery_engine": "agent_v2",
-            "discovery_mode": "web_read",
-            "agent_pipeline": True,
-        },
-    )
-    def test_missing_book_gap_is_prioritized_and_uses_agent_pipeline(self, mock_discover):
-        agent = SeriesIntelligenceAgent()
-
-        result = agent.run_series_check(self.db, self.series.id)
-
-        self.assertEqual(result["discovery_engine"], "agent_v2")
-        self.assertTrue(result["agent_pipeline"])
-        self.assertEqual(result["missing_books"], ["7"])
-        self.assertGreater(len(result["candidate_numbers"]), 0)
-        self.assertEqual(result["candidate_numbers"][0], 7)
-        mock_discover.assert_any_call(
-            "Cherry Blossom Girls",
-            7,
-            ["Harmon Cooper"],
-            known_series_max=9,
-            series_complete=False,
-        )
 
 if __name__ == "__main__":
     unittest.main()

@@ -135,6 +135,18 @@ _WORD_NUMBERS = {
 
 
 def infer_number_from_title(title: str | None, series_name: str | None = None) -> int | None:
+    # Checked against the raw (non-normalized) title first: normalize_text
+    # strips punctuation like "#", so a "#7"-style pattern could never
+    # actually match once run against the already-normalized text below.
+    hash_match = re.search(r"#\s*(\d+)\b", str(title or ""))
+    if hash_match:
+        try:
+            value = int(hash_match.group(1))
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+
     cleaned = normalize_text(title)
     if not cleaned:
         return None
@@ -142,7 +154,6 @@ def infer_number_from_title(title: str | None, series_name: str | None = None) -
         r"\bbook\s*(\d+)\b",
         r"\bvolume\s*(\d+)\b",
         r"\bvol\.?\s*(\d+)\b",
-        r"\b#\s*(\d+)\b",
     )
     for pattern in patterns:
         match = re.search(pattern, cleaned)

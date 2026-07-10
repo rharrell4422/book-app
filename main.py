@@ -1,5 +1,4 @@
 import asyncio
-import os
 from datetime import datetime, date
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import re
@@ -185,7 +184,6 @@ def log_discovery_summary(*, result: dict, terminal_error: str | None = None) ->
         _console_log(f"terminal_error={terminal_error}")
     _console_log("===== CHECK NOW DEBUG SUMMARY END =====")
 series_agent = SeriesIntelligenceAgent()
-series_scan_task: asyncio.Task | None = None
 series_check_jobs: dict[int, dict] = {}
 SERIES_CHECK_TIMEOUT_SECONDS = 300
 SERIES_CHECK_HARD_TIMEOUT_SECONDS = 300
@@ -1846,43 +1844,9 @@ def put_book(book_id: int, book: schemas.BookUpdate, db: Session = Depends(get_d
     return updated
 
 
-def run_daily_series_scan() -> None:
-    db = SessionLocal()
-    try:
-        series_agent.run_daily_scan(db)
-    finally:
-        db.close()
-
-
-async def daily_series_scan_loop() -> None:
-    # Sleep BEFORE the first run, not after -- discovery now calls real
-    # public APIs (Google Books/OpenLibrary) per series, so firing
-    # immediately on every server restart would blast a couple hundred
-    # requests at once, every time. That's a good way to get rate-limited.
-    while True:
-        await asyncio.sleep(24 * 60 * 60)
-        try:
-            await asyncio.to_thread(run_daily_series_scan)
-        except Exception:
-            logger.exception("Daily series scan failed")
-
-
-# Automated background scanning across the whole library is off by default.
-# Manual "Check Now" (POST /series/{id}/check) always works regardless of
-# this setting -- this only controls the unattended daily sweep. Turn it on
-# once manual discovery is verified solid: set ENABLE_DAILY_SERIES_SCAN=1.
-DAILY_SERIES_SCAN_ENABLED = str(os.environ.get("ENABLE_DAILY_SERIES_SCAN", "")).strip().lower() in {"1", "true", "yes"}
-
-
 @app.on_event("startup")
 async def start_series_scan_loop() -> None:
-    global series_scan_task
     await asyncio.to_thread(backfill_series_state)
-    if not DAILY_SERIES_SCAN_ENABLED:
-        logger.info("Daily series scan disabled (set ENABLE_DAILY_SERIES_SCAN=1 to enable).")
-        return
-    if series_scan_task is None or series_scan_task.done():
-        series_scan_task = asyncio.create_task(daily_series_scan_loop())
 
 
 @app.post("/books/{book_id}/summary")
