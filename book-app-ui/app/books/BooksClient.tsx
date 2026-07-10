@@ -17,6 +17,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
+import { fetchApiWithFallback } from "@/lib/api-client";
 
 import {
   Table,
@@ -96,7 +97,7 @@ function getDisplayDate(book: BookRow) {
 function formatDate(value?: string | null) {
   if (!value) return "—";
   const date = parseFlexibleDate(value);
-  return Number.isNaN(date.valueOf()) ? value : date.toLocaleDateString();
+  return !date || Number.isNaN(date.valueOf()) ? value : date.toLocaleDateString();
 }
 
 function getStatusChipClass(status: string) {
@@ -423,56 +424,6 @@ type LookupResultState = {
   matched_title: string | null;
   matched_author: string | null;
 };
-
-const STATIC_API_BASE_CANDIDATES = [
-  process.env.NEXT_PUBLIC_API_BASE_URL,
-  "http://localhost:8000",
-  "http://127.0.0.1:8000",
-].filter(Boolean) as string[];
-
-function normalizeBaseUrl(value: string) {
-  return value.replace(/\/+$/, "");
-}
-
-function getApiBaseCandidates() {
-  const dynamicCandidates: string[] = [];
-  if (typeof window !== "undefined") {
-    dynamicCandidates.push(`${window.location.protocol}//${window.location.hostname}:8000`);
-  }
-
-  return Array.from(new Set([...STATIC_API_BASE_CANDIDATES, ...dynamicCandidates]));
-}
-
-async function fetchApiWithFallback(path: string, init?: RequestInit) {
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const baseCandidates = getApiBaseCandidates();
-  const candidates = [
-    `/api${normalizedPath}`,
-    ...baseCandidates.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`),
-  ];
-
-  // If route includes a trailing slash, also try without it to avoid router mismatches.
-  if (normalizedPath.endsWith("/")) {
-    const trimmedPath = normalizedPath.slice(0, -1);
-    candidates.push(`/api${trimmedPath}`);
-    candidates.push(...baseCandidates.map((base) => `${normalizeBaseUrl(base)}${trimmedPath}`));
-  }
-
-  let lastError: Error | null = null;
-  for (const url of candidates) {
-    try {
-      const response = await fetch(url, init);
-      if (response.ok) {
-        return response;
-      }
-      lastError = new Error(`Failed to load ${normalizedPath} (${response.status})`);
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error("Network error");
-    }
-  }
-
-  throw lastError ?? new Error(`Failed to load ${normalizedPath}`);
-}
 
 const EMPTY_ADD_BOOK_FORM: AddBookFormState = {
   title: "",

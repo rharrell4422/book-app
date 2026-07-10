@@ -16,6 +16,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
 import { scheduleSeriesCheckReset } from "@/lib/series-check-progress";
+import { fetchApiWithFallback } from "@/lib/api-client";
 import {
   Table,
   TableBody,
@@ -25,12 +26,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useToast } from "@/components/ui/use-toast";
-
-const STATIC_API_BASE_CANDIDATES = [
-  process.env.NEXT_PUBLIC_API_BASE_URL,
-  "http://localhost:8000",
-  "http://127.0.0.1:8000",
-].filter(Boolean) as string[];
 
  type TitleNormalizationMode = "keep_original" | "clean_up" | "new_clean_title" | "match_other_titles";
 type TitleNormalizationWizardMode = TitleNormalizationMode | "custom";
@@ -313,53 +308,6 @@ function inferSeriesTitlePattern(books: BookRecord[]): "with_suffix" | "title_on
   }
 
   return withSuffix >= titleOnly ? "with_suffix" : "title_only";
-}
-
-function normalizeBaseUrl(value: string) {
-  return value.replace(/\/+$/, "");
-}
-
-function getApiBaseCandidates() {
-  const dynamicCandidates: string[] = [];
-  if (typeof window !== "undefined") {
-    dynamicCandidates.push(`${window.location.protocol}//${window.location.hostname}:8000`);
-  }
-
-  return Array.from(new Set([...STATIC_API_BASE_CANDIDATES, ...dynamicCandidates]));
-}
-
-async function fetchApiWithFallback(path: string, init?: RequestInit) {
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const isSuggestGetRequest = (init?.method || "GET").toUpperCase() === "GET" && /\/suggest(?:\?|$)/.test(normalizedPath);
-  const requestInit: RequestInit = isSuggestGetRequest
-    ? { ...init, cache: "no-store" }
-    : init ?? {};
-  const baseCandidates = getApiBaseCandidates();
-  const candidates = [
-    `/api${normalizedPath}`,
-    ...baseCandidates.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`),
-  ];
-
-  if (normalizedPath.endsWith("/")) {
-    const trimmedPath = normalizedPath.slice(0, -1);
-    candidates.push(`/api${trimmedPath}`);
-    candidates.push(...baseCandidates.map((base) => `${normalizeBaseUrl(base)}${trimmedPath}`));
-  }
-
-  let lastError: Error | null = null;
-  for (const url of candidates) {
-    try {
-      const response = await fetch(url, requestInit);
-      if (response.ok) {
-        return response;
-      }
-      lastError = new Error(`Failed to load ${normalizedPath} (${response.status})`);
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error("Network error");
-    }
-  }
-
-  throw lastError ?? new Error(`Failed to load ${normalizedPath}`);
 }
 
 function delay(ms: number) {
@@ -2015,7 +1963,7 @@ export default function SeriesDetailPage() {
           read_date: existing.read_date ?? null,
           release_date: existing.release_date ?? null,
           publication_date: existing.publication_date ?? null,
-          series_id: existing.series_id ?? series.id,
+          series_id: typeof existing.series_id === "number" ? existing.series_id : series.id,
           title: normalizedTitle,
           author: existing.author ?? null,
           book_number: typeof existing.book_number === "number" ? existing.book_number : null,

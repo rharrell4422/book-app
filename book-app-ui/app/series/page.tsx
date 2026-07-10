@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useToast } from "@/components/ui/use-toast";
+import { fetchApiWithFallback } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -431,55 +432,6 @@ const SERIES_RESIZE_NEIGHBOR: Record<SeriesColumnKey, SeriesColumnKey | null> = 
 };
 
 const SERIES_TABLE_COLUMN_WIDTHS_STORAGE_KEY = "seriesTableColumnWidthsV1";
-
-const STATIC_API_BASE_CANDIDATES = [
-  process.env.NEXT_PUBLIC_API_BASE_URL,
-  "http://localhost:8000",
-  "http://127.0.0.1:8000",
-].filter(Boolean) as string[];
-
-function normalizeBaseUrl(value: string) {
-  return value.replace(/\/+$/, "");
-}
-
-function getApiBaseCandidates() {
-  const dynamicCandidates: string[] = [];
-  if (typeof window !== "undefined") {
-    dynamicCandidates.push(`${window.location.protocol}//${window.location.hostname}:8000`);
-  }
-
-  return Array.from(new Set([...STATIC_API_BASE_CANDIDATES, ...dynamicCandidates]));
-}
-
-async function fetchApiWithFallback(path: string, init?: RequestInit) {
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const baseCandidates = getApiBaseCandidates();
-  const candidates = [
-    `/api${normalizedPath}`,
-    ...baseCandidates.map((base) => `${normalizeBaseUrl(base)}${normalizedPath}`),
-  ];
-
-  if (normalizedPath.endsWith("/")) {
-    const trimmedPath = normalizedPath.slice(0, -1);
-    candidates.push(`/api${trimmedPath}`);
-    candidates.push(...baseCandidates.map((base) => `${normalizeBaseUrl(base)}${trimmedPath}`));
-  }
-
-  let lastError: Error | null = null;
-  for (const url of candidates) {
-    try {
-      const response = await fetch(url, init);
-      if (response.ok) {
-        return response;
-      }
-      lastError = new Error(`Failed to load ${normalizedPath} (${response.status})`);
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error("Network error");
-    }
-  }
-
-  throw lastError ?? new Error(`Failed to load ${normalizedPath}`);
-}
 
 function sanitizeSavedSeriesColumnWidths(value: unknown): Record<SeriesColumnKey, number> | null {
   if (!value || typeof value !== "object") return null;
