@@ -373,119 +373,6 @@ function toIsoDateString(value: string | null | undefined): string | null {
   return `${year}-${month}-${day}`;
 }
 
-function parseMonthNameDateToIso(value: string): string | null {
-  const raw = String(value || "").trim();
-  if (!raw) return null;
-
-  const normalized = raw.replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, "$1");
-
-  const parsed = new Date(normalized);
-  if (Number.isNaN(parsed.valueOf())) {
-    return null;
-  }
-
-  const year = parsed.getFullYear();
-  const month = String(parsed.getMonth() + 1).padStart(2, "0");
-  const day = String(parsed.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function parseReleaseIntelText(text: string): Array<{ bookNumber: number; title: string; releaseDate: string | null }> {
-  const normalized = String(text || "").replace(/\s+/g, " ").trim();
-  if (!normalized) return [];
-
-  const extractReleaseDate = (value: string): string | null => {
-    const monthNameMatch = value.match(
-      /\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?(?:,)?\s+\d{4}\b/i
-    );
-    if (monthNameMatch) {
-      return parseMonthNameDateToIso(monthNameMatch[0]);
-    }
-
-    const numericDateMatch = value.match(/\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/);
-    if (!numericDateMatch) {
-      return null;
-    }
-
-    return normalizeDateInput(numericDateMatch[0]);
-  };
-
-  const matches = Array.from(
-    normalized.matchAll(/Book\s*#?\s*(\d+(?:\.\d+)?)\b(?:\s*(?:\(([^)]+)\)|[:\-]\s*([^,.;|\n]+)))?/gi)
-  );
-  if (!matches.length) {
-    const fallbackMatch = normalized.match(/(?:book|bk)\s*#?\s*(\d+(?:\.\d+)?)/i);
-    if (!fallbackMatch) return [];
-
-    const fallbackNumber = Number(fallbackMatch[1]);
-    if (!Number.isFinite(fallbackNumber)) return [];
-
-    return [
-      {
-        bookNumber: fallbackNumber,
-        title: `Book ${fallbackNumber}`,
-        releaseDate: extractReleaseDate(normalized),
-      },
-    ];
-  }
-
-  const parsed = matches
-    .map((match, index) => {
-      const num = Number(match[1]);
-      if (!Number.isFinite(num)) return null;
-
-      const title = String(match[2] || match[3] || "").trim() || `Book ${num}`;
-      const start = match.index ?? 0;
-      const end = (matches[index + 1]?.index ?? normalized.length);
-      const localWindow = normalized.slice(start, end);
-      const releaseDate = extractReleaseDate(localWindow);
-
-      return {
-        bookNumber: num,
-        title,
-        releaseDate,
-      };
-    })
-    .filter((value): value is { bookNumber: number; title: string; releaseDate: string | null } => Boolean(value));
-
-  const byBookNumber = new Map<number, { bookNumber: number; title: string; releaseDate: string | null }>();
-  for (const entry of parsed) {
-    byBookNumber.set(entry.bookNumber, entry);
-  }
-
-  return Array.from(byBookNumber.values());
-}
-
-function parseKnownSeriesListText(text: string): Array<{ bookNumber: number; title: string; publicationYear: number | null; note: string | null }> {
-  const normalized = String(text || "").replace(/\s+/g, " ").trim();
-  if (!normalized) return [];
-
-  const entries = Array.from(
-    normalized.matchAll(/(\d+(?:\.\d+)?)\s+(.+?)\s+\((\d{4})\)(?:\s+\(([^)]*)\))?(?=\s*\d+(?:\.\d+)?\s+|$)/g)
-  );
-
-  const parsed = entries
-    .map((match) => {
-      const bookNumber = Number(match[1]);
-      if (!Number.isFinite(bookNumber)) return null;
-
-      return {
-        bookNumber,
-        title: String(match[2] || "").trim(),
-        publicationYear: Number(match[3]) || null,
-        note: String(match[4] || "").trim() || null,
-      };
-    })
-    .filter((value): value is { bookNumber: number; title: string; publicationYear: number | null; note: string | null } => Boolean(value));
-
-  const deduped = new Map<number, { bookNumber: number; title: string; publicationYear: number | null; note: string | null }>();
-  for (const entry of parsed) {
-    deduped.set(entry.bookNumber, entry);
-  }
-
-  return Array.from(deduped.values()).sort((a, b) => a.bookNumber - b.bookNumber);
-}
-
 function hasUpcomingBookSignals(book: BookRecord) {
   const status = String(book.read_status || "").trim().toLowerCase();
   if (status === "upcoming" || status === "tbr" || status === "to be read") {
@@ -507,10 +394,6 @@ function hasUpcomingBookSignals(book: BookRecord) {
   }
 
   return false;
-}
-
-function isGhostBookRecord(book: BookRecord): boolean {
-  return Boolean(book?.is_missing || book?.is_upcoming_auto || book?.is_upcoming_final);
 }
 
 function isFutureDate(value?: string | null): boolean {
@@ -573,37 +456,6 @@ function getStatusChipClass(status: string) {
   return "inline-flex rounded-full border border-rose-300 bg-rose-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-rose-800";
 }
 
-
-function normalizeSuggestedTitle(rawTitle: string, fallbackBookNumber?: string): string {
-  let title = String(rawTitle || "").trim();
-  if (!title && fallbackBookNumber) {
-    return `Book ${fallbackBookNumber}`;
-  }
-
-  // Remove common storefront/media suffix noise.
-  title = title.replace(/\s+ebook\s*$/i, "");
-  title = title.replace(/\s*\(unabridged\)\s*$/i, "");
-  title = title.replace(/\s*\([^)]*\bbook\s*\d+[^)]*\)\s*$/i, "");
-  title = title.replace(/:\s*unbound\s*,?\s*book\s*\d+.*$/i, "");
-  title = title.replace(/:\s*book\s*\d+.*$/i, "");
-  title = title.replace(/\s*,\s*book\s*\d+.*$/i, "");
-
-  // Some store results use "Series Name - Author List" as the title.
-  if (/\s-\s/.test(title) && /,/.test(title) && !/\bby\b/i.test(title)) {
-    const [left, right] = title.split(/\s-\s/, 2);
-    const rightLooksLikeAuthorList = /^[A-Za-z.'\-\s,]+$/.test(right || "") && /,/.test(right || "");
-    if (left?.trim() && rightLooksLikeAuthorList) {
-      title = left.trim();
-    }
-  }
-
-  // Trim review/blog attribution tails: " - Author Name".
-  if (/\s-\s/i.test(title) && /\bby\b/i.test(title)) {
-    title = title.split(/\s-\s/i)[0].trim();
-  }
-
-  return title || (fallbackBookNumber ? `Book ${fallbackBookNumber}` : "Untitled");
-}
 
 function escapeRegExp(value: string): string {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -812,88 +664,6 @@ function shouldExcludeUpcomingBySpec(book: BookRecord): boolean {
   return parsedDate > today;
 }
 
-function inferSeriesTitleSuffix(books: BookRecord[]): string | null {
-  const suffixCounts: Record<string, number> = {};
-  const suffixDisplay: Record<string, string> = {};
-
-  for (const book of books || []) {
-    const title = String(book?.title || "").trim();
-    const match = title.match(/^([^:]+):\s*(.+)$/);
-    if (!match) continue;
-
-    let suffix = match[2].trim();
-    suffix = suffix.replace(/\s*\([^)]*\bbook\s*\d+[^)]*\)\s*$/i, "").trim();
-    if (!suffix) continue;
-
-    const key = suffix.toLowerCase();
-    suffixCounts[key] = (suffixCounts[key] || 0) + 1;
-    if (!suffixDisplay[key]) {
-      suffixDisplay[key] = suffix;
-    }
-  }
-
-  const ranked = Object.entries(suffixCounts).sort((a, b) => b[1] - a[1]);
-  if (!ranked.length) return null;
-
-  const [bestKey, bestCount] = ranked[0];
-  if (bestCount < 2) return null;
-
-  return suffixDisplay[bestKey] || null;
-}
-
-function inferSingleWordStemPreference(books: BookRecord[]): boolean {
-  const stems: string[] = [];
-  for (const book of books || []) {
-    const title = String(book?.title || "").trim();
-    if (!title) continue;
-    const stem = title.split(":")[0].trim();
-    if (stem) stems.push(stem);
-  }
-  if (stems.length < 3) {
-    return false;
-  }
-
-  const singleWordCount = stems.filter((stem) => stem.split(/\s+/).length === 1).length;
-  return singleWordCount / stems.length >= 0.7;
-}
-
-function canonicalizeSuggestionTitle(
-  rawTitle: string,
-  fallbackBookNumber: string | undefined,
-  books: BookRecord[],
-  seriesName?: string,
-): string {
-  let cleaned = normalizeSuggestedTitle(rawTitle, fallbackBookNumber);
-
-  // Trim noisy tails from review/blog style titles.
-  cleaned = cleaned.replace(/\s*-\s*unbound\s*#\d+.*$/i, "").trim();
-  cleaned = cleaned.replace(/\s*\|\s*book\s*\d+.*$/i, "").trim();
-  cleaned = cleaned.replace(/\s*\(unbound\s*book\s*\d+\)\s*$/i, "").trim();
-  cleaned = cleaned.replace(/\s+one\s+city\s+saved.*$/i, "").trim();
-
-  const suffix = inferSeriesTitleSuffix(books);
-  const preferSingleWordStem = inferSingleWordStemPreference(books);
-  if (preferSingleWordStem && !cleaned.includes(":")) {
-    const firstWord = cleaned.split(/\s+/)[0]?.trim();
-    if (firstWord) {
-      cleaned = firstWord;
-    }
-  }
-
-  if (suffix && !cleaned.includes(":")) {
-    cleaned = `${cleaned}: ${suffix}`;
-  }
-
-  const hasBookTag = /\([^)]*\bbook\s*\d+[^)]*\)/i.test(cleaned);
-  const bookNumber = fallbackBookNumber ? String(fallbackBookNumber).trim() : "";
-  const safeSeriesName = String(seriesName || "").trim();
-  if (!hasBookTag && bookNumber && safeSeriesName) {
-    cleaned = `${cleaned} (${safeSeriesName} Book ${bookNumber})`;
-  }
-
-  return cleaned;
-}
-
 function sortBooksBySeriesOrder(books: BookRecord[]): BookRecord[] {
   return [...books].sort((a, b) => {
     const aNum = Number(a?.book_number ?? a?.series_order ?? 0);
@@ -925,10 +695,6 @@ export default function SeriesDetailPage() {
   const [seriesCheckProgress, setSeriesCheckProgress] = useState(0);
   const [seriesCheckCurrentPass, setSeriesCheckCurrentPass] = useState<string | null>(null);
   const [seriesCheckStillChecking, setSeriesCheckStillChecking] = useState(false);
-  const [deleteGhostSaving, setDeleteGhostSaving] = useState(false);
-  const [releaseIntelText, setReleaseIntelText] = useState("");
-  const [releaseIntelSaving, setReleaseIntelSaving] = useState(false);
-  const [releaseIntelMessage, setReleaseIntelMessage] = useState<string | null>(null);
   const [addBookDialogOpen, setAddBookDialogOpen] = useState(false);
   const [addBookSaving, setAddBookSaving] = useState(false);
   const [addBookTitle, setAddBookTitle] = useState("");
@@ -941,13 +707,7 @@ export default function SeriesDetailPage() {
   const [normalizeCustomPattern, setNormalizeCustomPattern] = useState("{book_title} ({series_name} Book {book_number})");
   const [normalizeCustomPreset, setNormalizeCustomPreset] = useState<CustomTitlePatternPresetId>("book_title_series_suffix");
   const [normalizeExcludeUpcoming, setNormalizeExcludeUpcoming] = useState(true);
-  const [releaseIntelDialogOpen, setReleaseIntelDialogOpen] = useState(false);
   const [normalizeTitlesDialogOpen, setNormalizeTitlesDialogOpen] = useState(false);
-  const [knownTotalDraft, setKnownTotalDraft] = useState("");
-  const [knownTotalSaving, setKnownTotalSaving] = useState(false);
-  const [knownSeriesListDialogOpen, setKnownSeriesListDialogOpen] = useState(false);
-  const [knownSeriesListText, setKnownSeriesListText] = useState("");
-  const [knownSeriesListSaving, setKnownSeriesListSaving] = useState(false);
   const [deleteSeriesSaving, setDeleteSeriesSaving] = useState(false);
   const [editBookDialogOpen, setEditBookDialogOpen] = useState(false);
   const [savingEditBook, setSavingEditBook] = useState(false);
@@ -1167,11 +927,6 @@ export default function SeriesDetailPage() {
 
   useEffect(() => {
     if (!series) return;
-    setKnownTotalDraft(series.total_books ? String(series.total_books) : "");
-  }, [series?.id, series?.total_books]);
-
-  useEffect(() => {
-    if (!series) return;
     const storedMode = series.title_normalization_mode_override;
     setNormalizeWizardMode(isTitleNormalizationMode(storedMode) ? storedMode : "keep_original");
   }, [series?.id, series?.title_normalization_mode_override]);
@@ -1245,7 +1000,6 @@ export default function SeriesDetailPage() {
   const readCount = books.filter((book) => book.is_read).length;
   const upcomingCount = books.filter((book) => getBookStatus(book) === "upcoming").length;
   const unreadCount = books.filter((book) => !book.is_read).length;
-  const ghostCount = books.filter((book) => isGhostBookRecord(book)).length;
   const maxBookNumber = books.reduce((max: number, book) => {
     const num = Number(book.book_number);
     return Number.isFinite(num) ? Math.max(max, num) : max;
@@ -1496,113 +1250,44 @@ export default function SeriesDetailPage() {
     }
   }
 
-  async function handleDeleteGhostBooks() {
+  function handleSeriesRecap() {
     if (!series) return;
 
-    const ghostBooks = books.filter(isGhostBookRecord);
-    if (!ghostBooks.length) {
-      alert("No ghost books to delete.");
+    const activeBooks = books.filter((book) => String(book?.record_status || "active").toLowerCase() !== "deleted");
+    const readBooks = activeBooks
+      .filter((book) => Boolean(book.is_read) || String(book.read_status || "").trim().toLowerCase() === "read")
+      .map((book) => ({
+        number: Number(book.book_number ?? book.series_order ?? NaN),
+        title: String(book.title || "").trim(),
+      }))
+      .filter((book) => Number.isFinite(book.number) && book.title)
+      .sort((a, b) => a.number - b.number);
+
+    if (readBooks.length === 0) {
+      alert("No books marked as read yet in this series -- nothing to recap.");
       return;
     }
 
-    const confirmed = window.confirm(
-      `Delete ${ghostBooks.length} ghost book${ghostBooks.length === 1 ? "" : "s"}? This keeps them permanently removed from check-for-new.`
-    );
-    if (!confirmed) {
-      return;
-    }
+    const lastBook = readBooks[readBooks.length - 1];
+    const earlierBooks = readBooks.slice(0, -1);
+    const author = series.author ? ` by ${series.author}` : "";
 
-    setDeleteGhostSaving(true);
-    try {
-      const response = await fetchApiWithFallback(`/series/${series.id}/delete_ghost_books`, {
-        method: "POST",
-      });
+    const promptParts = [
+      `I'm reading the "${series.name}" series${author}. I just finished book ${lastBook.number}: "${lastBook.title}".`,
+      "Give me a paragraph-length recap of that book covering the major plot events, character developments, " +
+        "and any unresolved threads -- enough detail to remind me exactly where the story left off.",
+    ];
 
-      if (!response.ok) {
-        throw new Error(`Failed to delete ghost books (${response.status})`);
-      }
-
-      const result = await response.json();
-      const deletedBooks = Array.isArray(result?.deleted_books) ? result.deleted_books : [];
-      const deletedIds = new Set<number>(
-        deletedBooks
-          .map((entry: { id?: unknown }) => Number(entry?.id))
-          .filter((value: number) => Number.isFinite(value))
+    if (earlierBooks.length > 0) {
+      const earlierList = earlierBooks.map((book) => `Book ${book.number}: "${book.title}"`).join("; ");
+      promptParts.push(
+        "Then give a brief, high-level summary (1-2 sentences each) of the earlier books in reading order, " +
+          `just enough to jog my memory on major plot threads and character arcs: ${earlierList}.`
       );
-
-      setSeries((prev) => {
-        if (!prev || !Array.isArray(prev.books)) return prev;
-        return {
-          ...prev,
-          books: prev.books.filter((book) => !deletedIds.has(Number(book.id))),
-        };
-      });
-
-      for (const ghostBook of ghostBooks) {
-        if (!deletedIds.has(Number(ghostBook.id))) {
-          continue;
-        }
-        publishBookStatusUpdate({
-          id: Number(ghostBook.id),
-          record_status: "deleted",
-          series_id: series.id,
-        });
-      }
-
-      await refreshSeriesFromApi();
-      const deletedCount = Number(result?.deleted_count || deletedIds.size || 0);
-      const summary = `Deleted ${deletedCount} ghost book${deletedCount === 1 ? "" : "s"}.`;
-      flashAddedMessage(summary);
-      toast({ title: "Ghost cleanup complete", description: summary });
-    } catch (error) {
-      console.error(error);
-      alert(error instanceof Error ? error.message : "Unable to delete ghost books right now.");
-    } finally {
-      setDeleteGhostSaving(false);
-    }
-  }
-
-  async function handleSaveKnownTotal() {
-    if (!series) return;
-
-    const parsed = Number(knownTotalDraft);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
-      alert("Known total must be a positive number.");
-      return;
     }
 
-    setKnownTotalSaving(true);
-    try {
-      const response = await fetchApiWithFallback(`/series/${series.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: series.name,
-          author: series.author || undefined,
-          description: series.description || undefined,
-          genre: series.genre || undefined,
-          tags: series.tags || undefined,
-          total_books: parsed,
-          series_status: series.series_status || "ongoing",
-          next_unread_book_number: series.next_unread_book_number ?? undefined,
-          next_upcoming_book_number: series.next_upcoming_book_number ?? undefined,
-          missing_books: series.missing_books ?? undefined,
-          is_finished: series.is_finished ?? false,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to save known total (${response.status})`);
-      }
-
-      await refreshSeriesFromApi();
-      flashAddedMessage(`Saved known total of ${parsed}.`);
-    } catch (error) {
-      console.error(error);
-      alert(error instanceof Error ? error.message : "Unable to save known total.");
-    } finally {
-      setKnownTotalSaving(false);
-    }
+    const url = `https://chatgpt.com/?q=${encodeURIComponent(promptParts.join(" "))}`;
+    window.open(url, "_blank", "noopener,noreferrer");
   }
 
   async function handleDeleteSeriesWithBooks() {
@@ -1654,151 +1339,6 @@ export default function SeriesDetailPage() {
     }
   }
 
-  async function handleApplyKnownSeriesList() {
-    if (!series) return;
-
-    const parsedEntries = parseKnownSeriesListText(knownSeriesListText);
-    if (!parsedEntries.length) {
-      alert("I could not parse numbered entries like '53 Forgotten In Death (2021)'.");
-      return;
-    }
-
-    setKnownSeriesListSaving(true);
-    try {
-      const existingBooks: BookRecord[] = Array.isArray(series.books) ? series.books : [];
-      const payloadEntries = parsedEntries.map((entry) => ({
-        ...entry,
-        title: canonicalizeSuggestionTitle(
-          entry.title,
-          String(entry.bookNumber),
-          existingBooks,
-          series.name,
-        ),
-      }));
-
-      const response = await fetchApiWithFallback(`/series/${series.id}/apply_known_list`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ entries: payloadEntries }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to apply known series list (${response.status})`);
-      }
-
-      const result = await response.json();
-
-      await refreshSeriesFromApi();
-      setKnownSeriesListDialogOpen(false);
-      setKnownSeriesListText("");
-      flashAddedMessage(`Applied known series list: created ${result.created}, updated ${result.updated}.`);
-    } catch (error) {
-      console.error(error);
-      alert(error instanceof Error ? error.message : "Unable to apply known series list.");
-    } finally {
-      setKnownSeriesListSaving(false);
-    }
-  }
-
-  async function handleApplyReleaseIntel() {
-    if (!series) return;
-
-    const parsedEntries = parseReleaseIntelText(releaseIntelText);
-    if (!parsedEntries.length) {
-      alert("I could not detect entries like 'Book 11 (Title)', 'Book 11: Title', or 'Book 11 ... releases on Month Day, Year'.");
-      return;
-    }
-
-    setReleaseIntelSaving(true);
-    setReleaseIntelMessage(null);
-
-    try {
-      let created = 0;
-      let updated = 0;
-
-      const existingBooks: BookRecord[] = Array.isArray(series?.books) ? series.books : [];
-
-      for (const entry of parsedEntries) {
-        const existing = existingBooks.find((book) => Number(book?.book_number) === entry.bookNumber);
-        const authorValue = String(series?.author || existing?.author || "Unknown author").trim();
-        const normalizedTitle = canonicalizeSuggestionTitle(
-          entry.title,
-          String(entry.bookNumber),
-          existingBooks,
-          series?.name,
-        );
-
-        if (existing?.id) {
-          const response = await fetchApiWithFallback(`/books/${existing.id}`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              title: normalizedTitle,
-              author: authorValue,
-              is_read: false,
-              read_status: "upcoming",
-              release_date: entry.releaseDate || undefined,
-              publication_date: entry.releaseDate || undefined,
-            }),
-          });
-
-          if (!response.ok) {
-            throw new Error(`Failed to update book #${entry.bookNumber}`);
-          }
-          updated += 1;
-        } else {
-          const response = await fetchApiWithFallback("/books/", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              title: normalizedTitle,
-              author: authorValue,
-              series_id: Number(series.id),
-              series_order: entry.bookNumber,
-              book_number: entry.bookNumber,
-              is_read: false,
-              read_status: "upcoming",
-              release_date: entry.releaseDate || undefined,
-              publication_date: entry.releaseDate || undefined,
-            }),
-          });
-
-          if (!response.ok) {
-            throw new Error(`Failed to create book #${entry.bookNumber}`);
-          }
-          created += 1;
-        }
-      }
-
-      await fetchApiWithFallback(`/series/${series.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: series.name,
-          author: series.author || undefined,
-          description: series.description || undefined,
-          genre: series.genre || undefined,
-          tags: series.tags || undefined,
-          total_books: series.total_books ?? totalBooks,
-          series_status: "ongoing",
-          next_unread_book_number: series.next_unread_book_number ?? undefined,
-          next_upcoming_book_number: series.next_upcoming_book_number ?? undefined,
-          missing_books: series.missing_books ?? undefined,
-          is_finished: false,
-        }),
-      });
-
-      await refreshSeriesFromApi();
-      setReleaseIntelMessage(`Applied release intel: created ${created}, updated ${updated}.`);
-      setReleaseIntelText("");
-    } catch (error) {
-      console.error(error);
-      const message = error instanceof Error ? error.message : "Unable to apply release intel.";
-      alert(message);
-    } finally {
-      setReleaseIntelSaving(false);
-    }
-  }
 
   async function handleEditBookTitle(book: BookRecord) {
     const status = (getBookStatus(book) as "unread" | "upcoming" | "available" | "read") || "unread";
@@ -2385,14 +1925,10 @@ export default function SeriesDetailPage() {
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => void handleDeleteGhostBooks()}
-                disabled={deleteGhostSaving || ghostCount <= 0}
+                onClick={handleSeriesRecap}
+                title="Opens ChatGPT in a new tab with a pre-filled recap prompt for this series"
               >
-                {deleteGhostSaving
-                  ? "Deleting ghosts..."
-                  : ghostCount > 0
-                    ? `Delete Ghost Books (${ghostCount})`
-                    : "Delete Ghost Books"}
+                Series Recap
               </Button>
               {seriesCheckLoading ? (
                 <div className="flex min-w-[240px] items-center gap-2 rounded border bg-background px-2 py-1 text-xs">
@@ -2415,39 +1951,12 @@ export default function SeriesDetailPage() {
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => setReleaseIntelDialogOpen(true)}
-              >
-                Paste Series Intel
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
                 onClick={() => {
                   setNormalizeWizardMode(seriesNormalizationMode);
                   setNormalizeTitlesDialogOpen(true);
                 }}
               >
                 Normalize Titles
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setKnownSeriesListDialogOpen(true)}
-              >
-                Apply Known Series List
-              </Button>
-              <label htmlFor="known-total-books" className="text-xs text-muted-foreground">Known total</label>
-              <input
-                id="known-total-books"
-                value={knownTotalDraft}
-                onChange={(event) => setKnownTotalDraft(event.target.value)}
-                placeholder="e.g. 64"
-                className="h-8 w-24 rounded border bg-background px-2 text-xs"
-              />
-              <Button type="button" variant="outline" size="sm" onClick={handleSaveKnownTotal} disabled={knownTotalSaving}>
-                {knownTotalSaving ? "Saving..." : "Save total"}
               </Button>
             </div>
           </div>
@@ -2519,28 +2028,19 @@ export default function SeriesDetailPage() {
         </div>
       ) : null}
 
-      <div className="flex justify-end">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <label htmlFor="series-books-sort">Sort</label>
-          <select
-            id="series-books-sort"
-            aria-label="Sort books"
-            value={bookSortMode}
-            onChange={(event) => setBookSortMode(event.target.value as "series" | "az")}
-            className="h-7 rounded-md border bg-background px-2 text-[11px] font-normal"
-          >
-            <option value="series">Series order</option>
-            <option value="az">Title A to Z</option>
-          </select>
-        </div>
-      </div>
-
       <div ref={booksTableWrapRef} className="overflow-x-auto rounded-lg border bg-card/80">
       <Table className="w-full table-fixed">
         <TableHeader>
           <TableRow>
             <TableHead className="relative" style={{ width: `${columnWidths.title}%` }}>
-              Title
+              <button
+                type="button"
+                onClick={() => setBookSortMode("az")}
+                className="cursor-pointer select-none hover:underline"
+                title="Sort by title, A to Z"
+              >
+                Title{bookSortMode === "az" ? " \u25B2" : ""}
+              </button>
               <button
                 type="button"
                 aria-label="Resize Title column"
@@ -2576,7 +2076,14 @@ export default function SeriesDetailPage() {
               />
             </TableHead>
             <TableHead className="relative" style={{ width: `${columnWidths.bookNumber}%` }}>
-              Book #
+              <button
+                type="button"
+                onClick={() => setBookSortMode("series")}
+                className="cursor-pointer select-none hover:underline"
+                title="Sort by series order"
+              >
+                Book #{bookSortMode === "series" ? " \u25B2" : ""}
+              </button>
               <button
                 type="button"
                 aria-label="Resize Book number column"
@@ -2914,43 +2421,6 @@ export default function SeriesDetailPage() {
       </Dialog>
 
       <Dialog
-        open={releaseIntelDialogOpen}
-        onOpenChange={setReleaseIntelDialogOpen}
-      >
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Paste Release Intel</DialogTitle>
-            <DialogDescription>
-              Paste Google results text. Entries like &quot;Book 12: Unique&quot; and dates like &quot;August 3rd, 2026&quot; are parsed automatically.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-2">
-            <textarea
-              value={releaseIntelText}
-              onChange={(event) => setReleaseIntelText(event.target.value)}
-              placeholder="Paste release summary text..."
-              className="min-h-40 w-full rounded border bg-white px-2 py-2 text-xs"
-            />
-            {releaseIntelMessage ? (
-              <p className="text-xs text-blue-900">{releaseIntelMessage}</p>
-            ) : null}
-          </div>
-
-          <DialogFooter showCloseButton>
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={handleApplyReleaseIntel}
-              disabled={releaseIntelSaving}
-            >
-              {releaseIntelSaving ? "Applying…" : "Apply Release Intel"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
         open={normalizeTitlesDialogOpen}
         onOpenChange={setNormalizeTitlesDialogOpen}
       >
@@ -3088,40 +2558,6 @@ export default function SeriesDetailPage() {
               disabled={titleNormalizeSaving || titleNormalizationApplicablePreview.length === 0}
             >
               {titleNormalizeSaving ? "Applying..." : `Accept Changes (${titleNormalizationApplicablePreview.length})`}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={knownSeriesListDialogOpen}
-        onOpenChange={setKnownSeriesListDialogOpen}
-      >
-        <DialogContent className="sm:max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>Apply Known Series List</DialogTitle>
-            <DialogDescription>
-              Paste numbered entries such as &quot;53 Forgotten In Death (2021)&quot;. This will create or update books in the current series and set the known total from the highest whole-numbered entry.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-2">
-            <textarea
-              value={knownSeriesListText}
-              onChange={(event) => setKnownSeriesListText(event.target.value)}
-              placeholder="Paste the known series list here..."
-              className="min-h-56 w-full rounded border bg-white px-2 py-2 text-xs"
-            />
-          </div>
-
-          <DialogFooter showCloseButton>
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={handleApplyKnownSeriesList}
-              disabled={knownSeriesListSaving}
-            >
-              {knownSeriesListSaving ? "Applying..." : "Apply Known List"}
             </Button>
           </DialogFooter>
         </DialogContent>

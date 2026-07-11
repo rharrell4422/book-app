@@ -104,26 +104,59 @@ def normalize_text(value: str | None) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def _title_core_segment(raw: str) -> str:
+    # ':', '(' and ',' are the three separators commonly used to introduce a
+    # subtitle/series-suffix ("Title: subtitle", "Title (Series Book N)",
+    # "Title, A Series Short Story"). Splitting on whichever comes first
+    # gives a stable "core title" across differently-formatted sources --
+    # e.g. Hardcover's "Havoc in the Deathyards, A Completionist Chronicles
+    # Short Story" vs OpenLibrary's bare "Havoc in the Deathyards" both
+    # reduce to "havoc in the deathyards". A few owned titles use a comma as
+    # part of the actual title itself (e.g. "2 Lies, 2 Thrones", "Arisen,
+    # Book Two - ..."), which this over-truncates -- but core_title_key
+    # folds the book number (parsed from the *full* raw title, not the
+    # truncated core) back in, which still keeps same-series siblings
+    # distinct, and bare_title_key is only trusted when its result is
+    # unique across the owned catalog. Both safeguards absorb this.
+    return re.split(r"[:,(]", raw, maxsplit=1)[0]
+
+
 def core_title_key(title: str | None) -> str:
     """Titles in this app's library are often stored as
     "Core Title: (Series Name Book N)" while API results are usually just
-    the bare "Core Title". Comparing on the text before the first ':' or
-    '(' gives a stable identity key across both shapes -- *except* for
-    series that name every entry "<Series Name> (Volume N): <subtitle>" or
-    similar, where the volume number itself lives inside that first
-    "(...)"/":" segment. Truncating there would make every volume collapse
+    the bare "Core Title". Comparing on the text before the first subtitle
+    separator gives a stable identity key across both shapes -- *except*
+    for series that name every entry "<Series Name> (Volume N): <subtitle>"
+    or similar, where the volume number itself lives inside that first
+    separated segment. Truncating there would make every volume collapse
     to the exact same key (e.g. book 1 and book 4 both becoming just
     "1 lifesteal"), making it impossible to ever recognize a new volume as
     distinct from an owned one. To avoid that, fold any book/volume number
     found anywhere in the title into the key.
     """
     raw = str(title or "")
-    core = re.split(r"[:(]", raw, maxsplit=1)[0]
-    normalized_core = normalize_text(core)
+    normalized_core = normalize_text(_title_core_segment(raw))
     number = infer_number_from_title(raw)
     if number:
         return f"{normalized_core} {number}"
     return normalized_core
+
+
+def bare_title_key(title: str | None) -> str:
+    """Like core_title_key, but never folds in a book/volume number -- used
+    as a fallback identity signal for candidates whose title carries no
+    parseable number at all (e.g. a search result that comes back as just
+    the bare book title "Crown" with no "(Series Book 9)" suffix and no
+    other number hint). core_title_key can't recognize that as the already-
+    owned "Crown: A LitRPG: (Unbound Book 9)" since one side folds in "9"
+    and the other has no number to fold in. Callers should only trust this
+    as an identity match when the candidate's own inferred number is empty
+    (i.e. there's nothing more specific to compare) AND the bare key is
+    unique across the owned catalog (so it can't conflate two different,
+    numbered volumes that happen to share a one-word core title).
+    """
+    raw = str(title or "")
+    return normalize_text(_title_core_segment(raw))
 
 
 _WORD_NUMBERS = {

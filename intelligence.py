@@ -59,7 +59,12 @@ def _extract_series_position(text: str | None) -> int | None:
         return None
 
 
-def lookup_book_summary(title: str, author: str | None = None) -> dict:
+def lookup_book_summary(
+    title: str,
+    author: str | None = None,
+    book_number=None,
+    series_name: str | None = None,
+) -> dict:
     if not title:
         return {
             "found": False,
@@ -68,6 +73,13 @@ def lookup_book_summary(title: str, author: str | None = None) -> dict:
             "matched_title": None,
             "matched_author": None,
         }
+
+    expected_number = None
+    if book_number is not None:
+        try:
+            expected_number = int(float(book_number))
+        except (TypeError, ValueError):
+            expected_number = None
 
     def build_lookup_queries(raw_title: str) -> list[str]:
         queries: list[str] = []
@@ -128,28 +140,42 @@ def lookup_book_summary(title: str, author: str | None = None) -> dict:
 
             for result in google_results:
                 description = result.get("description")
-                if description:
-                    return result_payload(
-                        {
-                            "description": description,
-                            "source_url": result.get("source_url"),
-                            "title": result.get("title"),
-                            "author": ", ".join(result.get("authors") or []) or None,
-                        },
-                        author_candidate,
-                    )
+                if not description:
+                    continue
 
-            if not best_fallback and google_results:
-                first = google_results[0]
-                best_fallback = result_payload(
+                result_title = result.get("title")
+                result_number = discovery_engine.infer_number_from_title(result_title, series_name)
+
+                # Google's intitle: search is a relevance-ranked text match, not
+                # an exact-phrase lookup -- it doesn't reliably rank the exact
+                # volume first. Regression: a book-1 lookup for "1% Lifesteal"
+                # got Google's "Volume 4" result back (ranked above the real
+                # "Book one" match) purely because it happened to rank higher,
+                # silently attaching book 4's summary to book 1. When we know
+                # which book number we're after and a result's title clearly
+                # identifies itself as a *different* number, it can never be
+                # right -- skip it outright regardless of rank.
+                if expected_number is not None and result_number is not None and result_number != expected_number:
+                    continue
+
+                payload = result_payload(
                     {
-                        "description": first.get("description"),
-                        "source_url": first.get("source_url"),
-                        "title": first.get("title"),
-                        "author": ", ".join(first.get("authors") or []) or None,
+                        "description": description,
+                        "source_url": result.get("source_url"),
+                        "title": result_title,
+                        "author": ", ".join(result.get("authors") or []) or None,
                     },
                     author_candidate,
                 )
+
+                if expected_number is None or result_number == expected_number:
+                    return payload
+
+                # result_number is None -- an ambiguous result with no
+                # parseable number of its own. Only usable as a last-resort
+                # fallback if nothing confidently-numbered ever turns up.
+                if not best_fallback:
+                    best_fallback = payload
 
     if best_fallback:
         return best_fallback

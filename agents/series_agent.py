@@ -126,6 +126,26 @@ def _title_pattern_match(title: str, series_name: str, known_series_titles: set[
     return False
 
 
+def _title_references_series(title: str, series_name: str) -> bool:
+    """Whether a title textually identifies the series it belongs to --
+    used to decide whether we need to append a "(Series Name Book N)"
+    suffix ourselves. Some sources (notably Hardcover, which tracks series
+    position as structured data rather than embedding it in the title
+    string) return clean, bare titles like "Unmapped" with no series name
+    or book number anywhere in the text, which makes an added book hard to
+    recognize as part of the series it was found for.
+    """
+    title_norm = _normalize_title_text(title)
+    series_norm = _normalize_title_text(series_name)
+    if not title_norm or not series_norm:
+        return False
+    if series_norm in title_norm:
+        return True
+    title_tokens = _token_set(title_norm)
+    series_tokens = _token_set(series_norm)
+    return _token_overlap_ratio(title_tokens, series_tokens) >= 0.75 and len(title_tokens & series_tokens) >= 2
+
+
 def _partial_series_match(title: str, series_name: str) -> bool:
     title_tokens = _token_set(title)
     target_tokens = _token_set(series_name)
@@ -144,9 +164,10 @@ def _build_known_title_number_keys(books: list[Book]) -> set[str]:
     return keys
 
 
-def _build_series_identity_sets(books: list[Book]) -> tuple[set[str], set[str]]:
+def _build_series_identity_sets(books: list[Book]) -> tuple[set[str], set[str], set[str]]:
     known_series_titles: set[str] = set()
     known_series_numbers: set[str] = set()
+    bare_title_counts: dict[str, int] = {}
     for book in books:
         title_key = discovery_engine.core_title_key(book.title)
         number = _normalize_identity_number(book.book_number)
@@ -154,18 +175,29 @@ def _build_series_identity_sets(books: list[Book]) -> tuple[set[str], set[str]]:
             known_series_titles.add(title_key)
         if number:
             known_series_numbers.add(number)
-    return known_series_titles, known_series_numbers
+
+        bare_key = discovery_engine.bare_title_key(book.title)
+        if bare_key:
+            bare_title_counts[bare_key] = bare_title_counts.get(bare_key, 0) + 1
+
+    # Only trust a bare (number-less) title as an identity signal when it's
+    # unique across the owned catalog -- otherwise a one-word title shared
+    # by two different numbered volumes could get conflated.
+    known_bare_titles = {key for key, count in bare_title_counts.items() if count == 1}
+    return known_series_titles, known_series_numbers, known_bare_titles
 
 
 def _is_known_candidate(
     *,
     isbn13: str,
     title_key: str,
+    bare_title_key: str,
     normalized_number: str,
     known_series_isbns: set[str],
     known_series_titles: set[str],
     known_series_numbers: set[str],
     known_title_number_keys: set[str],
+    known_bare_titles: set[str],
 ) -> bool:
     if isbn13 and isbn13 in known_series_isbns:
         return True
@@ -177,6 +209,13 @@ def _is_known_candidate(
     # without a title match -- owned titles vary a lot in formatting, but
     # the position within the series is a reliable, stable identity signal.
     if normalized_number and normalized_number in known_series_numbers:
+        return True
+    # Fallback for candidates with no parseable number at all (e.g. a bare
+    # search-result title like "Crown" with no "(Series Book 9)" suffix):
+    # core_title_key can't match it against the number-bearing owned key,
+    # so fall back to the number-less title alone when it uniquely
+    # identifies one owned book.
+    if not normalized_number and bare_title_key and bare_title_key in known_bare_titles:
         return True
     return False
 
@@ -290,7 +329,7 @@ class SeriesIntelligenceAgent:
                     log_discovery_summary(result=result, terminal_error="series-missing-author")
                 return result
 
-            known_series_titles, known_series_numbers = _build_series_identity_sets(active_series_books)
+            known_series_titles, known_series_numbers, known_bare_titles = _build_series_identity_sets(active_series_books)
             known_title_number_keys = _build_known_title_number_keys(active_series_books)
             known_series_isbns = {
                 str(book.isbn13 or "").strip() for book in active_series_books if str(book.isbn13 or "").strip()
@@ -384,14 +423,37 @@ class SeriesIntelligenceAgent:
                 already_known = _is_known_candidate(
                     isbn13=isbn13,
                     title_key=title_key,
+                    bare_title_key=discovery_engine.bare_title_key(title),
                     normalized_number=resolved_number,
                     known_series_isbns=known_series_isbns,
                     known_series_titles=known_series_titles,
                     known_series_numbers=known_series_numbers,
                     known_title_number_keys=known_title_number_keys,
+                    known_bare_titles=known_bare_titles,
                 )
                 if already_known:
                     continue
+
+                # Different providers can return the same real book under
+                # differently-formatted titles within a *single* check run
+                # (e.g. Hardcover's "Havoc in the Deathyards, A
+                # Completionist Chronicles Short Story" vs OpenLibrary's
+                # bare "Havoc in the Deathyards") -- growing these sets as
+                # candidates get accepted lets the identity check above
+                # catch that on the very next candidate, the same way it
+                # catches matches against pre-existing owned books.
+                if isbn13:
+                    known_series_isbns.add(isbn13)
+                if title_key:
+                    known_series_titles.add(title_key)
+                if title_key and resolved_number:
+                    known_title_number_keys.add(f"{title_key}|{resolved_number}")
+                if resolved_number:
+                    known_series_numbers.add(resolved_number)
+                if not resolved_number:
+                    candidate_bare_key = discovery_engine.bare_title_key(title)
+                    if candidate_bare_key:
+                        known_bare_titles.add(candidate_bare_key)
 
                 parsed_date = discovery_engine.parse_flexible_date(raw.get("published_date"))
                 # Hardcover explicitly flags books it knows aren't out yet
@@ -401,8 +463,17 @@ class SeriesIntelligenceAgent:
                     parsed_date is None and raw.get("upcoming_hint")
                 )
 
+                # Give the stored title a recognizable series suffix when
+                # the source didn't provide one (see _title_references_series)
+                # so it's obvious at a glance which series/position a newly
+                # added book belongs to, instead of a bare title like
+                # "Unmapped" that could be mistaken for an unrelated find.
+                display_title = title
+                if inferred_number and not _title_references_series(title, series.name):
+                    display_title = f"{title}: ({series.name} Book {inferred_number})"
+
                 canonical = {
-                    "title": title,
+                    "title": display_title,
                     "author": series.author,
                     "series_name": series.name,
                     "series_number": inferred_number,

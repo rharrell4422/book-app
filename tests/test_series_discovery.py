@@ -31,6 +31,24 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
         key_5 = discovery_engine.core_title_key("1% Lifesteal (Volume 5): A LitRPG Adventure")
         self.assertNotEqual(key_4, key_5)
 
+    def test_core_title_key_matches_across_comma_and_bare_subtitle_formats(self):
+        # Regression: some providers separate a short-story subtitle with a
+        # comma rather than a colon/paren (e.g. Hardcover's "..., A Series
+        # Short Story"), while others return just the bare title.
+        comma_style = "Havoc in the Deathyards, A Completionist Chronicles Short Story"
+        bare_style = "Havoc in the Deathyards"
+        self.assertEqual(discovery_engine.core_title_key(comma_style), discovery_engine.core_title_key(bare_style))
+        self.assertEqual(discovery_engine.bare_title_key(comma_style), discovery_engine.bare_title_key(bare_style))
+
+    def test_core_title_key_comma_split_still_distinguishes_numbered_siblings(self):
+        # Some owned titles use a comma as part of the title itself (not a
+        # subtitle separator), e.g. this series' convention. Splitting on
+        # the first comma over-truncates the "core", but the book number
+        # (parsed from the full raw title) still keeps siblings distinct.
+        key_9 = discovery_engine.core_title_key("Webs of Power, The Grand Game, Book 9: A Dark Fantasy LitRPG")
+        key_10 = discovery_engine.core_title_key("The Mad God, The Grand Game, Book 10: A Dark Fantasy LitRPG")
+        self.assertNotEqual(key_9, key_10)
+
     def test_infer_number_from_title_recognizes_common_patterns(self):
         self.assertEqual(discovery_engine.infer_number_from_title("Cherry Blossom Girls Book 7"), 7)
         self.assertEqual(discovery_engine.infer_number_from_title("Cherry Blossom Girls Volume 7"), 7)
@@ -307,6 +325,126 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         self.assertFalse(result["found"])
         self.assertEqual(result["available_missing"], [])
         self.assertEqual(result["upcoming_books"], [])
+
+    def test_bare_title_with_no_number_matches_owned_book_by_unique_stem(self):
+        # Regression (live bug): "Unbound" book 9 is titled "Crown: A LitRPG:
+        # (Unbound Book 9)" in the library, but Google Books surfaced it as
+        # just the bare word "Crown" -- no "Book 9" suffix, no digits at
+        # all, and no series_number_hint. core_title_key folds the "9" into
+        # the *owned* book's key ("crown 9") but has nothing to fold into
+        # the bare candidate's key ("crown"), so the two never matched and
+        # it got re-added as a live "available" duplicate of an already-read
+        # book. It should instead be recognized as already owned via the
+        # unique bare-title fallback.
+        self.db.add(
+            Book(
+                title="Crown: A LitRPG: (Cherry Blossom Girls Book 9)",
+                author="Harmon Cooper",
+                series_id=self.series.id,
+                series_order=9,
+                book_number=9.0,
+                record_status="active",
+                is_read=True,
+            )
+        )
+        self.db.commit()
+
+        candidates = [
+            {
+                "source": "google_books",
+                "source_id": "gb-crown",
+                "title": "Crown",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2020-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            }
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertFalse(result["found"])
+        self.assertEqual(result["available_missing"], [])
+        self.assertEqual(result["upcoming_books"], [])
+
+    def test_same_new_book_from_two_providers_with_different_title_formats_is_added_once(self):
+        # Regression (live bug): checking "The Completionist Chronicles"
+        # surfaced a short story that Hardcover titled "Havoc in the
+        # Deathyards, A Completionist Chronicles Short Story" and
+        # OpenLibrary titled bare "Havoc in the Deathyards" -- neither had
+        # an ISBN or a parseable book number, so both slipped through as
+        # "new" and got added as two separate duplicate library entries for
+        # the same real short story.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-havoc",
+                "title": "Havoc in the Deathyards, A Completionist Chronicles Short Story",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2022-06-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            },
+            {
+                "source": "openlibrary",
+                "source_id": "ol-havoc",
+                "title": "Havoc in the Deathyards",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2022-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            },
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertEqual(result["added_count"], 1)
+        self.assertEqual(len(result["available_missing"]), 1)
+
+    def test_bare_title_with_no_series_reference_gets_a_synthesized_suffix(self):
+        # Regression: Hardcover tracks series position as structured data
+        # rather than embedding it in the title text, so it can return a
+        # clean bare title like "Unmapped" with no series name or book
+        # number anywhere in it -- making it hard to tell at a glance that
+        # the newly added book belongs to this series at all.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-13",
+                "title": "Unmapped",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2026-01-14",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 13,
+                "upcoming_hint": False,
+            }
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertEqual(len(result["available_missing"]), 1)
+        self.assertEqual(
+            result["available_missing"][0]["title"],
+            "Unmapped: (Cherry Blossom Girls Book 13)",
+        )
 
     def test_no_author_on_file_returns_empty_result_without_calling_apis(self):
         series = Series(name="No Author Series")

@@ -53,7 +53,12 @@ def fetch_and_save_book_summary(book_id: int, db: Session = Depends(get_db)):
     if not db_book:
         raise HTTPException(status_code=404, detail="Book not found")
 
-    summary_result = lookup_book_summary(db_book.title, db_book.author)
+    series_name = None
+    if db_book.series_id is not None:
+        db_series = crud.get_series(db, db_book.series_id)
+        series_name = db_series.name if db_series else None
+
+    summary_result = lookup_book_summary(db_book.title, db_book.author, db_book.book_number, series_name)
     if summary_result.get("found") and summary_result.get("summary"):
         db_book.auto_summary = summary_result.get("summary")
         db.commit()

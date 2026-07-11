@@ -17,10 +17,6 @@ from datetime import date
 import models
 
 
-def _is_ghost_book(book: "models.Book") -> bool:
-    return bool(book.is_missing) or bool(book.is_upcoming_auto) or bool(book.is_upcoming_final)
-
-
 def _normalize_discovered_title(value: str | None) -> str:
     cleaned = re.sub(r"\s+", " ", str(value or "")).strip().lower()
     return re.sub(r"[^a-z0-9]+", "", cleaned)

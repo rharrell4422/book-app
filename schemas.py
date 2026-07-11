@@ -189,17 +189,6 @@ class AgentApproveRequest(BaseModel):
 # Series action request Schemas
 # ------------------------------------------------------------
 
-class KnownSeriesListEntry(BaseModel):
-    bookNumber: float
-    title: str
-    publicationYear: int | None = None
-    note: str | None = None
-
-
-class KnownSeriesListApplyRequest(BaseModel):
-    entries: list[KnownSeriesListEntry]
-
-
 class NormalizeTitlesRequest(BaseModel):
     normalization_mode: str
     custom_pattern: str | None = None

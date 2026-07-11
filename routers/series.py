@@ -1,10 +1,8 @@
 import logging
-import re
 from datetime import datetime
 from typing import List
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 import crud
@@ -16,7 +14,7 @@ from intelligence import (
     recalculate_series_state_for_series,
 )
 from routers.deps import get_db
-from services.identity import _is_ghost_book, _is_upcoming_future_book
+from services.identity import _is_upcoming_future_book
 from services.series_check_engine import (
     SERIES_CHECK_TIMEOUT_SECONDS,
     run_series_check_job_full,
@@ -328,170 +326,6 @@ def clear_series_new_books(series_id: int, db: Session = Depends(get_db)):
     if not db_series.is_caught_up:
         payload["message"] = "Series is not caught up yet, so the flag stays visible until all books are read and no upcoming books remain."
     return payload
-
-
-@router.post("/{series_id}/delete_ghost_books")
-def delete_series_ghost_books(series_id: int, db: Session = Depends(get_db)):
-    db_series = crud.get_series(db, series_id)
-    if not db_series:
-        raise HTTPException(status_code=404, detail="Series not found")
-
-    candidate_books = (
-        db.query(models.Book)
-        .filter(models.Book.series_id == series_id)
-        .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
-        .all()
-    )
-
-    deleted_books: list[dict] = []
-    for book in candidate_books:
-        if not _is_ghost_book(book):
-            continue
-        book.record_status = "deleted"
-        deleted_books.append(
-            {
-                "id": book.id,
-                "title": book.title,
-                "book_number": book.book_number,
-            }
-        )
-
-    if deleted_books:
-        db.commit()
-
-        # After ghost purge, sync known total to actual active catalog footprint
-        # so stale placeholder-driven totals do not survive recalc.
-        remaining_active_books = (
-            db.query(models.Book)
-            .filter(models.Book.series_id == series_id)
-            .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
-            .all()
-        )
-
-        numbered_values: list[int] = []
-        for book in remaining_active_books:
-            raw_value = book.book_number if book.book_number is not None else book.series_order
-            try:
-                numeric_value = float(raw_value)
-            except (TypeError, ValueError):
-                continue
-            if numeric_value > 0 and numeric_value.is_integer():
-                numbered_values.append(int(numeric_value))
-
-        numbered_max = max(numbered_values) if numbered_values else 0
-        db_series.total_books = max(len(remaining_active_books), numbered_max)
-        db.commit()
-
-    recalculate_intelligence(db, series_id)
-
-    return {
-        "series_id": series_id,
-        "deleted_count": len(deleted_books),
-        "deleted_books": deleted_books,
-    }
-
-
-@router.post("/{series_id}/apply_known_list")
-def apply_known_series_list(series_id: int, payload: schemas.KnownSeriesListApplyRequest, db: Session = Depends(get_db)):
-    db_series = crud.get_series(db, series_id)
-    if not db_series:
-        raise HTTPException(status_code=404, detail="Series not found")
-
-    existing_entries = (
-        db.query(models.SeriesCanonicalEntry)
-        .filter(models.SeriesCanonicalEntry.series_id == series_id)
-        .all()
-    )
-    existing_by_number = {float(entry.book_number): entry for entry in existing_entries}
-
-    created = 0
-    updated = 0
-    highest_whole_number = 0
-
-    def detect_entry_type(note: str | None, book_number: float) -> tuple[str, bool, bool]:
-        normalized_note = str(note or "").lower()
-        is_fractional = not float(book_number).is_integer()
-        is_anthology = "antholog" in normalized_note or "with " in normalized_note
-        if is_anthology:
-            return "anthology", is_fractional, True
-        if is_fractional:
-            return "novella", True, False
-        return "novel", False, False
-
-    def build_author_aliases(note: str | None) -> list[str]:
-        aliases = []
-        if db_series.author:
-            aliases.append(db_series.author)
-        normalized_note = str(note or "")
-        with_match = re.search(r"with\s+([^()]+)", normalized_note, flags=re.IGNORECASE)
-        if with_match:
-            aliases.append(with_match.group(1).strip())
-        if db_series.name.strip().lower() == "in death":
-            aliases.extend(["J.D. Robb", "Nora Roberts"])
-
-        seen: set[str] = set()
-        ordered: list[str] = []
-        for alias in aliases:
-            cleaned = str(alias or "").strip()
-            if not cleaned:
-                continue
-            key = cleaned.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            ordered.append(cleaned)
-        return ordered
-
-    for entry in payload.entries:
-        entry_number = float(entry.bookNumber)
-        existing = existing_by_number.get(entry_number)
-        title = str(entry.title).strip()
-        author_aliases = build_author_aliases(entry.note)
-        canonical_author = author_aliases[0] if author_aliases else db_series.author
-        entry_type, is_fractional, is_anthology = detect_entry_type(entry.note, entry_number)
-
-        if float(entry_number).is_integer():
-            highest_whole_number = max(highest_whole_number, int(entry_number))
-
-        if existing:
-            existing.canonical_title = title
-            existing.canonical_author = canonical_author
-            existing.publication_year = entry.publicationYear
-            existing.entry_type = entry_type
-            existing.is_fractional = is_fractional
-            existing.is_anthology = is_anthology
-            existing.author_aliases = author_aliases
-            existing.notes = entry.note
-            updated += 1
-        else:
-            db.add(models.SeriesCanonicalEntry(
-                series_id=series_id,
-                book_number=entry_number,
-                canonical_title=title,
-                canonical_author=canonical_author,
-                publication_year=entry.publicationYear,
-                entry_type=entry_type,
-                is_fractional=is_fractional,
-                is_anthology=is_anthology,
-                author_aliases=author_aliases,
-                notes=entry.note,
-            ))
-            created += 1
-
-    if highest_whole_number > 0:
-        db_series.total_books = highest_whole_number
-
-    db.commit()
-    db.refresh(db_series)
-    recalculate_intelligence(db, series_id)
-
-    return {
-        "series_id": series_id,
-        "created": created,
-        "updated": updated,
-        "total_books": db_series.total_books,
-        "canonical_entries": len(payload.entries),
-    }
 
 
 @router.post("/{series_id}/normalize_titles")
