@@ -153,14 +153,9 @@ const CUSTOM_TITLE_PATTERN_PRESETS = [
     pattern: "{series_name} - Book {book_number} - {book_title}",
   },
   {
-    id: "title_optional_subtitle",
-    label: "Title with Optional Subtitle",
-    pattern: "{book_title}[[ - {book_subtitle}]]",
-  },
-  {
-    id: "subtitle_preferred_fallback",
-    label: "Prefer Subtitle, Fallback to Title",
-    pattern: "[[{book_subtitle} ({series_name} Book {book_number})]] || {book_title} ({series_name} Book {book_number})",
+    id: "title_with_subtitle",
+    label: "Title with Subtitle",
+    pattern: "{book_title} - {book_subtitle}",
   },
 ] as const;
 type CustomTitlePatternPresetId = (typeof CUSTOM_TITLE_PATTERN_PRESETS)[number]["id"];
@@ -171,20 +166,6 @@ function isTitleNormalizationMode(value: unknown): value is TitleNormalizationMo
 
 function isTitleNormalizationWizardMode(value: unknown): value is TitleNormalizationWizardMode {
   return typeof value === "string" && TITLE_NORMALIZATION_WIZARD_MODES.includes(value as TitleNormalizationWizardMode);
-}
-
-function getTitleNormalizationModeLabel(mode: TitleNormalizationMode) {
-  if (mode === "keep_original") return "Keep Original Title - Leave As Is";
-  if (mode === "clean_up") return "Clean Up Title - Fix formatting junk";
-  if (mode === "new_clean_title") return "New Clean Title - Keep book name, add clean series suffix";
-  return "Match Other Titles - Format like the rest of the series";
-}
-
-function getTitleNormalizationModeDescription(mode: TitleNormalizationMode) {
-  if (mode === "keep_original") return "Keeps the title exactly as imported.";
-  if (mode === "clean_up") return "Removes junk formatting while keeping the official book title structure.";
-  if (mode === "new_clean_title") return "Keeps the unique book title and adds (Series Name Book #).";
-  return "Matches the formatting style used by other titles in this series.";
 }
 
 function normalizeBookTitleCleanupOnly(rawTitle: string): string {
@@ -199,9 +180,18 @@ function normalizeBookTitleCleanupOnly(rawTitle: string): string {
   title = title.replace(/\s+\)/g, ")");
   title = title.replace(/\s{2,}/g, " ");
 
-  title = title.replace(/:\s*a\s+litrpg\s+apocalypse\s*:?$/i, ": A LitRPG").trim();
-  title = title.replace(/:\s*a\s+litrpg\s+(?:adventure|novel|saga|epic|fantasy|progression\s+fantasy)\s*:?$/i, ": A LitRPG").trim();
-  title = title.replace(/:\s*litrpg\s+(?:adventure|novel|saga|epic|fantasy|progression\s+fantasy)\s*:?$/i, ": LitRPG").trim();
+  // Collapse generic marketing-blurb subtitles that mention "LitRPG" with
+  // filler descriptor words on either side (e.g. "An Epic Fantasy LitRPG
+  // Adventure", "A LitRPG Apocalypse", "LitRPG Novel") down to ": A LitRPG".
+  // Uses a lookahead for the trailing "(Series Name Book #)"/end-of-string
+  // boundary instead of consuming it, so it still fires when that suffix
+  // follows -- which is the common case for real titles, not the rare one.
+  title = title
+    .replace(
+      /:\s*((?:a|an)\s+)?(?:(?:epic|fantasy|adventures?|novels?|sagas?|apocalyptic|apocalypse|progression(?:\s+fantasy)?)\s+)*litrpg(?:\s+(?:adventures?|novels?|sagas?|apocalyptic|apocalypse|epic|fantasy|progression(?:\s+fantasy)?))*:?(?=\s*(?:\([^)]*\))?\s*$)/i,
+      (_match, article) => (article ? ": A LitRPG" : ": LitRPG")
+    )
+    .trim();
 
   return title.replace(/\s{2,}/g, " ").trim();
 }
@@ -240,31 +230,6 @@ function normalizeBookTitleBookNameOnly(rawTitle: string): string {
     .trim();
 
   return stripped || cleaned;
-}
-
-function normalizeBookTitleSeriesNameOnly(rawTitle: string, seriesName?: string, bookNumber?: number | null): string {
-  const cleaned = normalizeBookTitleCleanupOnly(rawTitle);
-  if (!cleaned) return "";
-
-  const inferredBookNumberMatch = cleaned.match(/\bbook\s+(\d+(?:\.\d+)?)\b/i);
-  const resolvedBookNumber = Number.isFinite(bookNumber ?? NaN)
-    ? Number(bookNumber)
-    : inferredBookNumberMatch
-      ? Number(inferredBookNumberMatch[1])
-      : null;
-  const cleanSeriesName = String(seriesName || "").trim();
-  if (!cleanSeriesName) {
-    return cleaned;
-  }
-
-  if (resolvedBookNumber === null) {
-    return cleanSeriesName;
-  }
-
-  const prettyBookNumber = Number.isInteger(resolvedBookNumber)
-    ? String(Math.trunc(resolvedBookNumber))
-    : String(resolvedBookNumber);
-  return `${cleanSeriesName} Book ${prettyBookNumber}`;
 }
 
 function normalizeBookTitleNewClean(rawTitle: string, seriesName?: string, bookNumber?: number | null): string {
@@ -461,58 +426,6 @@ function escapeRegExp(value: string): string {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function normalizeBookTitleBookNameSeries(rawTitle: string, seriesName?: string, bookNumber?: number | null): string {
-  const title = normalizeBookTitleCleanupOnly(rawTitle);
-  if (!title) return "";
-
-  const inferredBookNumberMatch = title.match(/\bbook\s+(\d+(?:\.\d+)?)\b/i);
-  const resolvedBookNumber = Number.isFinite(bookNumber ?? NaN)
-    ? Number(bookNumber)
-    : inferredBookNumberMatch
-      ? Number(inferredBookNumberMatch[1])
-      : null;
-  const inferredSeriesNameMatch = title.match(/\(\s*([^()]*?)\s+book\s*\d+(?:\.\d+)?\s*\)\s*$/i);
-  const inferredSeriesName = inferredSeriesNameMatch ? String(inferredSeriesNameMatch[1] || "").trim() : "";
-  const cleanSeriesName = String(seriesName || inferredSeriesName || "").trim();
-
-  if (!cleanSeriesName) {
-    return title;
-  }
-
-  const escapedSeriesName = escapeRegExp(cleanSeriesName);
-  let normalized = title
-    .replace(new RegExp(`:\\s*${escapedSeriesName}\\s*,?\\s*book\\s*\\d+(?:\\.\\d+)?\\s*$`, "i"), "")
-    .replace(new RegExp(`:\\s*${escapedSeriesName}\\s*$`, "i"), "")
-    .trim();
-
-  const genericBookStemMatch = normalized.match(/^book\s+(\d+(?:\.\d+)?)\s*:??\s*$/i);
-  if (genericBookStemMatch) {
-    const numberFromStem = Number(genericBookStemMatch[1]);
-    const normalizedNumber = Number.isFinite(numberFromStem)
-      ? numberFromStem
-      : resolvedBookNumber;
-    const prettyNumber = normalizedNumber !== null
-      ? (Number.isInteger(normalizedNumber) ? String(Math.trunc(normalizedNumber)) : String(normalizedNumber))
-      : "";
-    normalized = prettyNumber ? `${cleanSeriesName} ${prettyNumber}` : cleanSeriesName;
-  }
-
-  normalized = normalized.replace(/\s*:\s*$/, "").trim();
-  if (!normalized) {
-    normalized = resolvedBookNumber !== null ? `Book ${resolvedBookNumber}` : "Untitled";
-  }
-  normalized = `${normalized}:`;
-
-  if (resolvedBookNumber !== null) {
-    const prettyBookNumber = Number.isInteger(resolvedBookNumber)
-      ? String(Math.trunc(resolvedBookNumber))
-      : String(resolvedBookNumber);
-    normalized = `${normalized} (${cleanSeriesName} Book ${prettyBookNumber})`;
-  }
-
-  return normalized.trim();
-}
-
 function normalizeBookTitleForMode(
   rawTitle: string,
   mode: TitleNormalizationMode,
@@ -588,58 +501,22 @@ function normalizeBookTitleWithCustomPattern(
     "{original_title}": String(rawTitle || "").trim(),
   };
 
-  const candidates = pattern
-    .split(/\s*\|\|\s*|\n+/)
-    .map((value) => value.trim())
-    .filter(Boolean);
-  const normalizedCandidates = candidates.length ? candidates : [pattern];
-
-  const renderCandidate = (template: string) => {
-    let rendered = String(template || "");
-
-    const renderOptionalBlock = (blockText: string) => {
-      const tokens = Array.from(new Set(blockText.match(/\{[a-z_]+\}/g) || []));
-      if (tokens.some((token) => !String(replacements[token] || "").trim())) {
-        return "";
-      }
-
-      let blockRendered = blockText;
-      for (const [token, value] of Object.entries(replacements)) {
-        blockRendered = blockRendered.split(token).join(value);
-      }
-      return blockRendered;
-    };
-
-    let previous = "";
-    while (previous !== rendered) {
-      previous = rendered;
-      rendered = rendered.replace(/\[\[([\s\S]*?)\]\]/g, (_match, block) => renderOptionalBlock(String(block || "")));
-    }
-
-    for (const [token, value] of Object.entries(replacements)) {
-      rendered = rendered.split(token).join(value);
-    }
-
-    rendered = rendered.replace(/\(\s*\)/g, "");
-    rendered = rendered.replace(/\[\s*\]/g, "");
-    rendered = rendered.replace(/\s+([,;:.!?])/g, "$1");
-    rendered = rendered.replace(/\s{2,}/g, " ");
-    return rendered.trim().replace(/^[\s\-,:;]+|[\s\-,:;]+$/g, "");
-  };
-
-  let firstRendered = "";
-  for (const candidate of normalizedCandidates) {
-    const rendered = renderCandidate(candidate);
-    if (!rendered) continue;
-    if (!firstRendered) {
-      firstRendered = rendered;
-    }
-    if (rendered !== fallbackTitle) {
-      return rendered;
-    }
+  let rendered = pattern;
+  for (const [token, value] of Object.entries(replacements)) {
+    rendered = rendered.split(token).join(value);
   }
 
-  return firstRendered || fallbackTitle;
+  // Cleans up artifacts left behind when a token (most often
+  // {book_subtitle} or {series_name}) substitutes to an empty string --
+  // e.g. "Title - ", "Title ()", or "Title ( Book 2)" -- without requiring
+  // conditional template syntax.
+  rendered = rendered.replace(/\(\s+/g, "(");
+  rendered = rendered.replace(/\(\s*\)/g, "");
+  rendered = rendered.replace(/\s+([,;:.!?])/g, "$1");
+  rendered = rendered.replace(/\s{2,}/g, " ");
+  rendered = rendered.trim().replace(/^[\s\-,:;]+|[\s\-,:;]+$/g, "");
+
+  return rendered || fallbackTitle;
 }
 
 function shouldExcludeUpcomingBySpec(book: BookRecord): boolean {
@@ -1016,22 +893,36 @@ export default function SeriesDetailPage() {
           currentTitle,
           normalizedTitle: currentTitle,
           skipped: true,
+          skipReason: "upcoming" as const,
         };
       }
       const resolvedBookNumber = Number(book?.book_number ?? book?.series_order ?? NaN);
+      if (!Number.isFinite(resolvedBookNumber)) {
+        // Books with no series number (novellas/short stories) are matched
+        // against future discovery results by title text alone -- rewriting
+        // their title here risks a later "Check Now" run treating them as
+        // new and duplicating them, so leave them untouched.
+        return {
+          id: Number(book.id),
+          currentTitle,
+          normalizedTitle: currentTitle,
+          skipped: true,
+          skipReason: "unnumbered" as const,
+        };
+      }
       const normalizedTitle = normalizeWizardMode === "custom"
         ? normalizeBookTitleWithCustomPattern(
             currentTitle,
             normalizeCustomPattern,
             series?.name,
-            Number.isFinite(resolvedBookNumber) ? resolvedBookNumber : null,
+            resolvedBookNumber,
             String(book?.subtitle || "").trim(),
           )
         : normalizeBookTitleForMode(
             currentTitle,
             normalizeWizardMode,
             series?.name,
-            Number.isFinite(resolvedBookNumber) ? resolvedBookNumber : null,
+            resolvedBookNumber,
             Array.isArray(series?.books) ? series.books : [],
           );
       if (!currentTitle || !normalizedTitle || currentTitle === normalizedTitle) {
@@ -1042,14 +933,21 @@ export default function SeriesDetailPage() {
         currentTitle,
         normalizedTitle,
         skipped: false,
+        skipReason: null,
       };
     })
     .filter(
-      (value): value is { id: number; currentTitle: string; normalizedTitle: string; skipped: boolean } =>
-        Boolean(value)
+      (value): value is {
+        id: number;
+        currentTitle: string;
+        normalizedTitle: string;
+        skipped: boolean;
+        skipReason: "upcoming" | "unnumbered" | null;
+      } => Boolean(value)
     );
   const titleNormalizationApplicablePreview = titleNormalizationPreview.filter((row) => !row.skipped);
-  const skippedUpcomingCount = titleNormalizationPreview.filter((row) => row.skipped).length;
+  const skippedUpcomingCount = titleNormalizationPreview.filter((row) => row.skipReason === "upcoming").length;
+  const skippedUnnumberedCount = titleNormalizationPreview.filter((row) => row.skipReason === "unnumbered").length;
 
   const titleNormalizationOptions: Array<{
     mode: TitleNormalizationWizardMode;
@@ -1084,8 +982,8 @@ export default function SeriesDetailPage() {
     {
       mode: "custom",
       label: "Other (Custom)",
-      description: "Use templates with optional blocks and fallback patterns.",
-      note: "Supports [[optional blocks]] and fallbacks with ||.",
+      description: "Build your own title format using simple tokens.",
+      note: "Pick a starting preset, then tweak it to fit.",
     },
   ];
 
@@ -1895,80 +1793,88 @@ export default function SeriesDetailPage() {
   }
 
   return (
-    <div className="p-3 space-y-2">
-      <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
-        <div className="space-y-1">
-          <p className="text-sm uppercase tracking-[0.2em] text-muted-foreground">Series detail</p>
-          <div>
-            <h1 className="text-3xl font-bold">{series.name}</h1>
-            <p className="text-sm text-muted-foreground">{series.author || "Unknown author"}</p>
-            <p className="mt-2 text-base font-semibold text-foreground">Books in this Series:</p>
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setAddBookDialogOpen(true)}
-              >
-                Add Book
-              </Button>
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={() => void handleCheckForNew()}
-                disabled={seriesCheckLoading}
-              >
-                {seriesCheckLoading ? `Checking ${series.name}…` : `Check ${series.name} for New`}
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={handleSeriesRecap}
-                title="Opens ChatGPT in a new tab with a pre-filled recap prompt for this series"
-              >
-                Series Recap
-              </Button>
-              {seriesCheckLoading ? (
-                <div className="flex min-w-[240px] items-center gap-2 rounded border bg-background px-2 py-1 text-xs">
-                  <Spinner />
-                  <div className="w-32 overflow-hidden rounded-full bg-slate-200">
-                    <div
-                      className="h-1.5 bg-slate-700 transition-all duration-500"
-                      style={{ width: `${Math.max(4, seriesCheckProgress)}%` }}
-                    />
-                  </div>
-                  <span className={seriesCheckStillChecking ? "animate-pulse text-muted-foreground" : "text-muted-foreground"}>
-                    {seriesCheckStillChecking ? "Still checking..." : `${seriesCheckProgress}%`}
-                  </span>
-                  {seriesCheckCurrentPass ? (
-                    <span className="text-muted-foreground">{seriesCheckCurrentPass}</span>
-                  ) : null}
-                </div>
-              ) : null}
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setNormalizeWizardMode(seriesNormalizationMode);
-                  setNormalizeTitlesDialogOpen(true);
-                }}
-              >
-                Normalize Titles
-              </Button>
-            </div>
+    <div className="p-2 space-y-1.5">
+      <div className="space-y-1.5 rounded-lg border bg-card/60 px-3 py-2">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <h1 className="text-xl font-bold leading-tight">{series.name}</h1>
+            <span className="text-sm text-muted-foreground">{series.author || "Unknown author"}</span>
           </div>
-          {series.description && (
-            <p className="max-w-3xl text-sm leading-6 text-muted-foreground">{series.description}</p>
-          )}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+            <span>Unread <span className="font-semibold text-foreground">{unreadCount}</span></span>
+            <span>Read <span className="font-semibold text-foreground">{readCount}</span></span>
+            <span>Total <span className="font-semibold text-foreground">{totalBooks}</span></span>
+            <span>Upcoming <span className="font-semibold text-foreground">{upcomingCount}</span></span>
+            <span className="text-muted-foreground/50">|</span>
+            <span>Status <span className="font-semibold text-foreground">{series.series_status || "Unknown"}</span></span>
+            <span>Next unread <span className="font-semibold text-foreground">{series.next_unread_book_number ?? "—"}</span></span>
+            <span>Next upcoming <span className="font-semibold text-foreground">{series.next_upcoming_book_number ?? "—"}</span></span>
+            <span>Missing <span className="font-semibold text-foreground">{missingOrders.length}</span></span>
+          </div>
         </div>
 
-        <div className="flex flex-col items-start gap-1 md:items-end md:pl-3">
-          <div className="flex w-full flex-wrap items-center gap-2 md:justify-end">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setAddBookDialogOpen(true)}
+            >
+              Add Book
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => void handleCheckForNew()}
+              disabled={seriesCheckLoading}
+            >
+              {seriesCheckLoading ? `Checking ${series.name}…` : `Check ${series.name} for New`}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleSeriesRecap}
+              title="Opens ChatGPT in a new tab with a pre-filled recap prompt for this series"
+            >
+              Series Recap
+            </Button>
+            {seriesCheckLoading ? (
+              <div className="flex min-w-[240px] items-center gap-2 rounded border bg-background px-2 py-1 text-xs">
+                <Spinner />
+                <div className="w-32 overflow-hidden rounded-full bg-slate-200">
+                  <div
+                    className="h-1.5 bg-slate-700 transition-all duration-500"
+                    style={{ width: `${Math.max(4, seriesCheckProgress)}%` }}
+                  />
+                </div>
+                <span className={seriesCheckStillChecking ? "animate-pulse text-muted-foreground" : "text-muted-foreground"}>
+                  {seriesCheckStillChecking ? "Still checking..." : `${seriesCheckProgress}%`}
+                </span>
+                {seriesCheckCurrentPass ? (
+                  <span className="text-muted-foreground">{seriesCheckCurrentPass}</span>
+                ) : null}
+              </div>
+            ) : null}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setNormalizeWizardMode(seriesNormalizationMode);
+                setNormalizeTitlesDialogOpen(true);
+              }}
+            >
+              Optional Title Normalization
+            </Button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
+              size="sm"
               onClick={handleToggleSeriesFinished}
               disabled={finishedToggleSaving}
             >
@@ -1979,47 +1885,26 @@ export default function SeriesDetailPage() {
                   : "Move to finished"}
             </Button>
             <Link href="/books">
-              <Button variant="outline">Back to Library</Button>
+              <Button variant="outline" size="sm">Back to Library</Button>
             </Link>
             <Link href={viewAllSeriesHref}>
-              <Button variant="secondary">View all series</Button>
+              <Button variant="secondary" size="sm">View all series</Button>
             </Link>
             <Button
               type="button"
               variant="destructive"
+              size="sm"
               onClick={() => void handleDeleteSeriesWithBooks()}
               disabled={deleteSeriesSaving}
             >
               {deleteSeriesSaving ? "Deleting series..." : "Delete series + books"}
             </Button>
           </div>
-
-          <div className="flex flex-wrap items-start gap-2 md:justify-end">
-            <Table className="w-auto min-w-[270px] text-sm">
-              <TableBody>
-                <TableRow>
-                  <TableCell className="py-1.5">Unread: <span className="font-semibold">{unreadCount}</span></TableCell>
-                  <TableCell className="py-1.5">Read: <span className="font-semibold">{readCount}</span></TableCell>
-                </TableRow>
-                <TableRow>
-                  <TableCell className="py-1.5">Total: <span className="font-semibold">{totalBooks}</span></TableCell>
-                  <TableCell className="py-1.5">Upcoming: <span className="font-semibold">{upcomingCount}</span></TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
-          </div>
-
-          <Table className="w-auto text-xs">
-              <TableBody>
-                <TableRow>
-                  <TableCell className="py-1 px-2">Status: <span className="font-medium">{series.series_status || "Unknown"}</span></TableCell>
-                  <TableCell className="py-1 px-2">Next unread: <span className="font-medium">{series.next_unread_book_number ?? "—"}</span></TableCell>
-                  <TableCell className="py-1 px-2">Next upcoming: <span className="font-medium">{series.next_upcoming_book_number ?? "—"}</span></TableCell>
-                  <TableCell className="py-1 px-2">Missing: <span className="font-medium">{missingOrders.length}</span></TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
         </div>
+
+        {series.description && (
+          <p className="line-clamp-2 max-w-4xl text-xs leading-5 text-muted-foreground">{series.description}</p>
+        )}
       </div>
 
       {recentAddMessage ? (
@@ -2039,7 +1924,10 @@ export default function SeriesDetailPage() {
                 className="cursor-pointer select-none hover:underline"
                 title="Sort by title, A to Z"
               >
-                Title{bookSortMode === "az" ? " \u25B2" : ""}
+                Title{" "}
+                <span className={bookSortMode === "az" ? "text-foreground" : "text-muted-foreground/40"}>
+                  &#9650;
+                </span>
               </button>
               <button
                 type="button"
@@ -2082,7 +1970,10 @@ export default function SeriesDetailPage() {
                 className="cursor-pointer select-none hover:underline"
                 title="Sort by series order"
               >
-                Book #{bookSortMode === "series" ? " \u25B2" : ""}
+                Book #{" "}
+                <span className={bookSortMode === "series" ? "text-foreground" : "text-muted-foreground/40"}>
+                  &#9650;
+                </span>
               </button>
               <button
                 type="button"
@@ -2426,9 +2317,10 @@ export default function SeriesDetailPage() {
       >
         <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl">
           <DialogHeader>
-            <DialogTitle>Title Normalization Wizard</DialogTitle>
+            <DialogTitle>Optional Title Normalization</DialogTitle>
             <DialogDescription>
-              Pick a mode, review real examples from this series, then apply once with Accept Changes.
+              Purely cosmetic and reversible -- this only changes how titles display in this app, not the book&apos;s
+              actual published title. Pick a mode, review real examples from this series, then apply once with Accept Changes.
             </DialogDescription>
           </DialogHeader>
 
@@ -2498,7 +2390,9 @@ export default function SeriesDetailPage() {
                   Tokens: {"{book_title}"}, {"{book_subtitle}"}, {"{series_name}"}, {"{book_number}"}, {"{original_title}"}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  Optional blocks: [[ ... ]] only render when all tokens inside have values. Multiple templates: separate with || and the first meaningful result is used.
+                  Each token is replaced with that book&apos;s value. If a token is blank (e.g. no subtitle), it&apos;s
+                  simply left empty and any leftover dash, colon, or empty parentheses next to it is cleaned up
+                  automatically.
                 </p>
               </div>
             ) : null}
@@ -2530,8 +2424,10 @@ export default function SeriesDetailPage() {
                     →
                   </div>
                   <div className="min-w-0">
-                    {row.skipped ? (
+                    {row.skipReason === "upcoming" ? (
                       <p className="truncate font-medium text-amber-700">Skipped (upcoming + future publication)</p>
+                    ) : row.skipReason === "unnumbered" ? (
+                      <p className="truncate font-medium text-amber-700">Skipped (no book number - protects future discovery matching)</p>
                     ) : (
                       <p className="truncate font-medium text-emerald-700">{row.normalizedTitle}</p>
                     )}
@@ -2548,6 +2444,7 @@ export default function SeriesDetailPage() {
           <div className="rounded border bg-slate-50 px-3 py-2 text-xs text-muted-foreground">
             Ready to apply: {titleNormalizationApplicablePreview.length} change{titleNormalizationApplicablePreview.length === 1 ? "" : "s"}
             {skippedUpcomingCount > 0 ? ` • Skipped upcoming: ${skippedUpcomingCount}` : ""}
+            {skippedUnnumberedCount > 0 ? ` • Skipped (no book #): ${skippedUnnumberedCount}` : ""}
           </div>
 
           <DialogFooter showCloseButton>

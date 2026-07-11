@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { CircleHelpIcon } from "lucide-react";
+import { BookOpenIcon, CheckIcon, CircleHelpIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
 import { fetchApiWithFallback } from "@/lib/api-client";
+import { ValueFilterMenu } from "@/components/value-filter-menu";
 
 import {
   Table,
@@ -102,15 +103,15 @@ function formatDate(value?: string | null) {
 
 function getStatusChipClass(status: string) {
   if (status === "read") {
-    return "inline-flex rounded-full border border-emerald-300 bg-emerald-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-emerald-800";
+    return "inline-flex rounded-full border border-emerald-300 bg-emerald-100 px-1.5 py-0 text-[11px] font-semibold uppercase tracking-wide text-emerald-800";
   }
   if (status === "available") {
-    return "inline-flex rounded-full border border-sky-300 bg-sky-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-sky-800";
+    return "inline-flex rounded-full border border-sky-300 bg-sky-100 px-1.5 py-0 text-[11px] font-semibold uppercase tracking-wide text-sky-800";
   }
   if (status === "unread") {
-    return "inline-flex rounded-full border border-slate-300 bg-slate-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-slate-800";
+    return "inline-flex rounded-full border border-slate-300 bg-slate-100 px-1.5 py-0 text-[11px] font-semibold uppercase tracking-wide text-slate-800";
   }
-  return "inline-flex rounded-full border border-rose-300 bg-rose-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-rose-800";
+  return "inline-flex rounded-full border border-rose-300 bg-rose-100 px-1.5 py-0 text-[11px] font-semibold uppercase tracking-wide text-rose-800";
 }
 
 function normalizeText(value: unknown) {
@@ -176,134 +177,6 @@ function toIsoDateString(value?: string | null): string | null {
 
 function toDateValue(value?: string | null): number {
   return parseFlexibleDate(value)?.valueOf() ?? Number.NEGATIVE_INFINITY;
-}
-
-type ValueFilterMenuProps = {
-  label: string;
-  options: string[];
-  selectedValues: string[];
-  onApplyValues: (values: string[]) => void;
-  onClear: () => void;
-  searchValue: string;
-  onSearchChange: (value: string) => void;
-};
-
-function ValueFilterMenu({
-  label,
-  options,
-  selectedValues,
-  onApplyValues,
-  onClear,
-  searchValue,
-  onSearchChange,
-}: ValueFilterMenuProps) {
-  const [open, setOpen] = useState(false);
-  const [draftValues, setDraftValues] = useState<string[]>(selectedValues);
-  const menuRef = useRef<HTMLDivElement | null>(null);
-  const normalizedSearch = normalizeText(searchValue);
-  const visibleOptions = options.filter((option) => normalizeText(option).includes(normalizedSearch));
-
-  useEffect(() => {
-    if (!open) return;
-
-    const handleDocumentMouseDown = (event: MouseEvent) => {
-      if (!menuRef.current) return;
-      if (!menuRef.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    };
-
-    const handleDocumentKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setOpen(false);
-      }
-    };
-
-    document.addEventListener("mousedown", handleDocumentMouseDown);
-    document.addEventListener("keydown", handleDocumentKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", handleDocumentMouseDown);
-      document.removeEventListener("keydown", handleDocumentKeyDown);
-    };
-  }, [open]);
-
-  return (
-    <div className="relative" ref={menuRef}>
-      <button
-        type="button"
-        onClick={() => {
-          setOpen((prev) => {
-            const nextOpen = !prev;
-            if (nextOpen) {
-              setDraftValues(selectedValues);
-            }
-            return nextOpen;
-          });
-        }}
-        className="h-7 w-full rounded border bg-background px-2 text-left text-xs"
-      >
-        {label} {selectedValues.length > 0 ? `(${selectedValues.length})` : ""}
-      </button>
-      {open ? (
-        <div className="absolute z-20 mt-1 w-60 rounded-md border bg-background p-2 shadow-lg">
-        <input
-          value={searchValue}
-          onChange={(event) => onSearchChange(event.target.value)}
-          placeholder="Search values"
-          className="mb-2 h-7 w-full rounded border bg-background px-2 text-xs"
-        />
-        <div className="max-h-40 space-y-1 overflow-auto pr-1">
-          {visibleOptions.map((option) => {
-            const checked = draftValues.includes(option);
-            return (
-              <label key={option} className="flex items-center gap-2 text-xs">
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={() => {
-                    setDraftValues((prev) =>
-                      prev.includes(option)
-                        ? prev.filter((item) => item !== option)
-                        : [...prev, option]
-                    );
-                  }}
-                />
-                <span className="truncate">{option || "(blank)"}</span>
-              </label>
-            );
-          })}
-          {visibleOptions.length === 0 ? (
-            <p className="text-xs text-muted-foreground">No matching values.</p>
-          ) : null}
-        </div>
-        <div className="mt-2 flex justify-end gap-1">
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            onClick={() => {
-              onApplyValues(draftValues);
-              setOpen(false);
-            }}
-          >
-            Apply
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              onClear();
-              setOpen(false);
-            }}
-          >
-            Clear
-          </Button>
-        </div>
-      </div>
-      ) : null}
-    </div>
-  );
 }
 
 type BookSortKey = "id" | "title" | "author" | "status" | "date" | "series" | "bookNumber";
@@ -407,16 +280,6 @@ type EditBookFormState = {
   date: string;
 };
 
-type AgentRunFormState = {
-  title: string;
-  author: string;
-};
-
-type AgentRunResponse = {
-  found: boolean;
-  metadata: Record<string, unknown>;
-};
-
 type LookupResultState = {
   found: boolean;
   summary: string | null;
@@ -447,11 +310,6 @@ const EMPTY_EDIT_BOOK_FORM: EditBookFormState = {
   date: "",
 };
 
-const EMPTY_AGENT_RUN_FORM: AgentRunFormState = {
-  title: "",
-  author: "",
-};
-
 function normalizeLookupMatchedTitle(value: string | null | undefined) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -475,22 +333,8 @@ export default function BooksClient() {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [savingEditBook, setSavingEditBook] = useState(false);
   const [editBookForm, setEditBookForm] = useState<EditBookFormState>(EMPTY_EDIT_BOOK_FORM);
-  const [agentDialogOpen, setAgentDialogOpen] = useState(false);
-  const [agentRunning, setAgentRunning] = useState(false);
-  const [agentApproving, setAgentApproving] = useState(false);
-  const [agentRunForm, setAgentRunForm] = useState<AgentRunFormState>(EMPTY_AGENT_RUN_FORM);
-  const [agentFound, setAgentFound] = useState<boolean | null>(null);
-  const [agentMetadata, setAgentMetadata] = useState<Record<string, unknown> | null>(null);
   const [pinnedBookId, setPinnedBookId] = useState<number | null>(null);
   const [lookupResult, setLookupResult] = useState<LookupResultState | null>(null);
-  const [filters, setFilters] = useState({
-    id: "",
-    title: "",
-    author: "",
-    status: "all",
-    series: "",
-    bookNumber: "",
-  });
   const [valueFilters, setValueFilters] = useState({
     title: [] as string[],
     author: [] as string[],
@@ -603,27 +447,7 @@ export default function BooksClient() {
   }, [valueFilters, titleOptions, authorOptions, seriesOptions, statusOptions]);
 
   const filteredBooks = useMemo(() => {
-    const idFilter = normalizeText(filters.id);
-    const titleFilter = normalizeText(filters.title);
-    const authorFilter = normalizeText(filters.author);
-    const statusFilter = normalizeText(filters.status);
-    const seriesFilter = normalizeText(filters.series);
-    const bookNumberFilter = normalizeText(filters.bookNumber);
-
     return books.filter((book) => {
-      const status = normalizeText(getBookStatus(book));
-      const idText = normalizeText(book.id);
-      const titleText = normalizeText(book.title);
-      const authorText = normalizeText(book.author);
-      const seriesText = normalizeText(book.series_name);
-      const bookNumberText = normalizeText(book.book_number);
-
-      if (idFilter && !idText.includes(idFilter)) return false;
-      if (titleFilter && !titleText.includes(titleFilter)) return false;
-      if (authorFilter && !authorText.includes(authorFilter)) return false;
-      if (statusFilter !== "all" && status !== statusFilter) return false;
-      if (seriesFilter && !seriesText.includes(seriesFilter)) return false;
-      if (bookNumberFilter && !bookNumberText.includes(bookNumberFilter)) return false;
       if (activeValueFilters.title.length > 0 && !activeValueFilters.title.includes(String(book.title || "").trim())) return false;
       if (activeValueFilters.author.length > 0 && !activeValueFilters.author.includes(String(book.author || "").trim())) return false;
       if (activeValueFilters.series.length > 0 && !activeValueFilters.series.includes(String(book.series_name || "").trim())) return false;
@@ -631,7 +455,7 @@ export default function BooksClient() {
 
       return true;
     });
-  }, [books, filters, activeValueFilters]);
+  }, [books, activeValueFilters]);
 
   const sortedBooks = useMemo(() => {
     const withPriorityOrder = [...filteredBooks].sort((a, b) => {
@@ -786,14 +610,6 @@ export default function BooksClient() {
     return sortConfig.direction === "asc" ? " ▲" : " ▼";
   }
 
-  function setExplicitSort(key: BookSortKey, mode: "none" | "asc" | "desc") {
-    if (mode === "none") {
-      setSortConfig({ key: null, direction: "asc" });
-      return;
-    }
-    setSortConfig({ key, direction: mode });
-  }
-
   function setValueFilter(kind: "title" | "author" | "series" | "status", values: string[]) {
     setValueFilters((prev) => ({
       ...prev,
@@ -802,16 +618,9 @@ export default function BooksClient() {
   }
 
   function clearFilters() {
-    setFilters({
-      id: "",
-      title: "",
-      author: "",
-      status: "all",
-      series: "",
-      bookNumber: "",
-    });
     setValueFilters({ title: [], author: [], series: [], status: [] });
     setValueFilterSearch({ title: "", author: "", series: "", status: "" });
+    setSortConfig({ key: null, direction: "asc" });
   }
 
   useEffect(() => {
@@ -878,120 +687,6 @@ export default function BooksClient() {
     setAddBookForm(EMPTY_ADD_BOOK_FORM);
     setLookupResult(null);
     setShowLookupSummary(false);
-  }
-
-  function resetAgentWorkflow() {
-    setAgentRunForm(EMPTY_AGENT_RUN_FORM);
-    setAgentFound(null);
-    setAgentMetadata(null);
-    setAgentRunning(false);
-    setAgentApproving(false);
-  }
-
-  async function handleRunAgent() {
-    const title = agentRunForm.title.trim();
-    const author = agentRunForm.author.trim();
-
-    if (!title) {
-      toast({
-        title: "Need a title",
-        description: "Enter a title before running the agent.",
-      });
-      return;
-    }
-
-    setAgentRunning(true);
-    setAgentFound(null);
-    setAgentMetadata(null);
-
-    try {
-      const response = await fetchApiWithFallback("/agent/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title,
-          author: author || undefined,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Agent run failed (${response.status})`);
-      }
-
-      const data = await response.json();
-      if (!data || typeof data !== "object" || Array.isArray(data)) {
-        throw new Error("Agent returned invalid metadata format.");
-      }
-
-      const typedResponse = data as Partial<AgentRunResponse>;
-      const responseMetadata =
-        typedResponse.metadata && typeof typedResponse.metadata === "object" && !Array.isArray(typedResponse.metadata)
-          ? typedResponse.metadata
-          : (data as Record<string, unknown>);
-      const responseFound =
-        typeof typedResponse.found === "boolean"
-          ? typedResponse.found
-          : Boolean((responseMetadata as Record<string, unknown>).found);
-
-      setAgentFound(responseFound);
-      setAgentMetadata(responseMetadata);
-      toast({
-        title: "Metadata ready",
-        description: "Review metadata and approve to create the book.",
-      });
-    } catch (error) {
-      console.error("Error running book agent:", error);
-      toast({
-        title: "Agent error",
-        description: error instanceof Error ? error.message : "Failed to run the book agent.",
-      });
-    } finally {
-      setAgentRunning(false);
-    }
-  }
-
-  async function handleApproveAgentMetadata() {
-    if (!agentMetadata) {
-      toast({
-        title: "No metadata",
-        description: "Run the agent and review metadata before approving.",
-      });
-      return;
-    }
-
-    setAgentApproving(true);
-
-    try {
-      const response = await fetchApiWithFallback("/agent/approve", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ metadata: agentMetadata, found: agentFound }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Approval failed (${response.status})`);
-      }
-
-      const createdBook = await response.json();
-      await Promise.all([fetchBooks(), fetchSeriesList()]);
-      setPinnedBookId(Number(createdBook?.id ?? null));
-
-      toast({
-        title: "Book created",
-        description: `${createdBook?.title || "Book"} was created from approved metadata.`,
-      });
-
-      setAgentDialogOpen(false);
-      resetAgentWorkflow();
-    } catch (error) {
-      console.error("Error approving metadata:", error);
-      toast({
-        title: "Approval error",
-        description: error instanceof Error ? error.message : "Failed to create book from metadata.",
-      });
-    } finally {
-      setAgentApproving(false);
-    }
   }
 
   async function handleFindDetails() {
@@ -1415,56 +1110,39 @@ export default function BooksClient() {
   }
 
   return (
-    <div className="p-4 space-y-3">
-      <div className="grid gap-2 md:grid-cols-[1fr_auto_auto] md:items-start">
-        <div>
-          <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
-            Library
-          </p>
-          <h1 className="text-2xl font-bold">
-            {seriesId ? `Series ${seriesId} books` : "All books"}
-          </h1>
-          <p className="max-w-2xl text-xs leading-5 text-muted-foreground">
-            Browse the collection with read status, release dates, and series links.
-          </p>
-          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
-            <span className="inline-flex items-center gap-1">
-              <span className="inline-flex rounded-full border border-sky-300 bg-sky-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-sky-800">
-                available
+    <div className="p-2 space-y-1.5">
+      <div className="space-y-1.5 rounded-lg border bg-card/60 px-3 py-2">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+            <h1 className="text-xl font-bold leading-tight">
+              {seriesId ? `Series ${seriesId} books` : "All books"}
+            </h1>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+              <span className="inline-flex items-center gap-1">
+                <span className="inline-flex rounded-full border border-sky-300 bg-sky-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-sky-800">
+                  available
+                </span>
+                <span>released and unread</span>
               </span>
-              <span>released and unread</span>
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="inline-flex rounded-full border border-rose-300 bg-rose-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-rose-800">
-                upcoming
+              <span className="inline-flex items-center gap-1">
+                <span className="inline-flex rounded-full border border-rose-300 bg-rose-100 px-1.5 py-0 text-[10px] font-semibold uppercase tracking-wide text-rose-800">
+                  upcoming
+                </span>
+                <span>planned for a future release</span>
               </span>
-              <span>planned for a future release</span>
-            </span>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+            <span>Unread <span className="font-semibold text-foreground">{unreadBooks}</span></span>
+            <span>Read <span className="font-semibold text-foreground">{readBooks}</span></span>
+            <span>Available <span className="font-semibold text-foreground">{availableBooks}</span></span>
+            <span>Total <span className="font-semibold text-foreground">{totalBooks}</span></span>
+            <span>Upcoming <span className="font-semibold text-foreground">{upcomingBooks}</span></span>
           </div>
         </div>
 
-        <div className="flex justify-start md:justify-self-center">
-          <table className="border border-border bg-card/70 text-xs">
-            <tbody>
-              <tr>
-                <td className="min-w-[150px] border border-border px-2 py-1">Unread: <span className="font-semibold">{unreadBooks}</span></td>
-                <td className="min-w-[150px] border border-border px-2 py-1">Read: <span className="font-semibold">{readBooks}</span></td>
-                <td className="min-w-[150px] border border-border px-2 py-1">Available: <span className="font-semibold">{availableBooks}</span></td>
-              </tr>
-              <tr>
-                <td className="border border-border px-2 py-1">Total: <span className="font-semibold">{totalBooks}</span></td>
-                <td className="border border-border px-2 py-1">Upcoming: <span className="font-semibold">{upcomingBooks}</span></td>
-                <td className="border border-border px-2 py-1">&nbsp;</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <div className="flex flex-wrap gap-2 md:justify-self-end">
+        <div className="flex flex-wrap gap-2">
           <Button type="button" onClick={() => setAddDialogOpen(true)}>Add Book</Button>
-          <Button type="button" variant="secondary" onClick={() => setAgentDialogOpen(true)}>
-            Agent Draft
-          </Button>
           <Link href="/books">
             <Button type="button" variant="outline">All Books</Button>
           </Link>
@@ -1474,44 +1152,67 @@ export default function BooksClient() {
         </div>
       </div>
 
-      <div ref={tableWrapRef} className="rounded-lg border bg-card/80">
-        <Table className="w-full table-fixed text-[11px] [&_th]:h-7 [&_th]:py-0.5 [&_td]:py-0.5">
+      <div ref={tableWrapRef} className="overflow-x-auto rounded-lg border bg-card/80">
+        <Table className="w-full min-w-[880px] table-fixed text-sm [&_th]:h-9 [&_th]:py-1 [&_td]:py-1">
           <TableHeader>
             <TableRow>
-              <TableHead style={{ width: `${columnWidths.title}%` }}>
-                <ValueFilterMenu
-                  label="Filter"
-                  options={titleOptions}
-                  selectedValues={activeValueFilters.title}
-                  onApplyValues={(values) => setValueFilter("title", values)}
-                  onClear={() => {
-                    setValueFilters((prev) => ({ ...prev, title: [] }));
-                    setValueFilterSearch((prev) => ({ ...prev, title: "" }));
-                    setFilters((prev) => ({ ...prev, title: "" }));
-                  }}
-                  searchValue={valueFilterSearch.title}
-                  onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, title: value }))}
-                />
-              </TableHead>
-              <TableHead style={{ width: `${columnWidths.author}%` }}>
-                <ValueFilterMenu
-                  label="Filter"
-                  options={authorOptions}
-                  selectedValues={activeValueFilters.author}
-                  onApplyValues={(values) => setValueFilter("author", values)}
-                  onClear={() => {
-                    setValueFilters((prev) => ({ ...prev, author: [] }));
-                    setValueFilterSearch((prev) => ({ ...prev, author: "" }));
-                    setFilters((prev) => ({ ...prev, author: "" }));
-                  }}
-                  searchValue={valueFilterSearch.author}
-                  onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, author: value }))}
-                />
-              </TableHead>
-              <TableHead style={{ width: `${columnWidths.status}%` }}>
-                <div className="space-y-1">
+              <TableHead className="relative" style={{ width: `${columnWidths.title}%` }}>
+                <div className="flex items-center justify-between gap-1 pr-2">
+                  <button type="button" className="truncate text-left hover:underline" onClick={() => toggleSort("title")}>
+                    Title{sortLabel("title")}
+                  </button>
                   <ValueFilterMenu
-                    label="Filter"
+                    label="Title"
+                    options={titleOptions}
+                    selectedValues={activeValueFilters.title}
+                    onApplyValues={(values) => setValueFilter("title", values)}
+                    onClear={() => {
+                      setValueFilters((prev) => ({ ...prev, title: [] }));
+                      setValueFilterSearch((prev) => ({ ...prev, title: "" }));
+                    }}
+                    searchValue={valueFilterSearch.title}
+                    onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, title: value }))}
+                  />
+                </div>
+                <button
+                  type="button"
+                  aria-label="Resize Title column"
+                  onMouseDown={(event) => startColumnResize("title", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
+              </TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.author}%` }}>
+                <div className="flex items-center justify-between gap-1 pr-2">
+                  <button type="button" className="truncate text-left hover:underline" onClick={() => toggleSort("author")}>
+                    Author{sortLabel("author")}
+                  </button>
+                  <ValueFilterMenu
+                    label="Author"
+                    options={authorOptions}
+                    selectedValues={activeValueFilters.author}
+                    onApplyValues={(values) => setValueFilter("author", values)}
+                    onClear={() => {
+                      setValueFilters((prev) => ({ ...prev, author: [] }));
+                      setValueFilterSearch((prev) => ({ ...prev, author: "" }));
+                    }}
+                    searchValue={valueFilterSearch.author}
+                    onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, author: value }))}
+                  />
+                </div>
+                <button
+                  type="button"
+                  aria-label="Resize Author column"
+                  onMouseDown={(event) => startColumnResize("author", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
+              </TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.status}%` }}>
+                <div className="flex items-center justify-between gap-1 pr-2">
+                  <button type="button" className="truncate text-left hover:underline" onClick={() => toggleSort("status")}>
+                    Status{sortLabel("status")}
+                  </button>
+                  <ValueFilterMenu
+                    label="Status"
                     options={statusOptions}
                     selectedValues={activeValueFilters.status}
                     onApplyValues={(values) => setValueFilter("status", values)}
@@ -1523,77 +1224,6 @@ export default function BooksClient() {
                     onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, status: value }))}
                   />
                 </div>
-              </TableHead>
-              <TableHead style={{ width: `${columnWidths.date}%` }} className="align-top">
-                <div className="space-y-1">
-                  <select
-                    value={sortConfig.key === "date" ? sortConfig.direction : "none"}
-                    onChange={(event) =>
-                      setExplicitSort("date", event.target.value as "none" | "asc" | "desc")
-                    }
-                    className="block h-6 w-full rounded border bg-background px-1.5 text-[11px]"
-                  >
-                    <option value="none">Sort</option>
-                    <option value="asc">A to Z (oldest)</option>
-                    <option value="desc">Z to A (newest)</option>
-                  </select>
-                </div>
-              </TableHead>
-              <TableHead style={{ width: `${columnWidths.series}%` }}>
-                <ValueFilterMenu
-                  label="Filter"
-                  options={seriesOptions}
-                  selectedValues={activeValueFilters.series}
-                  onApplyValues={(values) => setValueFilter("series", values)}
-                  onClear={() => {
-                    setValueFilters((prev) => ({ ...prev, series: [] }));
-                    setValueFilterSearch((prev) => ({ ...prev, series: "" }));
-                    setFilters((prev) => ({ ...prev, series: "" }));
-                  }}
-                  searchValue={valueFilterSearch.series}
-                  onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, series: value }))}
-                />
-              </TableHead>
-              <TableHead style={{ width: `${columnWidths.bookNumber}%` }}>
-                <select
-                  value={sortConfig.key === "bookNumber" ? sortConfig.direction : "none"}
-                  onChange={(event) =>
-                    setExplicitSort("bookNumber", event.target.value as "none" | "asc" | "desc")
-                  }
-                  className="h-6 w-full rounded border bg-background px-1.5 text-[11px]"
-                >
-                  <option value="none">Sort</option>
-                  <option value="asc">A to Z</option>
-                  <option value="desc">Z to A</option>
-                </select>
-              </TableHead>
-              <TableHead style={{ width: `${columnWidths.actions}%` }}>
-                <Button type="button" variant="ghost" size="sm" onClick={clearFilters}>
-                  Clear
-                </Button>
-              </TableHead>
-            </TableRow>
-            <TableRow>
-              <TableHead className="relative" style={{ width: `${columnWidths.title}%` }}>
-                <button type="button" className="text-left" onClick={() => toggleSort("title")}>Title{sortLabel("title")}</button>
-                <button
-                  type="button"
-                  aria-label="Resize Title column"
-                  onMouseDown={(event) => startColumnResize("title", event)}
-                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
-                />
-              </TableHead>
-              <TableHead className="relative" style={{ width: `${columnWidths.author}%` }}>
-                <button type="button" className="text-left" onClick={() => toggleSort("author")}>Author{sortLabel("author")}</button>
-                <button
-                  type="button"
-                  aria-label="Resize Author column"
-                  onMouseDown={(event) => startColumnResize("author", event)}
-                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
-                />
-              </TableHead>
-              <TableHead className="relative" style={{ width: `${columnWidths.status}%` }}>
-                <button type="button" className="text-left" onClick={() => toggleSort("status")}>Status{sortLabel("status")}</button>
                 <button
                   type="button"
                   aria-label="Resize Status column"
@@ -1602,7 +1232,7 @@ export default function BooksClient() {
                 />
               </TableHead>
               <TableHead className="relative" style={{ width: `${columnWidths.date}%` }}>
-                <button type="button" className="text-left" onClick={() => toggleSort("date")}>Date{sortLabel("date")}</button>
+                <button type="button" className="text-left hover:underline" onClick={() => toggleSort("date")}>Date{sortLabel("date")}</button>
                 <button
                   type="button"
                   aria-label="Resize Date column"
@@ -1611,7 +1241,23 @@ export default function BooksClient() {
                 />
               </TableHead>
               <TableHead className="relative" style={{ width: `${columnWidths.series}%` }}>
-                <button type="button" className="text-left" onClick={() => toggleSort("series")}>Series{sortLabel("series")}</button>
+                <div className="flex items-center justify-between gap-1 pr-2">
+                  <button type="button" className="truncate text-left hover:underline" onClick={() => toggleSort("series")}>
+                    Series{sortLabel("series")}
+                  </button>
+                  <ValueFilterMenu
+                    label="Series"
+                    options={seriesOptions}
+                    selectedValues={activeValueFilters.series}
+                    onApplyValues={(values) => setValueFilter("series", values)}
+                    onClear={() => {
+                      setValueFilters((prev) => ({ ...prev, series: [] }));
+                      setValueFilterSearch((prev) => ({ ...prev, series: "" }));
+                    }}
+                    searchValue={valueFilterSearch.series}
+                    onSearchChange={(value) => setValueFilterSearch((prev) => ({ ...prev, series: value }))}
+                  />
+                </div>
                 <button
                   type="button"
                   aria-label="Resize Series column"
@@ -1620,7 +1266,7 @@ export default function BooksClient() {
                 />
               </TableHead>
               <TableHead className="relative" style={{ width: `${columnWidths.bookNumber}%` }}>
-                <button type="button" className="text-left" onClick={() => toggleSort("bookNumber")}>Book #{sortLabel("bookNumber")}</button>
+                <button type="button" className="text-left hover:underline" onClick={() => toggleSort("bookNumber")}>Book #{sortLabel("bookNumber")}</button>
                 <button
                   type="button"
                   aria-label="Resize Book number column"
@@ -1629,7 +1275,12 @@ export default function BooksClient() {
                 />
               </TableHead>
               <TableHead className="relative" style={{ width: `${columnWidths.actions}%` }}>
-                Actions
+                <div className="flex items-center justify-between gap-1 pr-2">
+                  Actions
+                  <Button type="button" variant="ghost" size="icon-xs" title="Clear all filters and sorting" onClick={clearFilters}>
+                    <XIcon />
+                  </Button>
+                </div>
                 <button
                   type="button"
                   aria-label="Resize Actions column"
@@ -1659,43 +1310,48 @@ export default function BooksClient() {
                       <Button
                         type="button"
                         variant="ghost"
-                        size="sm"
-                        className="h-6 px-1.5 text-[10px]"
+                        size="icon-xs"
+                        title="View books in this series"
+                        aria-label="View books in this series"
                         onClick={() => router.push(`/series/${b.series_id}`)}
                       >
-                        View books
+                        <BookOpenIcon />
                       </Button>
                     ) : null}
                     <Button
                       type="button"
                       variant="outline"
-                      size="sm"
+                      size="icon-xs"
+                      title={b.is_read ? "Mark unread" : "Mark read"}
+                      aria-label={b.is_read ? "Mark unread" : "Mark read"}
                       className={
                         b.is_read
-                          ? "h-6 border-rose-300 px-1.5 text-[10px] text-rose-700 hover:bg-rose-50"
-                          : "h-6 border-emerald-300 px-1.5 text-[10px] text-emerald-700 hover:bg-emerald-50"
+                          ? "border-rose-300 text-rose-700 hover:bg-rose-50"
+                          : "border-emerald-300 text-emerald-700 hover:bg-emerald-50"
                       }
                       onClick={() => toggleRead(b)}
                     >
-                      {b.is_read ? "Mark unread" : "Mark read"}
+                      {b.is_read ? <RotateCcwIcon /> : <CheckIcon />}
                     </Button>
                     <Button
                       type="button"
                       variant="outline"
-                      size="sm"
-                      className="h-6 px-1.5 text-[10px]"
+                      size="icon-xs"
+                      title="Edit book"
+                      aria-label="Edit book"
                       onClick={() => openEditBookDialog(b)}
                     >
-                      Edit
+                      <PencilIcon />
                     </Button>
                     <Button
                       type="button"
                       variant="destructive"
-                      size="sm"
-                      className="h-6 px-1.5 text-[10px]"
+                      size="icon-xs"
+                      title="Delete book"
+                      aria-label="Delete book"
                       onClick={() => deleteBook(b.id)}
                     >
-                      Delete
+                      <Trash2Icon />
                     </Button>
                       </div>
                     </TableCell>
@@ -1984,78 +1640,6 @@ export default function BooksClient() {
         </DialogContent>
       </Dialog>
 
-      <Dialog
-        open={agentDialogOpen}
-        onOpenChange={(open) => {
-          setAgentDialogOpen(open);
-          if (!open) {
-            resetAgentWorkflow();
-          }
-        }}
-      >
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Agent-Assisted Book Draft</DialogTitle>
-            <DialogDescription>
-              Run the agent to generate metadata, review the result, then approve to create the book.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="space-y-1 sm:col-span-2">
-              <Label htmlFor="agent-book-title">Title</Label>
-              <Input
-                id="agent-book-title"
-                value={agentRunForm.title}
-                onChange={(event) => setAgentRunForm((prev) => ({ ...prev, title: event.target.value }))}
-                placeholder="Book title"
-              />
-            </div>
-
-            <div className="space-y-1 sm:col-span-2">
-              <Label htmlFor="agent-book-author">Author (optional)</Label>
-              <Input
-                id="agent-book-author"
-                value={agentRunForm.author}
-                onChange={(event) => setAgentRunForm((prev) => ({ ...prev, author: event.target.value }))}
-                placeholder="Author name"
-              />
-            </div>
-
-            <div className="sm:col-span-2">
-              <Button type="button" variant="outline" onClick={handleRunAgent} disabled={agentRunning}>
-                {agentRunning ? "Running agent..." : "Run /agent/run"}
-              </Button>
-            </div>
-
-            <div className="space-y-1 sm:col-span-2">
-              <Label htmlFor="agent-metadata-preview">Metadata preview</Label>
-              <textarea
-                id="agent-metadata-preview"
-                readOnly
-                value={agentMetadata ? JSON.stringify(agentMetadata, null, 2) : "Run the agent to generate metadata."}
-                className="min-h-56 w-full rounded-lg border border-input bg-background px-2.5 py-2 font-mono text-xs outline-none"
-              />
-            </div>
-          </div>
-
-          {agentFound === false ? (
-            <div className="rounded-md border border-red-500 bg-red-200 px-3 py-2 text-sm font-semibold text-red-900">
-              ⚠️ No known book found for this title. You can still approve manually.
-            </div>
-          ) : null}
-
-          <DialogFooter showCloseButton>
-            <Button
-              type="button"
-              onClick={handleApproveAgentMetadata}
-              disabled={!agentMetadata || agentApproving || agentRunning}
-            >
-              {agentApproving ? "Approving..." : "Approve and Create Book"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

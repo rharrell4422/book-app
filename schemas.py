@@ -172,20 +172,6 @@ class SeriesDetailResponse(BaseModel):
 
 
 # ------------------------------------------------------------
-# Agent request/response Schemas
-# ------------------------------------------------------------
-
-class AgentRunRequest(BaseModel):
-    title: str
-    author: str | None = None
-
-
-class AgentApproveRequest(BaseModel):
-    metadata: dict
-    found: bool | None = None
-
-
-# ------------------------------------------------------------
 # Series action request Schemas
 # ------------------------------------------------------------
 

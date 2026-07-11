@@ -8,6 +8,28 @@ import models
 
 TITLE_NORMALIZATION_MODES = {"keep_original", "clean_up", "new_clean_title", "match_other_titles"}
 
+# Matches generic marketing-blurb subtitles that mention "LitRPG" with filler
+# descriptor words on either side (e.g. "An Epic Fantasy LitRPG Adventure",
+# "A LitRPG Apocalypse", "LitRPG Novel"). Uses a lookahead for the trailing
+# "(Series Name Book #)"/end-of-string boundary instead of consuming it, so
+# it still fires when that suffix follows -- which is the common case for
+# real titles, not the rare one.
+_LITRPG_FILLER_SUBTITLE_RE = re.compile(
+    r":\s*(?P<article>(?:a|an)\s+)?"
+    r"(?:(?:epic|fantasy|adventures?|novels?|sagas?|apocalyptic|apocalypse|progression(?:\s+fantasy)?)\s+)*"
+    r"litrpg"
+    r"(?:\s+(?:adventures?|novels?|sagas?|apocalyptic|apocalypse|epic|fantasy|progression(?:\s+fantasy)?))*"
+    r":?(?=\s*(?:\([^)]*\))?\s*$)",
+    flags=re.IGNORECASE,
+)
+
+
+def _strip_litrpg_filler_subtitle(title: str) -> str:
+    def _replace(match: re.Match) -> str:
+        return ": A LitRPG" if match.group("article") else ": LitRPG"
+
+    return _LITRPG_FILLER_SUBTITLE_RE.sub(_replace, title)
+
 
 def normalize_title_normalization_mode(value: str | None) -> str | None:
     if value is None:
@@ -63,19 +85,7 @@ def _normalize_title_cleanup_only(raw_title: str) -> str:
     title = re.sub(r"\s+\)", ")", title)
     title = re.sub(r"\s{2,}", " ", title)
 
-    title = re.sub(r":\s*a\s+litrpg\s+apocalypse\s*:?$", ": A LitRPG", title, flags=re.IGNORECASE).strip()
-    title = re.sub(
-        r":\s*a\s+litrpg\s+(?:adventure|novel|saga|epic|fantasy|progression\s+fantasy)\s*:?$",
-        ": A LitRPG",
-        title,
-        flags=re.IGNORECASE,
-    ).strip()
-    title = re.sub(
-        r":\s*litrpg\s+(?:adventure|novel|saga|epic|fantasy|progression\s+fantasy)\s*:?$",
-        ": LitRPG",
-        title,
-        flags=re.IGNORECASE,
-    ).strip()
+    title = _strip_litrpg_filler_subtitle(title).strip()
 
     return re.sub(r"\s{2,}", " ", title).strip()
 
@@ -207,45 +217,18 @@ def _apply_custom_title_pattern(
         "{original_title}": str(original_title or "").strip(),
     }
 
-    raw_patterns = [part.strip() for part in re.split(r"\s*\|\|\s*|\n+", clean_pattern) if part.strip()]
-    patterns = raw_patterns or [clean_pattern]
+    rendered = clean_pattern
+    for token, value in replacements.items():
+        rendered = rendered.replace(token, value)
 
-    def render_candidate(candidate: str) -> str:
-        rendered = str(candidate or "")
+    # Cleans up artifacts left behind when a token (most often
+    # {book_subtitle} or {series_name}) substitutes to an empty string --
+    # e.g. "Title - ", "Title ()", or "Title ( Book 2)" -- without requiring
+    # the author to write conditional template syntax.
+    rendered = re.sub(r"\(\s+", "(", rendered)
+    rendered = re.sub(r"\(\s*\)", "", rendered)
+    rendered = re.sub(r"\s+([,;:.!?])", r"\1", rendered)
+    rendered = re.sub(r"\s{2,}", " ", rendered)
+    rendered = rendered.strip(" -,:;")
 
-        def replace_optional_block(match: re.Match) -> str:
-            block = str(match.group(1) or "")
-            tokens = set(re.findall(r"\{[a-z_]+\}", block))
-            if tokens and any(not str(replacements.get(token) or "").strip() for token in tokens):
-                return ""
-
-            block_rendered = block
-            for token, value in replacements.items():
-                block_rendered = block_rendered.replace(token, value)
-            return block_rendered
-
-        previous = None
-        while previous != rendered:
-            previous = rendered
-            rendered = re.sub(r"\[\[([\s\S]*?)\]\]", replace_optional_block, rendered)
-
-        for token, value in replacements.items():
-            rendered = rendered.replace(token, value)
-
-        rendered = re.sub(r"\(\s*\)", "", rendered)
-        rendered = re.sub(r"\[\s*\]", "", rendered)
-        rendered = re.sub(r"\s+([,;:.!?])", r"\1", rendered)
-        rendered = re.sub(r"\s{2,}", " ", rendered)
-        return rendered.strip(" -,:;")
-
-    first_rendered = ""
-    for candidate in patterns:
-        rendered = render_candidate(candidate)
-        if not rendered:
-            continue
-        if not first_rendered:
-            first_rendered = rendered
-        if rendered != book_title:
-            return rendered
-
-    return first_rendered or book_title
+    return rendered or book_title

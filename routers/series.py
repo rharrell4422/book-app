@@ -344,6 +344,7 @@ def normalize_series_titles(series_id: int, payload: schemas.NormalizeTitlesRequ
     today = datetime.utcnow().date()
     updated_rows: list[dict] = []
     skipped_upcoming_ids: list[int] = []
+    skipped_unnumbered_ids: list[int] = []
     empty_title_count = 0
     considered_count = 0
 
@@ -357,11 +358,20 @@ def normalize_series_titles(series_id: int, payload: schemas.NormalizeTitlesRequ
             skipped_upcoming_ids.append(int(book.id))
             continue
 
-        considered_count += 1
-
         resolved_number = getattr(book, "book_number", None)
         if resolved_number is None:
             resolved_number = getattr(book, "series_order", None)
+
+        # Books with no parseable series number (novellas/short stories) are
+        # identified during future "Check Now" runs by title text alone, since
+        # there's no number to fall back on -- rewriting their title here
+        # would risk a future rediscovery treating them as new and duplicating
+        # them, so leave them untouched.
+        if resolved_number is None:
+            skipped_unnumbered_ids.append(int(book.id))
+            continue
+
+        considered_count += 1
 
         if is_custom_mode:
             normalized_title = _apply_custom_title_pattern(
@@ -408,11 +418,14 @@ def normalize_series_titles(series_id: int, payload: schemas.NormalizeTitlesRequ
         "unchanged_count": unchanged_count,
         "skipped_upcoming_count": len(skipped_upcoming_ids),
         "skipped_upcoming_ids": skipped_upcoming_ids,
+        "skipped_unnumbered_count": len(skipped_unnumbered_ids),
+        "skipped_unnumbered_ids": skipped_unnumbered_ids,
         "updated_books": updated_rows,
         "normalization_diagnostics": {
             "total_books": len(books),
             "empty_title_count": empty_title_count,
             "skipped_upcoming_count": len(skipped_upcoming_ids),
+            "skipped_unnumbered_count": len(skipped_unnumbered_ids),
             "considered_count": considered_count,
             "updated_count": len(updated_rows),
             "unchanged_count": unchanged_count,
