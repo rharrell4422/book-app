@@ -3,7 +3,13 @@ import { NextRequest, NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-const BACKEND_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
+// Prefer a plain (non NEXT_PUBLIC_) server-side var here: this route only
+// ever runs on the server, and NEXT_PUBLIC_ vars get statically inlined at
+// *build time*, so if the var wasn't visible during that specific build,
+// it'd be stuck wrong until a fresh rebuild. Reading API_BASE_URL directly
+// at request time avoids that class of bug entirely.
+const BACKEND_BASE_URL =
+  process.env.API_BASE_URL || process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
 
 async function proxyRequest(request: NextRequest, pathSegments: string[]) {
   const targetUrl = new URL(pathSegments.join("/"), `${BACKEND_BASE_URL.replace(/\/+$/, "")}/`);
@@ -25,7 +31,23 @@ async function proxyRequest(request: NextRequest, pathSegments: string[]) {
     requestInit.cache = "no-store";
   }
 
-  const response = await fetch(targetUrl.toString(), requestInit);
+  let response: Response;
+  try {
+    response = await fetch(targetUrl.toString(), requestInit);
+  } catch (error) {
+    // Surface *why* the proxy failed (bad backend URL, DNS, connection
+    // refused, etc.) instead of letting Next.js swallow it into an opaque
+    // "Internal Server Error" with no diagnostic info.
+    const message = error instanceof Error ? error.message : String(error);
+    return NextResponse.json(
+      {
+        detail: "Proxy failed to reach backend",
+        backendUrl: targetUrl.toString(),
+        error: message,
+      },
+      { status: 502 },
+    );
+  }
 
   const responseHeaders = new Headers(response.headers);
   responseHeaders.delete("content-encoding");
