@@ -13,7 +13,7 @@ from intelligence import (
     recalculate_intelligence,
     recalculate_series_state_for_series,
 )
-from routers.deps import get_db
+from routers.deps import enforce_access, get_db
 from services.identity import _is_upcoming_future_book
 from services.series_check_engine import (
     SERIES_CHECK_TIMEOUT_SECONDS,
@@ -27,7 +27,7 @@ from services.title_normalization import (
 )
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/series", tags=["series"])
+router = APIRouter(prefix="/series", tags=["series"], dependencies=[Depends(enforce_access)])
 
 
 @router.post("/", response_model=schemas.SeriesResponse)

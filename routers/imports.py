@@ -9,9 +9,9 @@ import models
 import schemas
 from importer.importer import run_import
 from intelligence import recalculate_intelligence
-from routers.deps import get_db
+from routers.deps import enforce_access, get_db
 
-router = APIRouter(prefix="/import", tags=["import"])
+router = APIRouter(prefix="/import", tags=["import"], dependencies=[Depends(enforce_access)])
 
 
 @router.post("")

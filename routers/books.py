@@ -6,9 +6,9 @@ from sqlalchemy.orm import Session
 import crud
 import schemas
 from intelligence import lookup_book_summary
-from routers.deps import get_db
+from routers.deps import enforce_access, get_db
 
-router = APIRouter(prefix="/books", tags=["books"])
+router = APIRouter(prefix="/books", tags=["books"], dependencies=[Depends(enforce_access)])
 
 
 @router.post("/", response_model=schemas.BookResponse)

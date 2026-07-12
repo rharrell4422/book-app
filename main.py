@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import models
 from database import engine
 from bootstrap import backfill_series_state, ensure_series_state_columns
-from routers import books, imports, series
+from routers import auth, books, imports, series
 
 # Create database tables
 models.Base.metadata.create_all(bind=engine)
@@ -24,6 +24,7 @@ app.add_middleware(
     max_age=3600,
 )
 
+app.include_router(auth.router)
 app.include_router(series.router)
 app.include_router(books.router)
 app.include_router(imports.router)

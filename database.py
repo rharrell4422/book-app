@@ -1,7 +1,14 @@
+import os
+
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-DATABASE_URL = "sqlite:///./books.db"
+# DATABASE_PATH lets a deployment point this at a persistent disk (e.g.
+# Render/Railway mount a volume at something like /data) instead of the
+# repo-relative file used for local dev. Falls back to the existing local
+# behavior when unset.
+DATABASE_PATH = os.environ.get("DATABASE_PATH", "./books.db")
+DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
 
 engine = create_engine(
     DATABASE_URL,
