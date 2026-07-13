@@ -63,9 +63,29 @@ class Series(Base):
     books = relationship("Book", back_populates="series")
 
     @property
+    def _active_books(self):
+        return [book for book in (self.books or []) if str(book.record_status or "active") != "deleted"]
+
+    @property
+    def has_new_available_books(self):
+        """True if Check Now discovered a book that's out now but not yet
+        read -- distinct from has_unread_books, which also counts books you
+        added yourself. Clears automatically once the book is marked read
+        (see crud.books._should_clear_ghost_flags)."""
+        return any(bool(book.is_missing) for book in self._active_books)
+
+    @property
+    def has_new_upcoming_books(self):
+        """True if Check Now discovered an announced future release. Clears
+        automatically once the book is marked read."""
+        return any(bool(book.is_upcoming_auto) or bool(book.is_upcoming_final) for book in self._active_books)
+
+    @property
     def series_state(self):
         return {
             "has_new_books": bool(self.has_new_books),
+            "has_new_available_books": self.has_new_available_books,
+            "has_new_upcoming_books": self.has_new_upcoming_books,
             "has_unread_books": bool(self.has_unread_books),
             "has_upcoming_books": bool(self.has_upcoming_books),
             "is_caught_up": bool(self.is_caught_up),

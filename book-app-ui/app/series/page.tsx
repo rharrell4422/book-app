@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { BookOpenIcon, Clock3Icon } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { fetchApiWithFallback } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
@@ -26,7 +27,8 @@ type SeriesRow = {
   books_tracked?: number;
   last_checked?: string | null;
   updated_at?: string | null;
-  has_new_books?: boolean;
+  has_new_available_books?: boolean;
+  has_new_upcoming_books?: boolean;
   has_unread_books?: boolean;
   has_upcoming_books?: boolean;
   is_caught_up?: boolean;
@@ -37,6 +39,8 @@ type SeriesRow = {
 
 type SeriesState = {
   has_new_books: boolean;
+  has_new_available_books: boolean;
+  has_new_upcoming_books: boolean;
   has_unread_books: boolean;
   has_upcoming_books: boolean;
   is_caught_up: boolean;
@@ -52,7 +56,8 @@ type SeriesApiRow = {
   next_upcoming_book_number?: number | null;
   total_books?: number | null;
   updated_at?: string | null;
-  has_new_books?: boolean;
+  has_new_available_books?: boolean;
+  has_new_upcoming_books?: boolean;
   has_unread_books?: boolean;
   has_upcoming_books?: boolean;
   is_caught_up?: boolean;
@@ -114,9 +119,11 @@ type CandidateDiagnostic = {
   message?: string | null;
 };
 
-function getSeriesState(row: Pick<SeriesRow, "has_new_books" | "has_unread_books" | "has_upcoming_books" | "is_caught_up" | "series_state">): SeriesState {
+function getSeriesState(row: Pick<SeriesRow, "has_new_available_books" | "has_new_upcoming_books" | "has_unread_books" | "has_upcoming_books" | "is_caught_up" | "series_state">): SeriesState {
   return {
-    has_new_books: Boolean(row.series_state?.has_new_books ?? row.has_new_books ?? false),
+    has_new_books: Boolean(row.series_state?.has_new_books ?? false),
+    has_new_available_books: Boolean(row.series_state?.has_new_available_books ?? row.has_new_available_books ?? false),
+    has_new_upcoming_books: Boolean(row.series_state?.has_new_upcoming_books ?? row.has_new_upcoming_books ?? false),
     has_unread_books: Boolean(row.series_state?.has_unread_books ?? row.has_unread_books ?? false),
     has_upcoming_books: Boolean(row.series_state?.has_upcoming_books ?? row.has_upcoming_books ?? false),
     is_caught_up: Boolean(row.series_state?.is_caught_up ?? row.is_caught_up ?? false),
@@ -125,7 +132,7 @@ function getSeriesState(row: Pick<SeriesRow, "has_new_books" | "has_unread_books
 
 function getSeriesPriority(row: SeriesRow): number {
   const state = getSeriesState(row);
-  if (state.has_new_books) return 0;
+  if (state.has_new_available_books || state.has_new_upcoming_books) return 0;
   if (state.has_unread_books) return 1;
   return 2;
 }
@@ -764,7 +771,9 @@ export default function SeriesPage() {
           inferredMissingNumbers,
         );
         const seriesState = item.series_state ?? {
-          has_new_books: Boolean(item.has_new_books ?? false),
+          has_new_books: false,
+          has_new_available_books: Boolean(item.has_new_available_books ?? false),
+          has_new_upcoming_books: Boolean(item.has_new_upcoming_books ?? false),
           has_unread_books: Boolean(item.has_unread_books ?? false),
           has_upcoming_books: Boolean(item.has_upcoming_books ?? false),
           is_caught_up: Boolean(item.is_caught_up ?? false),
@@ -782,7 +791,8 @@ export default function SeriesPage() {
           books_tracked: booksTracked,
           last_checked: item.updated_at ?? null,
           updated_at: item.updated_at ?? null,
-          has_new_books: seriesState.has_new_books,
+          has_new_available_books: seriesState.has_new_available_books,
+          has_new_upcoming_books: seriesState.has_new_upcoming_books,
           has_unread_books: seriesState.has_unread_books,
           has_upcoming_books: seriesState.has_upcoming_books,
           is_caught_up: seriesState.is_caught_up,
@@ -979,16 +989,16 @@ export default function SeriesPage() {
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
             <span className="inline-flex items-center gap-1">
-              <span aria-hidden="true">⭐</span>
-              <span>new books found</span>
+              <BookOpenIcon className="h-3.5 w-3.5 text-sky-600" aria-hidden="true" />
+              <span>new available book(s) found</span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <Clock3Icon className="h-3.5 w-3.5 text-rose-600" aria-hidden="true" />
+              <span>new upcoming book(s) found</span>
             </span>
             <span className="inline-flex items-center gap-1">
               <span aria-hidden="true">📘</span>
               <span>unread books remain</span>
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span aria-hidden="true">🔮</span>
-              <span>upcoming books remain</span>
             </span>
           </div>
         </div>
@@ -1174,10 +1184,13 @@ export default function SeriesPage() {
                 <TableCell className="truncate" title={s.name}>
                   <div className="flex items-center gap-1 truncate">
                     <span className="truncate">{s.name}</span>
-                    {getSeriesState(s).has_new_books ? <span className="text-amber-500" aria-label="New books found">⭐</span> : null}
+                    {getSeriesState(s).has_new_available_books ? (
+                      <BookOpenIcon className="h-3.5 w-3.5 shrink-0 text-sky-600" aria-label="New available book(s) found" />
+                    ) : null}
+                    {getSeriesState(s).has_new_upcoming_books ? (
+                      <Clock3Icon className="h-3.5 w-3.5 shrink-0 text-rose-600" aria-label="New upcoming book(s) found" />
+                    ) : null}
                     {getSeriesState(s).has_unread_books ? <span aria-label="Unread books remain">📘</span> : null}
-                    {getSeriesState(s).has_upcoming_books ? <span aria-label="Upcoming books remain">🔮</span> : null}
-                    {Array.isArray(s.missing_books) && s.missing_books.length > 0 ? <span aria-label="Missing books detected">🧩</span> : null}
                   </div>
                   {Array.isArray(s.missing_books) && s.missing_books.length > 0 ? (
                     <p className="mt-1 truncate text-[11px] text-rose-700" title={formatMissingBooksLabel(s.missing_books) || undefined}>

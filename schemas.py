@@ -103,6 +103,8 @@ class BookUpdate(BaseModel):
 
 class SeriesState(BaseModel):
     has_new_books: bool = False
+    has_new_available_books: bool = False
+    has_new_upcoming_books: bool = False
     has_unread_books: bool = False
     has_upcoming_books: bool = False
     is_caught_up: bool = False
