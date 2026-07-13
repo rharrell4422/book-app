@@ -1071,7 +1071,7 @@ export default function SeriesPage() {
       </div>
 
       <div ref={tableWrapRef} className="overflow-x-auto rounded-lg border bg-card/80">
-        <Table className="w-full table-fixed text-xs [&_th]:h-8 [&_th]:py-1 [&_td]:py-1">
+        <Table className="w-full table-fixed text-sm [&_th]:h-9 [&_th]:py-1 [&_td]:py-1">
           <TableHeader>
             <TableRow>
               <TableHead className="relative" style={{ width: `${columnWidths.id}%` }}>
