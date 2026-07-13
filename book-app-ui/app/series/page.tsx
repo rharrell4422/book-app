@@ -754,55 +754,44 @@ export default function SeriesPage() {
         return;
       }
 
-      const detailResults = await Promise.allSettled(
-        (baseSeries as SeriesApiRow[]).map(async (item) => {
-          const detailResponse = await fetchApiWithFallback(`/series/${item.id}`, {
-            cache: "no-store",
-          });
-          return detailResponse.json();
-        })
-      );
-
-      const hydrated = (baseSeries as SeriesApiRow[]).map((item, index: number) => {
-        const detail = detailResults[index];
-        const detailData: SeriesDetailApiRow | null = detail?.status === "fulfilled" ? (detail.value as SeriesDetailApiRow) : null;
-        const books = Array.isArray(detailData?.books) ? detailData.books : [];
-        const booksTracked = Array.isArray(detailData?.books)
-          ? books.length
-          : 0;
+      // All necessary data (books, intelligence fields) is already present in the
+      // SeriesApiRow objects returned by /series/. Making a further per-series
+      // request to /series/{id} here was a redundant N+1 pattern that overwhelmed
+      // the backend and caused 500s/CORS failures once there were 100+ series.
+      const hydrated = (baseSeries as SeriesApiRow[]).map((item) => {
+        const books = Array.isArray(item.books) ? item.books : [];
+        const booksTracked = books.length;
         const inferredMissingNumbers = inferMissingNumbersFromBooks(books);
         const mergedMissingBooks = mergeMissingNumbers(
-          detailData?.missing_books ?? item.missing_books,
+          item.missing_books,
           inferredMissingNumbers,
         );
-        const seriesState = detailData?.series_state ?? item.series_state ?? null;
+        const seriesState = item.series_state ?? {
+          has_new_books: Boolean(item.has_new_books ?? false),
+          has_unread_books: Boolean(item.has_unread_books ?? false),
+          has_upcoming_books: Boolean(item.has_upcoming_books ?? false),
+          is_caught_up: Boolean(item.is_caught_up ?? false),
+        };
 
         return {
           id: item.id,
           name: item.name,
-          author: detailData?.author ?? item.author ?? null,
-          is_finished: Boolean(detailData?.is_finished ?? item.is_finished ?? false),
-          series_status: detailData?.series_status ?? item.series_status ?? null,
-          next_unread_book_number:
-            detailData?.next_unread_book_number ?? item.next_unread_book_number ?? null,
-          next_upcoming_book_number:
-            detailData?.next_upcoming_book_number ?? item.next_upcoming_book_number ?? null,
-          total_books: detailData?.total_books ?? item.total_books ?? null,
+          author: item.author ?? null,
+          is_finished: Boolean(item.is_finished ?? false),
+          series_status: item.series_status ?? null,
+          next_unread_book_number: item.next_unread_book_number ?? null,
+          next_upcoming_book_number: item.next_upcoming_book_number ?? null,
+          total_books: item.total_books ?? null,
           books_tracked: booksTracked,
-          last_checked: detailData?.updated_at ?? item.updated_at ?? null,
-          updated_at: detailData?.updated_at ?? item.updated_at ?? null,
-          has_new_books: Boolean(seriesState?.has_new_books ?? detailData?.has_new_books ?? item.has_new_books ?? false),
-          has_unread_books: Boolean(seriesState?.has_unread_books ?? detailData?.has_unread_books ?? item.has_unread_books ?? false),
-          has_upcoming_books: Boolean(seriesState?.has_upcoming_books ?? detailData?.has_upcoming_books ?? item.has_upcoming_books ?? false),
-          is_caught_up: Boolean(seriesState?.is_caught_up ?? detailData?.is_caught_up ?? item.is_caught_up ?? false),
+          last_checked: item.updated_at ?? null,
+          updated_at: item.updated_at ?? null,
+          has_new_books: seriesState.has_new_books,
+          has_unread_books: seriesState.has_unread_books,
+          has_upcoming_books: seriesState.has_upcoming_books,
+          is_caught_up: seriesState.is_caught_up,
           missing_books: mergedMissingBooks,
           inferred_missing_numbers: inferredMissingNumbers,
-          series_state: seriesState ? seriesState : {
-            has_new_books: Boolean(detailData?.has_new_books ?? item.has_new_books ?? false),
-            has_unread_books: Boolean(detailData?.has_unread_books ?? item.has_unread_books ?? false),
-            has_upcoming_books: Boolean(detailData?.has_upcoming_books ?? item.has_upcoming_books ?? false),
-            is_caught_up: Boolean(detailData?.is_caught_up ?? item.is_caught_up ?? false),
-          },
+          series_state: seriesState,
         } satisfies SeriesRow;
       });
 
