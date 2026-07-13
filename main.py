@@ -5,7 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import models
 from database import engine
-from bootstrap import backfill_series_state, ensure_series_state_columns
+from bootstrap import (
+    backfill_series_state,
+    clear_stale_ghost_flags_on_read_books,
+    ensure_series_state_columns,
+)
 from routers import admin, auth, books, imports, series
 
 # Create database tables
@@ -33,4 +37,5 @@ app.include_router(imports.router)
 
 @app.on_event("startup")
 async def start_series_scan_loop() -> None:
+    await asyncio.to_thread(clear_stale_ghost_flags_on_read_books)
     await asyncio.to_thread(backfill_series_state)

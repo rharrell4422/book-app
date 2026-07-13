@@ -223,6 +223,20 @@ def infer_number_from_title(title: str | None, series_name: str | None = None) -
                 value = 0
             if value > 0:
                 return value
+
+    # Same bare "<Series Name> <N>" pattern, but appearing anywhere in the
+    # title rather than only as a strict prefix -- e.g. a reprint listing
+    # titled "By Schism Rent Asunder (Safehold 2) Publisher: Tor..." embeds
+    # the series-name-plus-number as a parenthetical rather than a prefix.
+    if series_norm:
+        anywhere_match = re.search(rf"\b{re.escape(series_norm)}\s+(\d+)\b", cleaned)
+        if anywhere_match:
+            try:
+                value = int(anywhere_match.group(1))
+            except ValueError:
+                value = 0
+            if value > 0:
+                return value
     return None
 
 

@@ -60,6 +60,22 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
         # "<Series Name> <N>" with no "book"/"vol"/"#" keyword at all.
         self.assertEqual(discovery_engine.infer_number_from_title("All the Skills 5", "All The Skills"), 5)
 
+    def test_infer_number_from_title_recognizes_series_name_and_number_mid_title(self):
+        # Regression: a reprint listing titled "By Schism Rent Asunder
+        # (Safehold 2) Publisher: Tor Science Fiction; Reprint edition"
+        # embeds "<series name> <N>" as a parenthetical partway through the
+        # title rather than as a prefix, so the bare-trailing-number check
+        # (which only looks at the very start of the title) missed it,
+        # leaving this reprint of an already-owned book with no resolvable
+        # number at all.
+        self.assertEqual(
+            discovery_engine.infer_number_from_title(
+                "By Schism Rent Asunder (Safehold 2) Publisher: Tor Science Fiction; Reprint edition",
+                "Safehold",
+            ),
+            2,
+        )
+
     def test_looks_like_non_new_release_filters_bundles_and_editions(self):
         self.assertTrue(discovery_engine.looks_like_non_new_release("Cherry Blossom Girls Books 1-3 Box Set"))
         self.assertTrue(discovery_engine.looks_like_non_new_release("Cherry Blossom Girls: French Edition"))
@@ -373,18 +389,22 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         self.assertEqual(result["upcoming_books"], [])
 
     def test_same_new_book_from_two_providers_with_different_title_formats_is_added_once(self):
-        # Regression (live bug): checking "The Completionist Chronicles"
-        # surfaced a short story that Hardcover titled "Havoc in the
-        # Deathyards, A Completionist Chronicles Short Story" and
-        # OpenLibrary titled bare "Havoc in the Deathyards" -- neither had
-        # an ISBN or a parseable book number, so both slipped through as
-        # "new" and got added as two separate duplicate library entries for
-        # the same real short story.
+        # Regression (live bug): checking a series surfaced a companion short
+        # story that Hardcover titled "Havoc in the Deathyards, A Cherry
+        # Blossom Girls Short Story" and OpenLibrary titled bare "Havoc in
+        # the Deathyards" -- neither had an ISBN or a parseable book number,
+        # so both slipped through as "new" and got added as two separate
+        # duplicate library entries for the same real short story. (The
+        # first candidate's title explicitly references the series by name,
+        # which is what makes this different from an unrelated same-author
+        # book that merely came back as a "targeted"-confidence hit --
+        # confidence alone isn't trusted without either a number or some
+        # textual tie to the series; see test_author_fallback_... below.)
         candidates = [
             {
                 "source": "hardcover",
                 "source_id": "hc-havoc",
-                "title": "Havoc in the Deathyards, A Completionist Chronicles Short Story",
+                "title": "Havoc in the Deathyards, A Cherry Blossom Girls Short Story",
                 "authors": ["Harmon Cooper"],
                 "published_date": "2022-06-01",
                 "isbn13": None,
@@ -414,6 +434,147 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
 
         self.assertEqual(result["added_count"], 1)
         self.assertEqual(len(result["available_missing"]), 1)
+
+    def test_targeted_confidence_alone_does_not_pull_in_unrelated_same_author_books(self):
+        # Regression (live bug): checking "Safehold" by David Weber (a
+        # prolific author with many unrelated series) surfaced "Bolo!",
+        # "Worlds Of Honor", and "At All Costs" -- real David Weber books,
+        # but from entirely different series -- as "available" candidates.
+        # They came back tagged confidence="targeted" (the API's own
+        # relevance ranking against "Safehold David Weber"), had no
+        # parseable book number, and had zero textual reference to
+        # "Safehold" anywhere in the title. Trusting confidence=="targeted"
+        # alone, with no number and no textual tie to the series, is too
+        # weak a signal -- it should be rejected, while a same-batch hit
+        # that actually continues the numbering (book 8) should still be
+        # accepted.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-bolo",
+                "title": "Bolo!",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2020-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            },
+            {
+                "source": "hardcover",
+                "source_id": "hc-worlds-of-honor",
+                "title": "Worlds Of Honor",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2020-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            },
+            {
+                "source": "hardcover",
+                "source_id": "hc-book10",
+                "title": "Cherry Blossom Girls Book 10",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            },
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertEqual(result["added_count"], 1)
+        self.assertEqual(
+            [book["title"] for book in result["available_missing"]],
+            ["Cherry Blossom Girls Book 10"],
+        )
+
+    def test_owned_omnibus_range_prevents_individual_volume_reappearing_as_new(self):
+        # Regression (live bug): "Safehold" is owned as a boxed set covering
+        # books 1-3 in one row ("Safehold Boxed Set 1: (Safehold Books
+        # 1-3)"), plus individually-owned books 4-7. Because that omnibus
+        # row's own book_number is just 1 (its position in the shelf, not a
+        # range), the discovery/dedupe identity sets didn't know books 2 and
+        # 3 were already covered -- so a reprint single-volume edition like
+        # "By Heresies Distressed (Safehold Book 3)" slipped through and got
+        # added as a second, duplicate "available" copy of an already-owned
+        # book.
+        series = Series(name="Safehold", author="David Weber")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+
+        self.db.add(
+            Book(
+                title="Safehold Boxed Set 1: (Safehold Books 1-3)",
+                author="David Weber",
+                series_id=series.id,
+                series_order=1,
+                book_number=1.0,
+                record_status="active",
+                is_read=True,
+            )
+        )
+        for number in [4, 5, 6, 7]:
+            self.db.add(
+                Book(
+                    title=f"Safehold Book {number}",
+                    author="David Weber",
+                    series_id=series.id,
+                    series_order=number,
+                    book_number=float(number),
+                    record_status="active",
+                    is_read=True,
+                )
+            )
+        self.db.commit()
+
+        candidates = [
+            {
+                "source": "google_books",
+                "source_id": "gb-heresies-reprint",
+                "title": "By Heresies Distressed (Safehold Book 3)",
+                "authors": ["David Weber"],
+                "published_date": "2010-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            },
+            {
+                "source": "google_books",
+                "source_id": "gb-book8",
+                "title": "Safehold Book 8",
+                "authors": ["David Weber"],
+                "published_date": "2024-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            },
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, series.id, emit_summary=False)
+
+        self.assertEqual(
+            [book["title"] for book in result["available_missing"]],
+            ["Safehold Book 8"],
+        )
 
     def test_bare_title_with_no_series_reference_gets_a_synthesized_suffix(self):
         # Regression: Hardcover tracks series position as structured data

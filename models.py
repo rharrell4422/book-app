@@ -70,15 +70,23 @@ class Series(Base):
     def has_new_available_books(self):
         """True if Check Now discovered a book that's out now but not yet
         read -- distinct from has_unread_books, which also counts books you
-        added yourself. Clears automatically once the book is marked read
-        (see crud.books._should_clear_ghost_flags)."""
-        return any(bool(book.is_missing) for book in self._active_books)
+        added yourself. Normally clears once the book is marked read (see
+        crud.books._should_clear_ghost_flags), but that flag-clearing step
+        can be skipped by write paths that update is_read without going
+        through it (bulk syncs, older data, etc.) -- checking is_read here
+        directly makes this self-healing instead of trusting the flag was
+        cleared correctly everywhere it could be set."""
+        return any(bool(book.is_missing) and not bool(book.is_read) for book in self._active_books)
 
     @property
     def has_new_upcoming_books(self):
-        """True if Check Now discovered an announced future release. Clears
-        automatically once the book is marked read."""
-        return any(bool(book.is_upcoming_auto) or bool(book.is_upcoming_final) for book in self._active_books)
+        """True if Check Now discovered an announced future release. See
+        has_new_available_books for why is_read is also checked directly
+        rather than relying solely on the ghost flag being cleared."""
+        return any(
+            (bool(book.is_upcoming_auto) or bool(book.is_upcoming_final)) and not bool(book.is_read)
+            for book in self._active_books
+        )
 
     @property
     def series_state(self):

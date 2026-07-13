@@ -7,6 +7,7 @@ from datetime import date
 from sqlalchemy.orm import Session
 
 import discovery_engine
+import intelligence
 from models import Book, Series
 
 
@@ -175,6 +176,17 @@ def _build_series_identity_sets(books: list[Book]) -> tuple[set[str], set[str], 
             known_series_titles.add(title_key)
         if number:
             known_series_numbers.add(number)
+
+        # An owned omnibus/boxed-set edition (e.g. "Safehold Boxed Set 1:
+        # (Safehold Books 1-3)") only carries a single book_number on its
+        # own row, but it really covers every number in that range -- treat
+        # each of those as already-known too, so a newly-discovered
+        # single-volume reprint of book 2 or 3 (a real book, just not a new
+        # one) is recognized as a duplicate instead of "new available".
+        for covered in intelligence.extract_omnibus_ranges(book.title):
+            known_series_numbers.add(_normalize_identity_number(covered))
+        for covered in intelligence.extract_omnibus_ranges(getattr(book, "subtitle", None)):
+            known_series_numbers.add(_normalize_identity_number(covered))
 
         bare_key = discovery_engine.bare_title_key(book.title)
         if bare_key:
@@ -388,19 +400,29 @@ class SeriesIntelligenceAgent:
                 )
                 resolved_number = _normalize_identity_number(inferred_number) if inferred_number else ""
 
-                # Targeted-search results were already matched by the API's
-                # own relevance ranking against "<series name> <author>", so
-                # they don't need to independently pass a title-text check.
-                # Fallback (author-bibliography-only) results carry no such
-                # guarantee and need explicit series evidence in the title.
+                # Targeted-search results are relevance-ranked by the API
+                # against "<series name> <author>", but that ranking isn't a
+                # strict filter -- a prolific author's unrelated books (e.g.
+                # a different series, an anthology, a companion volume) can
+                # still come back as "targeted" hits with zero textual tie to
+                # the series being checked (regression: searching "Safehold
+                # David Weber" surfaced "Bolo!", "Worlds Of Honor", and "At
+                # All Costs" -- unrelated Weber titles from other series).
+                # Trusting confidence=="targeted" alone is only safe when the
+                # source also gave a real series-position number for it
+                # (structured data, e.g. Hardcover's series_number_hint, or a
+                # "Book N" pattern in the title itself) -- a same-author hit
+                # with no number and no textual series reference is too weak
+                # a signal on its own to add to the library as a new book.
                 came_from_targeted_search = raw.get("confidence") == "targeted"
                 explicit_series_match = _title_pattern_match(title, series.name, known_series_titles)
                 partial_match = _partial_series_match(title, series.name)
                 continues_numbering = bool(
                     inferred_number and highest_owned_book_number and inferred_number > highest_owned_book_number
                 )
+                targeted_with_number = bool(came_from_targeted_search and inferred_number)
                 belongs_to_series = bool(
-                    came_from_targeted_search or explicit_series_match or partial_match or continues_numbering
+                    targeted_with_number or explicit_series_match or partial_match or continues_numbering
                 )
 
                 candidate_diagnostics.append(
@@ -412,6 +434,7 @@ class SeriesIntelligenceAgent:
                         "partial_match": partial_match,
                         "inferred_number": inferred_number,
                         "continues_numbering": continues_numbering,
+                        "targeted_with_number": targeted_with_number,
                         "accepted": belongs_to_series,
                     }
                 )

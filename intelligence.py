@@ -20,6 +20,102 @@ OMNIBUS_RANGE_CAPTURE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_WORD_TO_NUMBER = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+}
+
+
+def _roman_to_int(value: str) -> int | None:
+    if not value:
+        return None
+    roman = str(value).strip().upper()
+    if not roman or not re.fullmatch(r"[IVXLCDM]+", roman):
+        return None
+
+    values = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+    total = 0
+    previous = 0
+    for char in reversed(roman):
+        current = values[char]
+        if current < previous:
+            total -= current
+        else:
+            total += current
+            previous = current
+    return total if total > 0 else None
+
+
+def _token_to_int(token: str) -> int | None:
+    cleaned = str(token or "").strip().lower()
+    if not cleaned:
+        return None
+
+    if cleaned.isdigit():
+        try:
+            number = int(cleaned)
+        except ValueError:
+            return None
+        return number if number > 0 else None
+
+    if cleaned in _WORD_TO_NUMBER:
+        return _WORD_TO_NUMBER[cleaned]
+
+    return _roman_to_int(cleaned)
+
+
+def extract_omnibus_ranges(text: str | None) -> set[int]:
+    """Parse "Books 1-3" / "Volumes one to three" / "Book I-III" style
+    ranges out of a title/subtitle so an owned omnibus edition is recognized
+    as covering every individual book number in that range, not just
+    whatever single book_number value happens to be stored on the row.
+    Shared by intelligence (missing-book calc) and series_agent (discovery
+    dedup) so both agree on what an owned omnibus already covers.
+    """
+    extracted: set[int] = set()
+    normalized = str(text or "")
+    if not normalized:
+        return extracted
+
+    if not re.search(r"\b(?:books?|volumes?|vol\.?)\b", normalized, flags=re.IGNORECASE):
+        return extracted
+
+    number_token = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|[ivxlcdm]+)"
+    range_pattern = re.compile(
+        rf"\b({number_token})\b\s*(?:-|–|—|to|thru|through)\s*\b({number_token})\b",
+        re.IGNORECASE,
+    )
+
+    for match in range_pattern.finditer(normalized):
+        start = _token_to_int(match.group(1))
+        end = _token_to_int(match.group(2))
+        if start is None or end is None:
+            continue
+
+        low, high = (start, end) if start <= end else (end, start)
+        for number in range(low, high + 1):
+            extracted.add(number)
+
+    return extracted
+
 
 def purge_orphaned_books(db) -> dict:
     books = db.query(Book).filter(Book.series_id.is_not(None)).all()
@@ -238,92 +334,6 @@ def compute_series_intelligence_for_series(db, series_id: int) -> dict:
         .all()
     )
     active_books = [book for book in books if str(getattr(book, "record_status", "active") or "active") != "deleted"]
-
-    word_to_number = {
-        "one": 1,
-        "two": 2,
-        "three": 3,
-        "four": 4,
-        "five": 5,
-        "six": 6,
-        "seven": 7,
-        "eight": 8,
-        "nine": 9,
-        "ten": 10,
-        "eleven": 11,
-        "twelve": 12,
-        "thirteen": 13,
-        "fourteen": 14,
-        "fifteen": 15,
-        "sixteen": 16,
-        "seventeen": 17,
-        "eighteen": 18,
-        "nineteen": 19,
-        "twenty": 20,
-    }
-
-    def roman_to_int(value: str) -> int | None:
-        if not value:
-            return None
-        roman = str(value).strip().upper()
-        if not roman or not re.fullmatch(r"[IVXLCDM]+", roman):
-            return None
-
-        values = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
-        total = 0
-        previous = 0
-        for char in reversed(roman):
-            current = values[char]
-            if current < previous:
-                total -= current
-            else:
-                total += current
-                previous = current
-        return total if total > 0 else None
-
-    def token_to_int(token: str) -> int | None:
-        cleaned = str(token or "").strip().lower()
-        if not cleaned:
-            return None
-
-        if cleaned.isdigit():
-            try:
-                number = int(cleaned)
-            except ValueError:
-                return None
-            return number if number > 0 else None
-
-        if cleaned in word_to_number:
-            return word_to_number[cleaned]
-
-        return roman_to_int(cleaned)
-
-    def extract_omnibus_ranges(text: str) -> set[int]:
-        extracted: set[int] = set()
-        normalized = str(text or "")
-        if not normalized:
-            return extracted
-
-        if not re.search(r"\b(?:books?|volumes?|vol\.?)\b", normalized, flags=re.IGNORECASE):
-            return extracted
-
-        number_token = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|[ivxlcdm]+)"
-        range_pattern = re.compile(
-            rf"\b({number_token})\b\s*(?:-|–|—|to|thru|through)\s*\b({number_token})\b",
-            re.IGNORECASE,
-        )
-
-        for match in range_pattern.finditer(normalized):
-            start = token_to_int(match.group(1))
-            end = token_to_int(match.group(2))
-            if start is None or end is None:
-                continue
-
-            low, high = (start, end) if start <= end else (end, start)
-            for number in range(low, high + 1):
-                extracted.add(number)
-
-        return extracted
 
     covered_numbers: set[int] = set()
     for book in active_books:
