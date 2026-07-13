@@ -758,7 +758,7 @@ export default function SeriesPage() {
       // SeriesApiRow objects returned by /series/. Making a further per-series
       // request to /series/{id} here was a redundant N+1 pattern that overwhelmed
       // the backend and caused 500s/CORS failures once there were 100+ series.
-      const hydrated = (baseSeries as SeriesApiRow[]).map((item) => {
+      const hydrated = (baseSeries as SeriesDetailApiRow[]).map((item) => {
         const books = Array.isArray(item.books) ? item.books : [];
         const booksTracked = books.length;
         const inferredMissingNumbers = inferMissingNumbersFromBooks(books);
