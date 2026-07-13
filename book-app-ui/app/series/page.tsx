@@ -507,9 +507,6 @@ export default function SeriesPage() {
     startNeighborWidth: number;
     containerWidth: number;
   } | null>(null);
-  const firstSeriesId = series.length > 0 ? series[0]?.id : null;
-  const detailHref = firstSeriesId ? `/series/${firstSeriesId}?fromView=${viewMode}` : "/series";
-
   useEffect(() => {
     const rafId = window.requestAnimationFrame(() => {
       const sourceView = new URLSearchParams(window.location.search).get("view");
@@ -1023,9 +1020,6 @@ export default function SeriesPage() {
           </Button>
           <Link href="/books">
             <Button variant="outline">View Library</Button>
-          </Link>
-          <Link href={detailHref}>
-            <Button variant="secondary">Series detail</Button>
           </Link>
         </div>
       </div>

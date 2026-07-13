@@ -19,7 +19,7 @@ import crud
 import library_sync
 from book_metadata_utils import parse_publication_date
 from database import SessionLocal
-from intelligence import recalculate_intelligence
+from intelligence import recalculate_intelligence, recalculate_series_state_for_series
 from agents.series_agent import SeriesIntelligenceAgent
 from services.discovery_logging import _console_log, log_discovery_summary
 from services.identity import (
@@ -643,4 +643,15 @@ def run_series_check_job_full(series_id: int) -> None:
             "asin_fetch_failed": 0,
         }
     finally:
+        # Guarantee the cached series intelligence (missing_books, total_books,
+        # etc.) always reflects the actual current book rows, even if this run
+        # errored out or timed out before reaching its own recalculate call
+        # above. Without this, a single failed/interrupted check could leave
+        # a series permanently reporting a stale "missing" book that the
+        # detail page (which always recomputes fresh) would never agree with.
+        try:
+            db.rollback()
+            recalculate_series_state_for_series(db, series_id)
+        except Exception:
+            logger.exception("Failed to refresh series intelligence after check job for series %s", series_id)
         db.close()
