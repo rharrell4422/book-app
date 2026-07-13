@@ -69,6 +69,7 @@ type SeriesDetailBook = {
   title?: string | null;
   book_number?: number | null;
   series_order?: number | null;
+  record_status?: string | null;
 };
 
 const OMNIBUS_RANGE_PATTERN = /\bbooks?\s+(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\b/i;
@@ -210,6 +211,15 @@ function inferMissingNumbersFromBooks(books: SeriesDetailBook[] | undefined): nu
   const ownedWholeNumbers = new Set<number>();
   const omnibusCoveredNumbers = new Set<number>();
   for (const book of books) {
+    // Deleted rows (e.g. a bad discovery that was later removed) can still
+    // be present in the raw books array -- without this check, a deleted
+    // "book 29" would make this function think book 28 is a real gap in
+    // the numbering, when the series backend's own intelligence (which does
+    // exclude deleted rows) knows there's no such gap at all.
+    if (String(book?.record_status ?? "active") === "deleted") {
+      continue;
+    }
+
     const omnibusMatch = String(book?.title ?? "").match(OMNIBUS_RANGE_PATTERN);
     if (omnibusMatch) {
       const start = Number(omnibusMatch[1]);

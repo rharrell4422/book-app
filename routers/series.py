@@ -38,7 +38,24 @@ def create_series(series: schemas.SeriesBase, db: Session = Depends(get_db)):
 
 @router.get("/", response_model=List[schemas.SeriesResponse])
 def read_series(db: Session = Depends(get_db)):
-    return crud.get_all_series(db)
+    all_series = crud.get_all_series(db)
+    responses = []
+    for series in all_series:
+        response = schemas.SeriesResponse.model_validate(series)
+        # Series.books is the raw, unfiltered ORM relationship -- it still
+        # includes soft-deleted rows (record_status="deleted"), unlike
+        # crud.get_books_by_series() which the detail endpoint uses. Left
+        # as-is, a deleted junk discovery (e.g. a bad "book 29" match later
+        # deleted) still counts toward the frontend's client-side missing-
+        # book gap inference, which has no way to know it was deleted and
+        # reports a phantom gap (e.g. "Missing: Book 28") that the detail
+        # page -- which correctly excludes deleted rows -- never shows.
+        response.books = [
+            book for book in response.books
+            if str(getattr(book, "record_status", None) or "active") != "deleted"
+        ]
+        responses.append(response)
+    return responses
 
 
 @router.get("/{series_id}", response_model=schemas.SeriesDetailResponse)
