@@ -92,7 +92,13 @@ NON_NEW_RELEASE_TITLE_MARKERS = (
 # Word-boundary patterns for non-new-release detection where a plain
 # substring check would risk false positives (e.g. "tome" is also an
 # ordinary English word meaning "a large book").
-NON_NEW_RELEASE_TITLE_PATTERNS = (re.compile(r"\btome\s*\d*\b"),)
+NON_NEW_RELEASE_TITLE_PATTERNS = (
+    re.compile(r"\btome\s*\d*\b"),
+    # "<Series Name> Series, Volume I" / "... Series Volume 1" -- a common
+    # indie/legacy-publisher naming convention for a multi-book compilation
+    # listing, distinct from "Volume 7" used as a standalone numbered entry.
+    re.compile(r"\bseries,?\s+volume\b", re.IGNORECASE),
+)
 
 
 def _log(message: str) -> None:

@@ -199,6 +199,32 @@ def _build_series_identity_sets(books: list[Book]) -> tuple[set[str], set[str], 
     return known_series_titles, known_series_numbers, known_bare_titles
 
 
+def _build_owned_core_title_texts(books: list[Book]) -> set[str]:
+    """Normalized, number-stripped core title text for each owned book --
+    used to catch a compilation/anthology listing that spells out several
+    already-owned book titles by name instead of using a "Books 1-3" /
+    "Boxed Set" / "Omnibus" style label (e.g. "The Safehold Series, Volume
+    I: Off Armageddon Reef, By Schism Rent Asunder, By Heresies Distressed,
+    A Mighty Fortress, How Firm a Foundation" -- five owned titles strung
+    together with no parseable number and no bundle keyword at all).
+    Filtered to a minimum length so short/generic titles can't cause false
+    matches against unrelated candidates.
+    """
+    texts: set[str] = set()
+    for book in books:
+        core = discovery_engine.normalize_text(discovery_engine._title_core_segment(str(book.title or "")))
+        if core and len(core) >= 8:
+            texts.add(core)
+    return texts
+
+
+def _count_referenced_owned_titles(candidate_title: str, owned_core_title_texts: set[str]) -> int:
+    candidate_norm = discovery_engine.normalize_text(candidate_title)
+    if not candidate_norm:
+        return 0
+    return sum(1 for core in owned_core_title_texts if core and core in candidate_norm)
+
+
 def _is_known_candidate(
     *,
     isbn13: str,
@@ -346,6 +372,7 @@ class SeriesIntelligenceAgent:
             known_series_isbns = {
                 str(book.isbn13 or "").strip() for book in active_series_books if str(book.isbn13 or "").strip()
             }
+            owned_core_title_texts = _build_owned_core_title_texts(active_series_books)
 
             # Exclude titles the user already owns anywhere by this exact
             # author (any series), so a same-author's other tracked series
@@ -425,6 +452,20 @@ class SeriesIntelligenceAgent:
                     targeted_with_number or explicit_series_match or partial_match or continues_numbering
                 )
 
+                # A candidate that spells out two or more already-owned book
+                # titles by name (rather than using a "Books 1-3"/"Boxed
+                # Set"/"Omnibus" label) is a compilation of existing content,
+                # not a new entry -- regardless of how it otherwise matched
+                # (regression: "The Safehold Series, Volume I: Off
+                # Armageddon Reef, By Schism Rent Asunder, By Heresies
+                # Distressed, A Mighty Fortress, How Firm a Foundation"
+                # strings together five owned titles with no number and no
+                # bundle keyword, so it passed as a new "available" book).
+                referenced_owned_titles = _count_referenced_owned_titles(title, owned_core_title_texts)
+                is_compilation_of_owned_titles = referenced_owned_titles >= 2
+                if is_compilation_of_owned_titles:
+                    belongs_to_series = False
+
                 candidate_diagnostics.append(
                     {
                         "title": title,
@@ -435,6 +476,7 @@ class SeriesIntelligenceAgent:
                         "inferred_number": inferred_number,
                         "continues_numbering": continues_numbering,
                         "targeted_with_number": targeted_with_number,
+                        "referenced_owned_titles": referenced_owned_titles,
                         "accepted": belongs_to_series,
                     }
                 )

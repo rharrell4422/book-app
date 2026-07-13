@@ -81,6 +81,19 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
         self.assertTrue(discovery_engine.looks_like_non_new_release("Cherry Blossom Girls: French Edition"))
         self.assertFalse(discovery_engine.looks_like_non_new_release("Cherry Blossom Girls Book 7"))
 
+    def test_looks_like_non_new_release_filters_series_volume_compilations(self):
+        # Regression (live bug): "Safehold Series, Volume I" and "The
+        # Safehold Series, Volume I: Off Armageddon Reef, ..." are both a
+        # common indie/legacy-publisher compilation-listing naming
+        # convention, distinct from a standalone "Volume 7" entry.
+        self.assertTrue(discovery_engine.looks_like_non_new_release("Safehold Series, Volume I"))
+        self.assertTrue(
+            discovery_engine.looks_like_non_new_release(
+                "The Safehold Series, Volume I: Off Armageddon Reef, By Schism Rent Asunder"
+            )
+        )
+        self.assertFalse(discovery_engine.looks_like_non_new_release("Safehold Volume 7"))
+
     def test_parse_flexible_date_handles_partial_precision(self):
         self.assertEqual(discovery_engine.parse_flexible_date("2024-03-12"), date(2024, 3, 12))
         self.assertEqual(discovery_engine.parse_flexible_date("2024-03"), date(2024, 3, 1))
@@ -574,6 +587,81 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         self.assertEqual(
             [book["title"] for book in result["available_missing"]],
             ["Safehold Book 8"],
+        )
+
+    def test_compilation_listing_naming_multiple_owned_titles_is_rejected(self):
+        # Regression (live bug): checking "Safehold" surfaced compilation
+        # listings that spell out several already-owned book titles by name
+        # instead of using a "Books 1-3"/"Boxed Set"/"Omnibus"/"Series,
+        # Volume" label (which discovery_engine.looks_like_non_new_release
+        # already catches -- see the DiscoveryEngineHelperTest above). This
+        # is the series_agent-level backstop for a differently-worded
+        # compilation that has no bundle keyword at all, just several owned
+        # titles strung together, so it had no parseable number and no
+        # bundle keyword and slipped through as a new "available" book.
+        series = Series(name="Safehold", author="David Weber")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+
+        owned_titles = [
+            "Off Armageddon Reef",
+            "By Schism Rent Asunder",
+            "By Heresies Distressed",
+            "A Mighty Fortress",
+            "How Firm a Foundation",
+        ]
+        for index, title in enumerate(owned_titles, start=1):
+            self.db.add(
+                Book(
+                    title=f"{title}: (Safehold Book {index})",
+                    author="David Weber",
+                    series_id=series.id,
+                    series_order=index,
+                    book_number=float(index),
+                    record_status="active",
+                    is_read=True,
+                )
+            )
+        self.db.commit()
+
+        candidates = [
+            {
+                "source": "google_books",
+                "source_id": "gb-compilation-no-keyword",
+                "title": (
+                    "David Weber Reader's Companion: Off Armageddon Reef and By Schism Rent Asunder"
+                ),
+                "authors": ["David Weber"],
+                "published_date": "2015-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            },
+            {
+                "source": "google_books",
+                "source_id": "gb-book6",
+                "title": "Safehold Book 6",
+                "authors": ["David Weber"],
+                "published_date": "2024-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            },
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, series.id, emit_summary=False)
+
+        self.assertEqual(
+            [book["title"] for book in result["available_missing"]],
+            ["Safehold Book 6"],
         )
 
     def test_bare_title_with_no_series_reference_gets_a_synthesized_suffix(self):
