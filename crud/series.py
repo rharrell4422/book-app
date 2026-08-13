@@ -4,7 +4,7 @@ from models import Series, Book
 
 
 def create_series(db: Session, series):
-    db_series = Series(**series.dict())
+    db_series = Series(**series.model_dump())
     db.add(db_series)
     db.commit()
     db.refresh(db_series)
@@ -31,7 +31,7 @@ def update_series(db: Session, series_id: int, series):
     if not db_series:
         return None
 
-    for key, value in series.dict(exclude_unset=True).items():
+    for key, value in series.model_dump(exclude_unset=True).items():
         setattr(db_series, key, value)
 
     db.commit()
