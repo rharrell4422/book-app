@@ -369,7 +369,14 @@ function getBookStatus(book: BookRecord) {
 
 function getBookDate(book: BookRecord) {
   const status = getBookStatus(book);
-  return status === "upcoming" ? book.release_date || book.read_date : book.read_date || book.release_date;
+  // release_date and publication_date are two separate stored fields (e.g.
+  // Hardcover-sourced candidates populate publication_date, not
+  // release_date) -- getBookStatus already falls back to publication_date
+  // when deciding upcoming vs. available, so the displayed date needs the
+  // same fallback or a book can be correctly classified "available" from
+  // its publication_date while still showing a blank date column.
+  const releaseOrPublicationDate = book.release_date || book.publication_date;
+  return status === "upcoming" ? releaseOrPublicationDate || book.read_date : book.read_date || releaseOrPublicationDate;
 }
 
 function escapeRegExp(value: string): string {
