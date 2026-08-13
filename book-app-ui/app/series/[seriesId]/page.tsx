@@ -5,15 +5,6 @@ import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import Spinner from "@/components/ui/spinner";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
 import { scheduleSeriesCheckReset } from "@/lib/series-check-progress";
 import { fetchApiWithFallback } from "@/lib/api-client";
@@ -26,6 +17,20 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useToast } from "@/components/ui/use-toast";
+import { useAuth } from "@/lib/auth-context";
+import {
+  formatDate,
+  getStatusChipClass,
+  isFutureDate,
+  isPastOrTodayDate,
+  toIsoDateString,
+} from "@/lib/book-format";
+import { ConfirmDialog, type ConfirmDialogState } from "@/components/confirm-dialog";
+import { SetStatusDialog } from "@/components/series/set-status-dialog";
+import { AddBookDialog } from "@/components/series/add-book-dialog";
+import { EditBookDialog, type EditBookFormState } from "@/components/series/edit-book-dialog";
+import { BookSummaryDialog } from "@/components/series/book-summary-dialog";
+import { NormalizeTitlesDialog } from "@/components/series/normalize-titles-dialog";
 
  type TitleNormalizationMode = "keep_original" | "clean_up" | "new_clean_title" | "match_other_titles";
 type TitleNormalizationWizardMode = TitleNormalizationMode | "custom";
@@ -69,13 +74,14 @@ type SeriesRecord = {
   [key: string]: unknown;
 };
 
-type EditBookFormState = {
-  id: number | null;
-  title: string;
-  author: string;
-  bookNumber: string;
-  status: "unread" | "upcoming" | "available" | "read";
-  date: string;
+type NormalizeTitlesResponse = {
+  updated_count?: number;
+  skipped_upcoming_count?: number;
+  normalization_diagnostics?: {
+    unchanged_count?: number;
+    considered_count?: number;
+  } | null;
+  updated_books?: Array<{ id?: number; from?: string; to?: string }>;
 };
 
 type SeriesCheckStatusPayload = {
@@ -279,19 +285,10 @@ function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function formatDate(value?: string | null) {
-  if (!value) return "—";
-  const normalized = toIsoDateString(value);
-  let date: Date;
-  if (normalized && /^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
-    const [year, month, day] = normalized.split("-").map(Number);
-    date = new Date(year, month - 1, day);
-  } else {
-    date = new Date(value);
-  }
-  return Number.isNaN(date.valueOf()) ? value : date.toLocaleDateString();
-}
-
+/** Best-effort normalize a raw form date input to YYYY-MM-DD, but (unlike
+ * toIsoDateString) falls back to returning the original string untouched
+ * rather than null when the format isn't recognized -- this feeds a payload
+ * field that's fine being sent through as-is for the backend to reject. */
 function normalizeDateInput(value: string | null | undefined): string | null {
   const raw = String(value || "").trim();
   if (!raw) return null;
@@ -309,33 +306,6 @@ function normalizeDateInput(value: string | null | undefined): string | null {
   }
 
   return raw;
-}
-
-function toIsoDateString(value: string | null | undefined): string | null {
-  const raw = String(value || "").trim();
-  if (!raw) return null;
-
-  const strictIso = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  if (strictIso) {
-    const year = strictIso[1];
-    const month = strictIso[2].padStart(2, "0");
-    const day = strictIso[3].padStart(2, "0");
-    return `${year}-${month}-${day}`;
-  }
-
-  const normalized = normalizeDateInput(raw);
-  if (normalized && /^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
-    return normalized;
-  }
-
-  const parsed = new Date(raw);
-  if (Number.isNaN(parsed.valueOf())) {
-    return null;
-  }
-  const year = parsed.getFullYear();
-  const month = String(parsed.getMonth() + 1).padStart(2, "0");
-  const day = String(parsed.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
 }
 
 function hasUpcomingBookSignals(book: BookRecord) {
@@ -359,26 +329,6 @@ function hasUpcomingBookSignals(book: BookRecord) {
   }
 
   return false;
-}
-
-function isFutureDate(value?: string | null): boolean {
-  if (!value) return false;
-  const parsedDate = new Date(value);
-  if (Number.isNaN(parsedDate.valueOf())) return false;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  parsedDate.setHours(0, 0, 0, 0);
-  return parsedDate > today;
-}
-
-function isPastOrTodayDate(value?: string | null): boolean {
-  if (!value) return false;
-  const parsedDate = new Date(value);
-  if (Number.isNaN(parsedDate.valueOf())) return false;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  parsedDate.setHours(0, 0, 0, 0);
-  return parsedDate <= today;
 }
 
 function getBookStatus(book: BookRecord) {
@@ -410,17 +360,6 @@ function getBookDate(book: BookRecord) {
   const status = getBookStatus(book);
   return status === "upcoming" ? book.release_date || book.read_date : book.read_date || book.release_date;
 }
-
-function getStatusChipClass(status: string) {
-  if (status === "read") {
-    return "inline-flex rounded-full border border-emerald-300 bg-emerald-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-emerald-800";
-  }
-  if (status === "available") {
-    return "inline-flex rounded-full border border-sky-300 bg-sky-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-sky-800";
-  }
-  return "inline-flex rounded-full border border-rose-300 bg-rose-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-rose-800";
-}
-
 
 function escapeRegExp(value: string): string {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -552,6 +491,8 @@ function sortBooksBySeriesOrder(books: BookRecord[]): BookRecord[] {
 }
 
 export default function SeriesDetailPage() {
+  const { role } = useAuth();
+  const canEdit = role === "owner";
   const params = useParams();
   const searchParams = useSearchParams();
   const seriesId = params.seriesId as string;
@@ -562,6 +503,7 @@ export default function SeriesDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [summaryLoadingId, setSummaryLoadingId] = useState<number | null>(null);
   const [finishedToggleSaving, setFinishedToggleSaving] = useState(false);
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const [summaryEditorBook, setSummaryEditorBook] = useState<BookRecord | null>(null);
   const [summaryDraft, setSummaryDraft] = useState("");
   const [notesDraft, setNotesDraft] = useState("");
@@ -805,7 +747,16 @@ export default function SeriesDetailPage() {
   useEffect(() => {
     if (!series) return;
     const storedMode = series.title_normalization_mode_override;
+    // Seeds the wizard's mode from the series' saved preference whenever a
+    // different series loads, while still letting the user freely change
+    // it afterward via the dialog -- can't be plain derived-during-render
+    // state since it needs to stay overridable after this initial sync.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setNormalizeWizardMode(isTitleNormalizationMode(storedMode) ? storedMode : "keep_original");
+    // Deliberately scoped to just id + the override field (not all of
+    // `series`) so this doesn't re-run -- and stomp the user's in-progress
+    // wizard selection -- on every unrelated series update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [series?.id, series?.title_normalization_mode_override]);
 
   const books = useMemo<BookRecord[]>(() => (Array.isArray(series?.books) ? series.books : []), [series?.books]);
@@ -877,10 +828,6 @@ export default function SeriesDetailPage() {
   const readCount = books.filter((book) => book.is_read).length;
   const upcomingCount = books.filter((book) => getBookStatus(book) === "upcoming").length;
   const unreadCount = books.filter((book) => !book.is_read).length;
-  const maxBookNumber = books.reduce((max: number, book) => {
-    const num = Number(book.book_number);
-    return Number.isFinite(num) ? Math.max(max, num) : max;
-  }, 0);
   const titleNormalizationPreview = displayedBooks
     .map((book) => {
       const currentTitle = String(book?.title || "").trim();
@@ -1020,6 +967,11 @@ export default function SeriesDetailPage() {
     return byMode;
   })();
 
+  const titleNormalizationOptionsWithExamples = titleNormalizationOptions.map((option) => ({
+    ...option,
+    sampleRows: titleNormalizationExamplesByMode.get(option.mode) || [],
+  }));
+
   function flashAddedMessage(message: string) {
     setRecentAddMessage(message);
     if (addMessageTimeoutRef.current !== null) {
@@ -1043,6 +995,10 @@ export default function SeriesDetailPage() {
       window.clearTimeout(seriesCheckResetTimeoutRef.current);
       seriesCheckResetTimeoutRef.current = null;
     }
+  }
+
+  function requestConfirm(options: ConfirmDialogState) {
+    setConfirmDialog(options);
   }
 
   async function refreshSeriesFromApi() {
@@ -1100,12 +1056,6 @@ export default function SeriesDetailPage() {
       }
 
       const data = statusPayload.result ?? {};
-      const contractNewBooks = Array.isArray(statusPayload.new_books) ? statusPayload.new_books : [];
-      const addedCount = contractNewBooks.length > 0
-        ? contractNewBooks.length
-        : Array.isArray(data.added_books)
-          ? data.added_books.length
-          : 0;
       const missingList = Array.isArray(statusPayload.missing_books)
         ? statusPayload.missing_books
         : Array.isArray(data.missing_books)
@@ -1143,7 +1093,10 @@ export default function SeriesDetailPage() {
       }
     } catch (error) {
       console.error(error);
-      alert(error instanceof Error ? error.message : "Unable to check for new books right now.");
+      toast({
+        title: "Check failed",
+        description: error instanceof Error ? error.message : "Unable to check for new books right now.",
+      });
       resetSeriesCheckUiState();
     }
   }
@@ -1162,7 +1115,7 @@ export default function SeriesDetailPage() {
       .sort((a, b) => a.number - b.number);
 
     if (readBooks.length === 0) {
-      alert("No books marked as read yet in this series -- nothing to recap.");
+      toast({ title: "Nothing to recap", description: "No books marked as read yet in this series." });
       return;
     }
 
@@ -1188,16 +1141,21 @@ export default function SeriesDetailPage() {
     window.open(url, "_blank", "noopener,noreferrer");
   }
 
-  async function handleDeleteSeriesWithBooks() {
+  function handleDeleteSeriesWithBooks() {
+    if (!series) return;
+    requestConfirm({
+      title: `Delete series "${series.name}"?`,
+      description: "This permanently removes the series and all its books from your library. This cannot be undone.",
+      confirmLabel: "Delete series",
+      destructive: true,
+      onConfirm: () => void performDeleteSeriesWithBooks(),
+    });
+  }
+
+  async function performDeleteSeriesWithBooks() {
     if (!series) return;
 
     const visibleBookCount = Array.isArray(series.books) ? series.books.length : 0;
-    const confirmed = window.confirm(
-      `Delete series "${series.name}" and all books in it? This permanently removes the series and its books from Library.`
-    );
-    if (!confirmed) {
-      return;
-    }
 
     setDeleteSeriesSaving(true);
     try {
@@ -1227,11 +1185,17 @@ export default function SeriesDetailPage() {
         // ignore response parse errors
       }
 
-      alert(`Deleted series "${series.name}" and ${deletedBooks} book${deletedBooks === 1 ? "" : "s"}.`);
+      toast({
+        title: "Series deleted",
+        description: `Deleted series "${series.name}" and ${deletedBooks} book${deletedBooks === 1 ? "" : "s"}.`,
+      });
       window.location.href = viewAllSeriesHref;
     } catch (error) {
       console.error(error);
-      alert(error instanceof Error ? error.message : "Unable to delete this series right now.");
+      toast({
+        title: "Delete failed",
+        description: error instanceof Error ? error.message : "Unable to delete this series right now.",
+      });
     } finally {
       setDeleteSeriesSaving(false);
     }
@@ -1258,21 +1222,21 @@ export default function SeriesDetailPage() {
     const title = editBookForm.title.trim();
     const author = editBookForm.author.trim();
     if (!title || !author) {
-      alert("Title and author are required.");
+      toast({ title: "Missing fields", description: "Title and author are required." });
       return;
     }
 
     const numberRaw = editBookForm.bookNumber.trim();
     const parsedBookNumber = numberRaw ? Number(numberRaw) : null;
     if (numberRaw && !Number.isFinite(parsedBookNumber)) {
-      alert("Book number must be numeric when provided.");
+      toast({ title: "Invalid book number", description: "Book number must be numeric when provided." });
       return;
     }
 
     const rawDate = editBookForm.date.trim();
     const normalizedDate = rawDate ? toIsoDateString(rawDate) : null;
     if (rawDate && !normalizedDate) {
-      alert("Use a valid date format, such as YYYY-MM-DD.");
+      toast({ title: "Invalid date", description: "Use a valid date format, such as YYYY-MM-DD." });
       return;
     }
 
@@ -1326,7 +1290,10 @@ export default function SeriesDetailPage() {
       });
     } catch (error) {
       console.error(error);
-      alert(error instanceof Error ? error.message : "Unable to update book right now.");
+      toast({
+        title: "Update failed",
+        description: error instanceof Error ? error.message : "Unable to update book right now.",
+      });
     } finally {
       setSavingEditBook(false);
     }
@@ -1338,17 +1305,17 @@ export default function SeriesDetailPage() {
     }
 
     if (!isTitleNormalizationWizardMode(normalizeWizardMode)) {
-      alert("Please select a normalization mode.");
+      toast({ title: "Select a mode", description: "Please select a normalization mode." });
       return;
     }
 
     if (normalizeWizardMode === "custom" && !String(normalizeCustomPattern || "").trim()) {
-      alert("Enter a custom pattern before applying.");
+      toast({ title: "Pattern required", description: "Enter a custom pattern before applying." });
       return;
     }
 
     if (!titleNormalizationApplicablePreview.length) {
-      alert("No eligible title changes to apply for the selected mode.");
+      toast({ title: "Nothing to apply", description: "No eligible title changes to apply for the selected mode." });
       return;
     }
 
@@ -1368,23 +1335,21 @@ export default function SeriesDetailPage() {
         throw new Error(`Failed to normalize titles (${response.status})`);
       }
 
-      const result = await response.json();
+      const result = (await response.json()) as NormalizeTitlesResponse;
       const updatedCount = Number(result?.updated_count || 0);
       const skippedCount = Number(result?.skipped_upcoming_count || 0);
-      const diagnostics = ((result as any)?.normalization_diagnostics ?? null) as any;
+      const diagnostics = result?.normalization_diagnostics ?? null;
       const unchangedCount = Number(diagnostics?.unchanged_count ?? 0);
       const consideredCount = Number(diagnostics?.considered_count ?? 0);
 
       // Broadcast normalized title updates so the Main Library view stays in sync.
-      const updatedBooks = Array.isArray((result as any)?.updated_books)
-        ? ((result as any).updated_books as any[])
-        : [];
+      const updatedBooks = Array.isArray(result?.updated_books) ? result.updated_books : [];
       const currentSeriesBooks = Array.isArray(series?.books) ? series.books : [];
       const booksById = new Map(currentSeriesBooks.map((book) => [Number(book.id), book]));
 
       for (const row of updatedBooks) {
-        const bookId = Number((row as any)?.id);
-        const normalizedTitle = typeof (row as any)?.to === "string" ? String((row as any).to).trim() : "";
+        const bookId = Number(row?.id);
+        const normalizedTitle = typeof row?.to === "string" ? row.to.trim() : "";
         if (!Number.isFinite(bookId) || !normalizedTitle) {
           continue;
         }
@@ -1430,7 +1395,10 @@ export default function SeriesDetailPage() {
       toast({ title: "Title normalization applied", description: summary });
     } catch (error) {
       console.error(error);
-      alert(error instanceof Error ? error.message : "Unable to apply title normalization right now.");
+      toast({
+        title: "Normalization failed",
+        description: error instanceof Error ? error.message : "Unable to apply title normalization right now.",
+      });
     } finally {
       setTitleNormalizeSaving(false);
     }
@@ -1463,7 +1431,7 @@ export default function SeriesDetailPage() {
       await refreshSeriesFromApi();
     } catch (err) {
       console.error(err);
-      alert("Unable to fetch a summary for this book right now.");
+      toast({ title: "Summary lookup failed", description: "Unable to fetch a summary for this book right now." });
     } finally {
       setSummaryLoadingId(null);
     }
@@ -1509,55 +1477,23 @@ export default function SeriesDetailPage() {
       setNotesDraft(String(updatedBook.notes || ""));
     } catch (err) {
       console.error(err);
-      alert("Unable to save summary or notes right now.");
+      toast({ title: "Save failed", description: "Unable to save summary or notes right now." });
     } finally {
       setSummarySaving(false);
     }
   }
 
-  async function handleToggleRead(book: BookRecord) {
-    const nextIsRead = !book.is_read;
-    const nextStatus = nextIsRead ? "read" : (hasUpcomingBookSignals(book) ? "upcoming" : "unread");
-
-    try {
-        const response = await fetchApiWithFallback(`/books/${book.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          is_read: nextIsRead,
-          read_status: nextStatus,
-          read_date: nextIsRead ? new Date().toISOString().split("T")[0] : null,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to update book (${response.status})`);
-      }
-
-      const updatedBook = await response.json();
-      setSeries((prev) => {
-        if (!prev) return prev;
-        const prevBooks = Array.isArray(prev.books) ? prev.books : [];
-        return {
-          ...prev,
-          books: prevBooks.map((item) =>
-            item.id === updatedBook.id ? { ...item, ...updatedBook } : item
-          ),
-        };
-      });
-      publishBookStatusUpdate(updatedBook);
-    } catch (err) {
-      console.error(err);
-      alert("Unable to update read status right now.");
-    }
+  function handleDeleteBook(book: BookRecord) {
+    requestConfirm({
+      title: `Delete "${book.title || "this book"}"?`,
+      description: "This cannot be undone.",
+      confirmLabel: "Delete book",
+      destructive: true,
+      onConfirm: () => void performDeleteBook(book),
+    });
   }
 
-  async function handleDeleteBook(book: BookRecord) {
-    const confirmed = window.confirm(`Delete \"${book.title || "this book"}\"? This cannot be undone.`);
-    if (!confirmed) {
-      return;
-    }
-
+  async function performDeleteBook(book: BookRecord) {
     try {
       const response = await fetchApiWithFallback(`/books/${book.id}`, {
         method: "DELETE",
@@ -1579,7 +1515,10 @@ export default function SeriesDetailPage() {
       flashAddedMessage(`Deleted book #${book.book_number ?? book.id}.`);
     } catch (error) {
       console.error(error);
-      alert(error instanceof Error ? error.message : "Unable to delete book right now.");
+      toast({
+        title: "Delete failed",
+        description: error instanceof Error ? error.message : "Unable to delete book right now.",
+      });
     }
   }
 
@@ -1599,7 +1538,7 @@ export default function SeriesDetailPage() {
       const todayIso = new Date().toISOString().split("T")[0];
       const normalizedDate = statusDate.trim() ? toIsoDateString(statusDate) : null;
       if (statusDate.trim() && !normalizedDate) {
-        alert("Use a valid date format, such as YYYY-MM-DD.");
+        toast({ title: "Invalid date", description: "Use a valid date format, such as YYYY-MM-DD." });
         return;
       }
 
@@ -1665,27 +1604,28 @@ export default function SeriesDetailPage() {
       flashAddedMessage(`Status updated for ${updatedBook.title || "book"}.`);
     } catch (err) {
       console.error(err);
-      alert("Unable to update status right now.");
+      toast({ title: "Update failed", description: "Unable to update status right now." });
     } finally {
       setStatusSaving(false);
     }
   }
 
-  async function handleToggleSeriesFinished() {
+  function handleToggleSeriesFinished() {
+    if (!series) return;
+    const movingToUnfinished = Boolean(series.is_finished);
+    requestConfirm({
+      title: movingToUnfinished ? "Move this series to unfinished?" : "Move this series to finished?",
+      confirmLabel: movingToUnfinished ? "Move to unfinished" : "Move to finished",
+      onConfirm: () => void performToggleSeriesFinished(),
+    });
+  }
+
+  async function performToggleSeriesFinished() {
     if (!series) return;
     setFinishedToggleSaving(true);
 
     try {
       const movingToUnfinished = Boolean(series.is_finished);
-      const confirmed = window.confirm(
-        movingToUnfinished
-          ? "Move this series to unfinished?"
-          : "Move this series to finished?"
-      );
-      if (!confirmed) {
-        return;
-      }
-
       const endpoint = movingToUnfinished
         ? `/series/${series.id}/mark_unfinished`
         : `/series/${series.id}/mark_finished`;
@@ -1707,7 +1647,7 @@ export default function SeriesDetailPage() {
       }
     } catch (err) {
       console.error(err);
-      alert("Unable to update series finished state right now.");
+      toast({ title: "Update failed", description: "Unable to update series finished state right now." });
     } finally {
       setFinishedToggleSaving(false);
     }
@@ -1719,11 +1659,11 @@ export default function SeriesDetailPage() {
     const title = String(addBookTitle || "").trim();
     const parsedNumber = Number(addBookNumber);
     if (!title) {
-      alert("Title is required.");
+      toast({ title: "Missing title", description: "Title is required." });
       return;
     }
     if (!Number.isFinite(parsedNumber) || parsedNumber <= 0) {
-      alert("Book number must be a positive number.");
+      toast({ title: "Invalid book number", description: "Book number must be a positive number." });
       return;
     }
 
@@ -1786,7 +1726,7 @@ export default function SeriesDetailPage() {
     } catch (err) {
       console.error(err);
       const message = err instanceof Error ? err.message : "Unable to add book right now.";
-      alert(message);
+      toast({ title: "Add book failed", description: message });
     } finally {
       setAddBookSaving(false);
     }
@@ -1815,23 +1755,27 @@ export default function SeriesDetailPage() {
 
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setAddBookDialogOpen(true)}
-            >
-              Add Book
-            </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={() => void handleCheckForNew()}
-              disabled={seriesCheckLoading}
-            >
-              {seriesCheckLoading ? `Checking ${series.name}…` : `Check ${series.name} for New`}
-            </Button>
+            {canEdit ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setAddBookDialogOpen(true)}
+              >
+                Add Book
+              </Button>
+            ) : null}
+            {canEdit ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => void handleCheckForNew()}
+                disabled={seriesCheckLoading}
+              >
+                {seriesCheckLoading ? `Checking ${series.name}…` : `Check ${series.name} for New`}
+              </Button>
+            ) : null}
             <Button
               type="button"
               variant="outline"
@@ -1858,47 +1802,53 @@ export default function SeriesDetailPage() {
                 ) : null}
               </div>
             ) : null}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setNormalizeWizardMode(seriesNormalizationMode);
-                setNormalizeTitlesDialogOpen(true);
-              }}
-            >
-              Optional Title Normalization
-            </Button>
+            {canEdit ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setNormalizeWizardMode(seriesNormalizationMode);
+                  setNormalizeTitlesDialogOpen(true);
+                }}
+              >
+                Optional Title Normalization
+              </Button>
+            ) : null}
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleToggleSeriesFinished}
-              disabled={finishedToggleSaving}
-            >
-              {finishedToggleSaving
-                ? "Saving..."
-                : series.is_finished
-                  ? "Move to unfinished"
-                  : "Move to finished"}
-            </Button>
+            {canEdit ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleToggleSeriesFinished}
+                disabled={finishedToggleSaving}
+              >
+                {finishedToggleSaving
+                  ? "Saving..."
+                  : series.is_finished
+                    ? "Move to unfinished"
+                    : "Move to finished"}
+              </Button>
+            ) : null}
             <Link href="/books">
               <Button variant="outline" size="sm">Back to Library</Button>
             </Link>
             <Link href={viewAllSeriesHref}>
               <Button variant="secondary" size="sm">View all series</Button>
             </Link>
-            <Button
-              type="button"
-              variant="destructive"
-              size="sm"
-              onClick={() => void handleDeleteSeriesWithBooks()}
-              disabled={deleteSeriesSaving}
-            >
-              {deleteSeriesSaving ? "Deleting series..." : "Delete series + books"}
-            </Button>
+            {canEdit ? (
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                onClick={() => void handleDeleteSeriesWithBooks()}
+                disabled={deleteSeriesSaving}
+              >
+                {deleteSeriesSaving ? "Deleting series..." : "Delete series + books"}
+              </Button>
+            ) : null}
           </div>
         </div>
 
@@ -2003,35 +1953,39 @@ export default function SeriesDetailPage() {
                 <TableCell>{formatDate(displayDate)}</TableCell>
                 <TableCell>{book.book_number ?? "—"}</TableCell>
                 <TableCell className="space-x-2 whitespace-nowrap">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => handleSetBookStatus(book)}
-                  >
-                    Set Status
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => handleEditBookTitle(book)}
-                  >
-                    Edit book
-                  </Button>
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    onClick={() => handleDeleteBook(book)}
-                  >
-                    Delete
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => handleFetchSummary(book.id)}
-                    disabled={summaryLoadingId === book.id}
-                  >
-                    {summary ? "Refresh summary" : "Fetch summary"}
-                  </Button>
+                  {canEdit ? (
+                    <>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleSetBookStatus(book)}
+                      >
+                        Set Status
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleEditBookTitle(book)}
+                      >
+                        Edit book
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => handleDeleteBook(book)}
+                      >
+                        Delete
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => handleFetchSummary(book.id)}
+                        disabled={summaryLoadingId === book.id}
+                      >
+                        {summary ? "Refresh summary" : "Fetch summary"}
+                      </Button>
+                    </>
+                  ) : null}
                   {summary || notes ? (
                     <Button
                       variant="outline"
@@ -2049,416 +2003,88 @@ export default function SeriesDetailPage() {
       </Table>
       </div>
 
-      <Dialog
+      <BookSummaryDialog
         open={Boolean(summaryEditorBook)}
+        bookTitle={summaryEditorBook?.title}
         onOpenChange={(open) => {
           if (!open) {
             setSummaryEditorBook(null);
           }
         }}
-      >
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>{summaryEditorBook?.title || "Book summary"}</DialogTitle>
-            <DialogDescription>
-              Review the fetched summary and add your own notes without stretching the table rows.
-            </DialogDescription>
-          </DialogHeader>
+        summaryDraft={summaryDraft}
+        onSummaryDraftChange={setSummaryDraft}
+        notesDraft={notesDraft}
+        onNotesDraftChange={setNotesDraft}
+        canEdit={canEdit}
+        onSave={handleSaveSummaryEditor}
+        saving={summarySaving}
+      />
 
-          <div className="space-y-3">
-            <div className="space-y-1">
-              <Label htmlFor="series-book-summary">Summary</Label>
-              <textarea
-                id="series-book-summary"
-                value={summaryDraft}
-                onChange={(event) => setSummaryDraft(event.target.value)}
-                className="min-h-32 w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-              />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="series-book-notes">My notes</Label>
-              <textarea
-                id="series-book-notes"
-                value={notesDraft}
-                onChange={(event) => setNotesDraft(event.target.value)}
-                className="min-h-28 w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-              />
-            </div>
-          </div>
-
-          <DialogFooter showCloseButton>
-            <Button type="button" onClick={handleSaveSummaryEditor} disabled={summarySaving}>
-              {summarySaving ? "Saving..." : "Save changes"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
+      <AddBookDialog
         open={addBookDialogOpen}
         onOpenChange={setAddBookDialogOpen}
-      >
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Add Book</DialogTitle>
-            <DialogDescription>
-              Add a new book directly to this series while you review release intel.
-            </DialogDescription>
-          </DialogHeader>
+        title={addBookTitle}
+        onTitleChange={setAddBookTitle}
+        bookNumber={addBookNumber}
+        onBookNumberChange={setAddBookNumber}
+        status={addBookStatus}
+        onStatusChange={setAddBookStatus}
+        date={addBookDate}
+        onDateChange={setAddBookDate}
+        onSave={handleCreateBookFromDialog}
+        saving={addBookSaving}
+      />
 
-          <div className="space-y-3">
-            <div className="space-y-1">
-              <Label htmlFor="add-book-title">Title</Label>
-              <input
-                id="add-book-title"
-                value={addBookTitle}
-                onChange={(event) => setAddBookTitle(event.target.value)}
-                placeholder="Book title"
-                className="h-9 w-full rounded border bg-white px-2 text-sm"
-              />
-            </div>
+      <SetStatusDialog
+        open={statusDialogOpen}
+        onOpenChange={setStatusDialogOpen}
+        statusAction={statusAction}
+        onStatusActionChange={setStatusAction}
+        statusDate={statusDate}
+        onStatusDateChange={setStatusDate}
+        onSave={handleSaveBookStatus}
+        saving={statusSaving}
+      />
 
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1">
-                <Label htmlFor="add-book-number">Book #</Label>
-                <input
-                  id="add-book-number"
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  value={addBookNumber}
-                  onChange={(event) => setAddBookNumber(event.target.value)}
-                  placeholder="e.g. 28"
-                  className="h-9 w-full rounded border bg-white px-2 text-sm"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <Label htmlFor="add-book-status">Status</Label>
-                <select
-                  id="add-book-status"
-                  value={addBookStatus}
-                  onChange={(event) => setAddBookStatus(event.target.value as "upcoming" | "unread" | "available" | "read")}
-                  className="h-9 w-full rounded border bg-white px-2 text-sm"
-                >
-                  <option value="upcoming">upcoming</option>
-                  <option value="unread">unread</option>
-                  <option value="available">available</option>
-                  <option value="read">read</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="space-y-1">
-              <Label htmlFor="add-book-date">Date (optional)</Label>
-              <input
-                id="add-book-date"
-                value={addBookDate}
-                onChange={(event) => setAddBookDate(event.target.value)}
-                placeholder={addBookStatus === "read" ? "Read date (MM-DD-YYYY)" : "Release date (MM-DD-YYYY)"}
-                className="h-9 w-full rounded border bg-white px-2 text-sm"
-              />
-            </div>
-          </div>
-
-          <DialogFooter showCloseButton>
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={handleCreateBookFromDialog}
-              disabled={addBookSaving}
-            >
-              {addBookSaving ? "Adding..." : "Add Book"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={statusDialogOpen} onOpenChange={setStatusDialogOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Set Status</DialogTitle>
-            <DialogDescription>
-              Update book state with automatic date-based inference.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-3">
-            <div className="space-y-1">
-              <Label htmlFor="series-status-action">Action</Label>
-              <select
-                id="series-status-action"
-                value={statusAction}
-                onChange={(event) =>
-                  setStatusAction(event.target.value as "read" | "unread" | "upcoming" | "available")
-                }
-                className="h-9 w-full rounded border bg-white px-2 text-sm"
-              >
-                <option value="read">Mark as Read</option>
-                <option value="unread">Mark as Unread</option>
-                <option value="upcoming">Mark as Upcoming</option>
-                <option value="available">Mark as Available</option>
-              </select>
-            </div>
-
-            <div className="space-y-1">
-              <Label htmlFor="series-status-date">
-                {statusAction === "read" ? "Date Read" : "Publication Date (optional)"}
-              </Label>
-              <input
-                id="series-status-date"
-                value={statusDate}
-                onChange={(event) => setStatusDate(event.target.value)}
-                placeholder="YYYY-MM-DD"
-                className="h-9 w-full rounded border bg-white px-2 text-sm"
-              />
-            </div>
-          </div>
-
-          <DialogFooter showCloseButton>
-            <Button type="button" onClick={handleSaveBookStatus} disabled={statusSaving}>
-              {statusSaving ? "Saving..." : "Save status"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
+      <EditBookDialog
         open={editBookDialogOpen}
         onOpenChange={setEditBookDialogOpen}
-      >
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Edit Book</DialogTitle>
-            <DialogDescription>
-              Update title, author, number, status, and date for this book.
-            </DialogDescription>
-          </DialogHeader>
+        form={editBookForm}
+        onFormChange={setEditBookForm}
+        onSave={handleSaveBookEdit}
+        saving={savingEditBook}
+      />
 
-          <div className="space-y-3">
-            <div className="space-y-1">
-              <Label htmlFor="edit-book-title">Title</Label>
-              <input
-                id="edit-book-title"
-                value={editBookForm.title}
-                onChange={(event) => setEditBookForm((prev) => ({ ...prev, title: event.target.value }))}
-                placeholder="Book title"
-                className="h-9 w-full rounded border bg-white px-2 text-sm"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <Label htmlFor="edit-book-author">Author</Label>
-              <input
-                id="edit-book-author"
-                value={editBookForm.author}
-                onChange={(event) => setEditBookForm((prev) => ({ ...prev, author: event.target.value }))}
-                placeholder="Author name"
-                className="h-9 w-full rounded border bg-white px-2 text-sm"
-              />
-            </div>
-
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1">
-                <Label htmlFor="edit-book-number">Book #</Label>
-                <input
-                  id="edit-book-number"
-                  value={editBookForm.bookNumber}
-                  onChange={(event) => setEditBookForm((prev) => ({ ...prev, bookNumber: event.target.value }))}
-                  placeholder="e.g. 24"
-                  className="h-9 w-full rounded border bg-white px-2 text-sm"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <Label htmlFor="edit-book-status">Status</Label>
-                <select
-                  id="edit-book-status"
-                  value={editBookForm.status}
-                  onChange={(event) =>
-                    setEditBookForm((prev) => ({
-                      ...prev,
-                      status: event.target.value as "unread" | "upcoming" | "available" | "read",
-                    }))
-                  }
-                  className="h-9 w-full rounded border bg-white px-2 text-sm"
-                >
-                  <option value="unread">unread</option>
-                  <option value="upcoming">upcoming</option>
-                  <option value="available">available</option>
-                  <option value="read">read</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="space-y-1">
-              <Label htmlFor="edit-book-date">Date</Label>
-              <input
-                id="edit-book-date"
-                value={editBookForm.date}
-                onChange={(event) => setEditBookForm((prev) => ({ ...prev, date: event.target.value }))}
-                placeholder={editBookForm.status === "read" ? "Read date (YYYY-MM-DD)" : "Release date (YYYY-MM-DD)"}
-                className="h-9 w-full rounded border bg-white px-2 text-sm"
-              />
-            </div>
-          </div>
-
-          <DialogFooter showCloseButton>
-            <Button type="button" onClick={handleSaveBookEdit} disabled={savingEditBook}>
-              {savingEditBook ? "Saving..." : "Save changes"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
+      <NormalizeTitlesDialog
         open={normalizeTitlesDialogOpen}
         onOpenChange={setNormalizeTitlesDialogOpen}
-      >
-        <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl">
-          <DialogHeader>
-            <DialogTitle>Optional Title Normalization</DialogTitle>
-            <DialogDescription>
-              Purely cosmetic and reversible -- this only changes how titles display in this app, not the book&apos;s
-              actual published title. Pick a mode, review real examples from this series, then apply once with Accept Changes.
-            </DialogDescription>
-          </DialogHeader>
+        options={titleNormalizationOptionsWithExamples}
+        wizardMode={normalizeWizardMode}
+        onWizardModeChange={setNormalizeWizardMode}
+        customPresets={CUSTOM_TITLE_PATTERN_PRESETS}
+        customPreset={normalizeCustomPreset}
+        onCustomPresetSelect={(preset) => {
+          setNormalizeCustomPreset(preset.id as CustomTitlePatternPresetId);
+          setNormalizeCustomPattern(preset.pattern);
+        }}
+        customPattern={normalizeCustomPattern}
+        onCustomPatternChange={setNormalizeCustomPattern}
+        excludeUpcoming={normalizeExcludeUpcoming}
+        onExcludeUpcomingChange={setNormalizeExcludeUpcoming}
+        previewRows={titleNormalizationPreview}
+        applicableCount={titleNormalizationApplicablePreview.length}
+        skippedUpcomingCount={skippedUpcomingCount}
+        skippedUnnumberedCount={skippedUnnumberedCount}
+        onApply={handleApplyTitleNormalization}
+        applying={titleNormalizeSaving}
+      />
 
-          <div className="space-y-3">
-            <div className="grid gap-2 md:grid-cols-2">
-              {titleNormalizationOptions.map((option) => {
-                const selected = normalizeWizardMode === option.mode;
-                const sampleRows = titleNormalizationExamplesByMode.get(option.mode) || [];
-                return (
-                  <button
-                    key={option.mode}
-                    type="button"
-                    className={`rounded border p-3 text-left ${selected ? "border-emerald-500 bg-emerald-50" : "border-slate-200 bg-white hover:border-slate-300"}`}
-                    onClick={() => setNormalizeWizardMode(option.mode)}
-                  >
-                    <div className="mb-1 flex items-center justify-between gap-2">
-                      <p className="text-sm font-semibold text-foreground">{option.label}</p>
-                      {selected ? <span className="text-xs font-semibold text-emerald-700">Selected</span> : null}
-                    </div>
-                    <p className="text-xs text-muted-foreground">{option.description}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">{option.note}</p>
-                    <div className="mt-2 space-y-1 rounded border bg-slate-50 p-2">
-                      {sampleRows.length > 0 ? (
-                        sampleRows.map((row, index) => (
-                          <div key={`${option.mode}-${index}`} className="grid grid-cols-[1fr_auto_1fr] gap-1 text-xs">
-                            <span className="truncate text-slate-700">{row.before}</span>
-                            <span className="text-slate-400" aria-hidden="true">-&gt;</span>
-                            <span className="truncate text-emerald-700">{row.after}</span>
-                          </div>
-                        ))
-                      ) : (
-                        <p className="text-xs text-muted-foreground">No sample titles available.</p>
-                      )}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-
-            {normalizeWizardMode === "custom" ? (
-              <div className="space-y-1 rounded border bg-slate-50 p-3">
-                <Label htmlFor="normalize-custom-preset">Custom style preset</Label>
-                <select
-                  id="normalize-custom-preset"
-                  value={normalizeCustomPreset}
-                  onChange={(event) => {
-                    const selectedPreset = CUSTOM_TITLE_PATTERN_PRESETS.find((preset) => preset.id === event.target.value);
-                    if (!selectedPreset) return;
-                    setNormalizeCustomPreset(selectedPreset.id);
-                    setNormalizeCustomPattern(selectedPreset.pattern);
-                  }}
-                  className="h-9 w-full rounded border bg-white px-2 text-sm"
-                >
-                  {CUSTOM_TITLE_PATTERN_PRESETS.map((preset) => (
-                    <option key={preset.id} value={preset.id}>{preset.label}</option>
-                  ))}
-                </select>
-                <Label htmlFor="normalize-custom-pattern">Custom pattern</Label>
-                <input
-                  id="normalize-custom-pattern"
-                  value={normalizeCustomPattern}
-                  onChange={(event) => setNormalizeCustomPattern(event.target.value)}
-                  className="h-9 w-full rounded border bg-white px-2 text-sm"
-                  placeholder="{book_title} ({series_name} Book {book_number})"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Tokens: {"{book_title}"}, {"{book_subtitle}"}, {"{series_name}"}, {"{book_number}"}, {"{original_title}"}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Each token is replaced with that book&apos;s value. If a token is blank (e.g. no subtitle), it&apos;s
-                  simply left empty and any leftover dash, colon, or empty parentheses next to it is cleaned up
-                  automatically.
-                </p>
-              </div>
-            ) : null}
-
-            <label className="flex items-start gap-2 rounded border bg-slate-50 px-3 py-2 text-xs text-muted-foreground">
-              <input
-                type="checkbox"
-                checked={normalizeExcludeUpcoming}
-                onChange={(event) => setNormalizeExcludeUpcoming(event.target.checked)}
-                className="mt-0.5"
-              />
-              <span>Exclude UPCOMING books with publication_date in the future.</span>
-            </label>
-          </div>
-
-          {titleNormalizationPreview.length > 0 ? (
-            <div className="max-h-[38vh] overflow-auto rounded border bg-white text-xs sm:max-h-[30rem]">
-              <div className="grid grid-cols-[1fr_auto_1fr] gap-2 border-b bg-slate-50 px-3 py-2 font-semibold text-muted-foreground">
-                <div>Current title</div>
-                <div />
-                <div>Normalized title</div>
-              </div>
-              {titleNormalizationPreview.map((row) => (
-                <div key={row.id} className="grid grid-cols-[1fr_auto_1fr] items-center gap-2 border-b px-3 py-2 last:border-b-0">
-                  <div className="min-w-0">
-                    <p className="truncate font-medium text-foreground">{row.currentTitle}</p>
-                  </div>
-                  <div className="px-1 text-sm text-muted-foreground" aria-hidden="true">
-                    →
-                  </div>
-                  <div className="min-w-0">
-                    {row.skipReason === "upcoming" ? (
-                      <p className="truncate font-medium text-amber-700">Skipped (upcoming + future publication)</p>
-                    ) : row.skipReason === "unnumbered" ? (
-                      <p className="truncate font-medium text-amber-700">Skipped (no book number - protects future discovery matching)</p>
-                    ) : (
-                      <p className="truncate font-medium text-emerald-700">{row.normalizedTitle}</p>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              No title normalization changes are needed for this selection.
-            </p>
-          )}
-
-          <div className="rounded border bg-slate-50 px-3 py-2 text-xs text-muted-foreground">
-            Ready to apply: {titleNormalizationApplicablePreview.length} change{titleNormalizationApplicablePreview.length === 1 ? "" : "s"}
-            {skippedUpcomingCount > 0 ? ` • Skipped upcoming: ${skippedUpcomingCount}` : ""}
-            {skippedUnnumberedCount > 0 ? ` • Skipped (no book #): ${skippedUnnumberedCount}` : ""}
-          </div>
-
-          <DialogFooter showCloseButton>
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={handleApplyTitleNormalization}
-              disabled={titleNormalizeSaving || titleNormalizationApplicablePreview.length === 0}
-            >
-              {titleNormalizeSaving ? "Applying..." : `Accept Changes (${titleNormalizationApplicablePreview.length})`}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        state={confirmDialog}
+        onOpenChange={(open) => {
+          if (!open) setConfirmDialog(null);
+        }}
+      />
 
     </div>
   );

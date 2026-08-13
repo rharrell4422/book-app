@@ -3,22 +3,34 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { BookOpenIcon, CheckIcon, CircleHelpIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
+import { BookOpenIcon, CheckIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
 import { fetchApiWithFallback } from "@/lib/api-client";
 import { ValueFilterMenu } from "@/components/value-filter-menu";
+import { useAuth } from "@/lib/auth-context";
+import {
+  type BookStatus,
+  formatDate,
+  getStatusChipClass as getStatusChipClassShared,
+  normalizeText,
+  parseFlexibleDate,
+  toDateValue,
+  toIsoDateString,
+} from "@/lib/book-format";
+import {
+  AddBookDialog,
+  EMPTY_ADD_BOOK_FORM,
+  type AddBookFormState,
+  type LookupResultState,
+  normalizeLookupMatchedTitle,
+} from "@/components/books/add-book-dialog";
+import {
+  EditBookDialog,
+  EMPTY_EDIT_BOOK_FORM,
+  type EditBookFormState,
+} from "@/components/books/edit-book-dialog";
 
 import {
   Table,
@@ -46,8 +58,6 @@ type BookRow = {
   book_number?: number | null;
   [key: string]: unknown;
 };
-
-type BookStatus = "unread" | "available" | "upcoming" | "read";
 
 function getBookStatus(book: BookRow): BookStatus {
   const explicitStatus = String(book.read_status || "").trim().toLowerCase();
@@ -95,88 +105,8 @@ function getDisplayDate(book: BookRow) {
     : book.read_date || book.release_date;
 }
 
-function formatDate(value?: string | null) {
-  if (!value) return "—";
-  const date = parseFlexibleDate(value);
-  return !date || Number.isNaN(date.valueOf()) ? value : date.toLocaleDateString();
-}
-
 function getStatusChipClass(status: string) {
-  if (status === "read") {
-    return "inline-flex rounded-full border border-emerald-300 bg-emerald-100 px-1.5 py-0 text-[11px] font-semibold uppercase tracking-wide text-emerald-800";
-  }
-  if (status === "available") {
-    return "inline-flex rounded-full border border-sky-300 bg-sky-100 px-1.5 py-0 text-[11px] font-semibold uppercase tracking-wide text-sky-800";
-  }
-  if (status === "unread") {
-    return "inline-flex rounded-full border border-slate-300 bg-slate-100 px-1.5 py-0 text-[11px] font-semibold uppercase tracking-wide text-slate-800";
-  }
-  return "inline-flex rounded-full border border-rose-300 bg-rose-100 px-1.5 py-0 text-[11px] font-semibold uppercase tracking-wide text-rose-800";
-}
-
-function normalizeText(value: unknown) {
-  return String(value ?? "").trim().toLowerCase();
-}
-
-function parseFlexibleDate(value?: string | null): Date | null {
-  if (!value) return null;
-
-  const raw = String(value).trim();
-  if (!raw) return null;
-
-  const isoDateOnlyMatch = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  if (isoDateOnlyMatch) {
-    const year = Number(isoDateOnlyMatch[1]);
-    const month = Number(isoDateOnlyMatch[2]);
-    const day = Number(isoDateOnlyMatch[3]);
-    const date = new Date(year, month - 1, day);
-    if (!Number.isNaN(date.valueOf())) {
-      return date;
-    }
-  }
-
-  const nativeParsed = new Date(raw);
-  if (!Number.isNaN(nativeParsed.valueOf())) {
-    return nativeParsed;
-  }
-
-  const mdyMatch = raw.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{2,4})$/);
-  if (mdyMatch) {
-    const month = Number(mdyMatch[1]);
-    const day = Number(mdyMatch[2]);
-    const yearRaw = Number(mdyMatch[3]);
-    const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
-    const date = new Date(year, month - 1, day);
-    if (!Number.isNaN(date.valueOf())) {
-      return date;
-    }
-  }
-
-  const ymdMatch = raw.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
-  if (ymdMatch) {
-    const year = Number(ymdMatch[1]);
-    const month = Number(ymdMatch[2]);
-    const day = Number(ymdMatch[3]);
-    const date = new Date(year, month - 1, day);
-    if (!Number.isNaN(date.valueOf())) {
-      return date;
-    }
-  }
-
-  return null;
-}
-
-function toIsoDateString(value?: string | null): string | null {
-  const parsed = parseFlexibleDate(value);
-  if (!parsed) return null;
-  const year = parsed.getFullYear();
-  const month = String(parsed.getMonth() + 1).padStart(2, "0");
-  const day = String(parsed.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function toDateValue(value?: string | null): number {
-  return parseFlexibleDate(value)?.valueOf() ?? Number.NEGATIVE_INFINITY;
+  return getStatusChipClassShared(status, "compact");
 }
 
 type BookSortKey = "id" | "title" | "author" | "status" | "date" | "series" | "bookNumber";
@@ -258,70 +188,10 @@ type SeriesOption = {
   author?: string | null;
 };
 
-type AddBookFormState = {
-  title: string;
-  author: string;
-  seriesName: string;
-  bookNumber: string;
-  status: BookStatus;
-  releaseDate: string;
-  publicationDate: string;
-  readDate: string;
-  autoSummary: string;
-};
-
-type EditBookFormState = {
-  id: number | null;
-  title: string;
-  author: string;
-  seriesName: string;
-  bookNumber: string;
-  status: BookStatus;
-  date: string;
-};
-
-type LookupResultState = {
-  found: boolean;
-  summary: string | null;
-  source_url: string | null;
-  matched_title: string | null;
-  matched_author: string | null;
-};
-
-const EMPTY_ADD_BOOK_FORM: AddBookFormState = {
-  title: "",
-  author: "",
-  seriesName: "",
-  bookNumber: "",
-  status: "unread",
-  releaseDate: "",
-  publicationDate: "",
-  readDate: "",
-  autoSummary: "",
-};
-
-const EMPTY_EDIT_BOOK_FORM: EditBookFormState = {
-  id: null,
-  title: "",
-  author: "",
-  seriesName: "",
-  bookNumber: "",
-  status: "unread",
-  date: "",
-};
-
-function normalizeLookupMatchedTitle(value: string | null | undefined) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-
-  return raw
-    .replace(/\s+ebook\s*$/i, "")
-    .replace(/\s+kindle\s+edition\s*$/i, "")
-    .trim();
-}
-
 export default function BooksClient() {
   const { toast } = useToast();
+  const { role } = useAuth();
+  const canEdit = role === "owner";
   const [books, setBooks] = useState<BookRow[]>([]);
   const [seriesList, setSeriesList] = useState<SeriesOption[]>([]);
   const [loading, setLoading] = useState(false);
@@ -775,6 +645,10 @@ export default function BooksClient() {
 
   useEffect(() => {
     if (seriesId) return;
+    // fetchBooks/fetchSeriesList set loading state synchronously before
+    // their first await -- standard "fetch on mount" pattern, not derived
+    // state that could be computed during render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchBooks();
     fetchSeriesList();
   }, [seriesId, fetchBooks, fetchSeriesList]);
@@ -1142,7 +1016,9 @@ export default function BooksClient() {
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <Button type="button" onClick={() => setAddDialogOpen(true)}>Add Book</Button>
+          {canEdit ? (
+            <Button type="button" onClick={() => setAddDialogOpen(true)}>Add Book</Button>
+          ) : null}
           <Link href="/books">
             <Button type="button" variant="outline">All Books</Button>
           </Link>
@@ -1318,6 +1194,8 @@ export default function BooksClient() {
                         <BookOpenIcon />
                       </Button>
                     ) : null}
+                    {canEdit ? (
+                    <>
                     <Button
                       type="button"
                       variant="outline"
@@ -1353,6 +1231,8 @@ export default function BooksClient() {
                     >
                       <Trash2Icon />
                     </Button>
+                    </>
+                    ) : null}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -1366,186 +1246,30 @@ export default function BooksClient() {
       </p>
       {loading && <p className="text-sm text-muted-foreground">Loading books…</p>}
 
-      <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
-        <DialogContent className="sm:max-w-xl">
-          <DialogHeader>
-            <DialogTitle>Add Book</DialogTitle>
-            <DialogDescription>
-              Add a standalone book or start a new series by entering the first book you already own.
-            </DialogDescription>
-          </DialogHeader>
+      <AddBookDialog
+        open={addDialogOpen}
+        onOpenChange={setAddDialogOpen}
+        form={addBookForm}
+        onFieldChange={updateAddBookForm}
+        onStatusChange={(nextStatus) => {
+          setAddBookForm((prev) => ({
+            ...prev,
+            status: nextStatus,
+            readDate: nextStatus === "read" ? prev.readDate : "",
+            releaseDate: nextStatus === "upcoming" ? prev.releaseDate : "",
+          }));
+        }}
+        seriesList={seriesList}
+        lookingUpBook={lookingUpBook}
+        lookupResult={lookupResult}
+        showLookupSummary={showLookupSummary}
+        onToggleLookupSummary={() => setShowLookupSummary((prev) => !prev)}
+        onFindDetails={handleFindDetails}
+        onSave={handleAddBook}
+        saving={savingBook}
+      />
 
-          <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-            <div className="flex items-start gap-2">
-              <CircleHelpIcon className="mt-0.5 h-4 w-4 shrink-0" />
-              <div>
-                <p className="font-medium text-foreground">Find details helper</p>
-                <p>Minimum for search: book title. Best results: book title plus author.</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="space-y-1 sm:col-span-2">
-              <Label htmlFor="add-book-title">Title</Label>
-              <Input
-                id="add-book-title"
-                value={addBookForm.title}
-                onChange={(event) => updateAddBookForm("title", event.target.value)}
-                placeholder="Book title"
-              />
-            </div>
-
-            <div className="space-y-1 sm:col-span-2">
-              <Label htmlFor="add-book-author">Author</Label>
-              <Input
-                id="add-book-author"
-                value={addBookForm.author}
-                onChange={(event) => updateAddBookForm("author", event.target.value)}
-                placeholder="Author name"
-              />
-            </div>
-
-            <div className="sm:col-span-2 flex flex-wrap items-center gap-2">
-              <Button type="button" variant="secondary" onClick={handleFindDetails} disabled={lookingUpBook}>
-                {lookingUpBook ? "Finding..." : "Find details"}
-              </Button>
-              {lookupResult?.found ? (
-                <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                  <span>
-                    Matched {normalizeLookupMatchedTitle(lookupResult.matched_title) || "title"}
-                    {lookupResult.matched_author ? ` by ${lookupResult.matched_author}` : ""}.
-                  </span>
-                  {lookupResult.summary ? (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 px-2 text-[11px]"
-                      onClick={() => setShowLookupSummary((prev) => !prev)}
-                    >
-                      {showLookupSummary ? "Hide summary" : "Show summary"}
-                    </Button>
-                  ) : null}
-                  {lookupResult.source_url ? (
-                    <a
-                      href={lookupResult.source_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-[11px] text-blue-600 underline"
-                    >
-                      Source
-                    </a>
-                  ) : null}
-                </div>
-              ) : lookupResult ? (
-                <span className="text-xs text-muted-foreground">No external match found. Manual add still works.</span>
-              ) : null}
-            </div>
-
-            <div className="space-y-1">
-              <Label htmlFor="add-book-series">Series name</Label>
-              <Input
-                id="add-book-series"
-                list="series-options"
-                value={addBookForm.seriesName}
-                onChange={(event) => updateAddBookForm("seriesName", event.target.value)}
-                placeholder="Optional series"
-              />
-              <datalist id="series-options">
-                {seriesList.map((series) => (
-                  <option key={series.id} value={series.name} />
-                ))}
-              </datalist>
-            </div>
-
-            <div className="space-y-1">
-              <Label htmlFor="add-book-number">Book number</Label>
-              <Input
-                id="add-book-number"
-                value={addBookForm.bookNumber}
-                onChange={(event) => updateAddBookForm("bookNumber", event.target.value)}
-                placeholder="Optional number"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <Label htmlFor="add-book-status">Status</Label>
-              <select
-                id="add-book-status"
-                value={addBookForm.status}
-                onChange={(event) => {
-                  const nextStatus = event.target.value as AddBookFormState["status"];
-                  setAddBookForm((prev) => ({
-                    ...prev,
-                    status: nextStatus,
-                    readDate: nextStatus === "read" ? prev.readDate : "",
-                    releaseDate: nextStatus === "upcoming" ? prev.releaseDate : "",
-                  }));
-                }}
-                className="h-9 w-full rounded-md border bg-background px-2 text-sm"
-              >
-                <option value="unread">Unread</option>
-                <option value="available">Available</option>
-                <option value="upcoming">Upcoming</option>
-                <option value="read">Read</option>
-              </select>
-            </div>
-
-            <div className="space-y-1">
-              <Label htmlFor="add-book-release-date">Date (planned/release)</Label>
-              <Input
-                id="add-book-release-date"
-                type="date"
-                value={addBookForm.releaseDate}
-                onChange={(event) => updateAddBookForm("releaseDate", event.target.value)}
-                disabled={addBookForm.status === "read"}
-              />
-            </div>
-
-            <div className="space-y-1">
-              <Label htmlFor="add-book-publication-date">Publication date</Label>
-              <Input
-                id="add-book-publication-date"
-                type="date"
-                value={addBookForm.publicationDate}
-                onChange={(event) => updateAddBookForm("publicationDate", event.target.value)}
-              />
-            </div>
-
-            <div className="space-y-1">
-              <Label htmlFor="add-book-read-date">Read date</Label>
-              <Input
-                id="add-book-read-date"
-                type="date"
-                value={addBookForm.readDate}
-                onChange={(event) => updateAddBookForm("readDate", event.target.value)}
-                disabled={addBookForm.status !== "read"}
-              />
-            </div>
-
-            {lookupResult?.summary && showLookupSummary ? (
-              <div className="space-y-1 sm:col-span-2">
-                <Label htmlFor="add-book-summary">Found summary</Label>
-                <textarea
-                  id="add-book-summary"
-                  value={addBookForm.autoSummary}
-                  onChange={(event) => updateAddBookForm("autoSummary", event.target.value)}
-                  className="min-h-16 w-full rounded-lg border border-input bg-transparent px-2.5 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-                />
-              </div>
-            ) : null}
-          </div>
-
-          <DialogFooter showCloseButton>
-            <Button type="button" onClick={handleAddBook} disabled={savingBook}>
-              {savingBook ? "Saving..." : "Save book"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
+      <EditBookDialog
         open={editDialogOpen}
         onOpenChange={(open) => {
           setEditDialogOpen(open);
@@ -1553,92 +1277,11 @@ export default function BooksClient() {
             setEditBookForm(EMPTY_EDIT_BOOK_FORM);
           }
         }}
-      >
-        <DialogContent className="sm:max-w-xl">
-          <DialogHeader>
-            <DialogTitle>Edit Book</DialogTitle>
-            <DialogDescription>
-              Update core book metadata from the library without leaving this page.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="space-y-1 sm:col-span-2">
-              <Label htmlFor="edit-book-title">Title</Label>
-              <Input
-                id="edit-book-title"
-                value={editBookForm.title}
-                onChange={(event) => setEditBookForm((prev) => ({ ...prev, title: event.target.value }))}
-              />
-            </div>
-
-            <div className="space-y-1 sm:col-span-2">
-              <Label htmlFor="edit-book-author">Author</Label>
-              <Input
-                id="edit-book-author"
-                value={editBookForm.author}
-                onChange={(event) => setEditBookForm((prev) => ({ ...prev, author: event.target.value }))}
-              />
-            </div>
-
-            <div className="space-y-1 sm:col-span-2">
-              <Label htmlFor="edit-book-series">Series (optional)</Label>
-              <Input
-                id="edit-book-series"
-                value={editBookForm.seriesName}
-                onChange={(event) => setEditBookForm((prev) => ({ ...prev, seriesName: event.target.value }))}
-                placeholder="Series name"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <Label htmlFor="edit-book-number">Book #</Label>
-              <Input
-                id="edit-book-number"
-                value={editBookForm.bookNumber}
-                onChange={(event) => setEditBookForm((prev) => ({ ...prev, bookNumber: event.target.value }))}
-                placeholder="e.g. 24"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <Label htmlFor="edit-book-status">Status</Label>
-              <select
-                id="edit-book-status"
-                value={editBookForm.status}
-                onChange={(event) =>
-                  setEditBookForm((prev) => ({
-                    ...prev,
-                    status: event.target.value as BookStatus,
-                  }))
-                }
-                className="h-9 w-full rounded border bg-background px-2 text-sm"
-              >
-                <option value="unread">unread</option>
-                <option value="available">available</option>
-                <option value="upcoming">upcoming</option>
-                <option value="read">read</option>
-              </select>
-            </div>
-
-            <div className="space-y-1 sm:col-span-2">
-              <Label htmlFor="edit-book-date">Date</Label>
-              <Input
-                id="edit-book-date"
-                value={editBookForm.date}
-                onChange={(event) => setEditBookForm((prev) => ({ ...prev, date: event.target.value }))}
-                placeholder={editBookForm.status === "read" ? "Read date" : "Release date"}
-              />
-            </div>
-          </div>
-
-          <DialogFooter showCloseButton>
-            <Button type="button" onClick={handleSaveBookEdit} disabled={savingEditBook}>
-              {savingEditBook ? "Saving..." : "Save changes"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        form={editBookForm}
+        onFormChange={setEditBookForm}
+        onSave={handleSaveBookEdit}
+        saving={savingEditBook}
+      />
 
     </div>
   );

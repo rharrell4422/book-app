@@ -6,6 +6,8 @@ import { BookOpenIcon, Clock3Icon } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { fetchApiWithFallback } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
+import { ValueFilterMenu } from "@/components/value-filter-menu";
+import { formatDate, normalizeText, parseFlexibleDate } from "@/lib/book-format";
 import {
   Table,
   TableBody,
@@ -156,53 +158,6 @@ function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function formatDate(value?: string | null) {
-  if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? value : date.toLocaleDateString();
-}
-
-function normalizeText(value: unknown) {
-  return String(value ?? "").trim().toLowerCase();
-}
-
-function parseFlexibleDate(value?: string | null): Date | null {
-  if (!value) return null;
-
-  const raw = String(value).trim();
-  if (!raw) return null;
-
-  const nativeParsed = new Date(raw);
-  if (!Number.isNaN(nativeParsed.valueOf())) {
-    return nativeParsed;
-  }
-
-  const mdyMatch = raw.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{2,4})$/);
-  if (mdyMatch) {
-    const month = Number(mdyMatch[1]);
-    const day = Number(mdyMatch[2]);
-    const yearRaw = Number(mdyMatch[3]);
-    const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
-    const date = new Date(year, month - 1, day);
-    if (!Number.isNaN(date.valueOf())) {
-      return date;
-    }
-  }
-
-  const ymdMatch = raw.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
-  if (ymdMatch) {
-    const year = Number(ymdMatch[1]);
-    const month = Number(ymdMatch[2]);
-    const day = Number(ymdMatch[3]);
-    const date = new Date(year, month - 1, day);
-    if (!Number.isNaN(date.valueOf())) {
-      return date;
-    }
-  }
-
-  return null;
-}
-
 function inferMissingNumbersFromBooks(books: SeriesDetailBook[] | undefined): number[] {
   if (!Array.isArray(books) || books.length === 0) {
     return [];
@@ -305,110 +260,6 @@ function getCheckBannerClassName(tone: CheckBannerTone) {
   }
 
   return "border-amber-200 bg-amber-50 text-amber-900";
-}
-
-type ValueFilterMenuProps = {
-  label: string;
-  options: string[];
-  selectedValues: string[];
-  onToggleValue: (value: string) => void;
-  onClear: () => void;
-  searchValue: string;
-  onSearchChange: (value: string) => void;
-};
-
-function ValueFilterMenu({
-  label,
-  options,
-  selectedValues,
-  onToggleValue,
-  onClear,
-  searchValue,
-  onSearchChange,
-}: ValueFilterMenuProps) {
-  const [open, setOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement | null>(null);
-  const normalizedSearch = normalizeText(searchValue);
-  const visibleOptions = options.filter((option) => normalizeText(option).includes(normalizedSearch));
-
-  useEffect(() => {
-    if (!open) return;
-
-    const handleDocumentMouseDown = (event: MouseEvent) => {
-      if (!menuRef.current) return;
-      if (!menuRef.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    };
-
-    const handleDocumentKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setOpen(false);
-      }
-    };
-
-    document.addEventListener("mousedown", handleDocumentMouseDown);
-    document.addEventListener("keydown", handleDocumentKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", handleDocumentMouseDown);
-      document.removeEventListener("keydown", handleDocumentKeyDown);
-    };
-  }, [open]);
-
-  return (
-    <div className="relative" ref={menuRef}>
-      <button
-        type="button"
-        onClick={() => setOpen((prev) => !prev)}
-        className="h-7 w-full rounded border bg-background px-2 text-left text-xs"
-      >
-        {label} {selectedValues.length > 0 ? `(${selectedValues.length})` : ""}
-      </button>
-      {open ? (
-        <div className="absolute z-20 mt-1 w-60 rounded-md border bg-background p-2 shadow-lg">
-        <input
-          value={searchValue}
-          onChange={(event) => onSearchChange(event.target.value)}
-          placeholder="Search values"
-          className="mb-2 h-7 w-full rounded border bg-background px-2 text-xs"
-        />
-        <div className="max-h-40 space-y-1 overflow-auto pr-1">
-          {visibleOptions.map((option) => {
-            const checked = selectedValues.includes(option);
-            return (
-              <label key={option} className="flex items-center gap-2 text-xs">
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={() => {
-                    onToggleValue(option);
-                  }}
-                />
-                <span className="truncate">{option || "(blank)"}</span>
-              </label>
-            );
-          })}
-          {visibleOptions.length === 0 ? (
-            <p className="text-xs text-muted-foreground">No matching values.</p>
-          ) : null}
-        </div>
-        <div className="mt-2 flex justify-end">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              onClear();
-              setOpen(false);
-            }}
-          >
-            Clear
-          </Button>
-        </div>
-      </div>
-      ) : null}
-    </div>
-  );
 }
 
 type SeriesSortKey = "id" | "name" | "author" | "nextUnread" | "nextUpcoming" | "total" | "lastChecked";
@@ -683,16 +534,6 @@ export default function SeriesPage() {
   function sortLabel(key: SeriesSortKey) {
     if (sortConfig.key !== key) return "";
     return sortConfig.direction === "asc" ? " ▲" : " ▼";
-  }
-
-  function toggleValueFilter(kind: "name" | "author", value: string) {
-    setValueFilters((prev) => {
-      const exists = prev[kind].includes(value);
-      return {
-        ...prev,
-        [kind]: exists ? prev[kind].filter((item) => item !== value) : [...prev[kind], value],
-      };
-    });
   }
 
   function clearFilters() {
@@ -1101,10 +942,10 @@ export default function SeriesPage() {
                 <div className="flex items-center justify-between gap-1">
                   <button type="button" className="text-left" onClick={() => toggleSort("name")}>Name{sortLabel("name")}</button>
                   <ValueFilterMenu
-                    label="Filter"
+                    label="Name"
                     options={nameOptions}
                     selectedValues={valueFilters.name}
-                    onToggleValue={(value) => toggleValueFilter("name", value)}
+                    onApplyValues={(values) => setValueFilters((prev) => ({ ...prev, name: values }))}
                     onClear={() => {
                       setValueFilters((prev) => ({ ...prev, name: [] }));
                       setValueFilterSearch((prev) => ({ ...prev, name: "" }));
@@ -1124,10 +965,10 @@ export default function SeriesPage() {
                 <div className="flex items-center justify-between gap-1">
                   <button type="button" className="text-left" onClick={() => toggleSort("author")}>Author{sortLabel("author")}</button>
                   <ValueFilterMenu
-                    label="Filter"
+                    label="Author"
                     options={authorOptions}
                     selectedValues={valueFilters.author}
-                    onToggleValue={(value) => toggleValueFilter("author", value)}
+                    onApplyValues={(values) => setValueFilters((prev) => ({ ...prev, author: values }))}
                     onClear={() => {
                       setValueFilters((prev) => ({ ...prev, author: [] }));
                       setValueFilterSearch((prev) => ({ ...prev, author: "" }));
