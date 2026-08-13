@@ -1,29 +1,23 @@
+import os
+import re
+import csv
 import traceback
 import argparse
+from datetime import datetime
+from typing import List, Tuple, Dict, Any
 
 try:
     import pandas as pd
     from sqlalchemy.orm import Session
-    from models import Book, Series
+    from sqlalchemy import func
+
+    from database import SessionLocal
+    from models import Series, Book
     from intelligence import recompute_series_intelligence
 except Exception as e:
     print("\n\n🔥 IMPORTER MODULE FAILED DURING IMPORT 🔥")
     traceback.print_exc()
     raise e
-
-import os
-import re
-import csv
-from datetime import datetime
-from typing import List, Tuple, Dict, Any
-
-import pandas as pd
-from sqlalchemy.orm import Session
-from sqlalchemy import func
-
-from database import SessionLocal
-from models import Series, Book
-from intelligence import recompute_series_intelligence
 
 
 # ------------------------------------------------------------

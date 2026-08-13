@@ -15,9 +15,11 @@ router = APIRouter(prefix="/import", tags=["import"], dependencies=[Depends(enfo
 
 
 @router.post("")
-def trigger_import():
-    file_path = "Test_LibraryImport_new_fields_28Jun2026.xlsx"
-
+def trigger_import(file_path: str):
+    """Run the importer against a file already present on the server's
+    filesystem (e.g. uploaded via `scp`/Railway volume). `file_path` must be
+    provided explicitly -- there is no default file, since that would
+    silently re-import stale personal data."""
     try:
         result = run_import(file_path)
         return {
