@@ -848,6 +848,11 @@ export default function SeriesDetailPage() {
   const upcomingCount = books.filter((book) => getBookStatus(book) === "upcoming").length;
   const unreadCount = books.filter((book) => !book.is_read).length;
   const needsVerificationCount = books.filter((book) => hasUnconfirmedReleaseDate(getBookStatus(book), book)).length;
+  const ownedBookNumbers = books
+    .filter((book) => String(book?.record_status || "active").toLowerCase() !== "deleted")
+    .map((book) => Number(book.book_number ?? book.series_order ?? NaN))
+    .filter((n) => Number.isFinite(n));
+  const nextBookNumber = ownedBookNumbers.length > 0 ? Math.max(...ownedBookNumbers) + 1 : null;
   const titleNormalizationPreview = displayedBooks
     .map((book) => {
       const currentTitle = String(book?.title || "").trim();
@@ -1159,6 +1164,22 @@ export default function SeriesDetailPage() {
 
     const url = `https://chatgpt.com/?q=${encodeURIComponent(promptParts.join(" "))}`;
     window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  function handleSearchForNextBookOnline() {
+    if (!series) return;
+
+    // Complements automated "Check for New": that only surfaces a next book
+    // if it's already indexed well enough by Google Books/Hardcover/Brave
+    // search to be classified as belonging to this series (a generic or
+    // common-word series title can get swamped by unrelated results and
+    // miss a real release entirely). This gives a fast manual escape hatch
+    // to check a retailer/Goodreads directly for "book <owned + 1>" instead
+    // of waiting on -- or debugging -- the automated pipeline.
+    const query = [series.name, series.author, nextBookNumber ? `book ${nextBookNumber}` : null, "release date"]
+      .filter(Boolean)
+      .join(" ");
+    window.open(`https://www.google.com/search?q=${encodeURIComponent(query)}`, "_blank", "noopener,noreferrer");
   }
 
   function handleDeleteSeriesWithBooks() {
@@ -1811,6 +1832,19 @@ export default function SeriesDetailPage() {
                 {seriesCheckLoading ? `Checking ${series.name}…` : `Check ${series.name} for New`}
               </Button>
             ) : null}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleSearchForNextBookOnline}
+              title={
+                nextBookNumber
+                  ? `Search online for Book ${nextBookNumber} -- use this if "Check for New" doesn't find a book you know exists`
+                  : "Search online for the next book in this series -- use this if \"Check for New\" doesn't find a book you know exists"
+              }
+            >
+              Search Book {nextBookNumber ?? "?"} Online
+            </Button>
             <Button
               type="button"
               variant="outline"

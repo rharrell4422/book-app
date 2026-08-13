@@ -776,8 +776,17 @@ def discover_candidates_for_series(
     if os.environ.get("BRAVE_SEARCH_API_KEY", "").strip() and os.environ.get("ANTHROPIC_API_KEY", "").strip():
         web_search_queries = [targeted_query_text] if targeted_query_text else []
         if series_name and highest_owned_book_number:
+            # Include the author name in these queries, not just the series
+            # name: a generic/common-word series title (e.g. "The World
+            # Book") can collide with an unrelated, heavily-indexed brand
+            # (here, the actual "World Book" encyclopedia, itself sold in
+            # 20+ numbered volumes) and get completely swamped out by that
+            # in a "<series> book <N>" search. Adding the author as a soft
+            # ranking signal resolved this in the live regression case
+            # without needing an exact-phrase match.
+            lookahead_author = f" {query_author}" if query_author else ""
             web_search_queries += [
-                f'"{series_name}" book {number}'
+                f'"{series_name}"{lookahead_author} book {number}'
                 for number in range(
                     highest_owned_book_number + 1, highest_owned_book_number + 1 + WEB_SEARCH_LOOKAHEAD_BOOKS
                 )

@@ -580,10 +580,30 @@ class WebSearchProviderTest(unittest.TestCase):
             )
 
         queries_used = mock_web_search.call_args[0][0]
-        self.assertIn('"The First Peacemaker" book 9', queries_used)
-        self.assertIn('"The First Peacemaker" book 10', queries_used)
-        self.assertIn('"The First Peacemaker" book 11', queries_used)
-        self.assertNotIn('"The First Peacemaker" book 12', queries_used)
+        self.assertIn('"The First Peacemaker" Some Author book 9', queries_used)
+        self.assertIn('"The First Peacemaker" Some Author book 10', queries_used)
+        self.assertIn('"The First Peacemaker" Some Author book 11', queries_used)
+        self.assertNotIn('"The First Peacemaker" Some Author book 12', queries_used)
+
+    def test_discover_candidates_for_series_lookahead_query_disambiguates_generic_series_names(self):
+        # Regression (live bug): "The World Book" by Jason Cheek is a real
+        # series, but that name is also the brand of an actual, heavily
+        # SEO'd encyclopedia sold in 20+ numbered volumes -- a bare
+        # "<series> book <N>" lookahead query returned nothing but
+        # encyclopedia listings and missed a real new release (book 21,
+        # "Here We Go Again", released 2026-07-15). Including the author
+        # name in the query disambiguates it.
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+            discovery_engine, "_fetch_hardcover", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_web_search", return_value=[]) as mock_web_search:
+            discovery_engine.discover_candidates_for_series(
+                "The World Book", "Jason Cheek", highest_owned_book_number=20
+            )
+
+        queries_used = mock_web_search.call_args[0][0]
+        self.assertIn('"The World Book" Jason Cheek book 21', queries_used)
 
     def test_discover_candidates_for_series_skips_web_search_without_keys(self):
         with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""}), patch.object(
