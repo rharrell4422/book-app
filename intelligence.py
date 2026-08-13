@@ -118,6 +118,8 @@ def extract_omnibus_ranges(text: str | None) -> set[int]:
 
 
 def purge_orphaned_books(db) -> dict:
+    """Delete books whose series_id points at a series row that no longer
+    exists (e.g. left over from a deleted series that didn't cascade)."""
     books = db.query(Book).filter(Book.series_id.is_not(None)).all()
     existing_series_ids = {int(row[0]) for row in db.query(Series.id).all()}
 
@@ -132,6 +134,7 @@ def purge_orphaned_books(db) -> dict:
                 "series_id": book.series_id,
             }
         )
+        db.delete(book)
 
     if deleted_entries:
         db.commit()

@@ -4,11 +4,20 @@ import threading
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
 
 from database import DATABASE_PATH, engine
-from routers.deps import require_owner
+from intelligence import purge_orphaned_books
+from routers.deps import get_db, require_owner
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_owner)])
+
+
+@router.post("/purge_orphaned_books")
+def purge_orphaned_books_endpoint(db: Session = Depends(get_db)):
+    """Delete books left pointing at a series that was deleted without
+    cascading. Safe to run any time; it's a no-op if there are none."""
+    return purge_orphaned_books(db)
 
 
 @router.get("/export_db")
