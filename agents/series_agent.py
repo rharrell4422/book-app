@@ -70,6 +70,25 @@ def _normalize_identity_number(value) -> str:
     return str(number).strip()
 
 
+_UNIVERSE_TIE_IN_PATTERN = re.compile(r"\buniverse\s+(novel|novella|book|story)\b", re.IGNORECASE)
+
+
+def _looks_like_universe_tie_in(title: str) -> bool:
+    """Common self-pub/indie branding convention: a companion/spin-off novel
+    set in the same shared "universe" as a flagship series says so right in
+    its own subtitle (e.g. "Mage-Provocateur: A Starship's Mage Universe
+    Novel") -- but it belongs to its own separate series (here, "Starship's
+    Mage: Red Falcon"), not the flagship one being checked, even though the
+    flagship series' name is textually present as a substring/token overlap
+    (regression: checking "Starship's Mage" pulled in all 3 Red Falcon
+    books this way). A plain textual match against the flagship series name
+    is too weak a signal for a title phrased like this; it should only be
+    accepted if it also has a genuine series-position number tying it to
+    *this* series specifically.
+    """
+    return bool(_UNIVERSE_TIE_IN_PATTERN.search(str(title or "")))
+
+
 def _title_pattern_match(title: str, series_name: str, known_series_titles: set[str]) -> bool:
     title_norm = _normalize_title_text(title)
     series_norm = _normalize_title_text(series_name)
@@ -423,6 +442,17 @@ class SeriesIntelligenceAgent:
                     targeted_with_number or explicit_series_match or partial_match or continues_numbering
                 )
 
+                # A self-identified "<Flagship Series> universe" tie-in novel
+                # (see _looks_like_universe_tie_in) can textually match the
+                # series name via explicit_series_match/partial_match while
+                # actually belonging to a different spin-off series -- for
+                # those, downgrade to requiring an actual series-position
+                # number tying it to *this* series, same bar as any other
+                # same-author-but-unrelated book.
+                is_universe_tie_in = _looks_like_universe_tie_in(title)
+                if is_universe_tie_in and not (targeted_with_number or continues_numbering):
+                    belongs_to_series = False
+
                 # A candidate that spells out two or more already-owned book
                 # titles by name (rather than using a "Books 1-3"/"Boxed
                 # Set"/"Omnibus" label) is a compilation of existing content,
@@ -448,6 +478,7 @@ class SeriesIntelligenceAgent:
                         "continues_numbering": continues_numbering,
                         "targeted_with_number": targeted_with_number,
                         "referenced_owned_titles": referenced_owned_titles,
+                        "is_universe_tie_in": is_universe_tie_in,
                         "accepted": belongs_to_series,
                     }
                 )

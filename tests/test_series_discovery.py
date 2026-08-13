@@ -905,6 +905,95 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
             ["Cherry Blossom Girls Book 10"],
         )
 
+    def test_universe_tie_in_spinoff_series_is_not_pulled_into_flagship_series(self):
+        # Regression (live bug): checking "Starship's Mage" (Glynn Stewart)
+        # pulled in "Interstellar Mage", "Mage-Provocateur", and "Agents of
+        # Mars" -- all real Glynn Stewart books, but from "Starship's Mage:
+        # Red Falcon", an entirely separate 3-book spin-off series that just
+        # shares the same "Starship's Mage Universe" branding. Each one's
+        # subtitle literally says "A Starship's Mage Universe Novel", so the
+        # flagship series name was textually present as a substring/token
+        # match -- but that's a spin-off marker, not proof of membership in
+        # the flagship series being checked, and none of them had a
+        # series-position number tying them to it either.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-interstellar-mage",
+                "title": "Interstellar Mage: A Cherry Blossom Girls Universe Novel",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2017-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            },
+            {
+                "source": "hardcover",
+                "source_id": "hc-mage-provocateur",
+                "title": "Mage-Provocateur: A Cherry Blossom Girls Universe Novel",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2018-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            },
+            {
+                "source": "hardcover",
+                "source_id": "hc-book10",
+                "title": "Cherry Blossom Girls Book 10",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            },
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertEqual(result["added_count"], 1)
+        self.assertEqual(
+            [book["title"] for book in result["available_missing"]],
+            ["Cherry Blossom Girls Book 10"],
+        )
+
+    def test_universe_tie_in_is_still_accepted_with_a_real_series_position_number(self):
+        # The universe-tie-in downgrade should only kick in when there's no
+        # other evidence tying the book to *this* series -- a same-batch
+        # spin-off-labeled title that Hardcover tags with an actual
+        # series-position number for the series being checked should still
+        # be accepted.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-tie-in-numbered",
+                "title": "Some Companion Tale: A Cherry Blossom Girls Universe Novel",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 10,
+                "upcoming_hint": False,
+            },
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertEqual(result["added_count"], 1)
+
     def test_owned_omnibus_range_prevents_individual_volume_reappearing_as_new(self):
         # Regression (live bug): "Safehold" is owned as a boxed set covering
         # books 1-3 in one row ("Safehold Boxed Set 1: (Safehold Books
