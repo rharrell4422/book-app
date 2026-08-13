@@ -277,6 +277,8 @@ def run_series_check_job_full(series_id: int) -> None:
                     matched_existing.author = normalized_author or matched_existing.author
                     if candidate_asin:
                         matched_existing.asin = candidate_asin
+                    if not matched_existing.source_url and candidate.get("source_url"):
+                        matched_existing.source_url = str(candidate.get("source_url")).strip()
 
                     if book_number is not None and (matched_existing.book_number is None or matched_existing.book_number <= 0):
                         matched_existing.book_number = book_number
@@ -326,6 +328,7 @@ def run_series_check_job_full(series_id: int) -> None:
                     release_date=expected_date,
                     date_added=today,
                     asin=candidate_asin or None,
+                    source_url=str(candidate.get("source_url")).strip() if candidate.get("source_url") else None,
                     format=incoming_edition_type if incoming_edition_type != "unknown" else None,
                     edition=incoming_edition_type if incoming_edition_type != "unknown" else None,
                     is_read=False,
@@ -360,6 +363,7 @@ def run_series_check_job_full(series_id: int) -> None:
                         "status": status,
                         "date_published": db_book.publication_date.isoformat() if db_book.publication_date else None,
                         "expected_date": db_book.release_date.isoformat() if db_book.release_date else None,
+                        "source_url": db_book.source_url,
                         "series_id": series_id,
                         "library_position": "top",
                     }

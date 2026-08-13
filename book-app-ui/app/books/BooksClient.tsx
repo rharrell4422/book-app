@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { BookOpenIcon, CheckIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
+import { BookOpenIcon, CheckIcon, ExternalLinkIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
@@ -13,6 +13,7 @@ import { useAuth } from "@/lib/auth-context";
 import {
   type BookStatus,
   formatDate,
+  getCheckOnlineUrl,
   getStatusChipClass as getStatusChipClassShared,
   normalizeText,
   parseFlexibleDate,
@@ -56,6 +57,7 @@ type BookRow = {
   series_name?: string | null;
   series_id?: number | null;
   book_number?: number | null;
+  source_url?: string | null;
   [key: string]: unknown;
 };
 
@@ -1194,6 +1196,16 @@ export default function BooksClient() {
                         <BookOpenIcon />
                       </Button>
                     ) : null}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      title={b.source_url ? "Check source listing" : "Search for this book online"}
+                      aria-label={b.source_url ? "Check source listing" : "Search for this book online"}
+                      onClick={() => window.open(getCheckOnlineUrl(b), "_blank", "noopener,noreferrer")}
+                    >
+                      <ExternalLinkIcon />
+                    </Button>
                     {canEdit ? (
                     <>
                     <Button

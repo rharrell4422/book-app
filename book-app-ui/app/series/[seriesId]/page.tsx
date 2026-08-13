@@ -20,6 +20,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/lib/auth-context";
 import {
   formatDate,
+  getCheckOnlineUrl,
   getStatusChipClass,
   isFutureDate,
   isPastOrTodayDate,
@@ -53,6 +54,7 @@ type BookRecord = {
   series_order?: number | null;
   auto_summary?: string | null;
   notes?: string | null;
+  source_url?: string | null;
   [key: string]: unknown;
 };
 
@@ -1995,6 +1997,14 @@ export default function SeriesDetailPage() {
                       See summary
                     </Button>
                   ) : null}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    title={book.source_url ? "Check source listing" : "Search for this book online"}
+                    onClick={() => window.open(getCheckOnlineUrl(book), "_blank", "noopener,noreferrer")}
+                  >
+                    Check online
+                  </Button>
                 </TableCell>
               </TableRow>
             );

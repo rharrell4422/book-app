@@ -27,6 +27,7 @@ class BookBase(BaseModel):
     google_books_id: Optional[str] = None
     goodreads_id: Optional[str] = None
     storygraph_id: Optional[str] = None
+    source_url: Optional[str] = None
     auto_summary: Optional[str] = None
     date_added: Optional[date] = None
     date_started: Optional[date] = None
@@ -77,6 +78,7 @@ class BookUpdate(BaseModel):
     google_books_id: Optional[str] = None
     goodreads_id: Optional[str] = None
     storygraph_id: Optional[str] = None
+    source_url: Optional[str] = None
     auto_summary: Optional[str] = None
     date_added: Optional[date] = None
     date_started: Optional[date] = None

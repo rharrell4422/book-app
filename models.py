@@ -163,6 +163,12 @@ class Book(Base):
     goodreads_id = Column(String, nullable=True)
     storygraph_id = Column(String, nullable=True)
 
+    # The retailer/catalog page this book was discovered from (e.g. an
+    # Amazon listing), if any. Surfaced in the UI as a "check online" link
+    # so the user can verify details (like an unconfirmed release date)
+    # themselves rather than the app scraping retailer pages to extract it.
+    source_url = Column(String, nullable=True)
+
     # User reading data
     is_read = Column(Boolean, default=False)
     read_date = Column(Date, nullable=True)

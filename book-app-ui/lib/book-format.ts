@@ -99,6 +99,20 @@ export function isPastOrTodayDate(value?: string | null): boolean {
   return parsedDate <= today;
 }
 
+/** Where to send a user to verify a book's details themselves (e.g. an
+ * unconfirmed release date on a brand-new preorder) -- the app deliberately
+ * doesn't scrape retailer pages to extract this automatically (fragile and
+ * against most retailers' terms of service), so this just links to the
+ * actual listing the book was discovered from, or falls back to a plain
+ * Google search for it. */
+export function getCheckOnlineUrl(book: { title?: string | null; author?: string | null; source_url?: string | null }): string {
+  const sourceUrl = String(book.source_url || "").trim();
+  if (sourceUrl) return sourceUrl;
+
+  const query = [book.title, book.author, "release date"].filter(Boolean).join(" ");
+  return `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+}
+
 /** Status pill styling shared by the Library and Series views. Includes all
  * four statuses -- some call sites previously only handled three, which
  * silently fell back to the "read" (rose/red) style for "unread" books.
