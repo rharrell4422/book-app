@@ -4,6 +4,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+import library_sync
 import services.series_check_engine as series_check_engine
 from database import Base
 from models import Book, Series
@@ -44,9 +45,18 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
             "provider_failures": [],
             "all_providers_failed": False,
         }
+        # run_series_check_job_full calls library_sync.update_from_series(),
+        # which opens its own db session via a module-level `SessionLocal`
+        # imported directly from database.py -- patching only
+        # series_check_engine's SessionLocal leaves that call pointed at the
+        # real on-disk dev database (sqlite:///./books.db) instead of this
+        # test's isolated in-memory one. Locally that "worked" by accident
+        # because a real books.db with a books table happens to exist on
+        # disk; a clean checkout (e.g. CI) has no such file/table and
+        # library_sync raises "no such table: books" instead.
         with patch.object(series_check_engine, "SessionLocal", self.SessionLocal), patch.object(
-            series_check_engine.series_agent, "run_series_check", return_value=mocked_result
-        ):
+            library_sync, "SessionLocal", self.SessionLocal
+        ), patch.object(series_check_engine.series_agent, "run_series_check", return_value=mocked_result):
             series_check_engine.run_series_check_job_full(self.series.id)
 
     def test_new_book_persists_source_url_from_discovery_candidate(self):

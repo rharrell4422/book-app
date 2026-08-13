@@ -94,11 +94,22 @@ def log_discovery_summary(*, result: dict, terminal_error: str | None = None) ->
 
     _console_log(f"--- missing_books (found, not yet owned) = {len(missing_books)} ---")
     for book in missing_books[:15]:
-        _console_log(f"  MISSING: {book.get('title')} | asin={book.get('asin')} | number={book.get('series_number')}")
+        # The terminal-error fallback path (series_check_engine's outer except
+        # block) populates this with plain book-number ints, not the usual
+        # candidate dicts -- guard against that shape here instead of assuming
+        # every caller passes dicts, since this is a logging helper and should
+        # never itself be the thing that turns a real error into a crash.
+        if isinstance(book, dict):
+            _console_log(f"  MISSING: {book.get('title')} | asin={book.get('asin')} | number={book.get('series_number')}")
+        else:
+            _console_log(f"  MISSING: book number {book}")
 
     _console_log(f"--- upcoming_books (pre-order / future release) = {len(upcoming_books)} ---")
     for book in upcoming_books[:15]:
-        _console_log(f"  UPCOMING: {book.get('title')} | asin={book.get('asin')} | expected={book.get('publication_date')}")
+        if isinstance(book, dict):
+            _console_log(f"  UPCOMING: {book.get('title')} | asin={book.get('asin')} | expected={book.get('publication_date')}")
+        else:
+            _console_log(f"  UPCOMING: book number {book}")
 
     if provider_failures:
         _console_log(f"--- provider_failures (first 10 of {len(provider_failures)}) ---")
