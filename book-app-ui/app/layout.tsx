@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 import { Providers } from "./providers";
-import { Toaster } from "@/components/ui/toaster";
 
 export const metadata: Metadata = {
   title: "Book App",
@@ -17,12 +16,11 @@ export default function RootLayout({
   return (
     <html lang="en" className="h-full antialiased">
       <body className="min-h-full flex flex-col">
+        {/* Toaster lives inside <Providers>, nested under ToastProvider so
+            useToast() can actually see the shared toast state. */}
         <Providers>
           {children}
         </Providers>
-
-        {/* ⭐ REQUIRED for toast + UI updates */}
-        <Toaster />
       </body>
     </html>
   );

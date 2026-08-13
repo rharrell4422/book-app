@@ -31,11 +31,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
+    // Deliberately in an effect, not a lazy useState initializer: this reads
+    // window.location and localStorage, which aren't available during SSR.
+    // Starting with role=null/ready=false and hydrating here on mount is the
+    // standard SSR-safe pattern for syncing from browser-only state.
     const params = new URLSearchParams(window.location.search);
     const shareParam = params.get("share");
     if (shareParam) {
       setShareToken(shareParam);
     }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- see comment above
     setRole(getCurrentRole());
     setReady(true);
   }, []);
