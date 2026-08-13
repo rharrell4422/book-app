@@ -10,6 +10,8 @@ __pycache__/
 *.cache
 *.sqlite
 *.db
+*.db-shm
+*.db-wal
 *.bak
 *.swp
 *.swo

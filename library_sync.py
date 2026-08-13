@@ -42,12 +42,27 @@ def update_from_series(series_id: int) -> dict:
                 publication_date = getattr(book, "publication_date", None)
                 release_date = getattr(book, "release_date", None)
                 candidate_date = release_date or publication_date
-                is_future_release = isinstance(candidate_date, date) and candidate_date > today
+                has_known_date = isinstance(candidate_date, date)
+                is_future_release = has_known_date and candidate_date > today
 
                 explicit_status = str(book.read_status or "").strip().lower()
                 is_marked_upcoming = bool(book.is_upcoming_auto) or bool(book.is_upcoming_final) or explicit_status == "upcoming"
 
-                if is_future_release or is_marked_upcoming:
+                if has_known_date:
+                    # A concrete date is the strongest signal available -- once it
+                    # has passed, the book is out even if it was previously (or is
+                    # still) flagged upcoming, e.g. a stale spreadsheet-import date
+                    # from before the release, or an old auto-discovery run.
+                    # Without this, a book stuck at read_status="upcoming" would
+                    # never self-heal since that flag alone used to keep it upcoming
+                    # forever, even long after its date had passed.
+                    should_be_upcoming = is_future_release
+                else:
+                    # No date to go on (e.g. an announced-but-undated preorder) --
+                    # trust whatever previously classified this as upcoming.
+                    should_be_upcoming = is_marked_upcoming
+
+                if should_be_upcoming:
                     if explicit_status != "upcoming":
                         book.read_status = "upcoming"
                         changed = True

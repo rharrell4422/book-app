@@ -113,6 +113,20 @@ export function getCheckOnlineUrl(book: { title?: string | null; author?: string
   return `https://www.google.com/search?q=${encodeURIComponent(query)}`;
 }
 
+/** True when a book is flagged as upcoming/available but no release date
+ * could be pinned down at all (e.g. a brand-new preorder listing whose
+ * search snippet had no date -- see getCheckOnlineUrl). Surfaced in the UI
+ * as a "verify this" flag next to the status, since an unconfirmed date is
+ * meaningfully different from "no news yet" (unread/not tracked) or "we
+ * know exactly when" (a real date is shown). */
+export function hasUnconfirmedReleaseDate(
+  status: BookStatus | string,
+  book: { release_date?: string | null; publication_date?: string | null }
+): boolean {
+  if (status !== "upcoming" && status !== "available") return false;
+  return !book.release_date && !book.publication_date;
+}
+
 /** Status pill styling shared by the Library and Series views. Includes all
  * four statuses -- some call sites previously only handled three, which
  * silently fell back to the "read" (rose/red) style for "unread" books.

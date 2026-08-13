@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import { AlertTriangleIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Spinner from "@/components/ui/spinner";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
@@ -22,6 +23,7 @@ import {
   formatDate,
   getCheckOnlineUrl,
   getStatusChipClass,
+  hasUnconfirmedReleaseDate,
   isFutureDate,
   isPastOrTodayDate,
   toIsoDateString,
@@ -339,14 +341,21 @@ function getBookStatus(book: BookRecord) {
   }
 
   const explicitStatus = String(book.read_status || "").trim().toLowerCase();
+  const releaseDate = String(book.release_date || book.publication_date || "").trim();
+
   if (explicitStatus === "upcoming") {
+    // A stored "upcoming" flag can go stale -- e.g. a spreadsheet-imported
+    // date that was in the future at import time, or an old auto-discovery
+    // run -- so once we have an actual date and it has passed, trust the
+    // date over the flag. Mirrors the equivalent fix in library_sync.py,
+    // which re-syncs this on every "Check Now" run.
+    if (releaseDate && isPastOrTodayDate(releaseDate)) return "available";
     return "upcoming";
   }
   if (explicitStatus === "available") {
     return "available";
   }
 
-  const releaseDate = String(book.release_date || book.publication_date || "").trim();
   if (releaseDate) {
     return isFutureDate(releaseDate) ? "upcoming" : "available";
   }
@@ -511,6 +520,7 @@ export default function SeriesDetailPage() {
   const [notesDraft, setNotesDraft] = useState("");
   const [summarySaving, setSummarySaving] = useState(false);
   const [bookSortMode, setBookSortMode] = useState<"series" | "az">("series");
+  const [needsVerificationOnly, setNeedsVerificationOnly] = useState(false);
   const [recentAddMessage, setRecentAddMessage] = useState<string | null>(null);
   const [seriesCheckLoading, setSeriesCheckLoading] = useState(false);
   const [seriesCheckProgress, setSeriesCheckProgress] = useState(0);
@@ -822,7 +832,7 @@ export default function SeriesDetailPage() {
     const pinnedIdSet = new Set(pinnedUpcoming.map((book) => Number(book?.id)));
     const rest = ordered.filter((book) => !pinnedIdSet.has(Number(book?.id)));
     return [...pinnedUpcoming, ...rest];
-  })();
+  })().filter((book) => !needsVerificationOnly || hasUnconfirmedReleaseDate(getBookStatus(book), book));
   const missingOrders: string[] = Array.isArray(series.missing_books)
     ? series.missing_books
     : [];
@@ -830,6 +840,7 @@ export default function SeriesDetailPage() {
   const readCount = books.filter((book) => book.is_read).length;
   const upcomingCount = books.filter((book) => getBookStatus(book) === "upcoming").length;
   const unreadCount = books.filter((book) => !book.is_read).length;
+  const needsVerificationCount = books.filter((book) => hasUnconfirmedReleaseDate(getBookStatus(book), book)).length;
   const titleNormalizationPreview = displayedBooks
     .map((book) => {
       const currentTitle = String(book?.title || "").trim();
@@ -1747,6 +1758,21 @@ export default function SeriesDetailPage() {
             <span>Read <span className="font-semibold text-foreground">{readCount}</span></span>
             <span>Total <span className="font-semibold text-foreground">{totalBooks}</span></span>
             <span>Upcoming <span className="font-semibold text-foreground">{upcomingCount}</span></span>
+            {needsVerificationCount > 0 ? (
+              <button
+                type="button"
+                title="Books flagged as upcoming/available with no confirmed release date -- click to filter to just these"
+                onClick={() => setNeedsVerificationOnly((prev) => !prev)}
+                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-semibold transition-colors ${
+                  needsVerificationOnly
+                    ? "border-amber-400 bg-amber-200 text-amber-900"
+                    : "border-amber-300 bg-amber-100 text-amber-800 hover:bg-amber-200"
+                }`}
+              >
+                <AlertTriangleIcon className="h-3 w-3" />
+                Needs date verification {needsVerificationCount}
+              </button>
+            ) : null}
             <span className="text-muted-foreground/50">|</span>
             <span>Status <span className="font-semibold text-foreground">{series.series_status || "Unknown"}</span></span>
             <span>Next unread <span className="font-semibold text-foreground">{series.next_unread_book_number ?? "—"}</span></span>
@@ -1943,6 +1969,7 @@ export default function SeriesDetailPage() {
             const displayDate = getBookDate(book);
             const summary = book.auto_summary;
             const notes = book.notes;
+            const unconfirmedDate = hasUnconfirmedReleaseDate(status, book);
             return (
               <TableRow key={book.id}>
                 <TableCell className="truncate" title={book.title ?? undefined}>
@@ -1950,7 +1977,14 @@ export default function SeriesDetailPage() {
                 </TableCell>
                 <TableCell className="truncate" title={book.author || "—"}>{book.author || "—"}</TableCell>
                 <TableCell>
-                  <span className={getStatusChipClass(status)}>{status}</span>
+                  <div className="flex items-center gap-1">
+                    <span className={getStatusChipClass(status)}>{status}</span>
+                    {unconfirmedDate ? (
+                      <span title="No confirmed release date yet -- click Check online to verify with the retailer">
+                        <AlertTriangleIcon className="h-3.5 w-3.5 shrink-0 text-amber-600" aria-label="Date unconfirmed" />
+                      </span>
+                    ) : null}
+                  </div>
                 </TableCell>
                 <TableCell>{formatDate(displayDate)}</TableCell>
                 <TableCell>{book.book_number ?? "—"}</TableCell>
@@ -2000,10 +2034,17 @@ export default function SeriesDetailPage() {
                   <Button
                     variant="outline"
                     size="sm"
-                    title={book.source_url ? "Check source listing" : "Search for this book online"}
+                    className={unconfirmedDate ? "border-amber-300 text-amber-700 hover:bg-amber-50" : undefined}
+                    title={
+                      unconfirmedDate
+                        ? "No confirmed date yet -- click to verify with the retailer"
+                        : book.source_url
+                          ? "Check source listing"
+                          : "Search for this book online"
+                    }
                     onClick={() => window.open(getCheckOnlineUrl(book), "_blank", "noopener,noreferrer")}
                   >
-                    Check online
+                    {unconfirmedDate ? "Verify date" : "Check online"}
                   </Button>
                 </TableCell>
               </TableRow>

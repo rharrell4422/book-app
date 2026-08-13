@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { BookOpenIcon, CheckIcon, ExternalLinkIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
+import { AlertTriangleIcon, BookOpenIcon, CheckIcon, ExternalLinkIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
@@ -14,7 +14,9 @@ import {
   type BookStatus,
   formatDate,
   getCheckOnlineUrl,
+  hasUnconfirmedReleaseDate,
   getStatusChipClass as getStatusChipClassShared,
+  isPastOrTodayDate,
   normalizeText,
   parseFlexibleDate,
   toDateValue,
@@ -68,10 +70,19 @@ function getBookStatus(book: BookRow): BookStatus {
     return "read";
   }
 
-  if (explicitStatus === "upcoming") return "upcoming";
+  const releaseDate = book.release_date || book.publication_date;
+
+  if (explicitStatus === "upcoming") {
+    // A stored "upcoming" flag can go stale -- e.g. a spreadsheet-imported
+    // date that was in the future at import time, or an old auto-discovery
+    // run -- so once we have an actual date and it has passed, trust the
+    // date over the flag. Mirrors the equivalent fix in library_sync.py,
+    // which re-syncs this on every "Check Now" run.
+    if (releaseDate && isPastOrTodayDate(releaseDate)) return "available";
+    return "upcoming";
+  }
   if (explicitStatus === "available") return "available";
 
-  const releaseDate = book.release_date || book.publication_date;
   if (releaseDate) {
     const parsedDate = new Date(releaseDate);
     if (!Number.isNaN(parsedDate.valueOf())) {
@@ -219,6 +230,7 @@ export default function BooksClient() {
     series: "",
     status: "",
   });
+  const [needsVerificationOnly, setNeedsVerificationOnly] = useState(false);
   const [sortConfig, setSortConfig] = useState<{ key: BookSortKey | null; direction: SortDirection }>({
     key: null,
     direction: "asc",
@@ -286,6 +298,7 @@ export default function BooksClient() {
   const availableBooks = statusSummary.available;
   const upcomingBooks = statusSummary.upcoming;
   const unreadBooks = statusSummary.unread + statusSummary.available;
+  const needsVerificationBooks = books.filter((book) => hasUnconfirmedReleaseDate(getBookStatus(book), book)).length;
 
   const titleOptions = useMemo(
     () => Array.from(new Set(books.map((book) => String(book.title || "").trim()))).sort((a, b) => a.localeCompare(b)),
@@ -324,10 +337,11 @@ export default function BooksClient() {
       if (activeValueFilters.author.length > 0 && !activeValueFilters.author.includes(String(book.author || "").trim())) return false;
       if (activeValueFilters.series.length > 0 && !activeValueFilters.series.includes(String(book.series_name || "").trim())) return false;
       if (activeValueFilters.status.length > 0 && !activeValueFilters.status.includes(String(getBookStatus(book)).trim())) return false;
+      if (needsVerificationOnly && !hasUnconfirmedReleaseDate(getBookStatus(book), book)) return false;
 
       return true;
     });
-  }, [books, activeValueFilters]);
+  }, [books, activeValueFilters, needsVerificationOnly]);
 
   const sortedBooks = useMemo(() => {
     const withPriorityOrder = [...filteredBooks].sort((a, b) => {
@@ -493,6 +507,7 @@ export default function BooksClient() {
     setValueFilters({ title: [], author: [], series: [], status: [] });
     setValueFilterSearch({ title: "", author: "", series: "", status: "" });
     setSortConfig({ key: null, direction: "asc" });
+    setNeedsVerificationOnly(false);
   }
 
   useEffect(() => {
@@ -1014,6 +1029,21 @@ export default function BooksClient() {
             <span>Available <span className="font-semibold text-foreground">{availableBooks}</span></span>
             <span>Total <span className="font-semibold text-foreground">{totalBooks}</span></span>
             <span>Upcoming <span className="font-semibold text-foreground">{upcomingBooks}</span></span>
+            {needsVerificationBooks > 0 ? (
+              <button
+                type="button"
+                title="Books flagged as upcoming/available with no confirmed release date -- click to filter to just these"
+                onClick={() => setNeedsVerificationOnly((prev) => !prev)}
+                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-semibold transition-colors ${
+                  needsVerificationOnly
+                    ? "border-amber-400 bg-amber-200 text-amber-900"
+                    : "border-amber-300 bg-amber-100 text-amber-800 hover:bg-amber-200"
+                }`}
+              >
+                <AlertTriangleIcon className="h-3 w-3" />
+                Needs date verification {needsVerificationBooks}
+              </button>
+            ) : null}
           </div>
         </div>
 
@@ -1172,12 +1202,20 @@ export default function BooksClient() {
             {Array.isArray(sortedBooks) &&
               sortedBooks.map((b) => {
                 const status = getBookStatus(b);
+                const unconfirmedDate = hasUnconfirmedReleaseDate(status, b);
                 return (
                   <TableRow key={b.id}>
                     <TableCell className="truncate" title={b.title ?? undefined}>{b.title || "—"}</TableCell>
                     <TableCell className="truncate" title={b.author || "—"}>{b.author || "—"}</TableCell>
                     <TableCell>
-                      <span className={getStatusChipClass(status)}>{status}</span>
+                      <div className="flex items-center gap-1">
+                        <span className={getStatusChipClass(status)}>{status}</span>
+                        {unconfirmedDate ? (
+                          <span title="No confirmed release date yet -- click the check-online icon to verify with the retailer">
+                            <AlertTriangleIcon className="h-3.5 w-3.5 shrink-0 text-amber-600" aria-label="Date unconfirmed" />
+                          </span>
+                        ) : null}
+                      </div>
                     </TableCell>
                     <TableCell>{formatDate(getDisplayDate(b))}</TableCell>
                     <TableCell className="truncate" title={b.series_name || "—"}>{b.series_name || "—"}</TableCell>
@@ -1200,8 +1238,15 @@ export default function BooksClient() {
                       type="button"
                       variant="ghost"
                       size="icon-xs"
-                      title={b.source_url ? "Check source listing" : "Search for this book online"}
+                      title={
+                        unconfirmedDate
+                          ? "No confirmed date yet -- click to verify with the retailer"
+                          : b.source_url
+                            ? "Check source listing"
+                            : "Search for this book online"
+                      }
                       aria-label={b.source_url ? "Check source listing" : "Search for this book online"}
+                      className={unconfirmedDate ? "text-amber-600 hover:text-amber-700" : undefined}
                       onClick={() => window.open(getCheckOnlineUrl(b), "_blank", "noopener,noreferrer")}
                     >
                       <ExternalLinkIcon />
