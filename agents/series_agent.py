@@ -373,6 +373,7 @@ class SeriesIntelligenceAgent:
                 exclude_title_keys=author_owned_titles,
                 allow_author_fallback=author_is_unambiguous,
                 progress_callback=progress_callback,
+                highest_owned_book_number=highest_owned_book_number,
             )
             candidates = discovery["candidates"]
             provider_failures = discovery["provider_failures"]

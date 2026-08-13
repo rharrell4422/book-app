@@ -326,7 +326,7 @@ class WebSearchProviderTest(unittest.TestCase):
         with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=structured
         ):
-            results = discovery_engine._fetch_web_search("query", "The First Peacemaker", "Some Author")
+            results = discovery_engine._fetch_web_search(["query"], "The First Peacemaker", "Some Author")
 
         self.assertEqual(len(results), 1)
         candidate = results[0]
@@ -337,19 +337,89 @@ class WebSearchProviderTest(unittest.TestCase):
         self.assertEqual(candidate["source_url"], "https://example.com/8")
         self.assertEqual(candidate["authors"], ["Some Author"])
 
+    def test_fetch_web_search_treats_undated_result_as_upcoming_even_if_llm_says_not(self):
+        # Regression (live bug): a retailer listing existing (no date in the
+        # snippet) isn't proof a book is actually out -- pre-order listings
+        # look identical -- but the LLM sometimes still guesses
+        # is_upcoming=False when it has no date at all. This should be
+        # overridden by the code-level safety net rather than trusted.
+        raw_results = [{"title": "New Book Listing", "description": "snippet", "url": "https://example.com/9"}]
+        structured = [
+            {
+                "result_index": 0,
+                "title": "Embers of the Ancients",
+                "book_number": 9,
+                "author_names": ["Some Author"],
+                "published_date": None,
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+        ]
+        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        ):
+            results = discovery_engine._fetch_web_search(["query"], "Series", "Some Author")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["upcoming_hint"], True)
+        self.assertEqual(results[0]["published_date"], "")
+
     def test_fetch_web_search_skips_llm_items_with_out_of_range_index(self):
         raw_results = [{"title": "Some Result", "description": "snippet", "url": "https://example.com/1"}]
         structured = [{"result_index": 5, "title": "Bad Index", "book_number": None, "author_names": [], "is_upcoming": False}]
         with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=structured
         ):
-            results = discovery_engine._fetch_web_search("query", "Series", "Author")
+            results = discovery_engine._fetch_web_search(["query"], "Series", "Author")
         self.assertEqual(results, [])
 
     def test_fetch_web_search_returns_empty_when_brave_has_no_results(self):
         with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=[]):
-            results = discovery_engine._fetch_web_search("query", "Series", "Author")
+            results = discovery_engine._fetch_web_search(["query"], "Series", "Author")
         self.assertEqual(results, [])
+
+    def test_fetch_web_search_merges_and_dedups_results_across_multiple_queries(self):
+        # The lookahead queries ("<series> book <N>") run alongside the
+        # generic query and can legitimately return overlapping pages --
+        # those should be merged into one deduped raw-result list (by URL)
+        # before the single LLM structuring call, not passed through twice.
+        def fake_brave(query):
+            if query == "generic":
+                return [
+                    {"title": "Series Book 1", "description": "d", "url": "https://example.com/1"},
+                    {"title": "Series Book 9", "description": "d", "url": "https://example.com/9"},
+                ]
+            if query == "book 9":
+                return [{"title": "Series Book 9", "description": "d", "url": "https://example.com/9"}]
+            return []
+
+        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=[]
+        ) as mock_structure:
+            discovery_engine._fetch_web_search(["generic", "book 9"], "Series", "Author")
+
+        passed_raw_results = mock_structure.call_args[0][2]
+        self.assertEqual(len(passed_raw_results), 2)
+        self.assertEqual({r["url"] for r in passed_raw_results}, {"https://example.com/1", "https://example.com/9"})
+
+    def test_fetch_web_search_tolerates_one_query_failing_if_another_succeeds(self):
+        def fake_brave(query):
+            if query == "bad":
+                raise RuntimeError("rate limited")
+            return [{"title": "Found It", "description": "d", "url": "https://example.com/ok"}]
+
+        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=[]
+        ) as mock_structure:
+            discovery_engine._fetch_web_search(["bad", "good"], "Series", "Author")
+
+        passed_raw_results = mock_structure.call_args[0][2]
+        self.assertEqual(len(passed_raw_results), 1)
+
+    def test_fetch_web_search_raises_when_every_query_fails(self):
+        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                discovery_engine._fetch_web_search(["bad1", "bad2"], "Series", "Author")
 
     def test_discover_candidates_for_series_wires_in_web_search_results(self):
         web_candidate = {
@@ -377,6 +447,29 @@ class WebSearchProviderTest(unittest.TestCase):
         self.assertEqual(len(result["candidates"]), 1)
         self.assertEqual(result["candidates"][0]["source"], "web_search")
         self.assertEqual(result["candidates"][0]["confidence"], "targeted")
+
+    def test_discover_candidates_for_series_adds_lookahead_queries_for_next_books(self):
+        # Regression (live bug): a generic "<series> <author>" search's
+        # relevance ranking favors whichever book has the most existing
+        # links (almost always book 1), so a brand-new release/announcement
+        # can fail to surface at all even with a large result count. When
+        # the caller knows the highest book number currently owned, explicit
+        # "<series> book <N>" queries for the next few numbers should be
+        # added alongside the generic one.
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+            discovery_engine, "_fetch_hardcover", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_web_search", return_value=[]) as mock_web_search:
+            discovery_engine.discover_candidates_for_series(
+                "The First Peacemaker", "Some Author", highest_owned_book_number=8
+            )
+
+        queries_used = mock_web_search.call_args[0][0]
+        self.assertIn('"The First Peacemaker" book 9', queries_used)
+        self.assertIn('"The First Peacemaker" book 10', queries_used)
+        self.assertIn('"The First Peacemaker" book 11', queries_used)
+        self.assertNotIn('"The First Peacemaker" book 12', queries_used)
 
     def test_discover_candidates_for_series_skips_web_search_without_keys(self):
         with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""}), patch.object(

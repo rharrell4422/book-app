@@ -54,6 +54,16 @@ WEB_SEARCH_TIMEOUT_SECONDS = 20.0
 ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 WEB_SEARCH_MAX_RESULTS = 8
 
+# A generic "<series> <author>" search's relevance ranking skews heavily
+# towards whichever entry has the most existing links/reviews -- almost
+# always book 1 -- so a brand new release can fail to place in the top
+# results even with a generous count (observed live: book 8 of a series
+# appeared in a plain "<series> <author>" search, but book 9, an
+# announced-but-not-yet-released preorder, did not, even at count=20).
+# Explicitly searching "<series> book <N>" for the next few sequential
+# numbers reliably surfaces it instead, so both query styles are combined.
+WEB_SEARCH_LOOKAHEAD_BOOKS = 3
+
 # Hardcover's own search index tags each hit with its position within a
 # series (when it has one), which is a far more reliable source of a book's
 # number than trying to parse it out of free-text title formatting -- so a
@@ -491,8 +501,10 @@ Below are {count} web search results returned for this series/author. For EACH r
 Search results:
 {snippets}
 
+A retailer listing existing (e.g. a Kindle Store page) is NOT proof a book has already been released -- pre-order listings look identical to a snippet with no date. If the snippet/title does not explicitly confirm a release date or that the book is already out, set "is_upcoming" to true and "published_date" to null rather than guessing it's already available -- it's far more useful to flag a book as "coming soon, exact date unconfirmed" than to wrongly tell a reader something is ready to read.
+
 Respond with ONLY a JSON array (no prose, no markdown code fences). Each element must have this shape:
-{{"result_index": <int, the [N] index above>, "title": <string, the clean book title without the series name or a "Book N" suffix>, "book_number": <int or null, this book's position in the series if stated or clearly implied>, "author_names": [<string>, ...], "published_date": <string, "YYYY-MM-DD"/"YYYY-MM"/"YYYY" if known else null>, "is_upcoming": <bool, true if this is a pre-order/announced/not-yet-released book>, "isbn13": <string or null>}}
+{{"result_index": <int, the [N] index above>, "title": <string, the clean book title without the series name or a "Book N" suffix>, "book_number": <int or null, this book's position in the series if stated or clearly implied>, "author_names": [<string>, ...], "published_date": <string, "YYYY-MM-DD"/"YYYY-MM"/"YYYY" if EXPLICITLY stated in the snippet, else null>, "is_upcoming": <bool, see rule above>, "isbn13": <string or null>}}
 
 If none of the results are genuine matches, respond with exactly: []"""
 
@@ -535,9 +547,25 @@ def _structure_web_results_with_llm(series_name: str, author: str, raw_results: 
     return parsed if isinstance(parsed, list) else []
 
 
-def _fetch_web_search(query: str, series_name: str, author: str) -> list[dict]:
-    raw_results = _fetch_brave_web_search(query)
+def _fetch_web_search(queries: list[str], series_name: str, author: str) -> list[dict]:
+    raw_results: list[dict] = []
+    seen_urls: set[str] = set()
+    query_errors: list[Exception] = []
+    for query in queries:
+        try:
+            items = _fetch_brave_web_search(query)
+        except Exception as exc:  # one query's transient failure shouldn't sink the others
+            query_errors.append(exc)
+            continue
+        for item in items:
+            if item["url"] in seen_urls:
+                continue
+            seen_urls.add(item["url"])
+            raw_results.append(item)
+
     if not raw_results:
+        if query_errors and len(query_errors) == len(queries):
+            raise query_errors[0]
         return []
 
     structured = _structure_web_results_with_llm(series_name, author, raw_results)
@@ -565,19 +593,28 @@ def _fetch_web_search(query: str, series_name: str, author: str) -> list[dict]:
         if not isinstance(author_names, list) or not author_names:
             author_names = [author]
 
+        published_date = str(item.get("published_date") or "").strip()
+        # Belt-and-suspenders on top of the prompt's own instruction: a
+        # retailer/store listing existing is not proof a book is actually
+        # out yet (pre-orders look identical), so if the model didn't
+        # extract an explicit date, treat it as not-yet-confirmed-available
+        # regardless of what it set "is_upcoming" to -- safer to under- than
+        # over-claim availability here.
+        upcoming_hint = bool(item.get("is_upcoming")) or not published_date
+
         results.append(
             {
                 "source": "web_search",
                 "source_id": source["url"],
                 "title": title,
                 "authors": [str(a) for a in author_names if str(a).strip()],
-                "published_date": str(item.get("published_date") or "").strip(),
+                "published_date": published_date,
                 "description": source.get("description"),
                 "isbn13": str(item.get("isbn13") or "").strip() or None,
                 "source_url": source["url"],
                 "language": "",
                 "series_number_hint": book_number,
-                "upcoming_hint": bool(item.get("is_upcoming")),
+                "upcoming_hint": upcoming_hint,
             }
         )
     return results
@@ -617,6 +654,7 @@ def discover_candidates_for_series(
     exclude_title_keys: set[str] | None = None,
     allow_author_fallback: bool = True,
     progress_callback=None,
+    highest_owned_book_number: int | None = None,
 ) -> dict:
     """Find candidate books for a specific series by a specific author.
 
@@ -679,8 +717,16 @@ def discover_candidates_for_series(
     # both to search and to structure the results.
     web_search_raw: list[dict] = []
     if os.environ.get("BRAVE_SEARCH_API_KEY", "").strip() and os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        web_search_queries = [targeted_query_text] if targeted_query_text else []
+        if series_name and highest_owned_book_number:
+            web_search_queries += [
+                f'"{series_name}" book {number}'
+                for number in range(
+                    highest_owned_book_number + 1, highest_owned_book_number + 1 + WEB_SEARCH_LOOKAHEAD_BOOKS
+                )
+            ]
         try:
-            web_search_raw = _fetch_web_search(targeted_query_text, series_name, author)
+            web_search_raw = _fetch_web_search(web_search_queries, series_name, author)
             any_provider_succeeded = True
         except Exception as exc:
             provider_failures.append({"provider": "web_search", "error": str(exc)})
