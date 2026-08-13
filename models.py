@@ -15,10 +15,30 @@ from sqlalchemy.orm import relationship
 from database import Base
 
 
+class User(Base):
+    """Schema-only groundwork for eventual multi-tenancy -- not wired into
+    auth yet (see routers/deps.py, which still does single-owner-password +
+    share-token auth). Adding this table and the nullable owner_id columns
+    below now means a future move to real per-user accounts is a data
+    migration + auth rewrite, not also a schema-design exercise done under
+    pressure. A single "owner" row is seeded on boot (see bootstrap.py) so
+    existing personal data has somewhere to point its owner_id at.
+    """
+
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, nullable=False)
+    display_name = Column(String, nullable=True)
+    role = Column(String, nullable=False, default="owner")  # owner, member, etc. (future use)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Series(Base):
     __tablename__ = "series"
 
     id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
 
     # Core
     name = Column(String, nullable=False)
@@ -114,6 +134,7 @@ class Book(Base):
     __tablename__ = "books"
 
     id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
 
     # Core identity
     title = Column(String, nullable=False)

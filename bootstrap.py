@@ -1,28 +1,51 @@
-"""Startup-time database bootstrapping: lightweight schema migrations run
-against SQLite directly (no Alembic in this project yet) and the one-time
-state backfill run when the app boots.
+"""Startup-time database bootstrapping: schema migrations (via Alembic) and
+the one-time state backfills run when the app boots.
 """
 
-from sqlalchemy import text
+import os
+
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import inspect
 
 import models
 from database import SessionLocal, engine
 from intelligence import recalculate_series_state_for_series
 
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-def ensure_series_state_columns() -> None:
-    with engine.begin() as conn:
-        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(series)")).fetchall()}
-        if "has_new_books" not in columns:
-            conn.execute(text("ALTER TABLE series ADD COLUMN has_new_books BOOLEAN NOT NULL DEFAULT 0"))
-        if "has_unread_books" not in columns:
-            conn.execute(text("ALTER TABLE series ADD COLUMN has_unread_books BOOLEAN NOT NULL DEFAULT 0"))
-        if "has_upcoming_books" not in columns:
-            conn.execute(text("ALTER TABLE series ADD COLUMN has_upcoming_books BOOLEAN NOT NULL DEFAULT 0"))
-        if "is_caught_up" not in columns:
-            conn.execute(text("ALTER TABLE series ADD COLUMN is_caught_up BOOLEAN NOT NULL DEFAULT 0"))
-        if "title_normalization_mode_override" not in columns:
-            conn.execute(text("ALTER TABLE series ADD COLUMN title_normalization_mode_override TEXT NULL"))
+# The revision that captures a frozen snapshot of the schema as it existed
+# right before Alembic was introduced into this project (see that
+# migration's docstring). Any database that already has the `series`/`books`
+# tables but no `alembic_version` table predates Alembic entirely -- e.g. a
+# deployment (like the Railway production instance) that was last deployed
+# before this change. Running `upgrade` from scratch against a DB like that
+# would try to CREATE TABLE series/books that already exist (with real data)
+# and crash on boot, so that case is detected and stamped at the baseline
+# instead of replayed.
+_PRE_ALEMBIC_BASELINE_REVISION = "bf8439427a1e"
+
+
+def run_migrations() -> None:
+    """Brings the DB schema up to date by running every Alembic migration
+    that hasn't been applied yet (a no-op if it's already at head). Runs on
+    every boot so a fresh DB, an existing one, and a freshly-deployed
+    Railway instance all converge on the same schema without a separate
+    deploy step -- this replaces the old ad-hoc `ensure_series_state_columns`
+    + `models.Base.metadata.create_all` pair that only handled a couple of
+    hand-picked columns.
+    """
+    alembic_cfg = Config(os.path.join(_REPO_ROOT, "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", os.path.join(_REPO_ROOT, "alembic"))
+
+    inspector = inspect(engine)
+    has_alembic_version_table = inspector.has_table("alembic_version")
+    has_pre_existing_schema = inspector.has_table("series") and inspector.has_table("books")
+
+    if not has_alembic_version_table and has_pre_existing_schema:
+        command.stamp(alembic_cfg, _PRE_ALEMBIC_BASELINE_REVISION)
+
+    command.upgrade(alembic_cfg, "head")
 
 
 def backfill_series_state() -> None:
