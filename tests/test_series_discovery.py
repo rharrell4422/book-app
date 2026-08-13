@@ -364,6 +364,120 @@ class WebSearchProviderTest(unittest.TestCase):
         self.assertEqual(results[0]["upcoming_hint"], True)
         self.assertEqual(results[0]["published_date"], "")
 
+    def test_fetch_web_search_refines_undated_result_with_a_second_targeted_query(self):
+        # Regression (live bug): "Edge of Shadow" (Peacemaker Book 8) was
+        # already out, but the broad "<series> book 8" query's top snippet
+        # had no date, so it got the conservative "upcoming" default. A
+        # second, title-specific "<title> release date" query found a page
+        # that did state the date -- that should override the guess.
+        raw_results = [{"title": "Edge of Shadow listing", "description": "snippet, no date", "url": "https://example.com/8"}]
+        first_pass_structured = [
+            {
+                "result_index": 0,
+                "title": "Edge of Shadow",
+                "book_number": 8,
+                "author_names": ["Some Author"],
+                "published_date": None,
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+        ]
+        refinement_raw = [{"title": "Edge of Shadow release date", "description": "Released Aug 9, 2026", "url": "https://example.com/8-date"}]
+        refinement_structured = [
+            {
+                "result_index": 0,
+                "title": "Edge of Shadow",
+                "book_number": 8,
+                "author_names": ["Some Author"],
+                "published_date": "2026-08-09",
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+        ]
+
+        def fake_brave(query):
+            if "release date" in query:
+                return refinement_raw
+            return raw_results
+
+        def fake_structure(series_name, author, results):
+            if results == refinement_raw:
+                return refinement_structured
+            return first_pass_structured
+
+        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", side_effect=fake_structure
+        ):
+            results = discovery_engine._fetch_web_search(["query"], "The First Peacemaker", "Some Author")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["published_date"], "2026-08-09")
+        self.assertEqual(results[0]["upcoming_hint"], False)
+
+    def test_fetch_web_search_keeps_upcoming_default_when_refinement_finds_nothing(self):
+        # The refinement pass is best-effort -- if the second query also
+        # can't find a date (e.g. a genuine undated preorder like Peacemaker
+        # Book 9), the original conservative "upcoming" classification must
+        # still stand rather than being cleared out.
+        raw_results = [{"title": "Embers listing", "description": "snippet, no date", "url": "https://example.com/9"}]
+        structured = [
+            {
+                "result_index": 0,
+                "title": "Embers of the Ancients",
+                "book_number": 9,
+                "author_names": ["Some Author"],
+                "published_date": None,
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+        ]
+
+        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        ):
+            results = discovery_engine._fetch_web_search(["query"], "The First Peacemaker", "Some Author")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["published_date"], "")
+        self.assertEqual(results[0]["upcoming_hint"], True)
+
+    def test_fetch_web_search_refinement_is_capped_and_tolerates_failures(self):
+        # Bound the extra cost: only the first WEB_SEARCH_DATE_REFINEMENT_MAX
+        # undated candidates get a second look, and a refinement query
+        # blowing up must not take down the whole discovery run.
+        raw_results = [{"title": "Generic listing", "description": "snippet, no date", "url": "https://example.com/x"}]
+        structured = [
+            {
+                "result_index": 0,
+                "title": f"Book {n}",
+                "book_number": n,
+                "author_names": ["Some Author"],
+                "published_date": None,
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+            for n in range(5)
+        ]
+        # Each item maps to the same lone raw result via result_index -- that's fine,
+        # this test is only exercising the refinement-cap/error-tolerance behavior.
+
+        call_count = {"n": 0}
+
+        def fake_brave(query):
+            if "release date" in query:
+                call_count["n"] += 1
+                raise RuntimeError("boom")
+            return raw_results
+
+        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        ):
+            results = discovery_engine._fetch_web_search(["query"], "Series", "Some Author")
+
+        self.assertEqual(len(results), 5)
+        self.assertTrue(all(r["upcoming_hint"] for r in results))
+        self.assertEqual(call_count["n"], discovery_engine.WEB_SEARCH_DATE_REFINEMENT_MAX)
+
     def test_fetch_web_search_skips_llm_items_with_out_of_range_index(self):
         raw_results = [{"title": "Some Result", "description": "snippet", "url": "https://example.com/1"}]
         structured = [{"result_index": 5, "title": "Bad Index", "book_number": None, "author_names": [], "is_upcoming": False}]

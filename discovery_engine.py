@@ -64,6 +64,16 @@ WEB_SEARCH_MAX_RESULTS = 8
 # numbers reliably surfaces it instead, so both query styles are combined.
 WEB_SEARCH_LOOKAHEAD_BOOKS = 3
 
+# When a candidate's first-pass query snippet doesn't include a release date,
+# a second, title-specific "<title> release date" query surfaces
+# date-focused pages (Goodreads, author sites, retailer detail pages, "new
+# releases this week" roundups, etc.) far more often than the broader
+# "<series> book N" query does -- observed live: a just-released book's
+# generic listing had no date in its snippet and got wrongly defaulted to
+# "upcoming" until this second look ran. Capped since it costs one extra
+# Brave + Anthropic call per undated candidate.
+WEB_SEARCH_DATE_REFINEMENT_MAX = 3
+
 # Hardcover's own search index tags each hit with its position within a
 # series (when it has one), which is a far more reliable source of a book's
 # number than trying to parse it out of free-text title formatting -- so a
@@ -547,6 +557,43 @@ def _structure_web_results_with_llm(series_name: str, author: str, raw_results: 
     return parsed if isinstance(parsed, list) else []
 
 
+def _refine_undated_web_search_result(result: dict, series_name: str, author: str) -> dict:
+    """Best-effort second look for a candidate the first pass couldn't date:
+    re-searches specifically for "<title> release date" and re-runs the same
+    LLM structuring on those results. If a date turns up, the downstream
+    upcoming-vs-available classification (which compares the real date to
+    today) takes over from the conservative "no date -> upcoming" guess.
+    Any failure here just leaves the original candidate as-is.
+    """
+    title = str(result.get("title") or "").strip()
+    if not title:
+        return result
+
+    try:
+        raw = _fetch_brave_web_search(f'"{title}" release date')
+    except Exception:
+        return result
+    if not raw:
+        return result
+
+    try:
+        structured = _structure_web_results_with_llm(series_name, author, raw)
+    except Exception:
+        return result
+
+    for item in structured:
+        if not isinstance(item, dict):
+            continue
+        published_date = str(item.get("published_date") or "").strip()
+        if published_date:
+            refined = dict(result)
+            refined["published_date"] = published_date
+            refined["upcoming_hint"] = bool(item.get("is_upcoming"))
+            return refined
+
+    return result
+
+
 def _fetch_web_search(queries: list[str], series_name: str, author: str) -> list[dict]:
     raw_results: list[dict] = []
     seen_urls: set[str] = set()
@@ -617,6 +664,16 @@ def _fetch_web_search(queries: list[str], series_name: str, author: str) -> list
                 "upcoming_hint": upcoming_hint,
             }
         )
+
+    refinements_used = 0
+    for index, entry in enumerate(results):
+        if entry.get("published_date"):
+            continue
+        if refinements_used >= WEB_SEARCH_DATE_REFINEMENT_MAX:
+            break
+        refinements_used += 1
+        results[index] = _refine_undated_web_search_result(entry, series_name, author)
+
     return results
 
 
