@@ -1,6 +1,8 @@
+import json
+import os
 import unittest
 from datetime import date
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -103,9 +105,19 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
 
 class DiscoverCandidatesForSeriesTest(unittest.TestCase):
     """Tests discovery_engine.discover_candidates_for_series's merge/priority
-    behavior across the three providers, with all three network calls
-    mocked out so this runs offline and deterministically.
+    behavior across the catalog providers, with all network calls mocked
+    out so this runs offline and deterministically. The web-search provider
+    is disabled here (via cleared env vars) since it's exercised on its own
+    in WebSearchProviderTest below -- these tests only care about the three
+    original catalog APIs.
     """
+
+    def setUp(self):
+        self._env_patch = patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
 
     def test_hardcover_result_wins_over_google_on_same_book(self):
         # Hardcover tags each hit with its actual series position and
@@ -201,6 +213,180 @@ class DiscoverCandidatesForSeriesTest(unittest.TestCase):
 
         self.assertFalse(result["all_providers_failed"])
         self.assertEqual(len(result["provider_failures"]), 1)
+
+
+class WebSearchProviderTest(unittest.TestCase):
+    """Tests the Brave Search + Claude web-search discovery provider, with
+    the HTTP call to Brave and the Anthropic client both mocked out so this
+    runs offline, deterministically, and without spending real API credits.
+    """
+
+    def test_fetch_brave_web_search_returns_empty_without_api_key(self):
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": ""}):
+            self.assertEqual(discovery_engine._fetch_brave_web_search("Some Series Author"), [])
+
+    def test_fetch_brave_web_search_parses_response(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "web": {
+                "results": [
+                    {"title": "Book Announced", "description": "A new entry.", "url": "https://example.com/a"},
+                    {"title": "", "description": "Missing title, should be skipped", "url": "https://example.com/b"},
+                ]
+            }
+        }
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key"}), patch.object(
+            discovery_engine.httpx, "get", return_value=mock_response
+        ) as mock_get:
+            results = discovery_engine._fetch_brave_web_search("Some Series Author")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["title"], "Book Announced")
+        self.assertEqual(results[0]["url"], "https://example.com/a")
+        self.assertTrue(mock_get.called)
+
+    def test_structure_web_results_returns_empty_without_api_key(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
+            result = discovery_engine._structure_web_results_with_llm(
+                "Some Series", "Some Author", [{"title": "t", "description": "d", "url": "u"}]
+            )
+        self.assertEqual(result, [])
+
+    def test_structure_web_results_returns_empty_without_raw_results(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+            result = discovery_engine._structure_web_results_with_llm("Some Series", "Some Author", [])
+        self.assertEqual(result, [])
+
+    def _mock_anthropic_client(self, response_text):
+        mock_text_block = MagicMock()
+        mock_text_block.type = "text"
+        mock_text_block.text = response_text
+        mock_message = MagicMock()
+        mock_message.content = [mock_text_block]
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_message
+        return mock_client
+
+    def test_structure_web_results_parses_valid_json_array(self):
+        payload = json.dumps(
+            [
+                {
+                    "result_index": 0,
+                    "title": "Peacemaker",
+                    "book_number": 8,
+                    "author_names": ["Some Author"],
+                    "published_date": "2026-08-09",
+                    "is_upcoming": False,
+                    "isbn13": None,
+                }
+            ]
+        )
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), patch(
+            "anthropic.Anthropic", return_value=self._mock_anthropic_client(payload)
+        ):
+            result = discovery_engine._structure_web_results_with_llm(
+                "The First Peacemaker", "Some Author", [{"title": "t", "description": "d", "url": "u"}]
+            )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["book_number"], 8)
+
+    def test_structure_web_results_strips_markdown_fences(self):
+        payload = "```json\n[]\n```"
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), patch(
+            "anthropic.Anthropic", return_value=self._mock_anthropic_client(payload)
+        ):
+            result = discovery_engine._structure_web_results_with_llm(
+                "Some Series", "Some Author", [{"title": "t", "description": "d", "url": "u"}]
+            )
+        self.assertEqual(result, [])
+
+    def test_structure_web_results_returns_empty_on_invalid_json(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), patch(
+            "anthropic.Anthropic", return_value=self._mock_anthropic_client("not json at all")
+        ):
+            result = discovery_engine._structure_web_results_with_llm(
+                "Some Series", "Some Author", [{"title": "t", "description": "d", "url": "u"}]
+            )
+        self.assertEqual(result, [])
+
+    def test_fetch_web_search_combines_brave_and_llm_structuring(self):
+        raw_results = [{"title": "Peacemaker Book 8 Announced", "description": "snippet", "url": "https://example.com/8"}]
+        structured = [
+            {
+                "result_index": 0,
+                "title": "The First Peacemaker",
+                "book_number": 8,
+                "author_names": ["Some Author"],
+                "published_date": "2026-08-09",
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+        ]
+        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        ):
+            results = discovery_engine._fetch_web_search("query", "The First Peacemaker", "Some Author")
+
+        self.assertEqual(len(results), 1)
+        candidate = results[0]
+        self.assertEqual(candidate["source"], "web_search")
+        self.assertEqual(candidate["title"], "The First Peacemaker")
+        self.assertEqual(candidate["series_number_hint"], 8)
+        self.assertEqual(candidate["upcoming_hint"], False)
+        self.assertEqual(candidate["source_url"], "https://example.com/8")
+        self.assertEqual(candidate["authors"], ["Some Author"])
+
+    def test_fetch_web_search_skips_llm_items_with_out_of_range_index(self):
+        raw_results = [{"title": "Some Result", "description": "snippet", "url": "https://example.com/1"}]
+        structured = [{"result_index": 5, "title": "Bad Index", "book_number": None, "author_names": [], "is_upcoming": False}]
+        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        ):
+            results = discovery_engine._fetch_web_search("query", "Series", "Author")
+        self.assertEqual(results, [])
+
+    def test_fetch_web_search_returns_empty_when_brave_has_no_results(self):
+        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=[]):
+            results = discovery_engine._fetch_web_search("query", "Series", "Author")
+        self.assertEqual(results, [])
+
+    def test_discover_candidates_for_series_wires_in_web_search_results(self):
+        web_candidate = {
+            "source": "web_search",
+            "source_id": "https://example.com/8",
+            "title": "The First Peacemaker Book 8",
+            "authors": ["Some Author"],
+            "published_date": "2026-08-09",
+            "description": "snippet",
+            "isbn13": None,
+            "source_url": "https://example.com/8",
+            "language": "",
+            "series_number_hint": 8,
+            "upcoming_hint": False,
+        }
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+            discovery_engine, "_fetch_hardcover", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ), patch.object(
+            discovery_engine, "_fetch_web_search", return_value=[web_candidate]
+        ):
+            result = discovery_engine.discover_candidates_for_series("The First Peacemaker", "Some Author")
+
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["candidates"][0]["source"], "web_search")
+        self.assertEqual(result["candidates"][0]["confidence"], "targeted")
+
+    def test_discover_candidates_for_series_skips_web_search_without_keys(self):
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""}), patch.object(
+            discovery_engine, "_fetch_hardcover", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_web_search") as mock_web_search:
+            discovery_engine.discover_candidates_for_series("The First Peacemaker", "Some Author")
+
+        mock_web_search.assert_not_called()
 
 
 class SeriesCheckIntegrationTest(unittest.TestCase):

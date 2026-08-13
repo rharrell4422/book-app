@@ -25,6 +25,7 @@ no such restriction and needs no key.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 from datetime import date
@@ -39,7 +40,19 @@ load_dotenv()
 GOOGLE_BOOKS_ENDPOINT = "https://www.googleapis.com/books/v1/volumes"
 OPENLIBRARY_ENDPOINT = "https://openlibrary.org/search.json"
 HARDCOVER_ENDPOINT = "https://api.hardcover.app/v1/graphql"
+BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 REQUEST_TIMEOUT_SECONDS = 12.0
+WEB_SEARCH_TIMEOUT_SECONDS = 20.0
+
+# Structured APIs (Google Books/OpenLibrary/Hardcover) index catalog metadata,
+# which lags behind for indie/self-published titles and pure announcements
+# that only exist as blog posts, retailer pre-order pages, or author social
+# posts. This provider fills that gap with a live web search whose raw,
+# unstructured results are then normalized into the same candidate shape by
+# a small LLM call, rather than trying to hand-write regexes/heuristics for
+# every possible way a book announcement can be phrased across the web.
+ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+WEB_SEARCH_MAX_RESULTS = 8
 
 # Hardcover's own search index tags each hit with its position within a
 # series (when it has one), which is a far more reliable source of a book's
@@ -441,6 +454,135 @@ def _fetch_hardcover(query: str, max_results: int = 25) -> list[dict]:
     return results
 
 
+def _fetch_brave_web_search(query: str, count: int = WEB_SEARCH_MAX_RESULTS) -> list[dict]:
+    api_key = os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()
+    if not api_key:
+        return []
+
+    headers = {**REQUEST_HEADERS, "Accept": "application/json", "X-Subscription-Token": api_key}
+    params = {"q": query, "count": count}
+    response = httpx.get(BRAVE_SEARCH_ENDPOINT, params=params, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+
+    hits = ((response.json() or {}).get("web") or {}).get("results") or []
+    results: list[dict] = []
+    for hit in hits:
+        title = str(hit.get("title") or "").strip()
+        url = str(hit.get("url") or "").strip()
+        if not title or not url:
+            continue
+        results.append(
+            {
+                "title": title,
+                "description": str(hit.get("description") or "").strip(),
+                "url": url,
+            }
+        )
+    return results
+
+
+_WEB_SEARCH_STRUCTURING_PROMPT = """You are extracting structured book-release data from live web search results.
+
+Target series: "{series_name}"
+Target author: "{author}"
+
+Below are {count} web search results returned for this series/author. For EACH result that actually describes a specific book entry in this series by this author (a released book, an upcoming/pre-order book, or a firm announcement of one) extract its data. Skip results that are: reviews or discussions of a book without any new release info, unrelated books by other authors, other series by the same author, retailer category/search pages, fan wiki summaries of the whole series, or news unrelated to a specific book.
+
+Search results:
+{snippets}
+
+Respond with ONLY a JSON array (no prose, no markdown code fences). Each element must have this shape:
+{{"result_index": <int, the [N] index above>, "title": <string, the clean book title without the series name or a "Book N" suffix>, "book_number": <int or null, this book's position in the series if stated or clearly implied>, "author_names": [<string>, ...], "published_date": <string, "YYYY-MM-DD"/"YYYY-MM"/"YYYY" if known else null>, "is_upcoming": <bool, true if this is a pre-order/announced/not-yet-released book>, "isbn13": <string or null>}}
+
+If none of the results are genuine matches, respond with exactly: []"""
+
+
+def _structure_web_results_with_llm(series_name: str, author: str, raw_results: list[dict]) -> list[dict]:
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key or not raw_results:
+        return []
+
+    import anthropic
+
+    snippets = "\n\n".join(
+        f"[{i}] Title: {r['title']}\nSnippet: {r['description']}\nURL: {r['url']}"
+        for i, r in enumerate(raw_results)
+    )
+    prompt = _WEB_SEARCH_STRUCTURING_PROMPT.format(
+        series_name=series_name, author=author, count=len(raw_results), snippets=snippets
+    )
+
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=ANTHROPIC_MODEL,
+        max_tokens=2000,
+        messages=[{"role": "user", "content": prompt}],
+        timeout=WEB_SEARCH_TIMEOUT_SECONDS,
+    )
+    text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text").strip()
+
+    # The prompt asks for raw JSON, but strip markdown fences defensively in
+    # case the model wraps its answer in one anyway.
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _fetch_web_search(query: str, series_name: str, author: str) -> list[dict]:
+    raw_results = _fetch_brave_web_search(query)
+    if not raw_results:
+        return []
+
+    structured = _structure_web_results_with_llm(series_name, author, raw_results)
+
+    results: list[dict] = []
+    for item in structured:
+        if not isinstance(item, dict):
+            continue
+        try:
+            source = raw_results[int(item.get("result_index"))]
+        except (TypeError, ValueError, IndexError):
+            continue
+
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+
+        book_number = item.get("book_number")
+        try:
+            book_number = int(book_number) if book_number is not None else None
+        except (TypeError, ValueError):
+            book_number = None
+
+        author_names = item.get("author_names")
+        if not isinstance(author_names, list) or not author_names:
+            author_names = [author]
+
+        results.append(
+            {
+                "source": "web_search",
+                "source_id": source["url"],
+                "title": title,
+                "authors": [str(a) for a in author_names if str(a).strip()],
+                "published_date": str(item.get("published_date") or "").strip(),
+                "description": source.get("description"),
+                "isbn13": str(item.get("isbn13") or "").strip() or None,
+                "source_url": source["url"],
+                "language": "",
+                "series_number_hint": book_number,
+                "upcoming_hint": bool(item.get("is_upcoming")),
+            }
+        )
+    return results
+
+
 def _filter_and_merge(raw_results: list[dict], author: str, exclude_title_keys: set[str], confidence: str) -> list[dict]:
     merged: list[dict] = []
     seen_keys: set[str] = set()
@@ -531,13 +673,29 @@ def discover_candidates_for_series(
     except Exception as exc:
         provider_failures.append({"provider": "hardcover", "error": str(exc)})
 
+    # Live web search fills the coverage gap the catalog APIs above have for
+    # indie/self-published titles and pure announcements -- only runs when
+    # both a Brave key and an Anthropic key are configured, since it needs
+    # both to search and to structure the results.
+    web_search_raw: list[dict] = []
+    if os.environ.get("BRAVE_SEARCH_API_KEY", "").strip() and os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        try:
+            web_search_raw = _fetch_web_search(targeted_query_text, series_name, author)
+            any_provider_succeeded = True
+        except Exception as exc:
+            provider_failures.append({"provider": "web_search", "error": str(exc)})
+
     # Hardcover listed first: when multiple sources return the same book,
     # dedup keeps whichever copy appears first, and Hardcover's explicit
     # series-position/release-status fields are more trustworthy than
     # Google Books/OpenLibrary free-text for indie/self-published LitRPG,
-    # which both of those APIs tend to index/cover poorly.
+    # which both of those APIs tend to index/cover poorly. Web search is
+    # listed last since it's the least structured of the four sources.
     combined = _filter_and_merge(
-        [*hardcover_raw, *google_raw, *openlibrary_raw], author, exclude_title_keys, confidence="targeted"
+        [*hardcover_raw, *google_raw, *openlibrary_raw, *web_search_raw],
+        author,
+        exclude_title_keys,
+        confidence="targeted",
     )
 
     used_author_fallback = False
