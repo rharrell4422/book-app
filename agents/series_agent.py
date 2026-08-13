@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 import discovery_engine
 import intelligence
 from models import Book, Series
+from services.discovery_logging import log_discovery_summary
 
 
 logger = logging.getLogger(__name__)
@@ -16,37 +17,6 @@ logger = logging.getLogger(__name__)
 
 def _console_log(message: str) -> None:
     print(f"[series_agent] {message}", flush=True)
-
-
-def log_discovery_summary(*, result: dict, terminal_error: str | None = None) -> None:
-    """Prints one short, bounded-size block summarizing a Check Now run, for
-    quick copy/paste debugging.
-    """
-    provider_failures = result.get("provider_failures") or []
-    available_missing = result.get("available_missing") or []
-    upcoming_books = result.get("upcoming_books") or []
-
-    _console_log("===== CHECK NOW DEBUG SUMMARY START =====")
-    _console_log(f"series_id={result.get('series_id')} series_name={result.get('series_name')}")
-    _console_log(f"status={result.get('status')} found={bool(result.get('found'))} added_count={int(result.get('added_count') or 0)}")
-    _console_log(f"discovery_engine={result.get('discovery_engine')} all_providers_failed={bool(result.get('all_providers_failed'))}")
-
-    if provider_failures:
-        _console_log(f"--- provider_failures ({len(provider_failures)}) ---")
-        for failure in provider_failures[:10]:
-            _console_log(f"  FAILED: {failure.get('provider')} | {failure.get('error')}")
-
-    _console_log(f"--- available_missing (found, not yet owned) = {len(available_missing)} ---")
-    for book in available_missing[:15]:
-        _console_log(f"  MISSING: {book.get('title')} | number={book.get('series_number')}")
-
-    _console_log(f"--- upcoming_books (pre-order / future release) = {len(upcoming_books)} ---")
-    for book in upcoming_books[:15]:
-        _console_log(f"  UPCOMING: {book.get('title')} | expected={book.get('publication_date')}")
-
-    if terminal_error:
-        _console_log(f"terminal_error={terminal_error}")
-    _console_log("===== CHECK NOW DEBUG SUMMARY END =====")
 
 
 def _normalize_author(value: str | None) -> str:

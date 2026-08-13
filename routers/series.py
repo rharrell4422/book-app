@@ -14,15 +14,13 @@ from intelligence import (
     recalculate_series_state_for_series,
 )
 from routers.deps import enforce_access, get_db
-from services.identity import _is_upcoming_future_book
 from services.series_check_engine import (
     SERIES_CHECK_TIMEOUT_SECONDS,
     run_series_check_job_full,
     series_check_jobs,
 )
 from services.title_normalization import (
-    _apply_custom_title_pattern,
-    _normalize_title_for_mode,
+    normalize_series_book_titles,
     normalize_title_normalization_mode,
 )
 
@@ -351,103 +349,15 @@ def normalize_series_titles(series_id: int, payload: schemas.NormalizeTitlesRequ
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
 
-    raw_mode = str(payload.normalization_mode or "").strip().lower()
-    is_custom_mode = raw_mode == "custom"
-    mode = raw_mode if is_custom_mode else normalize_title_normalization_mode(raw_mode)
-    if not mode:
+    books = crud.get_books_by_series(db, series_id)
+    result = normalize_series_book_titles(db, db_series, books, payload)
+    if result.get("error") == "invalid_normalization_mode":
         raise HTTPException(status_code=422, detail="Invalid normalization_mode")
 
-    books = crud.get_books_by_series(db, series_id)
-    today = datetime.utcnow().date()
-    updated_rows: list[dict] = []
-    skipped_upcoming_ids: list[int] = []
-    skipped_unnumbered_ids: list[int] = []
-    empty_title_count = 0
-    considered_count = 0
-
-    for book in books:
-        current_title = str(getattr(book, "title", "") or "").strip()
-        if not current_title:
-            empty_title_count += 1
-            continue
-
-        if payload.exclude_upcoming and _is_upcoming_future_book(book, today=today):
-            skipped_upcoming_ids.append(int(book.id))
-            continue
-
-        resolved_number = getattr(book, "book_number", None)
-        if resolved_number is None:
-            resolved_number = getattr(book, "series_order", None)
-
-        # Books with no parseable series number (novellas/short stories) are
-        # identified during future "Check Now" runs by title text alone, since
-        # there's no number to fall back on -- rewriting their title here
-        # would risk a future rediscovery treating them as new and duplicating
-        # them, so leave them untouched.
-        if resolved_number is None:
-            skipped_unnumbered_ids.append(int(book.id))
-            continue
-
-        considered_count += 1
-
-        if is_custom_mode:
-            normalized_title = _apply_custom_title_pattern(
-                payload.custom_pattern,
-                current_title,
-                db_series.name,
-                resolved_number,
-                getattr(book, "subtitle", None),
-            )
-        else:
-            normalized_title = _normalize_title_for_mode(
-                current_title,
-                mode,
-                db_series.name,
-                resolved_number,
-                books,
-            )
-
-        normalized_title = str(normalized_title or "").strip()
-        if not normalized_title or normalized_title == current_title:
-            continue
-
-        book.title = normalized_title
-        updated_rows.append({
-            "id": int(book.id),
-            "from": current_title,
-            "to": normalized_title,
-        })
-
-    if not is_custom_mode:
-        db_series.title_normalization_mode_override = mode
-
     db.commit()
-
     recalculate_intelligence(db, series_id)
 
-    unchanged_count = max(0, considered_count - len(updated_rows))
-
-    return {
-        "series_id": series_id,
-        "normalization_mode": "custom" if is_custom_mode else mode,
-        "updated_count": len(updated_rows),
-        "considered_count": considered_count,
-        "unchanged_count": unchanged_count,
-        "skipped_upcoming_count": len(skipped_upcoming_ids),
-        "skipped_upcoming_ids": skipped_upcoming_ids,
-        "skipped_unnumbered_count": len(skipped_unnumbered_ids),
-        "skipped_unnumbered_ids": skipped_unnumbered_ids,
-        "updated_books": updated_rows,
-        "normalization_diagnostics": {
-            "total_books": len(books),
-            "empty_title_count": empty_title_count,
-            "skipped_upcoming_count": len(skipped_upcoming_ids),
-            "skipped_unnumbered_count": len(skipped_unnumbered_ids),
-            "considered_count": considered_count,
-            "updated_count": len(updated_rows),
-            "unchanged_count": unchanged_count,
-        },
-    }
+    return {"series_id": series_id, **result}
 
 
 @router.post("/{series_id}/recalculate_intelligence")
