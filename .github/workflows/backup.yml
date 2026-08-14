@@ -1,0 +1,49 @@
+name: Weekly library backup
+
+on:
+  schedule:
+    # Every Monday at 08:00 UTC. GitHub may delay scheduled runs by a few
+    # minutes during high load; that's fine for a weekly backup.
+    - cron: "0 8 * * 1"
+  # Lets you trigger a backup on demand from the Actions tab, e.g. right
+  # before a risky change.
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download database export from production
+        env:
+          APP_URL: ${{ secrets.BACKUP_APP_URL }}
+          BACKUP_TOKEN: ${{ secrets.BACKUP_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -fsS \
+            -H "X-Backup-Token: ${BACKUP_TOKEN}" \
+            -o books_backup.db \
+            "${APP_URL%/}/api/admin/export_db"
+          echo "Downloaded $(stat -c%s books_backup.db 2>/dev/null || stat -f%z books_backup.db) bytes"
+
+      - name: Checkout backup repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.BACKUP_REPO }}
+          token: ${{ secrets.BACKUP_REPO_PAT }}
+          path: backup-repo
+
+      - name: Commit and push backup
+        run: |
+          set -euo pipefail
+          mkdir -p backup-repo
+          cp books_backup.db backup-repo/books_backup.db
+          cd backup-repo
+          git config user.name "book-app-backup-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add books_backup.db
+          if git diff --cached --quiet; then
+            echo "No changes since last backup, nothing to commit."
+            exit 0
+          fi
+          git commit -m "Weekly backup: $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push

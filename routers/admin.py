@@ -8,22 +8,28 @@ from sqlalchemy.orm import Session
 
 from database import DATABASE_PATH, engine
 from intelligence import purge_orphaned_books
-from routers.deps import get_db, require_owner
+from routers.deps import get_db, require_owner, require_owner_or_backup_token
 
-router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_owner)])
+# No router-level dependency here (unlike other routers) because export_db
+# needs a different, more restricted auth path than the rest of /admin --
+# see require_owner_or_backup_token. Every route below sets its own
+# dependency explicitly instead.
+router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-@router.post("/purge_orphaned_books")
+@router.post("/purge_orphaned_books", dependencies=[Depends(require_owner)])
 def purge_orphaned_books_endpoint(db: Session = Depends(get_db)):
     """Delete books left pointing at a series that was deleted without
     cascading. Safe to run any time; it's a no-op if there are none."""
     return purge_orphaned_books(db)
 
 
-@router.get("/export_db")
+@router.get("/export_db", dependencies=[Depends(require_owner_or_backup_token)])
 def export_db():
     """Download the current SQLite database file -- use this for backups,
-    or to migrate data between environments."""
+    or to migrate data between environments. Accepts either normal owner
+    auth or an X-Backup-Token header (see BACKUP_TOKEN), so an unattended
+    scheduled job can pull backups without holding full owner credentials."""
     if not os.path.exists(DATABASE_PATH):
         raise HTTPException(status_code=404, detail="No database file found")
     return FileResponse(
@@ -33,7 +39,7 @@ def export_db():
     )
 
 
-@router.post("/import_db")
+@router.post("/import_db", dependencies=[Depends(require_owner)])
 async def import_db(file: UploadFile = File(...)):
     """Replace the current database with an uploaded SQLite file.
 

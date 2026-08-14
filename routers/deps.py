@@ -1,3 +1,4 @@
+import hmac
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -84,4 +85,24 @@ def enforce_access(request: Request) -> str:
     """Router-level dependency: GET needs owner-or-viewer, writes need owner."""
     if request.method == "GET":
         return require_reader(request)
+    return require_owner(request)
+
+
+# --- Backup automation ---------------------------------------------------
+#
+# A scheduled job (e.g. a GitHub Actions cron) needs to pull a database
+# export unattended. Reusing the owner password/JWT for that would mean a
+# long-lived credential with full read/write/delete access sitting in a
+# third place (CI secrets). Instead, BACKUP_TOKEN is a single-purpose shared
+# secret that only ever grants read access to the one export endpoint --
+# if it leaks, the worst case is someone can download a copy of the
+# library, not edit or delete it.
+
+BACKUP_TOKEN = os.environ.get("BACKUP_TOKEN")
+
+
+def require_owner_or_backup_token(request: Request) -> str:
+    provided = request.headers.get("x-backup-token")
+    if BACKUP_TOKEN and provided and hmac.compare_digest(provided, BACKUP_TOKEN):
+        return "backup"
     return require_owner(request)
