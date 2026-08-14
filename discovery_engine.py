@@ -570,7 +570,15 @@ def _refine_undated_web_search_result(result: dict, series_name: str, author: st
         return result
 
     try:
-        raw = _fetch_brave_web_search(f'"{title}" release date')
+        # Live regression: quoting just the bare title as an exact phrase
+        # (the previous version of this query) gets swamped for a common
+        # title -- "Here We Go Again" is also a Demi Lovato song/album, a
+        # movie, a TV series, etc., none of which are this book. Adding the
+        # series name and author as unquoted extra terms (soft ranking
+        # signals, not exact-phrase requirements) reliably surfaced the
+        # actual author's release-announcement blog post instead.
+        query = " ".join(part for part in (title, series_name, author, "release date") if part)
+        raw = _fetch_brave_web_search(query)
     except Exception:
         return result
     if not raw:

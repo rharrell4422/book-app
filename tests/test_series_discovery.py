@@ -414,6 +414,46 @@ class WebSearchProviderTest(unittest.TestCase):
         self.assertEqual(results[0]["published_date"], "2026-08-09")
         self.assertEqual(results[0]["upcoming_hint"], False)
 
+    def test_fetch_web_search_refinement_query_is_not_an_exact_title_only_phrase(self):
+        # Regression (live bug): "Here We Go Again" (The World Book 21) is
+        # also a Demi Lovato song/album, a movie, and a TV series -- quoting
+        # just the bare title as an exact phrase (the old query) got
+        # swamped by those unrelated hits and found nothing useful. Adding
+        # the series name and author as unquoted extra terms (soft ranking
+        # signals) is what actually surfaced the real source page live.
+        raw_results = [{"title": "Here We Go Again listing", "description": "snippet, no date", "url": "https://example.com/21"}]
+        first_pass_structured = [
+            {
+                "result_index": 0,
+                "title": "Here We Go Again",
+                "book_number": 21,
+                "author_names": ["Jason Cheek"],
+                "published_date": None,
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+        ]
+        captured_queries = []
+
+        def fake_brave(query):
+            captured_queries.append(query)
+            if "release date" in query:
+                return []
+            return raw_results
+
+        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=first_pass_structured
+        ):
+            discovery_engine._fetch_web_search(["query"], "The World Book", "Jason Cheek")
+
+        refinement_queries = [q for q in captured_queries if "release date" in q]
+        self.assertEqual(len(refinement_queries), 1)
+        refinement_query = refinement_queries[0]
+        self.assertNotIn('"Here We Go Again"', refinement_query)
+        self.assertIn("Here We Go Again", refinement_query)
+        self.assertIn("The World Book", refinement_query)
+        self.assertIn("Jason Cheek", refinement_query)
+
     def test_fetch_web_search_keeps_upcoming_default_when_refinement_finds_nothing(self):
         # The refinement pass is best-effort -- if the second query also
         # can't find a date (e.g. a genuine undated preorder like Peacemaker
