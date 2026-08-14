@@ -1,10 +1,19 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, inspect
 from models import Series, Book
+
+# SeriesBase (the create/update schema) also carries a handful of derived,
+# read-only fields -- read_count, unread_count, series_state, etc. -- that
+# exist as @property on the Series model for API responses, not as mapped
+# columns. Passing them through to the Series(**kwargs) constructor blows up
+# with "property 'x' of 'Series' object has no setter", so only forward the
+# fields that are actually real columns on the model.
+_SERIES_COLUMN_NAMES = {column.key for column in inspect(Series).columns}
 
 
 def create_series(db: Session, series):
-    db_series = Series(**series.model_dump())
+    payload = {k: v for k, v in series.model_dump().items() if k in _SERIES_COLUMN_NAMES}
+    db_series = Series(**payload)
     db.add(db_series)
     db.commit()
     db.refresh(db_series)
@@ -32,7 +41,8 @@ def update_series(db: Session, series_id: int, series):
         return None
 
     for key, value in series.model_dump(exclude_unset=True).items():
-        setattr(db_series, key, value)
+        if key in _SERIES_COLUMN_NAMES:
+            setattr(db_series, key, value)
 
     db.commit()
     db.refresh(db_series)
