@@ -1135,6 +1135,9 @@ export default function BooksClient() {
           <Link href="/series">
             <Button type="button" variant="secondary">Series</Button>
           </Link>
+          <Link href="/books/standalone">
+            <Button type="button" variant="secondary">Standalone Books</Button>
+          </Link>
         </div>
       </div>
 

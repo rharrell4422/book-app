@@ -882,6 +882,9 @@ export default function SeriesPage() {
           <Link href="/books">
             <Button variant="outline">View Library</Button>
           </Link>
+          <Link href="/books/standalone">
+            <Button variant="outline">Standalone Books</Button>
+          </Link>
         </div>
       </div>
 
