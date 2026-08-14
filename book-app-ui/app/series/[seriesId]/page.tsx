@@ -1319,7 +1319,11 @@ export default function SeriesDetailPage() {
         } else if (isPastOrTodayDate(effectiveReleaseDate)) {
           payload.read_status = "available";
           payload.is_read = false;
-          payload.release_date = null;
+          // Keep the confirmed date instead of nulling it -- otherwise saving a
+          // manually-verified release date (e.g. via "Check online") on a book
+          // that's flipping to "available" silently loses that date and the
+          // book immediately re-flags as "needs date verification".
+          payload.release_date = effectiveReleaseDate;
         }
       }
 
