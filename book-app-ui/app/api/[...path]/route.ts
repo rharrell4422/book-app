@@ -12,7 +12,18 @@ const BACKEND_BASE_URL =
   process.env.API_BASE_URL || process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
 
 async function proxyRequest(request: NextRequest, pathSegments: string[]) {
-  const targetUrl = new URL(pathSegments.join("/"), `${BACKEND_BASE_URL.replace(/\/+$/, "")}/`);
+  // Preserve a trailing slash from the original request path. FastAPI routes
+  // are often registered as e.g. "/series/" -- if we drop the slash here,
+  // FastAPI issues a 307 redirect to add it back, and Node's fetch does not
+  // reliably replay non-GET requests with a body across that redirect
+  // (surfaces as an opaque "fetch failed" with no HTTP response at all).
+  // Building the exact target path up front avoids that redirect entirely.
+  const hadTrailingSlash = request.nextUrl.pathname.endsWith("/");
+  let joinedPath = pathSegments.join("/");
+  if (hadTrailingSlash && !joinedPath.endsWith("/")) {
+    joinedPath += "/";
+  }
+  const targetUrl = new URL(joinedPath, `${BACKEND_BASE_URL.replace(/\/+$/, "")}/`);
   targetUrl.search = request.nextUrl.search;
 
   const headers = new Headers(request.headers);
