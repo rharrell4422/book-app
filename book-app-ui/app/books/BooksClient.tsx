@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { AlertTriangleIcon, BookOpenIcon, CheckIcon, ExternalLinkIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
+import { AlertTriangleIcon, BookOpenIcon, CheckIcon, ExternalLinkIcon, FileTextIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
@@ -34,6 +34,7 @@ import {
   EMPTY_EDIT_BOOK_FORM,
   type EditBookFormState,
 } from "@/components/books/edit-book-dialog";
+import { BookSummaryDialog } from "@/components/series/book-summary-dialog";
 
 import {
   Table,
@@ -60,6 +61,8 @@ type BookRow = {
   series_id?: number | null;
   book_number?: number | null;
   source_url?: string | null;
+  auto_summary?: string | null;
+  notes?: string | null;
   [key: string]: unknown;
 };
 
@@ -224,6 +227,11 @@ export default function BooksClient() {
   const [savingEditBook, setSavingEditBook] = useState(false);
   const [editBookForm, setEditBookForm] = useState<EditBookFormState>(EMPTY_EDIT_BOOK_FORM);
   const [pinnedBookId, setPinnedBookId] = useState<number | null>(null);
+  const [summaryEditorBook, setSummaryEditorBook] = useState<BookRow | null>(null);
+  const [summaryDraft, setSummaryDraft] = useState("");
+  const [notesDraft, setNotesDraft] = useState("");
+  const [summaryFetching, setSummaryFetching] = useState(false);
+  const [summarySaving, setSummarySaving] = useState(false);
   const [lookupResult, setLookupResult] = useState<LookupResultState | null>(null);
   const [valueFilters, setValueFilters] = useState({
     title: [] as string[],
@@ -779,6 +787,69 @@ export default function BooksClient() {
     }
   }
 
+  // Standalone (non-series) books have no "Series Recap" equivalent to lean
+  // on, so this is the one place in the app they can still get an AI
+  // summary -- series books rely on the series page's Series Recap instead.
+  function openSummaryEditor(book: BookRow) {
+    setSummaryEditorBook(book);
+    setSummaryDraft(String(book?.auto_summary || ""));
+    setNotesDraft(String(book?.notes || ""));
+  }
+
+  async function handleFetchSummary() {
+    if (!summaryEditorBook) return;
+    setSummaryFetching(true);
+    try {
+      const response = await fetchApiWithFallback(`/books/${summaryEditorBook.id}/summary`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch summary (${response.status})`);
+      }
+
+      const data = await response.json();
+      const updatedBook = data.book;
+      setBooks((prev) => prev.map((item) => (item.id === updatedBook.id ? { ...item, ...updatedBook } : item)));
+      setSummaryEditorBook(updatedBook);
+      setSummaryDraft(String(updatedBook.auto_summary || ""));
+      setNotesDraft(String(updatedBook.notes || ""));
+    } catch (error) {
+      console.error(error);
+      toast({ title: "Summary lookup failed", description: "Unable to fetch a summary for this book right now." });
+    } finally {
+      setSummaryFetching(false);
+    }
+  }
+
+  async function handleSaveSummaryEditor() {
+    if (!summaryEditorBook) return;
+    setSummarySaving(true);
+    try {
+      const response = await fetchApiWithFallback(`/books/${summaryEditorBook.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          auto_summary: summaryDraft.trim() || null,
+          notes: notesDraft.trim() || null,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to save summary (${response.status})`);
+      }
+
+      const updatedBook = await response.json();
+      setBooks((prev) => prev.map((item) => (item.id === updatedBook.id ? { ...item, ...updatedBook } : item)));
+      setSummaryEditorBook(updatedBook);
+      setSummaryDraft(String(updatedBook.auto_summary || ""));
+      setNotesDraft(String(updatedBook.notes || ""));
+    } catch (error) {
+      console.error(error);
+      toast({ title: "Save failed", description: "Unable to save summary or notes right now." });
+    } finally {
+      setSummarySaving(false);
+    }
+  }
+
   async function handleAddBook() {
     const title = addBookForm.title.trim();
     const author = addBookForm.author.trim();
@@ -1240,7 +1311,21 @@ export default function BooksClient() {
                       >
                         <BookOpenIcon />
                       </Button>
-                    ) : null}
+                    ) : (
+                      // Standalone books have no series page/Series Recap to lean
+                      // on, so this is their one AI-summary entry point -- series
+                      // books intentionally don't get this button here.
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        title={b.auto_summary || b.notes ? "View/edit summary and notes" : "Fetch an AI summary for this book"}
+                        aria-label={b.auto_summary || b.notes ? "View/edit summary and notes" : "Fetch an AI summary for this book"}
+                        onClick={() => openSummaryEditor(b)}
+                      >
+                        <FileTextIcon />
+                      </Button>
+                    )}
                     <Button
                       type="button"
                       variant="ghost"
@@ -1345,6 +1430,23 @@ export default function BooksClient() {
         onFormChange={setEditBookForm}
         onSave={handleSaveBookEdit}
         saving={savingEditBook}
+      />
+
+      <BookSummaryDialog
+        open={Boolean(summaryEditorBook)}
+        bookTitle={summaryEditorBook?.title}
+        onOpenChange={(open) => {
+          if (!open) setSummaryEditorBook(null);
+        }}
+        summaryDraft={summaryDraft}
+        onSummaryDraftChange={setSummaryDraft}
+        notesDraft={notesDraft}
+        onNotesDraftChange={setNotesDraft}
+        canEdit={canEdit}
+        onSave={handleSaveSummaryEditor}
+        saving={summarySaving}
+        onRefresh={handleFetchSummary}
+        refreshing={summaryFetching}
       />
 
     </div>

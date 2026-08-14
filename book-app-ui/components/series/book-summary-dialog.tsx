@@ -22,6 +22,8 @@ export function BookSummaryDialog({
   canEdit,
   onSave,
   saving,
+  onRefresh,
+  refreshing,
 }: {
   open: boolean;
   bookTitle: string | null | undefined;
@@ -33,6 +35,12 @@ export function BookSummaryDialog({
   canEdit: boolean;
   onSave: () => void;
   saving: boolean;
+  // Optional: only the Books Library view (standalone/non-series books)
+  // fetches an AI summary from here -- the series view relies on Series
+  // Recap instead, so it doesn't pass these and no fetch/refresh control
+  // renders there.
+  onRefresh?: () => void;
+  refreshing?: boolean;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -46,7 +54,14 @@ export function BookSummaryDialog({
 
         <div className="space-y-3">
           <div className="space-y-1">
-            <Label htmlFor="series-book-summary">Summary</Label>
+            <div className="flex items-center justify-between">
+              <Label htmlFor="series-book-summary">Summary</Label>
+              {onRefresh ? (
+                <Button type="button" variant="outline" size="sm" onClick={onRefresh} disabled={refreshing}>
+                  {refreshing ? "Fetching..." : summaryDraft ? "Refresh summary" : "Fetch summary"}
+                </Button>
+              ) : null}
+            </div>
             <textarea
               id="series-book-summary"
               value={summaryDraft}

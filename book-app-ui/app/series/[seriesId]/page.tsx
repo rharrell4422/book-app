@@ -29,7 +29,6 @@ import {
   toIsoDateString,
 } from "@/lib/book-format";
 import { ConfirmDialog, type ConfirmDialogState } from "@/components/confirm-dialog";
-import { SetStatusDialog } from "@/components/series/set-status-dialog";
 import { AddBookDialog } from "@/components/series/add-book-dialog";
 import { EditBookDialog, type EditBookFormState } from "@/components/series/edit-book-dialog";
 import { BookSummaryDialog } from "@/components/series/book-summary-dialog";
@@ -519,7 +518,6 @@ export default function SeriesDetailPage() {
   const [series, setSeries] = useState<SeriesRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [summaryLoadingId, setSummaryLoadingId] = useState<number | null>(null);
   const [finishedToggleSaving, setFinishedToggleSaving] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const [summaryEditorBook, setSummaryEditorBook] = useState<BookRecord | null>(null);
@@ -549,11 +547,6 @@ export default function SeriesDetailPage() {
   const [deleteSeriesSaving, setDeleteSeriesSaving] = useState(false);
   const [editBookDialogOpen, setEditBookDialogOpen] = useState(false);
   const [savingEditBook, setSavingEditBook] = useState(false);
-  const [statusDialogOpen, setStatusDialogOpen] = useState(false);
-  const [statusTargetBook, setStatusTargetBook] = useState<BookRecord | null>(null);
-  const [statusAction, setStatusAction] = useState<"read" | "unread" | "upcoming" | "available">("unread");
-  const [statusDate, setStatusDate] = useState("");
-  const [statusSaving, setStatusSaving] = useState(false);
   const [editBookForm, setEditBookForm] = useState<EditBookFormState>({
     id: null,
     title: "",
@@ -1284,6 +1277,7 @@ export default function SeriesDetailPage() {
     setSavingEditBook(true);
     try {
       const status = editBookForm.status;
+      const existingBook = books.find((item) => item.id === bookId) || null;
       const payload: Record<string, unknown> = {
         title,
         author,
@@ -1297,9 +1291,36 @@ export default function SeriesDetailPage() {
       if (status === "read") {
         payload.read_date = normalizedDate || new Date().toISOString().split("T")[0];
         payload.release_date = null;
-      } else {
+      } else if (status === "unread") {
         payload.read_date = null;
-        payload.release_date = normalizedDate || null;
+      } else if (status === "upcoming") {
+        payload.read_date = null;
+        payload.release_date =
+          normalizedDate || toIsoDateString(existingBook?.release_date || existingBook?.publication_date) || null;
+      } else {
+        // available
+        payload.read_date = null;
+        const existingDate = toIsoDateString(existingBook?.release_date || existingBook?.publication_date);
+        payload.release_date = !existingDate || isPastOrTodayDate(existingDate) ? normalizedDate || null : normalizedDate || existingDate;
+      }
+
+      // Absorbed from the old standalone "Set Status" flow: a release date
+      // that ends up in the future forces status to "upcoming", and one
+      // that has already passed forces "available" -- so picking a date
+      // here can't leave the status pill contradicting the date.
+      const effectiveReleaseDate =
+        String(payload.release_date || "").trim() ||
+        toIsoDateString(existingBook?.release_date || existingBook?.publication_date);
+      if (!payload.read_date && effectiveReleaseDate) {
+        if (isFutureDate(effectiveReleaseDate)) {
+          payload.read_status = "upcoming";
+          payload.is_read = false;
+          payload.release_date = effectiveReleaseDate;
+        } else if (isPastOrTodayDate(effectiveReleaseDate)) {
+          payload.read_status = "available";
+          payload.is_read = false;
+          payload.release_date = null;
+        }
       }
 
       const response = await fetchApiWithFallback(`/books/${bookId}`, {
@@ -1445,39 +1466,6 @@ export default function SeriesDetailPage() {
     }
   }
 
-  async function handleFetchSummary(bookId: number) {
-    setSummaryLoadingId(bookId);
-    try {
-        const response = await fetchApiWithFallback(`/books/${bookId}/summary`, {
-        method: "POST",
-      });
-      if (!response.ok) {
-        throw new Error(`Failed to fetch summary (${response.status})`);
-      }
-
-      const data = await response.json();
-      const updatedBook = data.book;
-      setSeries((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          books: prev.books?.map((book) =>
-            book.id === updatedBook.id ? updatedBook : book
-          ),
-        };
-      });
-      setSummaryEditorBook(updatedBook);
-      setSummaryDraft(String(updatedBook.auto_summary || ""));
-      setNotesDraft(String(updatedBook.notes || ""));
-      await refreshSeriesFromApi();
-    } catch (err) {
-      console.error(err);
-      toast({ title: "Summary lookup failed", description: "Unable to fetch a summary for this book right now." });
-    } finally {
-      setSummaryLoadingId(null);
-    }
-  }
-
   function openSummaryEditor(book: BookRecord) {
     setSummaryEditorBook(book);
     setSummaryDraft(String(book?.auto_summary || ""));
@@ -1563,92 +1551,16 @@ export default function SeriesDetailPage() {
     }
   }
 
-  async function handleSetBookStatus(book: BookRecord) {
-    const currentStatus = (getBookStatus(book) as "read" | "unread" | "upcoming" | "available") || "unread";
-    setStatusTargetBook(book);
-    setStatusAction(currentStatus);
-    setStatusDate(toIsoDateString(currentStatus === "read" ? book.read_date : (book.release_date || book.publication_date)) || "");
-    setStatusDialogOpen(true);
-  }
-
-  async function handleSaveBookStatus() {
-    if (!statusTargetBook) return;
-
-    setStatusSaving(true);
-    try {
-      const todayIso = new Date().toISOString().split("T")[0];
-      const normalizedDate = statusDate.trim() ? toIsoDateString(statusDate) : null;
-      if (statusDate.trim() && !normalizedDate) {
-        toast({ title: "Invalid date", description: "Use a valid date format, such as YYYY-MM-DD." });
-        return;
-      }
-
-      const payload: Record<string, unknown> = {
-        is_read: statusAction === "read",
-        read_status: statusAction,
-      };
-
-      if (statusAction === "read") {
-        payload.read_date = normalizedDate || todayIso;
-        payload.release_date = null;
-      } else if (statusAction === "unread") {
-        payload.read_date = null;
-      } else if (statusAction === "upcoming") {
-        payload.read_date = null;
-        payload.release_date = normalizedDate || toIsoDateString(statusTargetBook.release_date || statusTargetBook.publication_date) || null;
-      } else if (statusAction === "available") {
-        payload.read_date = null;
-        const existingDate = toIsoDateString(statusTargetBook.release_date || statusTargetBook.publication_date);
-        if (!existingDate || isPastOrTodayDate(existingDate)) {
-          payload.release_date = null;
-        }
-      }
-
-      const effectiveReleaseDate = String(payload.release_date || "").trim() || toIsoDateString(statusTargetBook.release_date || statusTargetBook.publication_date);
-      if (!payload.read_date && effectiveReleaseDate) {
-        if (isFutureDate(effectiveReleaseDate)) {
-          payload.read_status = "upcoming";
-          payload.is_read = false;
-          payload.release_date = effectiveReleaseDate;
-        } else if (isPastOrTodayDate(effectiveReleaseDate)) {
-          payload.read_status = "available";
-          payload.is_read = false;
-          payload.release_date = null;
-        }
-      }
-
-      const response = await fetchApiWithFallback(`/books/${statusTargetBook.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to update book (${response.status})`);
-      }
-
-      const updatedBook = await response.json();
-      setSeries((prev) => {
-        if (!prev) return prev;
-        const prevBooks = Array.isArray(prev.books) ? prev.books : [];
-        return {
-          ...prev,
-          books: prevBooks.map((item) =>
-            item.id === updatedBook.id ? { ...item, ...updatedBook } : item
-          ),
-        };
-      });
-      publishBookStatusUpdate(updatedBook);
-      await refreshSeriesFromApi();
-      setStatusDialogOpen(false);
-      setStatusTargetBook(null);
-      flashAddedMessage(`Status updated for ${updatedBook.title || "book"}.`);
-    } catch (err) {
-      console.error(err);
-      toast({ title: "Update failed", description: "Unable to update status right now." });
-    } finally {
-      setStatusSaving(false);
-    }
+  function handleDeleteBookBeingEdited() {
+    // Edit Book now owns delete too (collapsed from 3 separate row buttons
+    // -- Set Status, Edit book, Delete -- into one), so this looks the
+    // book up from the currently-open form's id rather than needing its
+    // own book reference passed in.
+    const bookId = Number(editBookForm.id);
+    const book = books.find((item) => item.id === bookId);
+    if (!book) return;
+    setEditBookDialogOpen(false);
+    handleDeleteBook(book);
   }
 
   function handleToggleSeriesFinished() {
@@ -2008,8 +1920,6 @@ export default function SeriesDetailPage() {
           {displayedBooks.map((book) => {
             const status = getBookStatus(book);
             const displayDate = getBookDate(book);
-            const summary = book.auto_summary;
-            const notes = book.notes;
             const unconfirmedDate = hasUnconfirmedReleaseDate(status, book);
             return (
               <TableRow key={book.id}>
@@ -2031,47 +1941,23 @@ export default function SeriesDetailPage() {
                 <TableCell>{book.book_number ?? "—"}</TableCell>
                 <TableCell className="space-x-2 whitespace-nowrap">
                   {canEdit ? (
-                    <>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleSetBookStatus(book)}
-                      >
-                        Set Status
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleEditBookTitle(book)}
-                      >
-                        Edit book
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => handleDeleteBook(book)}
-                      >
-                        Delete
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => handleFetchSummary(book.id)}
-                        disabled={summaryLoadingId === book.id}
-                      >
-                        {summary ? "Refresh summary" : "Fetch summary"}
-                      </Button>
-                    </>
-                  ) : null}
-                  {summary || notes ? (
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => openSummaryEditor(book)}
+                      onClick={() => handleEditBookTitle(book)}
+                      title="Change title, author, book #, status, date, or delete this book"
                     >
-                      See summary
+                      Edit book
                     </Button>
                   ) : null}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => openSummaryEditor(book)}
+                    title="View/edit the AI summary and your personal notes for this book -- use Series Recap above for a catch-up across the whole series"
+                  >
+                    Notes
+                  </Button>
                   <Button
                     variant="outline"
                     size="sm"
@@ -2127,17 +2013,6 @@ export default function SeriesDetailPage() {
         saving={addBookSaving}
       />
 
-      <SetStatusDialog
-        open={statusDialogOpen}
-        onOpenChange={setStatusDialogOpen}
-        statusAction={statusAction}
-        onStatusActionChange={setStatusAction}
-        statusDate={statusDate}
-        onStatusDateChange={setStatusDate}
-        onSave={handleSaveBookStatus}
-        saving={statusSaving}
-      />
-
       <EditBookDialog
         open={editBookDialogOpen}
         onOpenChange={setEditBookDialogOpen}
@@ -2145,6 +2020,7 @@ export default function SeriesDetailPage() {
         onFormChange={setEditBookForm}
         onSave={handleSaveBookEdit}
         saving={savingEditBook}
+        onDelete={handleDeleteBookBeingEdited}
       />
 
       <NormalizeTitlesDialog

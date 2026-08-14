@@ -27,6 +27,7 @@ export function EditBookDialog({
   onFormChange,
   onSave,
   saving,
+  onDelete,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -34,6 +35,10 @@ export function EditBookDialog({
   onFormChange: (updater: (prev: EditBookFormState) => EditBookFormState) => void;
   onSave: () => void;
   saving: boolean;
+  // Optional: collapses the old standalone row "Delete" button into this
+  // dialog, since editing and deleting a book are both "manage this book"
+  // actions that don't need separate entry points.
+  onDelete?: () => void;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -114,6 +119,11 @@ export function EditBookDialog({
         </div>
 
         <DialogFooter showCloseButton>
+          {onDelete ? (
+            <Button type="button" variant="destructive" onClick={onDelete} disabled={saving}>
+              Delete book
+            </Button>
+          ) : null}
           <Button type="button" onClick={onSave} disabled={saving}>
             {saving ? "Saving..." : "Save changes"}
           </Button>
