@@ -11,12 +11,17 @@ from routers.deps import enforce_access, get_db
 router = APIRouter(prefix="/books", tags=["books"], dependencies=[Depends(enforce_access)])
 
 
+# Registered at both "/" and "" (see main.py's redirect_slashes=False) so a
+# request that arrives without its trailing slash -- e.g. from a proxy that
+# normalized it away -- is handled directly instead of needing a redirect.
 @router.post("/", response_model=schemas.BookResponse)
+@router.post("", response_model=schemas.BookResponse, include_in_schema=False)
 def create_book(book: schemas.BookBase, db: Session = Depends(get_db)):
     return crud.create_book(db=db, book=book)
 
 
 @router.get("/", response_model=List[schemas.BookResponse])
+@router.get("", response_model=List[schemas.BookResponse], include_in_schema=False)
 def read_books(db: Session = Depends(get_db)):
     return crud.get_all_books(db)
 

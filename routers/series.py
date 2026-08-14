@@ -28,13 +28,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/series", tags=["series"], dependencies=[Depends(enforce_access)])
 
 
+# Registered at both "/" and "" (see main.py's redirect_slashes=False) so a
+# request that arrives without its trailing slash -- e.g. from a proxy that
+# normalized it away -- is handled directly instead of needing a redirect.
 @router.post("/", response_model=schemas.SeriesResponse)
+@router.post("", response_model=schemas.SeriesResponse, include_in_schema=False)
 def create_series(series: schemas.SeriesBase, db: Session = Depends(get_db)):
     series.title_normalization_mode_override = normalize_title_normalization_mode(series.title_normalization_mode_override)
     return crud.create_series(db=db, series=series)
 
 
 @router.get("/", response_model=List[schemas.SeriesResponse])
+@router.get("", response_model=List[schemas.SeriesResponse], include_in_schema=False)
 def read_series(db: Session = Depends(get_db)):
     all_series = crud.get_all_series(db)
     responses = []

@@ -26,7 +26,18 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(lifespan=lifespan)
+# redirect_slashes=False: with it on (the default), a request to a collection
+# route missing its registered trailing slash (e.g. POST /series instead of
+# POST /series/) gets a 307 redirect back to add the slash. That's normally
+# invisible, but the Next.js API proxy in front of this app can lose the
+# client's original trailing slash before forwarding, and Node's fetch does
+# not reliably replay non-GET requests with a body across that redirect --
+# it just fails the request outright. Routers register both the slash and
+# no-slash forms of collection routes (see routers/books.py, routers/series.py)
+# so disabling the implicit redirect just means both forms are handled
+# directly instead of one bouncing through a redirect that may not survive
+# the proxy hop.
+app = FastAPI(lifespan=lifespan, redirect_slashes=False)
 
 # Allow frontend to talk to backend
 app.add_middleware(
