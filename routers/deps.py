@@ -103,6 +103,17 @@ BACKUP_TOKEN = os.environ.get("BACKUP_TOKEN")
 
 def require_owner_or_backup_token(request: Request) -> str:
     provided = request.headers.get("x-backup-token")
-    if BACKUP_TOKEN and provided and hmac.compare_digest(provided, BACKUP_TOKEN):
-        return "backup"
+    if provided is not None:
+        # .strip() on both sides: a stray trailing newline/space from
+        # copy-pasting the token into an env var UI is an easy, silent way
+        # to end up with a token that "looks" right but never matches.
+        expected = (BACKUP_TOKEN or "").strip()
+        if expected and hmac.compare_digest(provided.strip(), expected):
+            return "backup"
+        # Distinct from the generic "Owner login required" below: this
+        # tells you a backup token was actually sent and rejected, instead
+        # of silently falling through and leaving you to guess whether the
+        # header didn't arrive, the server doesn't have BACKUP_TOKEN set
+        # (yet, or at all), or the value just doesn't match.
+        raise HTTPException(status_code=403, detail="Invalid backup token")
     return require_owner(request)
