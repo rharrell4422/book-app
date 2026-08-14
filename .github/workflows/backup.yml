@@ -25,12 +25,24 @@ jobs:
             "${APP_URL%/}/api/admin/export_db"
           echo "Downloaded $(stat -c%s books_backup.db 2>/dev/null || stat -f%z books_backup.db) bytes"
 
-      - name: Checkout backup repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ secrets.BACKUP_REPO }}
-          token: ${{ secrets.BACKUP_REPO_PAT }}
-          path: backup-repo
+      - name: Checkout or initialize backup repo
+        env:
+          BACKUP_REPO: ${{ secrets.BACKUP_REPO }}
+          BACKUP_REPO_PAT: ${{ secrets.BACKUP_REPO_PAT }}
+        run: |
+          set -euo pipefail
+          remote_url="https://x-access-token:${BACKUP_REPO_PAT}@github.com/${BACKUP_REPO}.git"
+          # actions/checkout can't handle a brand-new, completely empty repo
+          # (no commits yet means no "main" ref to check out). Fall back to
+          # initializing a fresh local repo pointed at the same remote so
+          # the first-ever backup can still create that history itself.
+          if ! git clone "$remote_url" backup-repo; then
+            echo "Backup repo has no commits yet -- initializing it."
+            mkdir -p backup-repo
+            cd backup-repo
+            git init -b main
+            git remote add origin "$remote_url"
+          fi
 
       - name: Commit and push backup
         run: |
@@ -41,9 +53,9 @@ jobs:
           git config user.name "book-app-backup-bot"
           git config user.email "actions@users.noreply.github.com"
           git add books_backup.db
-          if git diff --cached --quiet; then
+          if git diff --cached --quiet 2>/dev/null; then
             echo "No changes since last backup, nothing to commit."
             exit 0
           fi
           git commit -m "Weekly backup: $(date -u +'%Y-%m-%d %H:%M UTC')"
-          git push
+          git push -u origin main
