@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -111,6 +112,12 @@ function ShareLinkButton() {
 
 function TopBar() {
   const { role, logout } = useAuth();
+  // The landing page ("/") is a deliberately dark, full-bleed hero (see
+  // components/landing/) -- this app's one visual departure from its
+  // otherwise light, grayscale theme. Rather than teach the landing page
+  // to render behind/under the bar, the bar itself goes transparent and
+  // overlays it there, purely a style change (no auth logic touched).
+  const isLanding = usePathname() === "/";
 
   if (role === "viewer") {
     return (
@@ -124,7 +131,13 @@ function TopBar() {
 
   if (role === "owner") {
     return (
-      <div className="flex items-center justify-end gap-2 border-b bg-muted/40 px-4 py-1.5">
+      <div
+        className={
+          isLanding
+            ? "absolute inset-x-0 top-0 z-10 flex items-center justify-end gap-2 px-4 py-3 text-white/80"
+            : "flex items-center justify-end gap-2 border-b bg-muted/40 px-4 py-1.5"
+        }
+      >
         <ShareLinkButton />
         <Button variant="ghost" size="sm" onClick={logout}>
           Sign out

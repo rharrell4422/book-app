@@ -120,6 +120,55 @@
   --sidebar-ring: oklch(0.556 0 0);
 }
 
+/* Landing-page-only ambient motion (see components/landing/). Scoped by
+   naming, not by file location, since Tailwind v4 needs @theme tokens
+   defined somewhere globally reachable -- these three keyframes are never
+   referenced outside components/landing/, so they don't affect the rest of
+   the (deliberately static, grayscale) app. All three animate only
+   transform/opacity, never layout-affecting properties, so they stay
+   compositor-only even on low-end devices. Respecting
+   prefers-reduced-motion is done at the call site via the motion-reduce:
+   Tailwind variant, not here. */
+@theme {
+  --animate-float: float 7s ease-in-out infinite;
+  --animate-spine-pulse: spine-pulse 4s ease-in-out infinite;
+  --animate-drift: drift 18s ease-in-out infinite;
+}
+
+@keyframes float {
+  0%,
+  100% {
+    transform: translate(0, 0);
+    opacity: 0.5;
+  }
+  50% {
+    transform: translate(0, -16px);
+    opacity: 1;
+  }
+}
+
+@keyframes spine-pulse {
+  0%,
+  100% {
+    opacity: 0.8;
+    filter: brightness(1);
+  }
+  50% {
+    opacity: 1;
+    filter: brightness(1.25);
+  }
+}
+
+@keyframes drift {
+  0%,
+  100% {
+    transform: translate(-4%, -2%) scale(1);
+  }
+  50% {
+    transform: translate(4%, 3%) scale(1.1);
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
