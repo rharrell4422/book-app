@@ -628,33 +628,12 @@ def _candidate_richness_score(candidate: dict) -> int:
     return score
 
 
-def discover_more_by_author(db: Session, author: str) -> dict:
-    """"More by this author" -- a lightweight, on-demand discovery across
-    ALL of an author's tracked series and standalone books at once.
-
-    Unlike run_series_check, this is not scoped to one series, does not
-    write anything to the database, and returns its candidate list directly
-    -- the caller (the API layer) decides per-row whether/how to add a
-    match via the normal create-book/create-series endpoints, per the "no
-    auto-created series from a guessed name" rule.
-
-    Catalog APIs return editions (hardcover/paperback/ebook/audiobook, each
-    with its own ISBN) and re-listings of already-owned books far more
-    aggressively here than in a single-series check, since there's no
-    series-name-scoped query to narrow results and no per-series lookahead
-    query to focus on just the next unread number -- so both "is this
-    already owned" and "is this a duplicate of another candidate in this
-    same batch" need to be checked primarily by title identity, not ISBN
-    (regression: a live check surfaced ~20 rows that were almost entirely
-    editions/re-listings of 12 already-owned books, because the original
-    version of this function only matched already-owned titles by exact
-    core_title_key and never collapsed same-book duplicates within a
-    single batch at all).
+def _owned_book_indexes(db: Session, author: str) -> dict:
+    """Shared by discover_more_by_author and discover_series_by_name --
+    both need the exact same "what does this author's owned library already
+    contain" picture to decide what's genuinely new, just starting from a
+    different raw candidate list (author-wide vs. one targeted series).
     """
-    author = str(author or "").strip()
-    if not author:
-        return {"author": author, "candidates": [], "provider_failures": [], "all_providers_failed": False}
-
     owned_books = [
         book
         for book in db.query(Book).filter(Book.author.isnot(None)).all()
@@ -705,10 +684,41 @@ def discover_more_by_author(db: Session, author: str) -> dict:
         if _authors_match_exact(author, series.author)
     }
 
-    discovery = discovery_engine.discover_candidates_for_author(author, exclude_title_keys=known_title_keys)
+    return {
+        "known_isbns": known_isbns,
+        "known_title_keys": known_title_keys,
+        "known_bare_titles": known_bare_titles,
+        "owned_numbers_by_series_id": owned_numbers_by_series_id,
+        "tracked_series_by_name": tracked_series_by_name,
+    }
+
+
+def _build_discovery_candidate_entries(raw_candidates: list[dict], author: str, indexes: dict) -> list[dict]:
+    """Turns raw discovery-engine candidates into the response shape both
+    discover_more_by_author and discover_series_by_name return: owned-book
+    exclusion, matched-tracked-series lookup, placeholder-date cleanup, and
+    same-book deduplication within this one batch.
+
+    Catalog APIs return editions (hardcover/paperback/ebook/audiobook, each
+    with its own ISBN) and re-listings of already-owned books far more
+    aggressively here than in a single-series Check Now, since there's no
+    per-series lookahead query to focus on just the next unread number --
+    so both "is this already owned" and "is this a duplicate of another
+    candidate in this same batch" need to be checked primarily by title
+    identity, not ISBN (regression: a live check surfaced ~20 rows that
+    were almost entirely editions/re-listings of 12 already-owned books,
+    because the original version of this function only matched
+    already-owned titles by exact core_title_key and never collapsed
+    same-book duplicates within a single batch at all).
+    """
+    known_isbns = indexes["known_isbns"]
+    known_title_keys = indexes["known_title_keys"]
+    known_bare_titles = indexes["known_bare_titles"]
+    owned_numbers_by_series_id = indexes["owned_numbers_by_series_id"]
+    tracked_series_by_name = indexes["tracked_series_by_name"]
 
     deduped: dict[str, dict] = {}
-    for raw in discovery["candidates"]:
+    for raw in raw_candidates:
         title = str(raw.get("title") or "").strip()
         if not title:
             continue
@@ -815,12 +825,71 @@ def discover_more_by_author(db: Session, author: str) -> dict:
         if existing is None or _candidate_richness_score(candidate_entry) > _candidate_richness_score(existing):
             deduped[group_key] = candidate_entry
 
-    results = sorted(
+    return sorted(
         deduped.values(),
         key=lambda c: (str(c.get("series_name") or "\uffff"), str(c.get("title") or "")),
     )
 
+
+def discover_more_by_author(db: Session, author: str) -> dict:
+    """"More by this author" -- a lightweight, on-demand discovery across
+    ALL of an author's tracked series and standalone books at once.
+
+    Unlike run_series_check, this is not scoped to one series, does not
+    write anything to the database, and returns its candidate list directly
+    -- the caller (the API layer) decides per-row whether/how to add a
+    match via the normal create-book/create-series endpoints, per the "no
+    auto-created series from a guessed name" rule.
+
+    Deliberately a broad, shallow sweep (one query per catalog API, no
+    per-series lookahead) -- see discover_series_by_name for the deeper,
+    targeted counterpart used to fill in a specific series this pass didn't
+    fully cover.
+    """
+    author = str(author or "").strip()
+    if not author:
+        return {"author": author, "candidates": [], "provider_failures": [], "all_providers_failed": False}
+
+    indexes = _owned_book_indexes(db, author)
+    discovery = discovery_engine.discover_candidates_for_author(author, exclude_title_keys=indexes["known_title_keys"])
+    results = _build_discovery_candidate_entries(discovery["candidates"], author, indexes)
+
     return {
+        "author": author,
+        "candidates": results,
+        "provider_failures": discovery["provider_failures"],
+        "all_providers_failed": discovery["all_providers_failed"],
+    }
+
+
+def discover_series_by_name(db: Session, series_name: str, author: str) -> dict:
+    """Deeper, targeted counterpart to discover_more_by_author's broad
+    sweep -- used to fill in a specific series the broad pass only
+    partially found.
+
+    Live regression: "More by this author" for Glynn Stewart's "Scattered
+    Stars" surfaced a books_count of 6 from Hardcover (see
+    series_total_hint) but only ever found book 1 ("Conviction") -- the
+    broad author-wide bibliography query simply doesn't return every book
+    across every series for a prolific author. This reuses the same
+    targeted "<series> <author>" search (with lookahead queries for an
+    unannounced next book) that a tracked series' own Check Now uses, which
+    is far more likely to surface the rest of a specific series than a
+    single generic author-wide query ever would.
+    """
+    series_name = str(series_name or "").strip()
+    author = str(author or "").strip()
+    if not series_name or not author:
+        return {"series_name": series_name, "author": author, "candidates": [], "provider_failures": [], "all_providers_failed": False}
+
+    indexes = _owned_book_indexes(db, author)
+    discovery = discovery_engine.discover_candidates_for_series(
+        series_name, author, exclude_title_keys=indexes["known_title_keys"], allow_author_fallback=False
+    )
+    results = _build_discovery_candidate_entries(discovery["candidates"], author, indexes)
+
+    return {
+        "series_name": series_name,
         "author": author,
         "candidates": results,
         "provider_failures": discovery["provider_failures"],

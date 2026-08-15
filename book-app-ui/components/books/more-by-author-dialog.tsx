@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ExternalLinkIcon, SparklesIcon, StarIcon } from "lucide-react";
+import { ExternalLinkIcon, SearchIcon, SparklesIcon, StarIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -86,6 +86,7 @@ function groupCandidates(candidates: AuthorDiscoveryCandidate[]) {
 }
 
 type SeriesOverviewState = { loading: boolean; text: string | null; error: string | null };
+type SeriesFillState = { loading: boolean; error: string | null; done: boolean };
 
 /** Maturity indicators are computed entirely client-side from data this
  * component already has (no extra fetch, no button needed) -- only the
@@ -182,6 +183,7 @@ export function MoreByAuthorDialog({
   const [addedKeys, setAddedKeys] = useState<Set<string>>(new Set());
   const [addingKey, setAddingKey] = useState<string | null>(null);
   const [overviews, setOverviews] = useState<Record<string, SeriesOverviewState>>({});
+  const [seriesFill, setSeriesFill] = useState<Record<string, SeriesFillState>>({});
 
   const groups = useMemo(() => groupCandidates(candidates), [candidates]);
 
@@ -216,9 +218,60 @@ export function MoreByAuthorDialog({
     if (open && author) {
       setAddedKeys(new Set());
       setOverviews({});
+      setSeriesFill({});
       runDiscovery();
     }
   }, [open, author, runDiscovery]);
+
+  // The broad author-wide sweep above is deliberately shallow (one query
+  // per catalog API) -- for a prolific author it can easily surface only
+  // part of a series (regression: Glynn Stewart's "Scattered Stars:
+  // Conviction" showed "Found 1 of ~6" from Hardcover's own book count,
+  // but the broad pass only ever turned up book 1). This runs the same
+  // deeper, targeted per-series search a tracked series' own Check Now
+  // uses, scoped to just this series name, and merges anything new it
+  // finds into the group already on screen -- on demand only, since it
+  // costs more than the broad pass and most groups won't need it.
+  async function handleFindRestOfSeries(group: CandidateGroup) {
+    const seriesName = group.heading;
+    const candidateAuthor = group.candidates[0]?.author || author || "";
+    if (!seriesName || !candidateAuthor) return;
+    setSeriesFill((prev) => ({ ...prev, [group.key]: { loading: true, error: null, done: false } }));
+    try {
+      const response = await fetchApiWithFallback(
+        `/books/discover_series_by_name?series_name=${encodeURIComponent(seriesName)}&author=${encodeURIComponent(candidateAuthor)}`,
+        { cache: "no-store" },
+      );
+      if (!response.ok) {
+        throw new Error(`Lookup failed (${response.status})`);
+      }
+      const data: { candidates: AuthorDiscoveryCandidate[] } = await response.json();
+      const found = Array.isArray(data.candidates) ? data.candidates : [];
+      setCandidates((prev) => {
+        const existingKeys = new Set(prev.map(candidateKey));
+        const additions = found.filter((candidate) => !existingKeys.has(candidateKey(candidate)));
+        return additions.length ? [...prev, ...additions] : prev;
+      });
+      setSeriesFill((prev) => ({
+        ...prev,
+        [group.key]: {
+          loading: false,
+          error: found.length ? null : "No additional books found for this series.",
+          done: true,
+        },
+      }));
+    } catch (err) {
+      console.error("Error searching for the rest of this series:", err);
+      setSeriesFill((prev) => ({
+        ...prev,
+        [group.key]: {
+          loading: false,
+          error: err instanceof Error ? err.message : "Unable to search for more books in this series.",
+          done: true,
+        },
+      }));
+    }
+  }
 
   // On-demand only, per group -- never fetched automatically alongside
   // discovery. Not persisted anywhere: closing the dialog and reopening it
@@ -420,6 +473,9 @@ export function MoreByAuthorDialog({
                 <div className="flex flex-col gap-4">
                   {groups.newSeries.map((group) => {
                     const overviewState = overviews[group.key];
+                    const fillState = seriesFill[group.key];
+                    const maturity = computeNewSeriesMaturity(group.candidates);
+                    const looksIncomplete = maturity.totalHint != null && maturity.foundCount < maturity.totalHint;
                     return (
                       <div key={group.key} className="rounded-lg border">
                         <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/50 px-3 py-1.5">
@@ -427,22 +483,40 @@ export function MoreByAuthorDialog({
                             <p className="text-xs font-medium">{group.heading}</p>
                             <NewSeriesMaturityBadge candidates={group.candidates} />
                           </div>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 gap-1 px-2 text-xs"
-                            disabled={overviewState?.loading}
-                            onClick={() => handleFetchSeriesOverview(group)}
-                          >
-                            <SparklesIcon className="h-3.5 w-3.5" />
-                            {overviewState?.loading
-                              ? "Summarizing…"
-                              : overviewState?.text
-                                ? "Refresh overview"
-                                : "Series Overview"}
-                          </Button>
+                          <div className="flex items-center gap-1">
+                            {looksIncomplete ? (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 gap-1 px-2 text-xs"
+                                disabled={fillState?.loading}
+                                onClick={() => handleFindRestOfSeries(group)}
+                              >
+                                <SearchIcon className="h-3.5 w-3.5" />
+                                {fillState?.loading ? "Searching…" : "Find the rest of this series"}
+                              </Button>
+                            ) : null}
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 gap-1 px-2 text-xs"
+                              disabled={overviewState?.loading}
+                              onClick={() => handleFetchSeriesOverview(group)}
+                            >
+                              <SparklesIcon className="h-3.5 w-3.5" />
+                              {overviewState?.loading
+                                ? "Summarizing…"
+                                : overviewState?.text
+                                  ? "Refresh overview"
+                                  : "Series Overview"}
+                            </Button>
+                          </div>
                         </div>
+                        {fillState?.error ? (
+                          <p className="border-b px-3 py-2 text-xs text-muted-foreground">{fillState.error}</p>
+                        ) : null}
                         {overviewState?.text ? (
                           <p className="border-b bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                             {overviewState.text}

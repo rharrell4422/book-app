@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 import crud
 import schemas
-from agents.series_agent import discover_more_by_author
+from agents.series_agent import discover_more_by_author, discover_series_by_name
 from discovery_engine import generate_series_overview
 from intelligence import lookup_book_summary
 from routers.deps import enforce_access, get_db
@@ -44,6 +44,17 @@ def lookup_book(title: str, author: str | None = None):
 @router.get("/discover_by_author")
 def discover_by_author(author: str, db: Session = Depends(get_db)):
     return discover_more_by_author(db, author)
+
+
+# Deeper, targeted follow-up to discover_by_author -- called on demand (a
+# "Find the rest of this series" button) when that broad sweep's own
+# maturity data suggests it only found part of a series (e.g. Hardcover
+# says 6 books exist but the broad pass only turned up 1). Not run
+# automatically for every "new series" group found, since the deeper
+# per-series search costs more than the broad pass.
+@router.get("/discover_series_by_name")
+def discover_series_by_name_endpoint(series_name: str, author: str, db: Session = Depends(get_db)):
+    return discover_series_by_name(db, series_name, author)
 
 
 # On-demand only -- called from a "Series Overview" button click in the

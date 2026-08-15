@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 
 import crud
 import discovery_engine
-from agents.series_agent import SeriesIntelligenceAgent, discover_more_by_author
+from agents.series_agent import SeriesIntelligenceAgent, discover_more_by_author, discover_series_by_name
 from database import Base
 from models import Book, Series
 
@@ -1960,6 +1960,143 @@ class DiscoverMoreByAuthorTest(unittest.TestCase):
         candidate = result["candidates"][0]
         self.assertEqual(candidate["matched_series_id"], self.series.id)
         self.assertEqual(candidate["status"], "upcoming")
+
+
+class DiscoverSeriesByNameTest(unittest.TestCase):
+    """Regression coverage for a live bug: "More by this author" for Glynn
+    Stewart showed "Scattered Stars" as "Found 1 of ~6" (Hardcover's own
+    series_total_hint said 6) but the broad author-wide sweep only ever
+    turned up book 1, "Conviction" -- with no way to find the other 5
+    without leaving the app. discover_series_by_name is the deeper,
+    targeted on-demand follow-up for exactly that gap.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=cls.engine)
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        Base.metadata.drop_all(bind=cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        self.db = self.SessionLocal()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _mock_discovery(self, candidates, **overrides):
+        result = {"candidates": candidates, "provider_failures": [], "all_providers_failed": False}
+        result.update(overrides)
+        return patch("discovery_engine.discover_candidates_for_series", return_value=result)
+
+    def test_no_series_name_or_author_returns_empty_result_without_calling_discovery(self):
+        with patch("discovery_engine.discover_candidates_for_series") as mock_discover:
+            result = discover_series_by_name(self.db, "", "Glynn Stewart")
+        mock_discover.assert_not_called()
+        self.assertEqual(result["candidates"], [])
+
+        with patch("discovery_engine.discover_candidates_for_series") as mock_discover:
+            result = discover_series_by_name(self.db, "Scattered Stars", "")
+        mock_discover.assert_not_called()
+        self.assertEqual(result["candidates"], [])
+
+    def test_queries_the_targeted_series_search_without_author_fallback(self):
+        # allow_author_fallback=False is deliberate: discover_candidates_for_series's
+        # fallback pass drops the series-name scoping entirely and sweeps the
+        # author's whole bibliography -- which is exactly what the broad
+        # discover_more_by_author pass already did. Allowing it here would
+        # flood a "find the rest of this one series" result with unrelated
+        # books from every other series this (often prolific) author writes.
+        with patch("discovery_engine.discover_candidates_for_series", return_value={
+            "candidates": [], "provider_failures": [], "all_providers_failed": False
+        }) as mock_discover:
+            discover_series_by_name(self.db, "Scattered Stars", "Glynn Stewart")
+
+        mock_discover.assert_called_once()
+        _, kwargs = mock_discover.call_args
+        self.assertEqual(mock_discover.call_args[0], ("Scattered Stars", "Glynn Stewart"))
+        self.assertFalse(kwargs["allow_author_fallback"])
+
+    def test_finds_the_rest_of_a_series_the_broad_sweep_only_partially_covered(self):
+        candidates = [
+            {
+                "source": "hardcover",
+                "title": "Confederacy",
+                "authors": ["Glynn Stewart"],
+                "published_date": "2020-06-15",
+                "description": "Book two of Scattered Stars.",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": 2,
+                "upcoming_hint": False,
+                "series_name_hint": "Scattered Stars",
+                "series_total_hint": 6,
+            },
+            {
+                "source": "hardcover",
+                "title": "Conspiracy",
+                "authors": ["Glynn Stewart"],
+                "published_date": "2020-11-10",
+                "description": "Book three of Scattered Stars.",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": 3,
+                "upcoming_hint": False,
+                "series_name_hint": "Scattered Stars",
+                "series_total_hint": 6,
+            },
+        ]
+        with self._mock_discovery(candidates):
+            result = discover_series_by_name(self.db, "Scattered Stars", "Glynn Stewart")
+
+        self.assertEqual(len(result["candidates"]), 2)
+        titles = {c["title"] for c in result["candidates"]}
+        self.assertEqual(titles, {"Confederacy", "Conspiracy"})
+
+    def test_excludes_a_book_already_owned_in_this_series(self):
+        series = Series(name="Scattered Stars", author="Glynn Stewart")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+        self.db.add(Book(
+            title="Conviction", author="Glynn Stewart", series_id=series.id, series_order=1,
+            book_number=1.0, record_status="active", is_read=True, isbn13="9780000000001",
+        ))
+        self.db.commit()
+
+        candidates = [
+            {
+                "source": "hardcover",
+                "title": "Conviction",
+                "authors": ["Glynn Stewart"],
+                "published_date": "2020-01-27",
+                "isbn13": "9780000000001",
+                "source_url": None,
+                "series_number_hint": 1,
+                "upcoming_hint": False,
+                "series_name_hint": "Scattered Stars",
+            },
+            {
+                "source": "hardcover",
+                "title": "Confederacy",
+                "authors": ["Glynn Stewart"],
+                "published_date": "2020-06-15",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": 2,
+                "upcoming_hint": False,
+                "series_name_hint": "Scattered Stars",
+            },
+        ]
+        with self._mock_discovery(candidates):
+            result = discover_series_by_name(self.db, "Scattered Stars", "Glynn Stewart")
+
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["candidates"][0]["title"], "Confederacy")
 
 
 class DiscoverMoreByAuthorEditionNoiseRegressionTest(unittest.TestCase):
