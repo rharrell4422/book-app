@@ -133,6 +133,70 @@ NON_NEW_RELEASE_TITLE_PATTERNS = (
     re.compile(r"\bseries,?\s+volume\b", re.IGNORECASE),
 )
 
+# A speculative "there will eventually be a book N, we just don't know its
+# title yet" mention -- common in fan wikis/forums/roundups discussing an
+# unannounced future release -- isn't a real, actionable book. Surfacing a
+# literal "Untitled" entry as if it were a confirmed new release just adds
+# noise with nothing a reader can act on (live regression: a web-search hit
+# discussing fan speculation about a series' next book got structured by the
+# LLM into a candidate literally titled "Untitled").
+PLACEHOLDER_TITLE_MARKERS = (
+    "untitled",
+    "unannounced",
+    "unnamed",
+    "unconfirmed title",
+    "tba",
+    "tbd",
+    "to be announced",
+    "to be determined",
+    "to be titled",
+    "working title",
+    "coming soon",
+)
+
+
+def looks_like_placeholder_title(title: str) -> bool:
+    title_norm = normalize_text(title)
+    if not title_norm:
+        return True
+    return any(marker in f" {title_norm} " for marker in (f" {m} " for m in PLACEHOLDER_TITLE_MARKERS))
+
+
+# Generic, non-book suffixes publishers/cataloguers tack onto a bare series
+# name for a series-level listing (an aggregation page, a boxed-set/imprint
+# entity, an author-page grouping, etc.) rather than any single book --
+# stripped before comparing a candidate's title to the series name so
+# "<series> Universe"/"<series> Collection"/etc. are caught the same way
+# "<series> Series" already is.
+_SERIES_INDEX_SUFFIX_PATTERN = re.compile(r"\b(?:series|universe|collection|world|saga)\b")
+
+
+def looks_like_series_index_entry(
+    title: str, series_name: str | None, isbn13: str | None, has_number_hint: bool
+) -> bool:
+    """Some catalog listings are for the series itself -- a Goodreads-style
+    aggregation page, a boxed set cataloged under the bare series name, an
+    author-page "series" entity, etc. -- rather than any single book in it
+    (live regression: a search for "The Empyrean" by Rebecca Yarros returned
+    separate records literally titled "The Empyrean" and "The Empyrean
+    Series", both with no book number, that both passed through as if they
+    were new, unread entries). Requiring the absence of *both* an ISBN and
+    an explicit book-number hint keeps this from misfiring on a real,
+    individually-cataloged eponymous book 1 (e.g. "Mistborn" for the
+    "Mistborn" series), which will almost always carry at least one of those.
+    """
+    if isbn13 or has_number_hint:
+        return False
+    title_norm = normalize_text(title)
+    series_norm = normalize_text(series_name)
+    if not title_norm or not series_norm:
+        return False
+    if title_norm == series_norm:
+        return True
+    stripped = _SERIES_INDEX_SUFFIX_PATTERN.sub("", title_norm).strip()
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    return bool(stripped) and stripped == series_norm
+
 
 def _log(message: str) -> None:
     print(f"[discovery_engine] {message}", flush=True)
@@ -506,7 +570,7 @@ _WEB_SEARCH_STRUCTURING_PROMPT = """You are extracting structured book-release d
 Target series: "{series_name}"
 Target author: "{author}"
 
-Below are {count} web search results returned for this series/author. For EACH result that actually describes a specific book entry in this series by this author (a released book, an upcoming/pre-order book, or a firm announcement of one) extract its data. Skip results that are: reviews or discussions of a book without any new release info, unrelated books by other authors, other series by the same author, retailer category/search pages, fan wiki summaries of the whole series, or news unrelated to a specific book.
+Below are {count} web search results returned for this series/author. For EACH result that actually describes a specific book entry in this series by this author (a released book, an upcoming/pre-order book, or a firm announcement of one) extract its data. Skip results that are: reviews or discussions of a book without any new release info, unrelated books by other authors, other series by the same author, retailer category/search pages, fan wiki summaries of the whole series, news unrelated to a specific book, or fan speculation/discussion about a future book that has no confirmed title yet (e.g. only referred to as "the next book" or "an untitled sequel").
 
 Search results:
 {snippets}
@@ -685,7 +749,13 @@ def _fetch_web_search(queries: list[str], series_name: str, author: str) -> list
     return results
 
 
-def _filter_and_merge(raw_results: list[dict], author: str, exclude_title_keys: set[str], confidence: str) -> list[dict]:
+def _filter_and_merge(
+    raw_results: list[dict],
+    author: str,
+    exclude_title_keys: set[str],
+    confidence: str,
+    series_name: str | None = None,
+) -> list[dict]:
     merged: list[dict] = []
     seen_keys: set[str] = set()
     for raw in raw_results:
@@ -696,14 +766,22 @@ def _filter_and_merge(raw_results: list[dict], author: str, exclude_title_keys: 
             continue
         if looks_like_non_new_release(title):
             continue
+        if looks_like_placeholder_title(title):
+            continue
         if not is_english_or_unknown(raw.get("language")):
+            continue
+
+        isbn13 = str(raw.get("isbn13") or "").strip()
+        has_number_hint = bool(raw.get("series_number_hint")) or bool(
+            infer_number_from_title(title, series_name)
+        )
+        if looks_like_series_index_entry(title, series_name, isbn13, has_number_hint):
             continue
 
         title_key = core_title_key(title)
         if title_key and title_key in exclude_title_keys:
             continue
 
-        isbn13 = str(raw.get("isbn13") or "").strip()
         dedupe_key = isbn13 or title_key or normalize_text(title)
         if dedupe_key in seen_keys:
             continue
@@ -816,6 +894,7 @@ def discover_candidates_for_series(
         author,
         exclude_title_keys,
         confidence="targeted",
+        series_name=series_name,
     )
 
     used_author_fallback = False
@@ -851,6 +930,7 @@ def discover_candidates_for_series(
             author,
             exclude_title_keys,
             confidence="author_fallback",
+            series_name=series_name,
         )
 
     # "All providers failed" should mean we got no usable data at all (every

@@ -102,6 +102,57 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
         self.assertEqual(discovery_engine.parse_flexible_date("2024"), date(2024, 1, 1))
         self.assertIsNone(discovery_engine.parse_flexible_date(""))
 
+    def test_looks_like_placeholder_title_filters_unconfirmed_future_titles(self):
+        # Regression (live bug): a fan wiki/forum mention of an unannounced
+        # future book got structured by the web-search LLM pass into a
+        # candidate literally titled "Untitled".
+        self.assertTrue(discovery_engine.looks_like_placeholder_title("Untitled"))
+        self.assertTrue(discovery_engine.looks_like_placeholder_title("Untitled: (The Empyrean Book 5)"))
+        self.assertTrue(discovery_engine.looks_like_placeholder_title("TBD"))
+        self.assertTrue(discovery_engine.looks_like_placeholder_title("Coming Soon"))
+        self.assertFalse(discovery_engine.looks_like_placeholder_title("Threshing Day"))
+
+    def test_looks_like_series_index_entry_filters_bare_series_name_listings(self):
+        # Regression (live bug): "Check Now" on "The Empyrean" surfaced two
+        # extra candidates literally titled "The Empyrean" and "The Empyrean
+        # Series" -- catalog listings for the series itself (an aggregation
+        # page/boxed-set entity), not any single book -- alongside the real
+        # numbered books.
+        self.assertTrue(
+            discovery_engine.looks_like_series_index_entry("The Empyrean", "The Empyrean", isbn13=None, has_number_hint=False)
+        )
+        self.assertTrue(
+            discovery_engine.looks_like_series_index_entry(
+                "The Empyrean Series", "The Empyrean", isbn13=None, has_number_hint=False
+            )
+        )
+        # Other generic, non-book suffixes cataloguers tack onto a bare
+        # series name for a series-level (not book-level) listing.
+        self.assertTrue(
+            discovery_engine.looks_like_series_index_entry(
+                "The Empyrean Universe", "The Empyrean", isbn13=None, has_number_hint=False
+            )
+        )
+        self.assertTrue(
+            discovery_engine.looks_like_series_index_entry(
+                "The Empyrean Collection", "The Empyrean", isbn13=None, has_number_hint=False
+            )
+        )
+        # A real, individually-cataloged book carries an ISBN or a resolved
+        # series position, even if (rare) its title happens to equal the
+        # bare series name -- e.g. an eponymous book 1.
+        self.assertFalse(
+            discovery_engine.looks_like_series_index_entry("The Empyrean", "The Empyrean", isbn13="9781234567897", has_number_hint=False)
+        )
+        self.assertFalse(
+            discovery_engine.looks_like_series_index_entry("The Empyrean", "The Empyrean", isbn13=None, has_number_hint=True)
+        )
+        self.assertFalse(
+            discovery_engine.looks_like_series_index_entry(
+                "Fourth Wing: (The Empyrean Book 1)", "The Empyrean", isbn13=None, has_number_hint=True
+            )
+        )
+
 
 class DiscoverCandidatesForSeriesTest(unittest.TestCase):
     """Tests discovery_engine.discover_candidates_for_series's merge/priority
@@ -188,6 +239,48 @@ class DiscoverCandidatesForSeriesTest(unittest.TestCase):
             owned_key = discovery_engine.core_title_key("Cherry Blossom Girls Book 7")
             result = discovery_engine.discover_candidates_for_series(
                 "Cherry Blossom Girls", "Harmon Cooper", exclude_title_keys={owned_key}
+            )
+
+        self.assertEqual(result["candidates"], [])
+
+    def test_excludes_bare_series_name_listing_with_no_number_or_isbn(self):
+        # Regression (live bug): Google Books/OpenLibrary both returned a
+        # record for "The Empyrean" series itself (no book number, no ISBN)
+        # alongside the real numbered books, which slipped through as a new
+        # "available" entry.
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
+            discovery_engine,
+            "_fetch_google_books",
+            return_value=[
+                {
+                    "source": "google_books",
+                    "source_id": "gb-series",
+                    "title": "The Empyrean",
+                    "authors": ["Rebecca Yarros"],
+                    "published_date": "2023",
+                    "isbn13": None,
+                    "source_url": None,
+                    "language": "",
+                }
+            ],
+        ), patch.object(
+            discovery_engine,
+            "_fetch_openlibrary",
+            return_value=[
+                {
+                    "source": "openlibrary",
+                    "source_id": "ol-series",
+                    "title": "The Empyrean Series",
+                    "authors": ["Rebecca Yarros"],
+                    "published_date": "2023",
+                    "isbn13": None,
+                    "source_url": None,
+                    "language": "",
+                }
+            ],
+        ):
+            result = discovery_engine.discover_candidates_for_series(
+                "The Empyrean", "Rebecca Yarros", allow_author_fallback=False
             )
 
         self.assertEqual(result["candidates"], [])
@@ -601,6 +694,37 @@ class WebSearchProviderTest(unittest.TestCase):
         self.assertEqual(len(result["candidates"]), 1)
         self.assertEqual(result["candidates"][0]["source"], "web_search")
         self.assertEqual(result["candidates"][0]["confidence"], "targeted")
+
+    def test_discover_candidates_for_series_excludes_untitled_placeholder_from_web_search(self):
+        # Regression (live bug): a lookahead "book 5" web search surfaced fan
+        # speculation about an unannounced future book, which the LLM
+        # structuring pass turned into a candidate literally titled
+        # "Untitled" with a guessed book_number -- that guessed number alone
+        # was enough to pass series-membership checks downstream, so it
+        # needs to be filtered out here before it ever gets that far.
+        placeholder_candidate = {
+            "source": "web_search",
+            "source_id": "https://example.com/speculation",
+            "title": "Untitled",
+            "authors": ["Rebecca Yarros"],
+            "published_date": "",
+            "description": "Fans speculate about the untitled fifth book",
+            "isbn13": None,
+            "source_url": "https://example.com/speculation",
+            "language": "",
+            "series_number_hint": 5,
+            "upcoming_hint": True,
+        }
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+            discovery_engine, "_fetch_hardcover", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ), patch.object(
+            discovery_engine, "_fetch_web_search", return_value=[placeholder_candidate]
+        ):
+            result = discovery_engine.discover_candidates_for_series("The Empyrean", "Rebecca Yarros")
+
+        self.assertEqual(result["candidates"], [])
 
     def test_discover_candidates_for_series_adds_lookahead_queries_for_next_books(self):
         # Regression (live bug): a generic "<series> <author>" search's
