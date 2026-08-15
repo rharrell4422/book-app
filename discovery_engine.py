@@ -227,13 +227,47 @@ _TITLE_SERIES_MARKER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Another common cataloguer convention (seen heavily on Hardcover-style
+# listings): "<Title> - <Series Name> #<N>", with no structured series
+# field at all -- e.g. "A Little Too Close - Madigan Mountain #2",
+# "Ignite - Legacy #0.7". Without reading this, a book whose *only*
+# available listing uses this format never gets grouped with the rest of
+# its series at all (regression: an author-wide discovery pass for Rebecca
+# Yarros put every "Legacy" novella in "New standalone books" instead of
+# forming a "Legacy" series group, since none of them had any other,
+# more-structured listing to fall back on).
+_DASH_SERIES_MARKER_PATTERN = re.compile(r"\s-\s+(.+?)\s*#\s*[\d.]+\s*$")
+
 
 def infer_series_hint_from_title_text(title: str) -> str | None:
-    match = _TITLE_SERIES_MARKER_PATTERN.search(str(title or ""))
+    raw = str(title or "")
+    for pattern in (_TITLE_SERIES_MARKER_PATTERN, _DASH_SERIES_MARKER_PATTERN):
+        match = pattern.search(raw)
+        if match:
+            guess = re.sub(r"\s+", " ", match.group(1)).strip()
+            if guess:
+                return guess
+    return None
+
+
+def clean_display_title(title: str) -> str:
+    """Strips the redundant "- <Series Name> #<N>" suffix (see
+    _DASH_SERIES_MARKER_PATTERN above) from a title meant for display.
+
+    Without this, even after such a candidate is correctly grouped under
+    its series and deduplicated against a cleaner-titled listing of the
+    same book, whichever raw copy happened to win the dedup tie-break
+    could still be the ugly "A Little Too Close - Madigan Mountain #2"
+    version rather than the plain "A Little Too Close" a reader expects --
+    the series name and number are already shown structurally elsewhere on
+    the row, so repeating them in the title itself is pure clutter.
+    """
+    raw = str(title or "")
+    match = _DASH_SERIES_MARKER_PATTERN.search(raw)
     if not match:
-        return None
-    guess = re.sub(r"\s+", " ", match.group(1)).strip()
-    return guess or None
+        return raw
+    cleaned = raw[: match.start()].strip()
+    return cleaned or raw
 
 
 _PLACEHOLDER_DATE_PATTERN = re.compile(r"^\d{4}-01-01$")
@@ -256,25 +290,52 @@ def _log(message: str) -> None:
 
 
 def normalize_text(value: str | None) -> str:
-    cleaned = re.sub(r"[^a-z0-9\s]", " ", str(value or "").lower())
+    # "&" is treated as the word "and" (not just stripped to a space) so
+    # "Muses & Melodies" and "Muses and Melodies" -- the same book, listed
+    # under two spelling conventions by two different sources -- normalize
+    # to identical text instead of silently differing by one word.
+    with_and = re.sub(r"&", " and ", str(value or "").lower())
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", with_and)
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+_LEADING_ARTICLE_PATTERN = re.compile(r"^(?:the|an?)\s+")
+
+
+def _strip_leading_article(normalized_text: str) -> str:
+    """Drops a leading "the"/"a"/"an" from an already-normalize_text'd
+    title so "The Reality of Everything" and "Reality of Everything" --
+    the same book, one source's title carrying the article and another's
+    dropping it -- resolve to the same identity key.
+
+    Deliberately NOT folded into normalize_text() itself: that function is
+    also used for *series* names (see normalize_series_branding_name),
+    where the article is part of the series' actual identity ("The
+    Empyrean" needs to stay distinguishable from a hypothetical unrelated
+    series just called "Empyrean") -- only book-title matching wants this.
+    """
+    return _LEADING_ARTICLE_PATTERN.sub("", normalized_text, count=1)
+
+
 def _title_core_segment(raw: str) -> str:
-    # ':', '(' and ',' are the three separators commonly used to introduce a
-    # subtitle/series-suffix ("Title: subtitle", "Title (Series Book N)",
-    # "Title, A Series Short Story"). Splitting on whichever comes first
-    # gives a stable "core title" across differently-formatted sources --
-    # e.g. Hardcover's "Havoc in the Deathyards, A Completionist Chronicles
-    # Short Story" vs OpenLibrary's bare "Havoc in the Deathyards" both
-    # reduce to "havoc in the deathyards". A few owned titles use a comma as
-    # part of the actual title itself (e.g. "2 Lies, 2 Thrones", "Arisen,
-    # Book Two - ..."), which this over-truncates -- but core_title_key
-    # folds the book number (parsed from the *full* raw title, not the
-    # truncated core) back in, which still keeps same-series siblings
-    # distinct, and bare_title_key is only trusted when its result is
-    # unique across the owned catalog. Both safeguards absorb this.
-    return re.split(r"[:,(]", raw, maxsplit=1)[0]
+    # ':', '(', ',' and a standalone " - " are the separators commonly used
+    # to introduce a subtitle/series-suffix ("Title: subtitle", "Title
+    # (Series Book N)", "Title, A Series Short Story", "Title - Series
+    # #N"). Splitting on whichever comes first gives a stable "core title"
+    # across differently-formatted sources -- e.g. Hardcover's "Havoc in
+    # the Deathyards, A Completionist Chronicles Short Story" vs
+    # OpenLibrary's bare "Havoc in the Deathyards" both reduce to "havoc in
+    # the deathyards". The " - " split requires surrounding spaces
+    # specifically so it never fires on a hyphenated word inside the title
+    # itself (e.g. "Self-Made Superhero"). A few owned titles use a comma
+    # as part of the actual title itself (e.g. "2 Lies, 2 Thrones",
+    # "Arisen, Book Two - ..."), which this over-truncates -- but
+    # core_title_key folds the book number (parsed from the *full* raw
+    # title, not the truncated core) back in, which still keeps
+    # same-series siblings distinct, and bare_title_key is only trusted
+    # when its result is unique across the owned catalog. Both safeguards
+    # absorb this.
+    return re.split(r"[:,(]|\s+-\s+", raw, maxsplit=1)[0]
 
 
 def core_title_key(title: str | None) -> str:
@@ -291,7 +352,7 @@ def core_title_key(title: str | None) -> str:
     found anywhere in the title into the key.
     """
     raw = str(title or "")
-    normalized_core = normalize_text(_title_core_segment(raw))
+    normalized_core = _strip_leading_article(normalize_text(_title_core_segment(raw)))
     number = infer_number_from_title(raw)
     if number:
         return f"{normalized_core} {number}"
@@ -312,7 +373,7 @@ def bare_title_key(title: str | None) -> str:
     numbered volumes that happen to share a one-word core title).
     """
     raw = str(title or "")
-    return normalize_text(_title_core_segment(raw))
+    return _strip_leading_article(normalize_text(_title_core_segment(raw)))
 
 
 _WORD_NUMBERS = {

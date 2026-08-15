@@ -767,7 +767,11 @@ def _build_discovery_candidate_entries(raw_candidates: list[dict], author: str, 
         is_upcoming = discovery_engine.classify_upcoming(parsed_date, raw.get("upcoming_hint"))
 
         candidate_entry = {
-            "title": title,
+            # Cleaned for *display* only -- title/title_key/bare_key/
+            # inferred_number above all stay derived from the original raw
+            # title, since e.g. the "#N" this strips off is also where
+            # infer_number_from_title reads the book's position from.
+            "title": discovery_engine.clean_display_title(title),
             "author": author,
             "series_name": series_name_guess,
             "matched_series_id": matched_series.id if matched_series else None,

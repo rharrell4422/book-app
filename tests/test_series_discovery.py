@@ -51,6 +51,67 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
         key_10 = discovery_engine.core_title_key("The Mad God, The Grand Game, Book 10: A Dark Fantasy LitRPG")
         self.assertNotEqual(key_9, key_10)
 
+    def test_core_title_key_matches_across_dash_series_suffix_format(self):
+        # Regression (live bug): Hardcover-style "<Title> - <Series> #<N>"
+        # listings (e.g. "A Little Too Close - Madigan Mountain #2") never
+        # matched the same book's cleaner "A Little Too Close" listing from
+        # another source, so both survived as separate rows -- one properly
+        # grouped under its series, one dumped in "standalone" as a
+        # duplicate.
+        dashed = "A Little Too Close - Madigan Mountain #2"
+        clean = "A Little Too Close"
+        self.assertEqual(discovery_engine.bare_title_key(dashed), discovery_engine.bare_title_key(clean))
+
+    def test_title_core_segment_does_not_split_on_a_hyphenated_word(self):
+        # The dash-suffix split requires spaces on both sides specifically
+        # so it never fires on a hyphenated word inside the title itself.
+        key = discovery_engine.core_title_key("Self-Made Superhero: Origins")
+        self.assertIn("self made superhero", key)
+
+    def test_core_title_key_matches_across_leading_article_variants(self):
+        # Regression (live bug): "The Reality of Everything" (a cleanly
+        # tagged Flight & Glory candidate) and "Reality of Everything -
+        # Flight & Glory #5" (the same book from a dash-suffixed listing,
+        # missing "The") didn't resolve to the same identity key.
+        with_article = "The Reality of Everything"
+        without_article = "Reality of Everything"
+        self.assertEqual(discovery_engine.bare_title_key(with_article), discovery_engine.bare_title_key(without_article))
+
+    def test_normalize_series_branding_name_keeps_leading_article(self):
+        # The leading-article strip is scoped to book *titles* only -- series
+        # names must keep "The" as part of their identity (this exact
+        # expectation is asserted elsewhere too; re-asserted here as a
+        # guardrail against accidentally generalizing the new title-only
+        # article-stripping into normalize_text() itself).
+        self.assertEqual(discovery_engine.normalize_series_branding_name("The Empyrean Series"), "the empyrean")
+
+    def test_core_title_key_matches_across_ampersand_and_spelled_out_and(self):
+        # Regression (live bug): "Muses & Melodies" (cleanly tagged Hush
+        # Note candidate) and "Muses and Melodies - Hush Note #3" (same
+        # book, different source) didn't resolve to the same identity key.
+        ampersand_style = "Muses & Melodies"
+        spelled_out = "Muses and Melodies"
+        self.assertEqual(discovery_engine.bare_title_key(ampersand_style), discovery_engine.bare_title_key(spelled_out))
+
+    def test_infer_series_hint_from_title_text_reads_dash_series_suffix(self):
+        self.assertEqual(
+            discovery_engine.infer_series_hint_from_title_text("A Little Too Close - Madigan Mountain #2"),
+            "Madigan Mountain",
+        )
+        self.assertEqual(discovery_engine.infer_series_hint_from_title_text("Ignite - Legacy #0.7"), "Legacy")
+
+    def test_infer_series_hint_from_title_text_ignores_a_plain_hyphenated_title(self):
+        self.assertIsNone(discovery_engine.infer_series_hint_from_title_text("Self-Made Superhero"))
+
+    def test_clean_display_title_strips_the_dash_series_suffix(self):
+        self.assertEqual(
+            discovery_engine.clean_display_title("A Little Too Close - Madigan Mountain #2"),
+            "A Little Too Close",
+        )
+
+    def test_clean_display_title_leaves_an_ordinary_title_unchanged(self):
+        self.assertEqual(discovery_engine.clean_display_title("Fourth Wing"), "Fourth Wing")
+
     def test_infer_number_from_title_recognizes_common_patterns(self):
         self.assertEqual(discovery_engine.infer_number_from_title("Cherry Blossom Girls Book 7"), 7)
         self.assertEqual(discovery_engine.infer_number_from_title("Cherry Blossom Girls Volume 7"), 7)
@@ -488,6 +549,40 @@ class DiscoverCandidatesForAuthorTest(unittest.TestCase):
         # series_name argument (second positional) is None -- no single
         # target series for an author-wide search.
         self.assertIsNone(mock_web_search.call_args[0][1])
+
+    def test_recovers_series_hint_from_a_dash_suffixed_title_with_no_structured_field(self):
+        # Regression (live bug): a raw candidate whose *only* series
+        # information is baked into the title text as "<Title> - <Series>
+        # #<N>" (a real Hardcover listing format, not just a hypothetical)
+        # had no structured series_name_hint field at all, so it fell all
+        # the way through to "standalone" in the response even when it was
+        # the only listing found for an entire series (e.g. Rebecca
+        # Yarros's "Legacy" novellas never formed a series group at all).
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[
+                {
+                    "source": "hardcover",
+                    "source_id": "hc-1",
+                    "title": "Ignite - Legacy #0.7",
+                    "authors": ["Rebecca Yarros"],
+                    "published_date": "2014-01-01",
+                    "isbn13": None,
+                    "source_url": None,
+                    "language": "",
+                    "series_number_hint": None,
+                    "upcoming_hint": False,
+                    "series_name_hint": None,
+                }
+            ],
+        ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ):
+            result = discovery_engine.discover_candidates_for_author("Rebecca Yarros")
+
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["candidates"][0]["series_name_hint"], "Legacy")
 
     def test_excludes_already_owned_titles_across_the_authors_whole_library(self):
         with patch.object(
@@ -2477,6 +2572,108 @@ class DiscoverMoreByAuthorAlternateBrandingRegressionTest(unittest.TestCase):
         # independently of this one-off search.
         self.assertTrue(candidate["matched_series_is_finished"])
         self.assertEqual(candidate["matched_series_total_books"], 4)
+
+
+class DiscoverMoreByAuthorDashSeriesSuffixRegressionTest(unittest.TestCase):
+    """Regression coverage for a live bug: "More by this author" for
+    Rebecca Yarros found several real new series (good), but every one of
+    those same books *also* showed up a second time under "New standalone
+    books" with a "<Title> - <Series> #<N>" suffix baked into the title
+    (e.g. "A Little Too Close - Madigan Mountain #2" duplicating the
+    already-grouped "A Little Too Close"), and an entire series ("Legacy")
+    never formed a group at all because none of its listings had anything
+    but this dash-suffixed format.
+    """
+
+    def setUp(self):
+        self.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=self.engine)
+        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+        self.db = self.SessionLocal()
+
+    def tearDown(self):
+        self.db.close()
+        Base.metadata.drop_all(bind=self.engine)
+        self.engine.dispose()
+
+    def _mock_discovery(self, candidates):
+        return patch("discovery_engine.discover_candidates_for_author", return_value={
+            "candidates": candidates, "provider_failures": [], "all_providers_failed": False
+        })
+
+    def test_dash_suffixed_duplicate_is_merged_into_the_cleanly_tagged_candidate(self):
+        # discover_candidates_for_author (mocked here) already runs its own
+        # _filter_and_merge internally, which is what actually resolves
+        # series_name_hint via infer_series_hint_from_title_text for a
+        # candidate whose only listing uses the dash-suffix format --
+        # covered directly in DiscoverCandidatesForAuthorTest. This second
+        # candidate's hint is populated here to mirror that real output,
+        # since this test's job is the *dedup/grouping* layer downstream of
+        # it, not re-proving the hint inference itself.
+        candidates = [
+            {
+                "source": "google_books",
+                "title": "A Little Too Close",
+                "authors": ["Rebecca Yarros"],
+                "published_date": "2022-10-11",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": 2,
+                "upcoming_hint": False,
+                "series_name_hint": "Madigan Mountain",
+            },
+            {
+                "source": "hardcover",
+                "title": "A Little Too Close - Madigan Mountain #2",
+                "authors": ["Rebecca Yarros"],
+                "published_date": None,
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": None,
+                "upcoming_hint": False,
+                "series_name_hint": "Madigan Mountain",
+            },
+        ]
+        with self._mock_discovery(candidates):
+            result = discover_more_by_author(self.db, "Rebecca Yarros")
+
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["title"], "A Little Too Close")
+        self.assertEqual(candidate["series_name"], "Madigan Mountain")
+
+    def test_a_series_with_only_dash_suffixed_listings_still_forms_its_own_group(self):
+        candidates = [
+            {
+                "source": "hardcover",
+                "title": "Reason to Believe - Legacy #1",
+                "authors": ["Rebecca Yarros"],
+                "published_date": "2013-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": None,
+                "upcoming_hint": False,
+                "series_name_hint": "Legacy",
+            },
+            {
+                "source": "hardcover",
+                "title": "Ignite - Legacy #0.7",
+                "authors": ["Rebecca Yarros"],
+                "published_date": "2014-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": None,
+                "upcoming_hint": False,
+                "series_name_hint": "Legacy",
+            },
+        ]
+        with self._mock_discovery(candidates):
+            result = discover_more_by_author(self.db, "Rebecca Yarros")
+
+        self.assertEqual(len(result["candidates"]), 2)
+        self.assertTrue(all(c["series_name"] == "Legacy" for c in result["candidates"]))
+        titles = {c["title"] for c in result["candidates"]}
+        self.assertEqual(titles, {"Reason to Believe", "Ignite"})
 
 
 class ManualDeleteRecalculationTest(unittest.TestCase):
