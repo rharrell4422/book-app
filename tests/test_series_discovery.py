@@ -202,6 +202,27 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
         self.assertFalse(discovery_engine.looks_like_placeholder_date(None))
         self.assertFalse(discovery_engine.looks_like_placeholder_date(""))
 
+    def test_infer_series_hint_from_title_text_reads_universe_novella_pattern(self):
+        # Regression (live bug): Google Books/OpenLibrary never carry a
+        # structured series field, so "Fae, Flames & Fedoras: A Changeling
+        # Blood Universe Novella" showed up as an unlabeled standalone even
+        # though its own subtitle names the series it belongs to.
+        self.assertEqual(
+            discovery_engine.infer_series_hint_from_title_text(
+                "Fae, Flames & Fedoras: A Changeling Blood Universe Novella"
+            ),
+            "Changeling Blood",
+        )
+        self.assertEqual(
+            discovery_engine.infer_series_hint_from_title_text("Some Story: A Duchy of Terra Series Short Story"),
+            "Duchy of Terra",
+        )
+
+    def test_infer_series_hint_from_title_text_returns_none_when_no_marker(self):
+        self.assertIsNone(discovery_engine.infer_series_hint_from_title_text("Refuge"))
+        self.assertIsNone(discovery_engine.infer_series_hint_from_title_text("Exile: A Space Opera"))
+        self.assertIsNone(discovery_engine.infer_series_hint_from_title_text(None))
+
 
 class DiscoverCandidatesForSeriesTest(unittest.TestCase):
     """Tests discovery_engine.discover_candidates_for_series's merge/priority
@@ -455,6 +476,114 @@ class DiscoverCandidatesForAuthorTest(unittest.TestCase):
             result = discovery_engine.discover_candidates_for_author("Rebecca Yarros")
 
         self.assertEqual(result["candidates"], [])
+
+
+def _hardcover_result(title, series_name_hint=None, series_number_hint=None):
+    return {
+        "source": "hardcover",
+        "source_id": f"hc-{title}",
+        "title": title,
+        "authors": ["Glynn Stewart"],
+        "published_date": "2019-01-30",
+        "isbn13": None,
+        "source_url": None,
+        "language": "",
+        "series_number_hint": series_number_hint,
+        "upcoming_hint": False,
+        "series_name_hint": series_name_hint,
+    }
+
+
+class EnrichMissingSeriesHintsTest(unittest.TestCase):
+    """Regression coverage for a live bug: an author-wide bibliography
+    search on Hardcover for "Glynn Stewart" returned "Refuge", "Crusade" and
+    "Ashen Stars" with no series info at all, even though Hardcover's own
+    per-title search ("Refuge Glynn Stewart") correctly identifies it as
+    Exile #2 -- the bibliography-wide query and a title-specific query hit
+    different index paths on Hardcover's side. discover_candidates_for_author
+    should recover that missing series data with a supplemental per-title
+    lookup, only when Hardcover is actually configured.
+    """
+
+    def setUp(self):
+        self._env_patch = patch.dict(
+            os.environ,
+            {"HARDCOVER_API_KEY": "test-key", "BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""},
+        )
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+
+    def test_recovers_series_name_via_per_title_lookup(self):
+        bibliography_results = [_hardcover_result("Refuge")]
+
+        def fake_fetch_hardcover(query, max_results=25):
+            if query == "Glynn Stewart":
+                return bibliography_results
+            self.assertEqual(query, "Refuge Glynn Stewart")
+            return [_hardcover_result("Refuge", series_name_hint="Exile", series_number_hint=2)]
+
+        with patch.object(discovery_engine, "_fetch_hardcover", side_effect=fake_fetch_hardcover), patch.object(
+            discovery_engine, "_fetch_google_books", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]):
+            result = discovery_engine.discover_candidates_for_author("Glynn Stewart")
+
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["series_name_hint"], "Exile")
+        self.assertEqual(candidate["series_number_hint"], 2)
+
+    def test_drops_bare_series_name_title_revealed_by_sibling_lookup(self):
+        # "ONSET" is never itself a book -- only "To Serve and Protect",
+        # "My Enemy's Enemy", etc. are. A per-title lookup for "ONSET Glynn
+        # Stewart" surfaces those siblings, all tagged with series "ONSET",
+        # which is strong evidence the candidate itself is a bare series
+        # name/stub listing that should be dropped, not shown as a new book.
+        bibliography_results = [_hardcover_result("ONSET")]
+
+        def fake_fetch_hardcover(query, max_results=25):
+            if query == "Glynn Stewart":
+                return bibliography_results
+            self.assertEqual(query, "ONSET Glynn Stewart")
+            return [
+                _hardcover_result("To Serve and Protect", series_name_hint="ONSET", series_number_hint=1),
+                _hardcover_result("My Enemy's Enemy", series_name_hint="ONSET", series_number_hint=2),
+                _hardcover_result("Blood of the Innocent", series_name_hint="ONSET", series_number_hint=3),
+            ]
+
+        with patch.object(discovery_engine, "_fetch_hardcover", side_effect=fake_fetch_hardcover), patch.object(
+            discovery_engine, "_fetch_google_books", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]):
+            result = discovery_engine.discover_candidates_for_author("Glynn Stewart")
+
+        self.assertEqual(result["candidates"], [])
+
+    def test_does_not_run_without_hardcover_api_key_configured(self):
+        with patch.dict(os.environ, {"HARDCOVER_API_KEY": ""}):
+            bibliography_results = [_hardcover_result("Refuge")]
+            with patch.object(
+                discovery_engine, "_fetch_hardcover", return_value=bibliography_results
+            ) as mock_hardcover, patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
+                discovery_engine, "_fetch_openlibrary", return_value=[]
+            ):
+                result = discovery_engine.discover_candidates_for_author("Glynn Stewart")
+
+        # Only the one bibliography call -- no supplemental per-title lookup.
+        mock_hardcover.assert_called_once_with("Glynn Stewart")
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertIsNone(result["candidates"][0]["series_name_hint"])
+
+    def test_leaves_already_tagged_candidates_alone(self):
+        bibliography_results = [_hardcover_result("Exile", series_name_hint="Exile", series_number_hint=1)]
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=bibliography_results) as mock_hardcover, patch.object(
+            discovery_engine, "_fetch_google_books", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]):
+            result = discovery_engine.discover_candidates_for_author("Glynn Stewart")
+
+        # No supplemental lookup needed -- already has a series name.
+        mock_hardcover.assert_called_once_with("Glynn Stewart")
+        self.assertEqual(result["candidates"][0]["series_name_hint"], "Exile")
 
 
 class HardcoverProviderTest(unittest.TestCase):

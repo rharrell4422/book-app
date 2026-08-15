@@ -216,6 +216,26 @@ def looks_like_series_index_entry(
     return bool(stripped) and stripped == series_norm
 
 
+# Catches the common indie-publishing convention of naming a spin-off
+# novella/short story after its parent series right in the subtitle (e.g.
+# "Fae, Flames & Fedoras: A Changeling Blood Universe Novella") -- Google
+# Books/OpenLibrary never populate a structured series field, so without
+# this the book shows up as a bare standalone with no way to group it with
+# the rest of its series.
+_TITLE_SERIES_MARKER_PATTERN = re.compile(
+    r":\s*a\s+(.+?)\s+(?:universe|series|saga|world)\s+(?:novella|short story|story|book|companion)\b",
+    re.IGNORECASE,
+)
+
+
+def infer_series_hint_from_title_text(title: str) -> str | None:
+    match = _TITLE_SERIES_MARKER_PATTERN.search(str(title or ""))
+    if not match:
+        return None
+    guess = re.sub(r"\s+", " ", match.group(1)).strip()
+    return guess or None
+
+
 _PLACEHOLDER_DATE_PATTERN = re.compile(r"^\d{4}-01-01$")
 
 
@@ -859,13 +879,18 @@ def _filter_and_merge(
         has_number_hint = bool(raw.get("series_number_hint")) or bool(
             infer_number_from_title(title, series_name)
         )
+        # Google Books/OpenLibrary never carry a structured series field, so
+        # for candidates missing one, fall back to a narrow title-text
+        # pattern (see infer_series_hint_from_title_text) before giving up.
+        series_name_hint = raw.get("series_name_hint") or infer_series_hint_from_title_text(title)
         # discover_candidates_for_series always knows the one series it's
         # checking, so that fixed name is authoritative here. Author-wide
         # discovery has no such fixed name (series_name is None) and instead
         # falls back to each individual candidate's own guessed series name
-        # (from Hardcover's index or the web-search LLM pass) so the same
-        # stub-listing check still applies per-candidate.
-        effective_series_name = series_name or raw.get("series_name_hint")
+        # (from Hardcover's index, the web-search LLM pass, or the title-text
+        # fallback above) so the same stub-listing check still applies
+        # per-candidate.
+        effective_series_name = series_name or series_name_hint
         if looks_like_series_index_entry(title, effective_series_name, isbn13, has_number_hint):
             continue
 
@@ -877,7 +902,7 @@ def _filter_and_merge(
         if dedupe_key in seen_keys:
             continue
         seen_keys.add(dedupe_key)
-        merged.append({**raw, "confidence": confidence})
+        merged.append({**raw, "confidence": confidence, "series_name_hint": series_name_hint})
     return merged
 
 
@@ -1041,6 +1066,84 @@ def discover_candidates_for_series(
     }
 
 
+# Bounds the number of extra per-candidate lookups _enrich_missing_series_hints
+# performs -- keeps a "More by this author" run from ballooning into dozens
+# of sequential API calls for a very prolific author.
+MAX_SERIES_HINT_LOOKUPS = 25
+
+
+def _enrich_missing_series_hints(candidates: list[dict], author: str) -> list[dict]:
+    """Recover series membership for candidates the initial author-wide
+    catalog sweep couldn't tag with a series name.
+
+    Live regression: an author-bibliography search on Hardcover for "Glynn
+    Stewart" returned "Refuge", "Crusade" and "Ashen Stars" with no series
+    info at all, even though Hardcover's own per-title search --
+    "Refuge Glynn Stewart" -- correctly identifies it as Exile #2. The
+    author-wide bibliography query and a title-specific query apparently hit
+    different index paths on Hardcover's side; only the latter reliably
+    carries series data for every title. Re-querying per-title is more
+    expensive, so it's only done for candidates that still have nothing
+    after the cheap author-wide pass, and capped (MAX_SERIES_HINT_LOOKUPS).
+
+    Also recovers the inverse case: a title that IS the bare series name and
+    was never itself published as a book (e.g. "ONSET" -- the real books are
+    "To Serve and Protect", "My Enemy's Enemy", etc.). If every sibling
+    result from the per-title search shares one series name that matches the
+    candidate's own title, the candidate is tagged with that series name so
+    looks_like_series_index_entry can drop it downstream as a stub listing.
+    """
+    query_author = primary_author_name(author)
+    enriched: list[dict] = []
+    lookups_used = 0
+    for candidate in candidates:
+        if candidate.get("series_name_hint") or lookups_used >= MAX_SERIES_HINT_LOOKUPS:
+            enriched.append(candidate)
+            continue
+        title = str(candidate.get("title") or "").strip()
+        if not title:
+            enriched.append(candidate)
+            continue
+
+        lookups_used += 1
+        try:
+            siblings = _fetch_hardcover(f"{title} {query_author}", max_results=8)
+        except Exception:
+            enriched.append(candidate)
+            continue
+
+        target_key = bare_title_key(title)
+        self_match = next(
+            (
+                r
+                for r in siblings
+                if bare_title_key(r.get("title")) == target_key and r.get("series_name_hint")
+            ),
+            None,
+        )
+        if self_match:
+            enriched.append(
+                {
+                    **candidate,
+                    "series_name_hint": self_match.get("series_name_hint"),
+                    "series_number_hint": candidate.get("series_number_hint")
+                    or self_match.get("series_number_hint"),
+                }
+            )
+            continue
+
+        candidate_as_series = normalize_series_branding_name(title) or normalize_text(title)
+        sibling_series_names = {
+            normalize_text(r.get("series_name_hint")) for r in siblings if r.get("series_name_hint")
+        }
+        if siblings and candidate_as_series and sibling_series_names == {candidate_as_series}:
+            enriched.append({**candidate, "series_name_hint": title})
+            continue
+
+        enriched.append(candidate)
+    return enriched
+
+
 def discover_candidates_for_author(
     author: str,
     *,
@@ -1108,6 +1211,28 @@ def discover_candidates_for_author(
         exclude_title_keys,
         confidence="author_wide",
     )
+
+    # Only worth the extra per-title lookups when Hardcover is actually
+    # configured -- without a key it would just be a guaranteed-empty call
+    # per candidate.
+    if os.environ.get("HARDCOVER_API_KEY", "").strip():
+        if progress_callback:
+            progress_callback({"current_pass": "Filling in series details"})
+        combined = _enrich_missing_series_hints(combined, author)
+        # Enrichment can newly reveal that a candidate IS the bare series
+        # name itself (the "ONSET" case) -- re-run the same stub-listing
+        # check the initial merge already applies so those get dropped too.
+        combined = [
+            c
+            for c in combined
+            if not looks_like_series_index_entry(
+                str(c.get("title") or ""),
+                c.get("series_name_hint"),
+                str(c.get("isbn13") or "").strip(),
+                bool(c.get("series_number_hint"))
+                or bool(infer_number_from_title(str(c.get("title") or ""), c.get("series_name_hint"))),
+            )
+        ]
 
     all_providers_failed = bool(provider_failures) and not any_provider_succeeded
 
