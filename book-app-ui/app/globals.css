@@ -133,7 +133,7 @@
   --animate-float: float 7s ease-in-out infinite;
   --animate-spine-pulse: spine-pulse 4s ease-in-out infinite;
   --animate-drift: drift 18s ease-in-out infinite;
-  --animate-wave-bob: wave-bob 5s ease-in-out infinite;
+  --animate-wave-bob: wave-bob 6s ease-in-out infinite;
 }
 
 @keyframes float {
@@ -148,15 +148,20 @@
   }
 }
 
+/* Opacity-only (no longer also animates `filter: brightness()`): book-spine
+   bars now carry a static drop-shadow glow via inline style (see
+   book-spines.tsx), which also lives on the `filter` property. A running
+   CSS animation takes over any property it declares for its entire
+   duration, so if this keyframe still set `filter`, it would silently
+   overwrite/discard that static drop-shadow every cycle instead of
+   combining with it. */
 @keyframes spine-pulse {
   0%,
   100% {
-    opacity: 0.8;
-    filter: brightness(1);
+    opacity: 0.75;
   }
   50% {
     opacity: 1;
-    filter: brightness(1.25);
   }
 }
 

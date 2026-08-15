@@ -81,48 +81,58 @@ export function LandingPage() {
 
       <Particles />
 
-      <div className="relative mx-auto flex max-w-5xl flex-col gap-16 px-4 py-16 sm:py-24">
+      {/* Section spacing is intentionally tight throughout this wrapper --
+          the curved wave centerpiece plus a full value-prop row and 7-item
+          feature grid is a lot of vertical content, and the goal is fitting
+          all of it on one screen without cutting anything (see the "Fitting
+          everything on one screen" section of the redesign plan). */}
+      <div className="relative mx-auto flex max-w-5xl flex-col gap-8 px-4 py-8 sm:gap-10 sm:py-10">
         {/* Hero */}
-        <section className="flex flex-col items-center gap-4 text-center">
-          <h1 className="animate-in fade-in slide-in-from-bottom-4 duration-700 text-5xl font-semibold tracking-tight sm:text-6xl">
+        <section className="flex flex-col items-center gap-2 text-center">
+          <h1 className="animate-in fade-in slide-in-from-bottom-4 duration-700 text-4xl font-semibold tracking-tight sm:text-5xl">
             ReaderPro
           </h1>
-          <p className="animate-in fade-in slide-in-from-bottom-4 delay-150 duration-700 text-lg font-medium text-blue-100 sm:text-xl">
+          <p className="animate-in fade-in slide-in-from-bottom-4 delay-150 duration-700 text-base font-medium text-blue-100 sm:text-lg">
             Your Personal Book Intelligence Engine
           </p>
-          <p className="animate-in fade-in slide-in-from-bottom-4 delay-300 max-w-md text-sm text-slate-300 duration-700 sm:text-base">
+          <p className="animate-in fade-in slide-in-from-bottom-4 delay-300 max-w-md text-xs text-slate-300 duration-700 sm:text-sm">
             Track series. Discover new releases. Stay ahead.
           </p>
-          <BookSpines className="animate-in fade-in delay-500 mt-8 h-32 w-full max-w-md duration-1000 sm:h-44" />
+          <BookSpines className="animate-in fade-in delay-500 mt-4 h-32 w-full max-w-md duration-1000 sm:h-44" />
         </section>
 
-        {/* Value proposition */}
-        <section className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        {/* Value proposition -- a single compact row of icon+text chips
+            rather than three full padded cards, so all three messages stay
+            without costing a whole extra "section" worth of height. */}
+        <section className="flex flex-wrap items-center justify-center gap-3">
           {VALUE_PROPS.map(({ icon: Icon, text }, index) => (
             <div
               key={text}
-              className={`animate-in fade-in slide-in-from-bottom-4 ${STAGGER_DELAYS[index]} group flex flex-col items-center gap-2 rounded-xl border border-white/10 bg-black/30 px-5 py-5 text-center text-sm font-medium backdrop-blur-sm duration-700 transition-[transform,background-color,border-color,box-shadow] hover:-translate-y-1 hover:border-white/20 hover:bg-white/10 hover:shadow-[0_0_30px_-5px_rgba(34,211,238,0.4)]`}
+              className={`animate-in fade-in slide-in-from-bottom-4 ${STAGGER_DELAYS[index]} group flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-4 py-2 text-xs font-medium backdrop-blur-sm duration-700 transition-[transform,background-color,border-color,box-shadow] hover:-translate-y-0.5 hover:border-white/20 hover:bg-white/10 hover:shadow-[0_0_20px_-5px_rgba(34,211,238,0.4)] sm:text-sm`}
             >
-              <Icon className="size-5 text-cyan-300 transition-transform group-hover:scale-110" />
+              <Icon className="size-4 shrink-0 text-cyan-300 transition-transform group-hover:scale-110" />
               {text}
             </div>
           ))}
         </section>
 
-        {/* Feature highlights */}
-        <section className="flex flex-col gap-6">
-          <h2 className="text-center text-xl font-semibold">What ReaderPro Does</h2>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {/* Feature highlights -- 4 columns from `sm` up (rather than
+            starting at `lg`) so the 7 cards resolve to 2 rows instead of 3,
+            with tighter padding/text than a standalone feature showcase
+            would use. */}
+        <section className="flex flex-col gap-3">
+          <h2 className="text-center text-base font-semibold">What ReaderPro Does</h2>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             {FEATURES.map(({ icon: Icon, label, description }, index) => (
               <div
                 key={label}
-                className={`animate-in fade-in slide-in-from-bottom-4 ${STAGGER_DELAYS[index % STAGGER_DELAYS.length]} group flex flex-col items-center gap-2 rounded-xl border border-white/10 bg-black/30 px-4 py-6 text-center backdrop-blur-sm duration-700 transition-[transform,background-color,border-color,box-shadow] hover:-translate-y-1 hover:border-white/20 hover:bg-white/10 hover:shadow-[0_0_30px_-5px_rgba(96,165,250,0.4)]`}
+                className={`animate-in fade-in slide-in-from-bottom-4 ${STAGGER_DELAYS[index % STAGGER_DELAYS.length]} group flex flex-col items-center gap-1.5 rounded-xl border border-white/10 bg-black/30 px-3 py-3 text-center backdrop-blur-sm duration-700 transition-[transform,background-color,border-color,box-shadow] hover:-translate-y-1 hover:border-white/20 hover:bg-white/10 hover:shadow-[0_0_30px_-5px_rgba(96,165,250,0.4)]`}
               >
-                <span className="flex size-11 items-center justify-center rounded-full bg-white/10 ring-1 ring-white/15 transition-colors group-hover:bg-white/15">
-                  <Icon className="size-5 text-blue-300 transition-transform group-hover:scale-110" />
+                <span className="flex size-9 items-center justify-center rounded-full bg-white/10 ring-1 ring-white/15 transition-colors group-hover:bg-white/15">
+                  <Icon className="size-4 text-blue-300 transition-transform group-hover:scale-110" />
                 </span>
-                <p className="text-sm font-semibold text-slate-100">{label}</p>
-                <p className="text-xs text-slate-300">{description}</p>
+                <p className="text-xs font-semibold text-slate-100 sm:text-sm">{label}</p>
+                <p className="text-[11px] leading-snug text-slate-300">{description}</p>
               </div>
             ))}
           </div>
@@ -134,12 +144,12 @@ export function LandingPage() {
             (rather than the previous colorful gradient) to match the
             concept image, with a colored glow on hover instead of a
             gradient shift. */}
-        <section className="flex flex-col items-center pb-4">
+        <section className="flex flex-col items-center">
           <Link href="/books">
             <Button
               type="button"
               size="lg"
-              className="h-12 rounded-full border-0 bg-white px-10 text-base font-semibold text-slate-900 shadow-[0_0_25px_-5px_rgba(255,255,255,0.5)] transition-all hover:-translate-y-0.5 hover:bg-white hover:shadow-[0_0_45px_-5px_rgba(34,211,238,0.9)]"
+              className="h-11 rounded-full border-0 bg-white px-10 text-base font-semibold text-slate-900 shadow-[0_0_25px_-5px_rgba(255,255,255,0.5)] transition-all hover:-translate-y-0.5 hover:bg-white hover:shadow-[0_0_45px_-5px_rgba(34,211,238,0.9)]"
             >
               Enter Your Library
             </Button>
