@@ -693,8 +693,14 @@ def discover_more_by_author(db: Session, author: str) -> dict:
     # Lets the caller offer "add to this existing series" instead of
     # silently creating a new one from the LLM's guessed series name -- this
     # function only reports the match, it never creates or links anything.
+    # Keyed on the branding-normalized name (strips generic words like
+    # "Universe"/"Series") rather than exact text, since catalogs commonly
+    # tack those onto a series name for one listing but not another
+    # (regression: a candidate guessed series "Duchy of Terra Universe" for
+    # a book already owned under the tracked series "Duchy of Terra" -- an
+    # exact-text lookup missed that and reported it "not yet tracked").
     tracked_series_by_name = {
-        _normalize_identity_text(series.name): series
+        discovery_engine.normalize_series_branding_name(series.name): series
         for series in db.query(Series).filter(Series.author.isnot(None)).all()
         if _authors_match_exact(author, series.author)
     }
@@ -713,7 +719,9 @@ def discover_more_by_author(db: Session, author: str) -> dict:
 
         series_name_guess = str(raw.get("series_name_hint") or "").strip() or None
         matched_series = (
-            tracked_series_by_name.get(_normalize_identity_text(series_name_guess)) if series_name_guess else None
+            tracked_series_by_name.get(discovery_engine.normalize_series_branding_name(series_name_guess))
+            if series_name_guess
+            else None
         )
         inferred_number = raw.get("series_number_hint") or discovery_engine.infer_number_from_title(
             title, series_name_guess
@@ -723,12 +731,29 @@ def discover_more_by_author(db: Session, author: str) -> dict:
         already_owned = bool(isbn13 and isbn13 in known_isbns) or bool(title_key and title_key in known_title_keys)
         if not already_owned and matched_series is not None and normalized_number:
             already_owned = normalized_number in owned_numbers_by_series_id.get(matched_series.id, set())
-        if not already_owned and not normalized_number and bare_key and bare_key in known_bare_titles:
+        # Bare-title matching is number-agnostic by construction (it's the
+        # title text before any parenthetical/colon suffix), so it isn't
+        # restricted to only-when-no-number-is-known -- the safety net
+        # against false collisions is the uniqueness requirement on
+        # known_bare_titles, not the presence/absence of a number
+        # (regression: candidates carrying a number tied to an unmatched
+        # alternate-branding series listing -- e.g. Glynn Stewart's
+        # "Starship's Mage: UnArcana Rebellion" re-release of already-owned
+        # main-series books -- have a number, so this check used to be
+        # skipped entirely alongside the per-series check above, letting
+        # several already-owned books through as "new").
+        if not already_owned and bare_key and bare_key in known_bare_titles:
             already_owned = True
         if already_owned:
             continue
 
         parsed_date = discovery_engine.parse_flexible_date(raw.get("published_date"))
+        release_date_iso = parsed_date.isoformat() if parsed_date else None
+        if release_date_iso and discovery_engine.looks_like_placeholder_date(release_date_iso):
+            # A literal Jan 1st is almost always a "year-only" stand-in, not
+            # a confirmed exact date -- keep the candidate, just don't show
+            # a fabricated day/month next to genuinely-dated releases.
+            release_date_iso = None
         is_upcoming = discovery_engine.classify_upcoming(parsed_date, raw.get("upcoming_hint"))
 
         candidate_entry = {
@@ -736,9 +761,15 @@ def discover_more_by_author(db: Session, author: str) -> dict:
             "author": author,
             "series_name": series_name_guess,
             "matched_series_id": matched_series.id if matched_series else None,
+            # The canonical tracked name, distinct from series_name (the raw
+            # per-candidate guess, e.g. "Duchy of Terra Universe") -- lets
+            # the caller show "you already track <this>" using the name you
+            # actually gave the series, not whatever branding a given
+            # catalog listing happened to use.
+            "matched_series_name": matched_series.name if matched_series else None,
             "series_number": inferred_number,
             "status": "upcoming" if is_upcoming else "available",
-            "release_date": parsed_date.isoformat() if parsed_date else None,
+            "release_date": release_date_iso,
             "source_url": raw.get("source_url"),
             "isbn13": isbn13 or None,
             "provider": raw.get("source"),

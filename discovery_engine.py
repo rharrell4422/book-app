@@ -165,10 +165,29 @@ def looks_like_placeholder_title(title: str) -> bool:
 # Generic, non-book suffixes publishers/cataloguers tack onto a bare series
 # name for a series-level listing (an aggregation page, a boxed-set/imprint
 # entity, an author-page grouping, etc.) rather than any single book --
-# stripped before comparing a candidate's title to the series name so
-# "<series> Universe"/"<series> Collection"/etc. are caught the same way
-# "<series> Series" already is.
+# stripped before comparing a candidate's title (or a candidate's guessed
+# series name) to a known series name so "<series> Universe"/"<series>
+# Collection"/etc. are treated the same as the bare "<series>" name.
 _SERIES_INDEX_SUFFIX_PATTERN = re.compile(r"\b(?:series|universe|collection|world|saga)\b")
+
+
+def normalize_series_branding_name(name: str | None) -> str:
+    """Strip generic branding words a cataloguer tacks onto a series name
+    ("Universe", "Series", "Collection", ...) so two listings for the same
+    tracked series don't fail to match over a single extra word (regression:
+    an author-wide discovery pass guessed series name "Duchy of Terra
+    Universe" for a book already owned under the tracked series "Duchy of
+    Terra", and the exact-text comparison used elsewhere treated them as
+    two different series, mislabeling an owned book "not yet tracked").
+
+    Deliberately narrow: only strips *generic* words, never a distinctive
+    proper-noun qualifier. "Starship's Mage: Red Falcon" and "Starship's
+    Mage: UnArcana Rebellion" must NOT collapse to "Starship's Mage" here --
+    those are real, distinct sub-series/rebranded editions, and conflating
+    them was the exact cause of an earlier cross-series contamination bug.
+    """
+    stripped = _SERIES_INDEX_SUFFIX_PATTERN.sub("", normalize_text(name)).strip()
+    return re.sub(r"\s+", " ", stripped).strip()
 
 
 def looks_like_series_index_entry(
@@ -193,9 +212,23 @@ def looks_like_series_index_entry(
         return False
     if title_norm == series_norm:
         return True
-    stripped = _SERIES_INDEX_SUFFIX_PATTERN.sub("", title_norm).strip()
-    stripped = re.sub(r"\s+", " ", stripped).strip()
+    stripped = normalize_series_branding_name(title)
     return bool(stripped) and stripped == series_norm
+
+
+_PLACEHOLDER_DATE_PATTERN = re.compile(r"^\d{4}-01-01$")
+
+
+def looks_like_placeholder_date(iso_date: str | None) -> bool:
+    """A literal January 1st is the common "we only know the year" stand-in
+    several catalogs use in place of a real, precise publication date --
+    not evidence the book actually released on that exact day (live
+    regression: an author-wide discovery pass showed several already-listed
+    standalone titles with dates like 1/1/1900 and 1/1/2017 -- including the
+    same 1/1/2017 on three unrelated titles -- displayed with the same
+    confidence as a genuinely-dated release).
+    """
+    return bool(_PLACEHOLDER_DATE_PATTERN.match(str(iso_date or "").strip()))
 
 
 def _log(message: str) -> None:

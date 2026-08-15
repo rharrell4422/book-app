@@ -164,6 +164,44 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
             )
         )
 
+    def test_normalize_series_branding_name_strips_generic_words(self):
+        # Regression (live bug): an author-wide discovery pass guessed
+        # series name "Duchy of Terra Universe" for a book already owned
+        # under the tracked series "Duchy of Terra" -- an exact-text
+        # comparison missed that single extra word and reported the book
+        # "not yet tracked" even though it was.
+        self.assertEqual(discovery_engine.normalize_series_branding_name("Duchy of Terra Universe"), "duchy of terra")
+        self.assertEqual(discovery_engine.normalize_series_branding_name("Duchy of Terra"), "duchy of terra")
+        self.assertEqual(discovery_engine.normalize_series_branding_name("The Empyrean Series"), "the empyrean")
+        self.assertEqual(discovery_engine.normalize_series_branding_name("The Empyrean Collection"), "the empyrean")
+
+    def test_normalize_series_branding_name_does_not_strip_distinctive_qualifiers(self):
+        # These are real, distinct sub-series/rebranded editions, not a
+        # cataloguer's generic suffix -- collapsing them to their parent
+        # series name would reintroduce the exact cross-series
+        # contamination bug fixed for "Starship's Mage: Red Falcon".
+        self.assertNotEqual(
+            discovery_engine.normalize_series_branding_name("Starship's Mage: Red Falcon"),
+            discovery_engine.normalize_series_branding_name("Starship's Mage"),
+        )
+        self.assertNotEqual(
+            discovery_engine.normalize_series_branding_name("Starship's Mage: UnArcana Rebellion"),
+            discovery_engine.normalize_series_branding_name("Starship's Mage"),
+        )
+
+    def test_looks_like_placeholder_date_flags_literal_january_first(self):
+        # Regression (live bug): an author-wide discovery pass showed
+        # several standalone titles with dates like 1/1/1900 and 1/1/2017
+        # (the same 1/1/2017 on three unrelated titles) -- a common
+        # "year-only precision" stand-in some catalogs use, displayed with
+        # the same confidence as a genuinely-dated release.
+        self.assertTrue(discovery_engine.looks_like_placeholder_date("2017-01-01"))
+        self.assertTrue(discovery_engine.looks_like_placeholder_date("1900-01-01"))
+        self.assertFalse(discovery_engine.looks_like_placeholder_date("2017-01-02"))
+        self.assertFalse(discovery_engine.looks_like_placeholder_date("2024-03-12"))
+        self.assertFalse(discovery_engine.looks_like_placeholder_date(None))
+        self.assertFalse(discovery_engine.looks_like_placeholder_date(""))
+
 
 class DiscoverCandidatesForSeriesTest(unittest.TestCase):
     """Tests discovery_engine.discover_candidates_for_series's merge/priority
@@ -1836,6 +1874,163 @@ class DiscoverMoreByAuthorEditionNoiseRegressionTest(unittest.TestCase):
         self.assertEqual(candidate["matched_series_id"], self.series.id)
         self.assertEqual(candidate["series_number"], 13)
         self.assertEqual(candidate["source_url"], "https://hardcover.app/books/reckoning")
+
+
+class DiscoverMoreByAuthorAlternateBrandingRegressionTest(unittest.TestCase):
+    """Regression coverage for a live bug: "More by this author" for Glynn
+    Stewart (48 owned books across 5 tracked series) still showed several
+    already-owned books as "new"/"not yet tracked" after the edition-noise
+    fix above, because:
+
+    1) A candidate's guessed series name can carry an extra generic word
+       ("Duchy of Terra Universe") that an exact-text comparison against
+       the tracked series name ("Duchy of Terra") fails to match, so
+       matched_series ends up None even though the series is tracked.
+    2) Glynn Stewart re-releases/rebrands some already-owned main-series
+       books under a differently-named product listing (e.g. "Starship's
+       Mage: UnArcana Rebellion" repackaging books 6/8/9 of the main
+       numbered "Starship's Mage" series) -- these candidates carry a
+       number, so the old bare-title fallback (only used when no number was
+       resolved) never ran, and no other check caught them either.
+    """
+
+    def setUp(self):
+        self.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=self.engine)
+        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+        self.db = self.SessionLocal()
+
+        self.duchy = Series(name="Duchy of Terra", author="Glynn Stewart")
+        self.mage = Series(name="Starship's Mage", author="Glynn Stewart")
+        self.db.add_all([self.duchy, self.mage])
+        self.db.commit()
+        self.db.refresh(self.duchy)
+        self.db.refresh(self.mage)
+
+        for number, title in [
+            (1, "The Terran Privateer: (Duchy of Terra Book 1)"),
+            (2, "Duchess of Terra: (Duchy of Terra Book 2)"),
+            (3, "Terra and Imperium: (Duchy of Terra Book 3)"),
+            (4, "Darkness Beyond: (Duchy of Terra Book 4)"),
+        ]:
+            self.db.add(Book(
+                title=title, author="Glynn Stewart", series_id=self.duchy.id, series_order=number,
+                book_number=float(number), record_status="active", is_read=True,
+            ))
+
+        for number, title in [
+            (8, "Mountain of Mars (Starship's Mage Book 8)"),
+            (9, "The Service of Mars (Starship's Mage Book 9)"),
+        ]:
+            self.db.add(Book(
+                title=title, author="Glynn Stewart", series_id=self.mage.id, series_order=number,
+                book_number=float(number), record_status="active", is_read=True,
+            ))
+        self.db.commit()
+
+    def tearDown(self):
+        self.db.close()
+        Base.metadata.drop_all(bind=self.engine)
+        self.engine.dispose()
+
+    def _mock_discovery(self, candidates):
+        return patch("discovery_engine.discover_candidates_for_author", return_value={
+            "candidates": candidates, "provider_failures": [], "all_providers_failed": False
+        })
+
+    def test_owned_book_matches_tracked_series_despite_extra_branding_word(self):
+        candidates = [
+            {
+                "source": "hardcover",
+                "title": "Duchess of Terra",
+                "authors": ["Glynn Stewart"],
+                "published_date": "2017-02-09",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": 2,
+                "upcoming_hint": False,
+                "series_name_hint": "Duchy of Terra Universe",
+            }
+        ]
+        with self._mock_discovery(candidates):
+            result = discover_more_by_author(self.db, "Glynn Stewart")
+
+        self.assertEqual(result["candidates"], [])
+
+    def test_owned_book_republished_under_different_series_branding_is_excluded(self):
+        candidates = [
+            {
+                "source": "hardcover",
+                "title": "Mountain of Mars",
+                "authors": ["Glynn Stewart"],
+                "published_date": "2020-03-17",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": 3,
+                "upcoming_hint": False,
+                "series_name_hint": "Starship's Mage: UnArcana Rebellion",
+            },
+            {
+                "source": "hardcover",
+                "title": "The Service of Mars",
+                "authors": ["Glynn Stewart"],
+                "published_date": "2020-08-25",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": 4,
+                "upcoming_hint": False,
+                "series_name_hint": "Starship's Mage: UnArcana Rebellion",
+            },
+        ]
+        with self._mock_discovery(candidates):
+            result = discover_more_by_author(self.db, "Glynn Stewart")
+
+        self.assertEqual(result["candidates"], [])
+
+    def test_genuinely_new_series_is_not_matched_to_an_unrelated_tracked_series(self):
+        # "Starship's Mage: Red Falcon" must stay distinct from the tracked
+        # "Starship's Mage" -- same guard that prevents the earlier
+        # cross-series contamination bug from reappearing here.
+        candidates = [
+            {
+                "source": "hardcover",
+                "title": "Interstellar Mage",
+                "authors": ["Glynn Stewart"],
+                "published_date": "2021-05-01",
+                "isbn13": "9780000000501",
+                "source_url": None,
+                "series_number_hint": 1,
+                "upcoming_hint": False,
+                "series_name_hint": "Starship's Mage: Red Falcon",
+            }
+        ]
+        with self._mock_discovery(candidates):
+            result = discover_more_by_author(self.db, "Glynn Stewart")
+
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertIsNone(candidate["matched_series_id"])
+        self.assertEqual(candidate["series_name"], "Starship's Mage: Red Falcon")
+
+    def test_placeholder_date_is_cleared_but_candidate_still_surfaces(self):
+        candidates = [
+            {
+                "source": "openlibrary",
+                "title": "Heart of Vengeance",
+                "authors": ["Glynn Stewart"],
+                "published_date": "2017-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": None,
+                "upcoming_hint": False,
+                "series_name_hint": None,
+            }
+        ]
+        with self._mock_discovery(candidates):
+            result = discover_more_by_author(self.db, "Glynn Stewart")
+
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertIsNone(result["candidates"][0]["release_date"])
 
 
 class ManualDeleteRecalculationTest(unittest.TestCase):

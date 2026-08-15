@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ExternalLinkIcon, StarIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -21,6 +21,7 @@ export type AuthorDiscoveryCandidate = {
   author: string;
   series_name: string | null;
   matched_series_id: number | null;
+  matched_series_name: string | null;
   series_number: number | null;
   status: "available" | "upcoming";
   release_date: string | null;
@@ -35,6 +36,50 @@ type AuthorDiscoveryResponse = {
   provider_failures: { provider: string; error: string }[];
   all_providers_failed: boolean;
 };
+
+type CandidateGroup = {
+  key: string;
+  heading: string;
+  candidates: AuthorDiscoveryCandidate[];
+};
+
+/** Splits the flat candidate list into the three buckets a user actually
+ * cares about: books in a series you already track, books in a series you
+ * don't (grouped so a multi-book new series reads as one series, not N
+ * unrelated rows), and books with no series signal at all. */
+function groupCandidates(candidates: AuthorDiscoveryCandidate[]) {
+  const trackedGroups = new Map<string, CandidateGroup>();
+  const newSeriesGroups = new Map<string, CandidateGroup>();
+  const standalone: AuthorDiscoveryCandidate[] = [];
+
+  for (const candidate of candidates) {
+    if (candidate.matched_series_id != null) {
+      const key = String(candidate.matched_series_id);
+      const heading = candidate.matched_series_name || candidate.series_name || "Tracked series";
+      if (!trackedGroups.has(key)) trackedGroups.set(key, { key, heading, candidates: [] });
+      trackedGroups.get(key)!.candidates.push(candidate);
+    } else if (candidate.series_name) {
+      const key = candidate.series_name.trim().toLowerCase();
+      if (!newSeriesGroups.has(key)) newSeriesGroups.set(key, { key, heading: candidate.series_name, candidates: [] });
+      newSeriesGroups.get(key)!.candidates.push(candidate);
+    } else {
+      standalone.push(candidate);
+    }
+  }
+
+  const byNumber = (a: AuthorDiscoveryCandidate, b: AuthorDiscoveryCandidate) =>
+    (a.series_number ?? Number.MAX_SAFE_INTEGER) - (b.series_number ?? Number.MAX_SAFE_INTEGER);
+  const byHeading = (a: CandidateGroup, b: CandidateGroup) => a.heading.localeCompare(b.heading);
+
+  trackedGroups.forEach((group) => group.candidates.sort(byNumber));
+  newSeriesGroups.forEach((group) => group.candidates.sort(byNumber));
+
+  return {
+    tracked: Array.from(trackedGroups.values()).sort(byHeading),
+    newSeries: Array.from(newSeriesGroups.values()).sort(byHeading),
+    standalone: standalone.sort((a, b) => a.title.localeCompare(b.title)),
+  };
+}
 
 /** "More by this author" -- an on-demand, author-wide discovery lookup
  * shared by every book-listing view (All Books, Standalone Books, Series
@@ -59,6 +104,8 @@ export function MoreByAuthorDialog({
   const [candidates, setCandidates] = useState<AuthorDiscoveryCandidate[]>([]);
   const [addedKeys, setAddedKeys] = useState<Set<string>>(new Set());
   const [addingKey, setAddingKey] = useState<string | null>(null);
+
+  const groups = useMemo(() => groupCandidates(candidates), [candidates]);
 
   const candidateKey = (candidate: AuthorDiscoveryCandidate) => `${candidate.title}|${candidate.series_number ?? ""}`;
 
@@ -93,6 +140,85 @@ export function MoreByAuthorDialog({
       runDiscovery();
     }
   }, [open, author, runDiscovery]);
+
+  function renderActions(candidate: AuthorDiscoveryCandidate) {
+    const key = candidateKey(candidate);
+    const alreadyAdded = addedKeys.has(key);
+    return (
+      <div className="flex items-center justify-end gap-1">
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button type="button" variant="ghost" size="icon-xs" title="Check ratings / reviews">
+              <StarIcon />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-48">
+            <div className="flex flex-col gap-1">
+              {getRatingsReviewLinks(candidate.title, candidate.author).map((link) => (
+                <a
+                  key={link.label}
+                  href={link.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center justify-between rounded px-2 py-1 text-sm hover:bg-muted"
+                >
+                  {link.label}
+                  <ExternalLinkIcon className="h-3.5 w-3.5" />
+                </a>
+              ))}
+            </div>
+          </PopoverContent>
+        </Popover>
+        {canEdit ? (
+          <Button
+            type="button"
+            size="sm"
+            variant={alreadyAdded ? "outline" : "default"}
+            disabled={alreadyAdded || addingKey === key}
+            onClick={() => handleAddToLibrary(candidate)}
+          >
+            {alreadyAdded ? "Added" : addingKey === key ? "Adding…" : "Add to Library"}
+          </Button>
+        ) : null}
+      </div>
+    );
+  }
+
+  /** showNumberColumn: omitted for the standalone bucket, where a series
+   * position never applies. The series-name column is intentionally never
+   * shown here -- each table only ever appears under a heading that already
+   * names the (tracked or new) series, or under "New standalone books",
+   * so repeating it per-row would be redundant. */
+  function renderCandidateTable(list: AuthorDiscoveryCandidate[], { showNumberColumn }: { showNumberColumn: boolean }) {
+    return (
+      <Table className="text-sm">
+        <TableHeader>
+          <TableRow>
+            <TableHead>Title</TableHead>
+            {showNumberColumn ? <TableHead>#</TableHead> : null}
+            <TableHead>Status</TableHead>
+            <TableHead>Date</TableHead>
+            <TableHead className="text-right">Actions</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {list.map((candidate) => (
+            <TableRow key={candidateKey(candidate)}>
+              <TableCell className="max-w-[260px] truncate" title={candidate.title}>
+                {candidate.title}
+              </TableCell>
+              {showNumberColumn ? <TableCell>{candidate.series_number ?? "—"}</TableCell> : null}
+              <TableCell>
+                <span className={getStatusChipClass(candidate.status, "compact")}>{candidate.status}</span>
+              </TableCell>
+              <TableCell>{formatDate(candidate.release_date)}</TableCell>
+              <TableCell className="text-right">{renderActions(candidate)}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    );
+  }
 
   async function handleAddToLibrary(candidate: AuthorDiscoveryCandidate) {
     setAddingKey(candidateKey(candidate));
@@ -150,85 +276,43 @@ export function MoreByAuthorDialog({
             No new books found for this author right now.
           </p>
         ) : (
-          <div className="max-h-[60vh] overflow-y-auto rounded-lg border">
-            <Table className="text-sm">
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Title</TableHead>
-                  <TableHead>Series</TableHead>
-                  <TableHead>#</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Date</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {candidates.map((candidate) => {
-                  const key = candidateKey(candidate);
-                  const alreadyAdded = addedKeys.has(key);
-                  return (
-                    <TableRow key={key}>
-                      <TableCell className="max-w-[220px] truncate" title={candidate.title}>
-                        {candidate.title}
-                      </TableCell>
-                      <TableCell className="max-w-[160px] truncate" title={candidate.series_name || undefined}>
-                        {candidate.series_name ? (
-                          candidate.series_name
-                        ) : (
-                          <span className="text-muted-foreground">Standalone</span>
-                        )}
-                        {candidate.series_name && !candidate.matched_series_id ? (
-                          <span className="block text-[11px] text-muted-foreground">not yet tracked</span>
-                        ) : null}
-                      </TableCell>
-                      <TableCell>{candidate.series_number ?? "—"}</TableCell>
-                      <TableCell>
-                        <span className={getStatusChipClass(candidate.status, "compact")}>{candidate.status}</span>
-                      </TableCell>
-                      <TableCell>{formatDate(candidate.release_date)}</TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex items-center justify-end gap-1">
-                          <Popover>
-                            <PopoverTrigger asChild>
-                              <Button type="button" variant="ghost" size="icon-xs" title="Check ratings / reviews">
-                                <StarIcon />
-                              </Button>
-                            </PopoverTrigger>
-                            <PopoverContent align="end" className="w-48">
-                              <div className="flex flex-col gap-1">
-                                {getRatingsReviewLinks(candidate.title, candidate.author).map((link) => (
-                                  <a
-                                    key={link.label}
-                                    href={link.url}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="flex items-center justify-between rounded px-2 py-1 text-sm hover:bg-muted"
-                                  >
-                                    {link.label}
-                                    <ExternalLinkIcon className="h-3.5 w-3.5" />
-                                  </a>
-                                ))}
-                              </div>
-                            </PopoverContent>
-                          </Popover>
-                          {canEdit ? (
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant={alreadyAdded ? "outline" : "default"}
-                              disabled={alreadyAdded || addingKey === key}
-                              onClick={() => handleAddToLibrary(candidate)}
-                            >
-                              {alreadyAdded ? "Added" : addingKey === key ? "Adding…" : "Add to Library"}
-                            </Button>
-                          ) : null}
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
+          <div className="flex max-h-[65vh] flex-col gap-5 overflow-y-auto pr-1">
+            {groups.tracked.length > 0 ? (
+              <section>
+                <h3 className="mb-2 text-sm font-semibold">You have this series</h3>
+                <div className="flex flex-col gap-4">
+                  {groups.tracked.map((group) => (
+                    <div key={group.key} className="rounded-lg border">
+                      <p className="border-b bg-muted/50 px-3 py-1.5 text-xs font-medium">{group.heading}</p>
+                      {renderCandidateTable(group.candidates, { showNumberColumn: true })}
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+
+            {groups.newSeries.length > 0 ? (
+              <section>
+                <h3 className="mb-2 text-sm font-semibold">New series (not yet tracked)</h3>
+                <div className="flex flex-col gap-4">
+                  {groups.newSeries.map((group) => (
+                    <div key={group.key} className="rounded-lg border">
+                      <p className="border-b bg-muted/50 px-3 py-1.5 text-xs font-medium">{group.heading}</p>
+                      {renderCandidateTable(group.candidates, { showNumberColumn: true })}
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+
+            {groups.standalone.length > 0 ? (
+              <section>
+                <h3 className="mb-2 text-sm font-semibold">New standalone book{groups.standalone.length > 1 ? "s" : ""}</h3>
+                <div className="rounded-lg border">
+                  {renderCandidateTable(groups.standalone, { showNumberColumn: false })}
+                </div>
+              </section>
+            ) : null}
           </div>
         )}
         {error && candidates.length > 0 ? (
