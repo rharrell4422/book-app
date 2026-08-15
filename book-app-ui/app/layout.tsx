@@ -4,8 +4,8 @@ import "./globals.css";
 import { Providers } from "./providers";
 
 export const metadata: Metadata = {
-  title: "Book App",
-  description: "Library and series viewer",
+  title: "ReaderPro",
+  description: "Your personal book intelligence engine",
 };
 
 export default function RootLayout({
