@@ -419,6 +419,72 @@ class DiscoverCandidatesForAuthorTest(unittest.TestCase):
         self.assertEqual(result["candidates"], [])
 
 
+class HardcoverProviderTest(unittest.TestCase):
+    """Regression coverage for _fetch_hardcover's raw-document parsing --
+    verified against a real API response shape, not a guessed one.
+    """
+
+    def _mock_response(self, hits):
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"data": {"search": {"results": {"hits": hits}}}}
+        return mock_response
+
+    def test_series_name_hint_reads_the_nested_series_name_field(self):
+        # Regression (live bug): the series name lives at
+        # featured_series.series.name, one level deeper than
+        # position/unreleased -- a "More by this author" search for
+        # Nicoli Gonnella's "Unbound" series mistakenly read a flat
+        # featured_series.name (which doesn't exist) and always got None,
+        # so every Unbound book came back tagged "Standalone" instead of
+        # being recognized as part of an already-tracked series.
+        hits = [
+            {
+                "document": {
+                    "title": "Ruin",
+                    "author_names": ["Nicoli Gonnella"],
+                    "isbns": ["9781637663271"],
+                    "release_date": "2026-06-24",
+                    "featured_series": {
+                        "position": 12.0,
+                        "unreleased": False,
+                        "series": {"id": 23995, "name": "Unbound", "slug": "unbound"},
+                    },
+                }
+            }
+        ]
+        with patch.object(discovery_engine, "os") as mock_os, patch.object(
+            discovery_engine.httpx, "post", return_value=self._mock_response(hits)
+        ):
+            mock_os.environ.get.return_value = "test-key"
+            results = discovery_engine._fetch_hardcover("Nicoli Gonnella")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["series_name_hint"], "Unbound")
+        self.assertEqual(results[0]["series_number_hint"], 12)
+
+    def test_series_name_hint_is_none_when_no_featured_series(self):
+        hits = [
+            {
+                "document": {
+                    "title": "Dissonance: A LitRPG Adventure",
+                    "author_names": ["Nicoli Gonnella"],
+                    "isbns": [],
+                    "release_date": "",
+                    "featured_series": {},
+                }
+            }
+        ]
+        with patch.object(discovery_engine, "os") as mock_os, patch.object(
+            discovery_engine.httpx, "post", return_value=self._mock_response(hits)
+        ):
+            mock_os.environ.get.return_value = "test-key"
+            results = discovery_engine._fetch_hardcover("Nicoli Gonnella")
+
+        self.assertEqual(len(results), 1)
+        self.assertIsNone(results[0]["series_name_hint"])
+
+
 class WebSearchProviderTest(unittest.TestCase):
     """Tests the Brave Search + Claude web-search discovery provider, with
     the HTTP call to Brave and the Anthropic client both mocked out so this
@@ -1605,6 +1671,171 @@ class DiscoverMoreByAuthorTest(unittest.TestCase):
         candidate = result["candidates"][0]
         self.assertEqual(candidate["matched_series_id"], self.series.id)
         self.assertEqual(candidate["status"], "upcoming")
+
+
+class DiscoverMoreByAuthorEditionNoiseRegressionTest(unittest.TestCase):
+    """Regression coverage for a live bug: "More by this author" on a
+    12-book series ("Unbound" by Nicoli Gonnella) returned ~20 rows that
+    were almost entirely re-listings/alternate editions of already-owned
+    books, tagged "Standalone" instead of the tracked series, because (a)
+    the Hardcover series-name field was read from the wrong nesting level
+    (see HardcoverProviderTest) and (b) already-owned matching only
+    compared exact core_title_key text, with no fallback for a bare,
+    number-less title and no de-duplication of same-book candidates
+    returned by multiple providers/editions within one batch.
+    """
+
+    def setUp(self):
+        # A fresh engine per test (rather than the class-shared-engine
+        # pattern used elsewhere in this file) because this test class
+        # relies on bare-title-uniqueness for owned-book matching --
+        # leftover rows from a previous test in the class would silently
+        # make every bare title "non-unique" and break that check.
+        self.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=self.engine)
+        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+        self.db = self.SessionLocal()
+        self.series = Series(name="Unbound", author="Nicoli Gonnella")
+        self.db.add(self.series)
+        self.db.commit()
+        self.db.refresh(self.series)
+
+        # Mirrors the real owned catalog: 12 numbered books, each with its
+        # own ISBN, titled with a "(Unbound Book N)"-style suffix.
+        for number, bare_title in enumerate(
+            ["Dissonance", "Silence", "Hunger", "Fury", "Threshold", "Expanse", "Abyss", "Vault", "Crown", "Empire", "Chains", "Ruin"],
+            start=1,
+        ):
+            self.db.add(
+                Book(
+                    title=f"{bare_title}: (Unbound Book {number})",
+                    author="Nicoli Gonnella",
+                    series_id=self.series.id,
+                    series_order=number,
+                    book_number=float(number),
+                    record_status="active",
+                    is_read=True,
+                    isbn13=f"97800000000{number:02d}",
+                )
+            )
+        self.db.commit()
+
+    def tearDown(self):
+        self.db.close()
+        Base.metadata.drop_all(bind=self.engine)
+        self.engine.dispose()
+
+    def test_editions_and_relistings_of_owned_books_are_fully_excluded(self):
+        candidates = [
+            # Hardcover, correctly series-tagged (post-fix): bare title,
+            # structured position, no textual number.
+            {
+                "source": "hardcover",
+                "title": "Ruin",
+                "authors": ["Nicoli Gonnella"],
+                "published_date": "2026-06-24",
+                "isbn13": "9780000000012",
+                "source_url": None,
+                "series_number_hint": 12,
+                "upcoming_hint": False,
+                "series_name_hint": "Unbound",
+            },
+            # Hardcover, an edition with no featured_series data at all but
+            # the number spelled out in the title text itself.
+            {
+                "source": "hardcover",
+                "title": "Chains: A LitRPG Adventure: Unbound, Book 11",
+                "authors": ["Nicoli Gonnella"],
+                "published_date": "",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": None,
+                "upcoming_hint": False,
+                "series_name_hint": None,
+            },
+            # Google Books: bare title, different ISBN (different edition),
+            # no series metadata at all.
+            {
+                "source": "google_books",
+                "title": "Crown",
+                "authors": ["Nicoli Gonnella"],
+                "published_date": "2024",
+                "isbn13": "9781637662717",
+                "source_url": None,
+                "series_number_hint": None,
+                "upcoming_hint": False,
+                "series_name_hint": None,
+            },
+            # OpenLibrary: bare title, no ISBN, no series metadata.
+            {
+                "source": "openlibrary",
+                "title": "Dissonance",
+                "authors": ["Nicoli Gonnella"],
+                "published_date": "2022",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": None,
+                "upcoming_hint": False,
+                "series_name_hint": None,
+            },
+        ]
+        with patch("discovery_engine.discover_candidates_for_author", return_value={
+            "candidates": candidates, "provider_failures": [], "all_providers_failed": False
+        }):
+            result = discover_more_by_author(self.db, "Nicoli Gonnella")
+
+        self.assertEqual(result["candidates"], [])
+
+    def test_genuinely_new_book_still_surfaces_amid_owned_book_noise(self):
+        candidates = [
+            {
+                "source": "openlibrary",
+                "title": "Dissonance",
+                "authors": ["Nicoli Gonnella"],
+                "published_date": "2022",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": None,
+                "upcoming_hint": False,
+                "series_name_hint": None,
+            },
+            {
+                "source": "hardcover",
+                "title": "Reckoning",
+                "authors": ["Nicoli Gonnella"],
+                "published_date": "2027-01-15",
+                "isbn13": "9780000000013",
+                "source_url": "https://hardcover.app/books/reckoning",
+                "series_number_hint": 13,
+                "upcoming_hint": False,
+                "series_name_hint": "Unbound",
+            },
+            # Same new book, also returned by Google Books with a different
+            # (ebook) ISBN and no series metadata -- should collapse into
+            # the one Hardcover-sourced row above, not appear separately.
+            {
+                "source": "google_books",
+                "title": "Reckoning",
+                "authors": ["Nicoli Gonnella"],
+                "published_date": "2027-01-15",
+                "isbn13": "9780000000099",
+                "source_url": None,
+                "series_number_hint": None,
+                "upcoming_hint": False,
+                "series_name_hint": None,
+            },
+        ]
+        with patch("discovery_engine.discover_candidates_for_author", return_value={
+            "candidates": candidates, "provider_failures": [], "all_providers_failed": False
+        }):
+            result = discover_more_by_author(self.db, "Nicoli Gonnella")
+
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["title"], "Reckoning")
+        self.assertEqual(candidate["matched_series_id"], self.series.id)
+        self.assertEqual(candidate["series_number"], 13)
+        self.assertEqual(candidate["source_url"], "https://hardcover.app/books/reckoning")
 
 
 class ManualDeleteRecalculationTest(unittest.TestCase):

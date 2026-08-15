@@ -610,6 +610,24 @@ class SeriesIntelligenceAgent:
             raise
 
 
+def _candidate_richness_score(candidate: dict) -> int:
+    """Used to pick which duplicate to keep when the same real book comes
+    back as multiple raw candidates (see discover_more_by_author) -- prefer
+    whichever copy carries the most useful information instead of an
+    arbitrary "first one wins".
+    """
+    score = 0
+    if candidate.get("matched_series_id"):
+        score += 4
+    if candidate.get("series_name"):
+        score += 2
+    if candidate.get("release_date"):
+        score += 2
+    if candidate.get("source_url"):
+        score += 1
+    return score
+
+
 def discover_more_by_author(db: Session, author: str) -> dict:
     """"More by this author" -- a lightweight, on-demand discovery across
     ALL of an author's tracked series and standalone books at once.
@@ -619,6 +637,19 @@ def discover_more_by_author(db: Session, author: str) -> dict:
     -- the caller (the API layer) decides per-row whether/how to add a
     match via the normal create-book/create-series endpoints, per the "no
     auto-created series from a guessed name" rule.
+
+    Catalog APIs return editions (hardcover/paperback/ebook/audiobook, each
+    with its own ISBN) and re-listings of already-owned books far more
+    aggressively here than in a single-series check, since there's no
+    series-name-scoped query to narrow results and no per-series lookahead
+    query to focus on just the next unread number -- so both "is this
+    already owned" and "is this a duplicate of another candidate in this
+    same batch" need to be checked primarily by title identity, not ISBN
+    (regression: a live check surfaced ~20 rows that were almost entirely
+    editions/re-listings of 12 already-owned books, because the original
+    version of this function only matched already-owned titles by exact
+    core_title_key and never collapsed same-book duplicates within a
+    single batch at all).
     """
     author = str(author or "").strip()
     if not author:
@@ -629,8 +660,35 @@ def discover_more_by_author(db: Session, author: str) -> dict:
         for book in db.query(Book).filter(Book.author.isnot(None)).all()
         if str(book.record_status or "") != "deleted" and _authors_match_exact(author, book.author)
     ]
-    exclude_title_keys = {discovery_engine.core_title_key(book.title) for book in owned_books if book.title}
+
     known_isbns = {str(book.isbn13 or "").strip() for book in owned_books if str(book.isbn13 or "").strip()}
+    # Safe to compare globally (not per-series): this only matches on
+    # actual title *text*, including any number folded in directly from
+    # that text (see core_title_key) -- unlike a bare numeric position,
+    # two unrelated series both happening to use identical title wording
+    # is effectively impossible.
+    known_title_keys = {discovery_engine.core_title_key(book.title) for book in owned_books if book.title}
+    bare_title_counts: dict[str, int] = {}
+    for book in owned_books:
+        bare_key = discovery_engine.bare_title_key(book.title)
+        if bare_key:
+            bare_title_counts[bare_key] = bare_title_counts.get(bare_key, 0) + 1
+    # Only trusted when unique across this author's whole catalog -- a
+    # bare, number-less candidate title ("Ruin") matching a single owned
+    # book's bare title is strong evidence of the same book; if two owned
+    # books share that bare title it's too ambiguous to use as a match.
+    known_bare_titles = {key for key, count in bare_title_counts.items() if count == 1}
+
+    # Owned book *numbers* are only meaningful when scoped to one series --
+    # nearly every series has a "book 1", so comparing a candidate's number
+    # against every tracked series' numbers combined would treat a
+    # genuinely new book in an untracked series as already owned just
+    # because some other series also has that position.
+    owned_numbers_by_series_id: dict[int, set[str]] = {}
+    for book in owned_books:
+        if book.series_id is None or book.book_number is None:
+            continue
+        owned_numbers_by_series_id.setdefault(book.series_id, set()).add(_normalize_identity_number(book.book_number))
 
     # Lets the caller offer "add to this existing series" instead of
     # silently creating a new one from the LLM's guessed series name -- this
@@ -641,38 +699,83 @@ def discover_more_by_author(db: Session, author: str) -> dict:
         if _authors_match_exact(author, series.author)
     }
 
-    discovery = discovery_engine.discover_candidates_for_author(author, exclude_title_keys=exclude_title_keys)
+    discovery = discovery_engine.discover_candidates_for_author(author, exclude_title_keys=known_title_keys)
 
-    results: list[dict] = []
+    deduped: dict[str, dict] = {}
     for raw in discovery["candidates"]:
-        isbn13 = str(raw.get("isbn13") or "").strip()
-        if isbn13 and isbn13 in known_isbns:
+        title = str(raw.get("title") or "").strip()
+        if not title:
             continue
 
-        title = str(raw.get("title") or "").strip()
+        isbn13 = str(raw.get("isbn13") or "").strip()
+        title_key = discovery_engine.core_title_key(title)
+        bare_key = discovery_engine.bare_title_key(title)
+
         series_name_guess = str(raw.get("series_name_hint") or "").strip() or None
-        series_number = raw.get("series_number_hint") or discovery_engine.infer_number_from_title(
+        matched_series = (
+            tracked_series_by_name.get(_normalize_identity_text(series_name_guess)) if series_name_guess else None
+        )
+        inferred_number = raw.get("series_number_hint") or discovery_engine.infer_number_from_title(
             title, series_name_guess
         )
-        matched_series = tracked_series_by_name.get(_normalize_identity_text(series_name_guess)) if series_name_guess else None
+        normalized_number = _normalize_identity_number(inferred_number) if inferred_number else ""
+
+        already_owned = bool(isbn13 and isbn13 in known_isbns) or bool(title_key and title_key in known_title_keys)
+        if not already_owned and matched_series is not None and normalized_number:
+            already_owned = normalized_number in owned_numbers_by_series_id.get(matched_series.id, set())
+        if not already_owned and not normalized_number and bare_key and bare_key in known_bare_titles:
+            already_owned = True
+        if already_owned:
+            continue
 
         parsed_date = discovery_engine.parse_flexible_date(raw.get("published_date"))
         is_upcoming = discovery_engine.classify_upcoming(parsed_date, raw.get("upcoming_hint"))
 
-        results.append(
-            {
-                "title": title,
-                "author": author,
-                "series_name": series_name_guess,
-                "matched_series_id": matched_series.id if matched_series else None,
-                "series_number": series_number,
-                "status": "upcoming" if is_upcoming else "available",
-                "release_date": parsed_date.isoformat() if parsed_date else None,
-                "source_url": raw.get("source_url"),
-                "isbn13": isbn13 or None,
-                "provider": raw.get("source"),
-            }
-        )
+        candidate_entry = {
+            "title": title,
+            "author": author,
+            "series_name": series_name_guess,
+            "matched_series_id": matched_series.id if matched_series else None,
+            "series_number": inferred_number,
+            "status": "upcoming" if is_upcoming else "available",
+            "release_date": parsed_date.isoformat() if parsed_date else None,
+            "source_url": raw.get("source_url"),
+            "isbn13": isbn13 or None,
+            "provider": raw.get("source"),
+        }
+
+        # Collapse the same real book showing up as separate raw candidates
+        # within this one batch (different provider, different
+        # edition/ISBN, or simply missing a number one other source did
+        # provide) -- grouped primarily by bare title text, since the same
+        # book is inconsistently number-tagged across providers far more
+        # often than two genuinely different books share identical title
+        # wording.
+        group_key = bare_key or title_key or discovery_engine.normalize_text(title)
+        if not group_key:
+            continue
+
+        existing = deduped.get(group_key)
+        if (
+            existing is not None
+            and normalized_number
+            and existing.get("series_number") is not None
+            and _normalize_identity_number(existing["series_number"]) != normalized_number
+        ):
+            # Same bare title but a clearly different resolved number --
+            # almost certainly two distinct books (e.g. two unrelated
+            # series that happen to share a common one-word title) rather
+            # than two editions of the same one, so don't merge them.
+            group_key = f"{group_key}|{normalized_number}"
+            existing = deduped.get(group_key)
+
+        if existing is None or _candidate_richness_score(candidate_entry) > _candidate_richness_score(existing):
+            deduped[group_key] = candidate_entry
+
+    results = sorted(
+        deduped.values(),
+        key=lambda c: (str(c.get("series_name") or "\uffff"), str(c.get("title") or "")),
+    )
 
     return {
         "author": author,

@@ -552,8 +552,12 @@ def _fetch_hardcover(query: str, max_results: int = 25) -> list[dict]:
                 # this book to a series -- used as a per-candidate series
                 # name signal by discover_candidates_for_author, which (unlike
                 # discover_candidates_for_series) has no single fixed series
-                # name of its own to compare candidates against.
-                "series_name_hint": str(featured_series.get("name") or "").strip() or None,
+                # name of its own to compare candidates against. The name
+                # itself lives one level deeper than `position`/`unreleased`
+                # (verified against a live API response) -- featured_series
+                # is `{position, unreleased, series: {id, name, slug, ...}}`,
+                # not a flat object with its own "name" key.
+                "series_name_hint": str((featured_series.get("series") or {}).get("name") or "").strip() or None,
             }
         )
     return results
