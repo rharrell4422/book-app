@@ -588,6 +588,19 @@ def _fetch_hardcover(query: str, max_results: int = 25) -> list[dict]:
             except (TypeError, ValueError):
                 series_position = None
 
+        # Hardcover's own crowd-sourced series length -- a real answer to
+        # "how many books are in this series" that doesn't depend on our own
+        # search coverage. primary_books_count (numbered main entries) is
+        # preferred over books_count (which also counts 0.5-style novellas/
+        # side content) since it's the more intuitive "book N of M" figure;
+        # falls back to books_count when that's the only one present.
+        series_info = featured_series.get("series") or {}
+        series_total_hint = series_info.get("primary_books_count") or series_info.get("books_count")
+        try:
+            series_total_hint = int(series_total_hint) if series_total_hint else None
+        except (TypeError, ValueError):
+            series_total_hint = None
+
         results.append(
             {
                 "source": "hardcover",
@@ -611,6 +624,7 @@ def _fetch_hardcover(query: str, max_results: int = 25) -> list[dict]:
                 # is `{position, unreleased, series: {id, name, slug, ...}}`,
                 # not a flat object with its own "name" key.
                 "series_name_hint": str((featured_series.get("series") or {}).get("name") or "").strip() or None,
+                "series_total_hint": series_total_hint,
             }
         )
     return results
@@ -718,6 +732,59 @@ def _structure_web_results_with_llm(series_name: str | None, author: str, raw_re
     except (json.JSONDecodeError, ValueError):
         return []
     return parsed if isinstance(parsed, list) else []
+
+
+_SERIES_OVERVIEW_PROMPT = """You are writing a short, spoiler-light overview of a book series for a reader deciding whether to start it.
+
+Series: "{series_name}" by {author}
+
+Below are the descriptions of books discovered in this series so far. Use ONLY this information -- do not invent plot details, characters, or facts not present in the text below.
+
+{book_descriptions}
+
+Write 2-4 sentences covering: the general premise/setting/genre, and what kind of reader would enjoy it. Do not describe it book-by-book or mention book numbers. Do not add a title or heading. Respond with ONLY the overview text, no prose before or after it."""
+
+
+def generate_series_overview(series_name: str, author: str, books: list[dict]) -> str | None:
+    """On-demand only (called from a "Series Overview" button click, never
+    during discovery itself) -- synthesizes a short premise summary for a
+    series the user doesn't own yet, from descriptions already fetched
+    during discovery. Reuses the same Anthropic client/model as the
+    web-search structuring pass rather than adding new LLM infrastructure.
+
+    Deliberately does not re-fetch anything: the caller passes in whatever
+    descriptions the discovery pass already returned, keeping this to a
+    single LLM call with no additional catalog API cost.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    usable_books = [b for b in books if str(b.get("description") or "").strip()]
+    if not usable_books:
+        return None
+
+    import anthropic
+
+    book_descriptions = "\n\n".join(
+        f"- {str(b.get('title') or 'Untitled').strip()}: {str(b.get('description') or '').strip()}"
+        for b in usable_books
+    )
+    prompt = _SERIES_OVERVIEW_PROMPT.format(
+        series_name=series_name or "this series",
+        author=author or "this author",
+        book_descriptions=book_descriptions,
+    )
+
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=ANTHROPIC_MODEL,
+        max_tokens=400,
+        messages=[{"role": "user", "content": prompt}],
+        timeout=WEB_SEARCH_TIMEOUT_SECONDS,
+    )
+    text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text").strip()
+    return text or None
 
 
 def _refine_undated_web_search_result(result: dict, series_name: str, author: str) -> dict:
@@ -902,7 +969,14 @@ def _filter_and_merge(
         if dedupe_key in seen_keys:
             continue
         seen_keys.add(dedupe_key)
-        merged.append({**raw, "confidence": confidence, "series_name_hint": series_name_hint})
+        merged.append(
+            {
+                **raw,
+                "confidence": confidence,
+                "series_name_hint": series_name_hint,
+                "series_total_hint": raw.get("series_total_hint"),
+            }
+        )
     return merged
 
 
@@ -1128,6 +1202,8 @@ def _enrich_missing_series_hints(candidates: list[dict], author: str) -> list[di
                     "series_name_hint": self_match.get("series_name_hint"),
                     "series_number_hint": candidate.get("series_number_hint")
                     or self_match.get("series_number_hint"),
+                    "series_total_hint": candidate.get("series_total_hint")
+                    or self_match.get("series_total_hint"),
                 }
             )
             continue

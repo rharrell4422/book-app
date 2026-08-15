@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ExternalLinkIcon, StarIcon } from "lucide-react";
+import { ExternalLinkIcon, SparklesIcon, StarIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -22,12 +22,16 @@ export type AuthorDiscoveryCandidate = {
   series_name: string | null;
   matched_series_id: number | null;
   matched_series_name: string | null;
+  matched_series_is_finished: boolean | null;
+  matched_series_total_books: number | null;
   series_number: number | null;
   status: "available" | "upcoming";
   release_date: string | null;
   source_url: string | null;
   isbn13: string | null;
   provider: string | null;
+  description: string | null;
+  series_total_books: number | null;
 };
 
 type AuthorDiscoveryResponse = {
@@ -81,6 +85,79 @@ function groupCandidates(candidates: AuthorDiscoveryCandidate[]) {
   };
 }
 
+type SeriesOverviewState = { loading: boolean; text: string | null; error: string | null };
+
+/** Maturity indicators are computed entirely client-side from data this
+ * component already has (no extra fetch, no button needed) -- only the
+ * separate "Series Overview" LLM call is gated behind a click.
+ *
+ * Deliberately hedged wording throughout: this app's own discovery pass
+ * (the same one populating this dialog) recently had a live bug where a
+ * whole trilogy was scattered across unrelated "standalone" entries, so
+ * "found N books" here is a floor, not a verified total, and completion
+ * status is never asserted outright -- a confidently-wrong "Completed"
+ * badge is worse than no badge, since it's the exact wrong-direction
+ * mistake a reader is trying to avoid by checking series maturity at all.
+ */
+function computeNewSeriesMaturity(candidates: AuthorDiscoveryCandidate[]) {
+  const totalHint = candidates.reduce<number | null>((max, candidate) => {
+    if (candidate.series_total_books == null) return max;
+    return max == null ? candidate.series_total_books : Math.max(max, candidate.series_total_books);
+  }, null);
+  const availableDates = candidates
+    .filter((c) => c.status === "available" && c.release_date)
+    .map((c) => c.release_date as string)
+    .sort();
+  const upcomingDates = candidates
+    .filter((c) => c.status === "upcoming" && c.release_date)
+    .map((c) => c.release_date as string)
+    .sort();
+
+  return {
+    foundCount: candidates.length,
+    totalHint,
+    lastReleaseDate: availableDates.length ? availableDates[availableDates.length - 1] : null,
+    nextReleaseDate: upcomingDates.length ? upcomingDates[0] : null,
+    hasUpcoming: candidates.some((c) => c.status === "upcoming"),
+  };
+}
+
+function NewSeriesMaturityBadge({ candidates }: { candidates: AuthorDiscoveryCandidate[] }) {
+  const maturity = computeNewSeriesMaturity(candidates);
+  const countLabel = maturity.totalHint
+    ? `Found ${maturity.foundCount} of ~${maturity.totalHint}`
+    : `Found ${maturity.foundCount} book${maturity.foundCount === 1 ? "" : "s"}`;
+  const statusLabel = maturity.hasUpcoming
+    ? maturity.nextReleaseDate
+      ? `Next: ${formatDate(maturity.nextReleaseDate)}`
+      : "Next book announced, date TBD"
+    : "No upcoming release found";
+
+  return (
+    <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-muted-foreground">
+      <span>{countLabel}</span>
+      <span aria-hidden>·</span>
+      <span>{statusLabel}</span>
+      {maturity.lastReleaseDate ? (
+        <>
+          <span aria-hidden>·</span>
+          <span>Last: {formatDate(maturity.lastReleaseDate)}</span>
+        </>
+      ) : null}
+    </span>
+  );
+}
+
+/** Tracked series already have a real Series row in this app -- its own
+ * is_finished flag (kept current by the normal Check Now flow) is far more
+ * authoritative than anything re-derived from this one-off discovery
+ * batch, so it's used as-is rather than recomputed. */
+function TrackedSeriesMaturityBadge({ candidates }: { candidates: AuthorDiscoveryCandidate[] }) {
+  const isFinished = candidates[0]?.matched_series_is_finished;
+  if (isFinished == null) return null;
+  return <span className="text-[11px] text-muted-foreground">{isFinished ? "Finished" : "Ongoing"}</span>;
+}
+
 /** "More by this author" -- an on-demand, author-wide discovery lookup
  * shared by every book-listing view (All Books, Standalone Books, Series
  * detail). Self-fetches from /books/discover_by_author whenever it's
@@ -104,6 +181,7 @@ export function MoreByAuthorDialog({
   const [candidates, setCandidates] = useState<AuthorDiscoveryCandidate[]>([]);
   const [addedKeys, setAddedKeys] = useState<Set<string>>(new Set());
   const [addingKey, setAddingKey] = useState<string | null>(null);
+  const [overviews, setOverviews] = useState<Record<string, SeriesOverviewState>>({});
 
   const groups = useMemo(() => groupCandidates(candidates), [candidates]);
 
@@ -137,9 +215,51 @@ export function MoreByAuthorDialog({
   useEffect(() => {
     if (open && author) {
       setAddedKeys(new Set());
+      setOverviews({});
       runDiscovery();
     }
   }, [open, author, runDiscovery]);
+
+  // On-demand only, per group -- never fetched automatically alongside
+  // discovery. Not persisted anywhere: closing the dialog and reopening it
+  // re-fetches, which is an acceptable tradeoff given how infrequently this
+  // gets clicked versus adding a database table just to cache it.
+  async function handleFetchSeriesOverview(group: CandidateGroup) {
+    setOverviews((prev) => ({ ...prev, [group.key]: { loading: true, text: null, error: null } }));
+    try {
+      const response = await fetchApiWithFallback("/books/series_overview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          series_name: group.heading,
+          author: group.candidates[0]?.author || author || "",
+          books: group.candidates.map((c) => ({ title: c.title, description: c.description })),
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Lookup failed (${response.status})`);
+      }
+      const data: { overview: string | null } = await response.json();
+      setOverviews((prev) => ({
+        ...prev,
+        [group.key]: {
+          loading: false,
+          text: data.overview,
+          error: data.overview ? null : "No overview available for this series yet.",
+        },
+      }));
+    } catch (err) {
+      console.error("Error fetching series overview:", err);
+      setOverviews((prev) => ({
+        ...prev,
+        [group.key]: {
+          loading: false,
+          text: null,
+          error: err instanceof Error ? err.message : "Unable to fetch a series overview right now.",
+        },
+      }));
+    }
+  }
 
   function renderActions(candidate: AuthorDiscoveryCandidate) {
     const key = candidateKey(candidate);
@@ -283,7 +403,10 @@ export function MoreByAuthorDialog({
                 <div className="flex flex-col gap-4">
                   {groups.tracked.map((group) => (
                     <div key={group.key} className="rounded-lg border">
-                      <p className="border-b bg-muted/50 px-3 py-1.5 text-xs font-medium">{group.heading}</p>
+                      <div className="flex flex-col gap-0.5 border-b bg-muted/50 px-3 py-1.5">
+                        <p className="text-xs font-medium">{group.heading}</p>
+                        <TrackedSeriesMaturityBadge candidates={group.candidates} />
+                      </div>
                       {renderCandidateTable(group.candidates, { showNumberColumn: true })}
                     </div>
                   ))}
@@ -295,12 +418,42 @@ export function MoreByAuthorDialog({
               <section>
                 <h3 className="mb-2 text-sm font-semibold">New series (not yet tracked)</h3>
                 <div className="flex flex-col gap-4">
-                  {groups.newSeries.map((group) => (
-                    <div key={group.key} className="rounded-lg border">
-                      <p className="border-b bg-muted/50 px-3 py-1.5 text-xs font-medium">{group.heading}</p>
-                      {renderCandidateTable(group.candidates, { showNumberColumn: true })}
-                    </div>
-                  ))}
+                  {groups.newSeries.map((group) => {
+                    const overviewState = overviews[group.key];
+                    return (
+                      <div key={group.key} className="rounded-lg border">
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/50 px-3 py-1.5">
+                          <div className="flex flex-col gap-0.5">
+                            <p className="text-xs font-medium">{group.heading}</p>
+                            <NewSeriesMaturityBadge candidates={group.candidates} />
+                          </div>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 gap-1 px-2 text-xs"
+                            disabled={overviewState?.loading}
+                            onClick={() => handleFetchSeriesOverview(group)}
+                          >
+                            <SparklesIcon className="h-3.5 w-3.5" />
+                            {overviewState?.loading
+                              ? "Summarizing…"
+                              : overviewState?.text
+                                ? "Refresh overview"
+                                : "Series Overview"}
+                          </Button>
+                        </div>
+                        {overviewState?.text ? (
+                          <p className="border-b bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                            {overviewState.text}
+                          </p>
+                        ) : overviewState?.error ? (
+                          <p className="border-b px-3 py-2 text-xs text-destructive">{overviewState.error}</p>
+                        ) : null}
+                        {renderCandidateTable(group.candidates, { showNumberColumn: true })}
+                      </div>
+                    );
+                  })}
                 </div>
               </section>
             ) : null}

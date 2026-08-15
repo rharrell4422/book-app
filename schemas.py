@@ -198,3 +198,22 @@ class SeriesImportConfirmationDecision(BaseModel):
 
 class SeriesImportConfirmationResolveRequest(BaseModel):
     decisions: list[SeriesImportConfirmationDecision]
+
+
+# ------------------------------------------------------------
+# "More by this author" series overview request schema
+# ------------------------------------------------------------
+
+class SeriesOverviewBookInput(BaseModel):
+    title: str
+    description: str | None = None
+
+
+class SeriesOverviewRequest(BaseModel):
+    series_name: str
+    author: str
+    # Descriptions the frontend already has in memory from the discovery
+    # call that produced this series group -- deliberately passed in rather
+    # than re-fetched, so this endpoint costs exactly one LLM call and no
+    # extra catalog API requests.
+    books: list[SeriesOverviewBookInput]

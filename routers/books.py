@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 import crud
 import schemas
 from agents.series_agent import discover_more_by_author
+from discovery_engine import generate_series_overview
 from intelligence import lookup_book_summary
 from routers.deps import enforce_access, get_db
 
@@ -43,6 +44,19 @@ def lookup_book(title: str, author: str | None = None):
 @router.get("/discover_by_author")
 def discover_by_author(author: str, db: Session = Depends(get_db)):
     return discover_more_by_author(db, author)
+
+
+# On-demand only -- called from a "Series Overview" button click in the
+# "More by this author" dialog, never fetched automatically during
+# discovery. Takes the descriptions the frontend already has in memory
+# (from the same discover_by_author response) instead of re-querying any
+# catalog API, so this costs exactly one LLM call per click.
+@router.post("/series_overview")
+def series_overview(request: schemas.SeriesOverviewRequest):
+    overview = generate_series_overview(
+        request.series_name, request.author, [book.model_dump() for book in request.books]
+    )
+    return {"overview": overview}
 
 
 @router.get("/{book_id}", response_model=schemas.BookResponse)

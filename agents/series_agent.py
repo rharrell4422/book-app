@@ -767,12 +767,24 @@ def discover_more_by_author(db: Session, author: str) -> dict:
             # actually gave the series, not whatever branding a given
             # catalog listing happened to use.
             "matched_series_name": matched_series.name if matched_series else None,
+            # For a tracked series, its own is_finished/total_books (kept up
+            # to date by the normal Check Now / recalculation flow) is a far
+            # more authoritative maturity signal than anything this one
+            # discovery batch could re-derive -- surfaced here so the
+            # frontend never needs to guess for a series we already track.
+            "matched_series_is_finished": bool(matched_series.is_finished) if matched_series else None,
+            "matched_series_total_books": matched_series.total_books if matched_series else None,
             "series_number": inferred_number,
             "status": "upcoming" if is_upcoming else "available",
             "release_date": release_date_iso,
             "source_url": raw.get("source_url"),
             "isbn13": isbn13 or None,
             "provider": raw.get("source"),
+            # Only used for the on-demand "Series Overview" LLM call and the
+            # "found N books" maturity count for series NOT yet tracked --
+            # never sent anywhere unless the user clicks that button.
+            "description": raw.get("description"),
+            "series_total_books": raw.get("series_total_hint"),
         }
 
         # Collapse the same real book showing up as separate raw candidates

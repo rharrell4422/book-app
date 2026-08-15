@@ -224,6 +224,76 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
         self.assertIsNone(discovery_engine.infer_series_hint_from_title_text(None))
 
 
+def _mock_anthropic_client(response_text):
+    mock_text_block = MagicMock()
+    mock_text_block.type = "text"
+    mock_text_block.text = response_text
+    mock_message = MagicMock()
+    mock_message.content = [mock_text_block]
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_message
+    return mock_client
+
+
+class GenerateSeriesOverviewTest(unittest.TestCase):
+    """generate_series_overview is only ever called on-demand (a "Series
+    Overview" button click in the frontend), never during discovery itself
+    -- these tests cover the function in isolation, not that call-site
+    contract.
+    """
+
+    def test_returns_none_without_anthropic_api_key(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
+            result = discovery_engine.generate_series_overview(
+                "Exile", "Glynn Stewart", [{"title": "Exile", "description": "A shackled Earth..."}]
+            )
+        self.assertIsNone(result)
+
+    def test_returns_none_when_no_book_has_a_description(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+            result = discovery_engine.generate_series_overview(
+                "Exile", "Glynn Stewart", [{"title": "Exile", "description": None}, {"title": "Refuge"}]
+            )
+        self.assertIsNone(result)
+
+    def test_returns_llm_generated_overview_text(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), patch(
+            "anthropic.Anthropic", return_value=_mock_anthropic_client("A space opera trilogy about exiled rebels.")
+        ):
+            result = discovery_engine.generate_series_overview(
+                "Exile",
+                "Glynn Stewart",
+                [{"title": "Exile", "description": "A shackled Earth, ruled by an unstoppable tyrant..."}],
+            )
+        self.assertEqual(result, "A space opera trilogy about exiled rebels.")
+
+    def test_only_passes_books_with_descriptions_to_the_prompt(self):
+        captured = {}
+
+        def fake_anthropic(api_key):
+            client = _mock_anthropic_client("An overview.")
+
+            def capture_create(**kwargs):
+                captured["prompt"] = kwargs["messages"][0]["content"]
+                return client.messages.create.return_value
+
+            client.messages.create.side_effect = capture_create
+            return client
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), patch("anthropic.Anthropic", side_effect=fake_anthropic):
+            discovery_engine.generate_series_overview(
+                "Exile",
+                "Glynn Stewart",
+                [
+                    {"title": "Exile", "description": "Book one premise text."},
+                    {"title": "Untitled Draft", "description": None},
+                ],
+            )
+
+        self.assertIn("Book one premise text.", captured["prompt"])
+        self.assertNotIn("Untitled Draft", captured["prompt"])
+
+
 class DiscoverCandidatesForSeriesTest(unittest.TestCase):
     """Tests discovery_engine.discover_candidates_for_series's merge/priority
     behavior across the catalog providers, with all network calls mocked
@@ -629,6 +699,58 @@ class HardcoverProviderTest(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["series_name_hint"], "Unbound")
         self.assertEqual(results[0]["series_number_hint"], 12)
+
+    def test_series_total_hint_prefers_primary_books_count(self):
+        # Verified against a live API response for Glynn Stewart's "Exile"
+        # series: books_count (4) includes a 0.5 novella, primary_books_count
+        # (3) counts only the main numbered entries -- the latter is the
+        # more intuitive "book N of M" figure for a maturity indicator.
+        hits = [
+            {
+                "document": {
+                    "title": "Exile",
+                    "author_names": ["Glynn Stewart"],
+                    "isbns": ["9781988035307"],
+                    "release_date": "2018-07-17",
+                    "featured_series": {
+                        "position": 1.0,
+                        "unreleased": False,
+                        "series": {"id": 8618, "name": "Exile", "books_count": 4, "primary_books_count": 3},
+                    },
+                }
+            }
+        ]
+        with patch.object(discovery_engine, "os") as mock_os, patch.object(
+            discovery_engine.httpx, "post", return_value=self._mock_response(hits)
+        ):
+            mock_os.environ.get.return_value = "test-key"
+            results = discovery_engine._fetch_hardcover("Glynn Stewart")
+
+        self.assertEqual(results[0]["series_total_hint"], 3)
+
+    def test_series_total_hint_falls_back_to_books_count(self):
+        hits = [
+            {
+                "document": {
+                    "title": "Some Book",
+                    "author_names": ["Some Author"],
+                    "isbns": [],
+                    "release_date": "",
+                    "featured_series": {
+                        "position": 1.0,
+                        "unreleased": False,
+                        "series": {"id": 1, "name": "Some Series", "books_count": 2},
+                    },
+                }
+            }
+        ]
+        with patch.object(discovery_engine, "os") as mock_os, patch.object(
+            discovery_engine.httpx, "post", return_value=self._mock_response(hits)
+        ):
+            mock_os.environ.get.return_value = "test-key"
+            results = discovery_engine._fetch_hardcover("Some Author")
+
+        self.assertEqual(results[0]["series_total_hint"], 2)
 
     def test_series_name_hint_is_none_when_no_featured_series(self):
         hits = [
@@ -2160,6 +2282,64 @@ class DiscoverMoreByAuthorAlternateBrandingRegressionTest(unittest.TestCase):
 
         self.assertEqual(len(result["candidates"]), 1)
         self.assertIsNone(result["candidates"][0]["release_date"])
+
+    def test_carries_description_and_series_total_for_a_new_series_candidate(self):
+        candidates = [
+            {
+                "source": "hardcover",
+                "title": "Broken Prince",
+                "authors": ["Glynn Stewart"],
+                "published_date": "2026-03-26",
+                "description": "The war is over. Their duty remains.",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": 5,
+                "upcoming_hint": False,
+                "series_name_hint": "House Adamant",
+                "series_total_hint": 6,
+            }
+        ]
+        with self._mock_discovery(candidates):
+            result = discover_more_by_author(self.db, "Glynn Stewart")
+
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["description"], "The war is over. Their duty remains.")
+        self.assertEqual(candidate["series_total_books"], 6)
+        self.assertIsNone(candidate["matched_series_is_finished"])
+        self.assertIsNone(candidate["matched_series_total_books"])
+
+    def test_carries_the_tracked_series_own_maturity_fields_for_a_matched_candidate(self):
+        self.duchy.is_finished = True
+        self.duchy.total_books = 4
+        self.db.commit()
+
+        candidates = [
+            {
+                "source": "hardcover",
+                "title": "A New Duchy Book",
+                "authors": ["Glynn Stewart"],
+                "published_date": "2026-05-01",
+                "description": "New installment.",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": 5,
+                "upcoming_hint": False,
+                "series_name_hint": "Duchy of Terra",
+                "series_total_hint": None,
+            }
+        ]
+        with self._mock_discovery(candidates):
+            result = discover_more_by_author(self.db, "Glynn Stewart")
+
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["matched_series_id"], self.duchy.id)
+        # Tracked series' own fields win over anything the discovery batch
+        # itself could guess -- more authoritative and kept up to date
+        # independently of this one-off search.
+        self.assertTrue(candidate["matched_series_is_finished"])
+        self.assertEqual(candidate["matched_series_total_books"], 4)
 
 
 class ManualDeleteRecalculationTest(unittest.TestCase):
