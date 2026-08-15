@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { AlertTriangleIcon, BookOpenIcon, CheckIcon, ExternalLinkIcon, FileTextIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
+import { AlertTriangleIcon, BookOpenIcon, CheckIcon, ExternalLinkIcon, FileTextIcon, PencilIcon, RotateCcwIcon, SearchIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
@@ -35,6 +35,7 @@ import {
   type EditBookFormState,
 } from "@/components/books/edit-book-dialog";
 import { BookSummaryDialog } from "@/components/series/book-summary-dialog";
+import { MoreByAuthorDialog } from "@/components/books/more-by-author-dialog";
 
 import {
   Table,
@@ -232,6 +233,7 @@ export default function BooksClient() {
   const [notesDraft, setNotesDraft] = useState("");
   const [summaryFetching, setSummaryFetching] = useState(false);
   const [summarySaving, setSummarySaving] = useState(false);
+  const [moreByAuthorTarget, setMoreByAuthorTarget] = useState<string | null>(null);
   const [lookupResult, setLookupResult] = useState<LookupResultState | null>(null);
   const [valueFilters, setValueFilters] = useState({
     title: [] as string[],
@@ -1346,6 +1348,16 @@ export default function BooksClient() {
                     >
                       <ExternalLinkIcon />
                     </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      title="More by this author"
+                      aria-label="More by this author"
+                      onClick={() => setMoreByAuthorTarget(String(b.author || ""))}
+                    >
+                      <SearchIcon />
+                    </Button>
                     {canEdit ? (
                     <>
                     <Button
@@ -1450,6 +1462,19 @@ export default function BooksClient() {
         saving={summarySaving}
         onRefresh={handleFetchSummary}
         refreshing={summaryFetching}
+      />
+
+      <MoreByAuthorDialog
+        open={Boolean(moreByAuthorTarget)}
+        onOpenChange={(open) => {
+          if (!open) setMoreByAuthorTarget(null);
+        }}
+        author={moreByAuthorTarget}
+        canEdit={canEdit}
+        onBookAdded={() => {
+          fetchBooks();
+          fetchSeriesList();
+        }}
       />
 
     </div>

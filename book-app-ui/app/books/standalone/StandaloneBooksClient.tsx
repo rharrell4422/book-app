@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { CheckIcon, ExternalLinkIcon, FileTextIcon, PencilIcon, RotateCcwIcon, Trash2Icon } from "lucide-react";
+import { CheckIcon, ExternalLinkIcon, FileTextIcon, PencilIcon, RotateCcwIcon, SearchIcon, Trash2Icon } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
@@ -25,6 +25,7 @@ import {
   type EditBookFormState,
 } from "@/components/books/edit-book-dialog";
 import { BookSummaryDialog } from "@/components/series/book-summary-dialog";
+import { MoreByAuthorDialog } from "@/components/books/more-by-author-dialog";
 import {
   Table,
   TableBody,
@@ -114,6 +115,7 @@ export default function StandaloneBooksClient() {
   const [notesDraft, setNotesDraft] = useState("");
   const [summaryFetching, setSummaryFetching] = useState(false);
   const [summarySaving, setSummarySaving] = useState(false);
+  const [moreByAuthorTarget, setMoreByAuthorTarget] = useState<string | null>(null);
   const [sortConfig, setSortConfig] = useState<{ key: SortKey | null; direction: SortDirection }>({
     key: "title",
     direction: "asc",
@@ -575,6 +577,16 @@ export default function StandaloneBooksClient() {
                         type="button"
                         variant="ghost"
                         size="icon-xs"
+                        title="More by this author"
+                        aria-label="More by this author"
+                        onClick={() => setMoreByAuthorTarget(String(b.author || ""))}
+                      >
+                        <SearchIcon />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
                         title={b.auto_summary || b.notes ? "View/edit summary and notes" : "Fetch an AI summary for this book"}
                         aria-label={b.auto_summary || b.notes ? "View/edit summary and notes" : "Fetch an AI summary for this book"}
                         onClick={() => openSummaryEditor(b)}
@@ -660,6 +672,19 @@ export default function StandaloneBooksClient() {
         saving={summarySaving}
         onRefresh={handleFetchSummary}
         refreshing={summaryFetching}
+      />
+
+      <MoreByAuthorDialog
+        open={Boolean(moreByAuthorTarget)}
+        onOpenChange={(open) => {
+          if (!open) setMoreByAuthorTarget(null);
+        }}
+        author={moreByAuthorTarget}
+        canEdit={canEdit}
+        onBookAdded={() => {
+          fetchBooks();
+          fetchSeriesList();
+        }}
       />
     </div>
   );

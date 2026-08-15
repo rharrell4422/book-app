@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 
 import crud
 import discovery_engine
-from agents.series_agent import SeriesIntelligenceAgent
+from agents.series_agent import SeriesIntelligenceAgent, discover_more_by_author
 from database import Base
 from models import Book, Series
 
@@ -101,6 +101,17 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
         self.assertEqual(discovery_engine.parse_flexible_date("2024-03"), date(2024, 3, 1))
         self.assertEqual(discovery_engine.parse_flexible_date("2024"), date(2024, 1, 1))
         self.assertIsNone(discovery_engine.parse_flexible_date(""))
+
+    def test_classify_upcoming_uses_date_when_available(self):
+        past = date(2020, 1, 1)
+        future = date(date.today().year + 5, 1, 1)
+        self.assertFalse(discovery_engine.classify_upcoming(past, upcoming_hint=True))
+        self.assertTrue(discovery_engine.classify_upcoming(future, upcoming_hint=False))
+
+    def test_classify_upcoming_falls_back_to_hint_without_a_date(self):
+        self.assertTrue(discovery_engine.classify_upcoming(None, upcoming_hint=True))
+        self.assertFalse(discovery_engine.classify_upcoming(None, upcoming_hint=False))
+        self.assertFalse(discovery_engine.classify_upcoming(None, upcoming_hint=None))
 
     def test_looks_like_placeholder_title_filters_unconfirmed_future_titles(self):
         # Regression (live bug): a fan wiki/forum mention of an unannounced
@@ -306,6 +317,106 @@ class DiscoverCandidatesForSeriesTest(unittest.TestCase):
 
         self.assertFalse(result["all_providers_failed"])
         self.assertEqual(len(result["provider_failures"]), 1)
+
+
+class DiscoverCandidatesForAuthorTest(unittest.TestCase):
+    """Tests discovery_engine.discover_candidates_for_author -- the lighter,
+    non-series-scoped sibling used by "More by this author". Network calls
+    mocked out for determinism.
+    """
+
+    def setUp(self):
+        self._env_patch = patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+
+    def test_queries_bare_author_bibliography_on_all_catalog_apis(self):
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]) as mock_hardcover, patch.object(
+            discovery_engine, "_fetch_google_books", return_value=[]
+        ) as mock_google, patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]) as mock_openlibrary:
+            discovery_engine.discover_candidates_for_author("Harmon Cooper")
+
+        mock_google.assert_called_once_with('inauthor:"Harmon Cooper"')
+        mock_openlibrary.assert_called_once_with('author:"Harmon Cooper"')
+        mock_hardcover.assert_called_once_with("Harmon Cooper")
+
+    def test_no_lookahead_queries_for_author_wide_search(self):
+        # Unlike discover_candidates_for_series, there's no single "next
+        # book number" to look ahead from when results can span several
+        # different series -- only one plain web-search query should fire.
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+            discovery_engine, "_fetch_hardcover", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_web_search", return_value=[]) as mock_web_search:
+            discovery_engine.discover_candidates_for_author("Harmon Cooper")
+
+        mock_web_search.assert_called_once()
+        queries_used = mock_web_search.call_args[0][0]
+        self.assertEqual(len(queries_used), 1)
+        # series_name argument (second positional) is None -- no single
+        # target series for an author-wide search.
+        self.assertIsNone(mock_web_search.call_args[0][1])
+
+    def test_excludes_already_owned_titles_across_the_authors_whole_library(self):
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[
+                {
+                    "source": "hardcover",
+                    "source_id": "hc-1",
+                    "title": "Cherry Blossom Girls Book 7",
+                    "authors": ["Harmon Cooper"],
+                    "published_date": "2024-02-20",
+                    "isbn13": None,
+                    "source_url": None,
+                    "language": "",
+                    "series_number_hint": 7,
+                    "upcoming_hint": False,
+                    "series_name_hint": "Cherry Blossom Girls",
+                }
+            ],
+        ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ):
+            owned_key = discovery_engine.core_title_key("Cherry Blossom Girls Book 7")
+            result = discovery_engine.discover_candidates_for_author(
+                "Harmon Cooper", exclude_title_keys={owned_key}
+            )
+
+        self.assertEqual(result["candidates"], [])
+
+    def test_excludes_bare_series_name_stub_using_per_candidate_series_hint(self):
+        # Regression: author-wide search has no single fixed series name to
+        # compare a stub listing against, so it must fall back to each
+        # candidate's own guessed series_name_hint instead.
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[
+                {
+                    "source": "hardcover",
+                    "source_id": "hc-stub",
+                    "title": "The Empyrean",
+                    "authors": ["Rebecca Yarros"],
+                    "published_date": "2023",
+                    "isbn13": None,
+                    "source_url": None,
+                    "language": "",
+                    "series_number_hint": None,
+                    "upcoming_hint": False,
+                    "series_name_hint": "The Empyrean",
+                }
+            ],
+        ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ):
+            result = discovery_engine.discover_candidates_for_author("Rebecca Yarros")
+
+        self.assertEqual(result["candidates"], [])
 
 
 class WebSearchProviderTest(unittest.TestCase):
@@ -1374,6 +1485,126 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         mock_discover.assert_not_called()
         self.assertEqual(result["reason"], "series-missing-author")
         self.assertFalse(result["found"])
+
+
+class DiscoverMoreByAuthorTest(unittest.TestCase):
+    """Integration tests for agents.series_agent.discover_more_by_author
+    ("More by this author") against an in-memory database, with
+    discovery_engine mocked so behavior is deterministic.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=cls.engine)
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        Base.metadata.drop_all(bind=cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        self.db = self.SessionLocal()
+        self.series = Series(name="Cherry Blossom Girls", author="Harmon Cooper")
+        self.db.add(self.series)
+        self.db.commit()
+        self.db.refresh(self.series)
+
+        self.db.add(
+            Book(
+                title="Cherry Blossom Girls Book 7",
+                author="Harmon Cooper",
+                series_id=self.series.id,
+                series_order=7,
+                book_number=7.0,
+                record_status="active",
+                is_read=True,
+                isbn13="9781111111111",
+            )
+        )
+        self.db.commit()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _mock_discovery(self, candidates, **overrides):
+        result = {"candidates": candidates, "provider_failures": [], "all_providers_failed": False}
+        result.update(overrides)
+        return patch("discovery_engine.discover_candidates_for_author", return_value=result)
+
+    def test_no_author_returns_empty_result_without_calling_discovery(self):
+        with patch("discovery_engine.discover_candidates_for_author") as mock_discover:
+            result = discover_more_by_author(self.db, "")
+
+        mock_discover.assert_not_called()
+        self.assertEqual(result["candidates"], [])
+
+    def test_already_owned_isbn_is_excluded(self):
+        candidates = [
+            {
+                "source": "hardcover",
+                "title": "Cherry Blossom Girls Book 7",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": "9781111111111",
+                "source_url": None,
+                "series_number_hint": 7,
+                "upcoming_hint": False,
+                "series_name_hint": "Cherry Blossom Girls",
+            }
+        ]
+        with self._mock_discovery(candidates):
+            result = discover_more_by_author(self.db, "Harmon Cooper")
+
+        self.assertEqual(result["candidates"], [])
+
+    def test_new_book_in_a_new_series_reports_no_matched_series(self):
+        candidates = [
+            {
+                "source": "web_search",
+                "title": "Space Colony One",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2025-05-01",
+                "isbn13": None,
+                "source_url": "https://example.com/space-colony-one",
+                "series_number_hint": 1,
+                "upcoming_hint": False,
+                "series_name_hint": "Space Colony",
+            }
+        ]
+        with self._mock_discovery(candidates):
+            result = discover_more_by_author(self.db, "Harmon Cooper")
+
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["series_name"], "Space Colony")
+        self.assertIsNone(candidate["matched_series_id"])
+        self.assertEqual(candidate["status"], "available")
+        self.assertEqual(candidate["release_date"], "2025-05-01")
+        self.assertEqual(candidate["source_url"], "https://example.com/space-colony-one")
+
+    def test_new_book_in_an_already_tracked_series_reports_the_matched_series_id(self):
+        candidates = [
+            {
+                "source": "hardcover",
+                "title": "Cherry Blossom Girls Book 10",
+                "authors": ["Harmon Cooper"],
+                "published_date": "",
+                "isbn13": None,
+                "source_url": None,
+                "series_number_hint": 10,
+                "upcoming_hint": True,
+                "series_name_hint": "Cherry Blossom Girls",
+            }
+        ]
+        with self._mock_discovery(candidates):
+            result = discover_more_by_author(self.db, "Harmon Cooper")
+
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["matched_series_id"], self.series.id)
+        self.assertEqual(candidate["status"], "upcoming")
 
 
 class ManualDeleteRecalculationTest(unittest.TestCase):

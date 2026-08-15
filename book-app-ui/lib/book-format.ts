@@ -113,6 +113,23 @@ export function getCheckOnlineUrl(book: { title?: string | null; author?: string
   return `https://www.google.com/search?q=${encodeURIComponent(query)}`;
 }
 
+/** Direct links to look up ratings/reviews for a book on a few common
+ * sites. These are search-result links, not exact book-detail pages -- the
+ * app has no reliable per-site ID (Goodreads/StoryGraph ID, ASIN, etc.) for
+ * most discovered candidates, and scraping those sites to resolve one isn't
+ * worth the fragility/ToS risk for a "go check this yourself" convenience
+ * link. Used by the "More by this author" dialog. */
+export function getRatingsReviewLinks(title?: string | null, author?: string | null) {
+  const query = [title, author].filter(Boolean).join(" ").trim();
+  const encoded = encodeURIComponent(query);
+  return [
+    { label: "Goodreads", url: `https://www.goodreads.com/search?q=${encoded}` },
+    { label: "StoryGraph", url: `https://app.thestorygraph.com/search?search_term=${encoded}` },
+    { label: "Amazon", url: `https://www.amazon.com/s?k=${encoded}` },
+    { label: "Google Books", url: `https://www.google.com/search?tbm=bks&q=${encoded}` },
+  ];
+}
+
 /** True when a book is flagged as upcoming/available but no release date
  * could be pinned down at all (e.g. a brand-new preorder listing whose
  * search snippet had no date -- see getCheckOnlineUrl). Surfaced in the UI

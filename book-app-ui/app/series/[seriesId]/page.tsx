@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { AlertTriangleIcon } from "lucide-react";
+import { AlertTriangleIcon, SearchIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Spinner from "@/components/ui/spinner";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
@@ -33,6 +33,7 @@ import { AddBookDialog } from "@/components/series/add-book-dialog";
 import { EditBookDialog, type EditBookFormState } from "@/components/series/edit-book-dialog";
 import { BookSummaryDialog } from "@/components/series/book-summary-dialog";
 import { NormalizeTitlesDialog } from "@/components/series/normalize-titles-dialog";
+import { MoreByAuthorDialog } from "@/components/books/more-by-author-dialog";
 
  type TitleNormalizationMode = "keep_original" | "clean_up" | "new_clean_title" | "match_other_titles";
 type TitleNormalizationWizardMode = TitleNormalizationMode | "custom";
@@ -524,6 +525,7 @@ export default function SeriesDetailPage() {
   const [summaryDraft, setSummaryDraft] = useState("");
   const [notesDraft, setNotesDraft] = useState("");
   const [summarySaving, setSummarySaving] = useState(false);
+  const [moreByAuthorTarget, setMoreByAuthorTarget] = useState<string | null>(null);
   const [bookSortMode, setBookSortMode] = useState<"series" | "az">("series");
   const [needsVerificationOnly, setNeedsVerificationOnly] = useState(false);
   const [recentAddMessage, setRecentAddMessage] = useState<string | null>(null);
@@ -1977,6 +1979,14 @@ export default function SeriesDetailPage() {
                   >
                     {unconfirmedDate ? "Verify date" : "Check online"}
                   </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    title="Search for more books by this author, across all their series and standalone works"
+                    onClick={() => setMoreByAuthorTarget(String(book.author || ""))}
+                  >
+                    <SearchIcon />
+                  </Button>
                 </TableCell>
               </TableRow>
             );
@@ -2000,6 +2010,18 @@ export default function SeriesDetailPage() {
         canEdit={canEdit}
         onSave={handleSaveSummaryEditor}
         saving={summarySaving}
+      />
+
+      <MoreByAuthorDialog
+        open={Boolean(moreByAuthorTarget)}
+        onOpenChange={(open) => {
+          if (!open) setMoreByAuthorTarget(null);
+        }}
+        author={moreByAuthorTarget}
+        canEdit={canEdit}
+        onBookAdded={() => {
+          refreshSeriesFromApi();
+        }}
       />
 
       <AddBookDialog

@@ -391,6 +391,21 @@ def parse_flexible_date(value: str | None) -> date | None:
     return None
 
 
+def classify_upcoming(parsed_date: date | None, upcoming_hint: bool | None) -> bool:
+    """A candidate is treated as upcoming (not yet available to read) when
+    either its known release date is still in the future, or -- when
+    there's no date at all to compare -- a provider's own hint says it
+    isn't out yet (e.g. Hardcover's `unreleased` flag, or the web-search
+    safety net that defaults an undated result to "unconfirmed" rather than
+    assuming it's already out). Extracted so both the single-series check
+    (agents/series_agent.py) and author-wide discovery classify status the
+    exact same way instead of each having their own copy of this rule.
+    """
+    if parsed_date:
+        return parsed_date > date.today()
+    return bool(upcoming_hint)
+
+
 def split_author_names(value: str | None) -> list[str]:
     """Series in this app's library sometimes store multiple co-authors in
     one string (e.g. "J.N Chaney; Terry Maggert"). Split those apart so
@@ -533,6 +548,12 @@ def _fetch_hardcover(query: str, max_results: int = 25) -> list[dict]:
                 "language": "",
                 "series_number_hint": series_position,
                 "upcoming_hint": bool(featured_series.get("unreleased")),
+                # Only populated when Hardcover's own index actually ties
+                # this book to a series -- used as a per-candidate series
+                # name signal by discover_candidates_for_author, which (unlike
+                # discover_candidates_for_series) has no single fixed series
+                # name of its own to compare candidates against.
+                "series_name_hint": str(featured_series.get("name") or "").strip() or None,
             }
         )
     return results
@@ -567,10 +588,10 @@ def _fetch_brave_web_search(query: str, count: int = WEB_SEARCH_MAX_RESULTS) -> 
 
 _WEB_SEARCH_STRUCTURING_PROMPT = """You are extracting structured book-release data from live web search results.
 
-Target series: "{series_name}"
+{scope_line}
 Target author: "{author}"
 
-Below are {count} web search results returned for this series/author. For EACH result that actually describes a specific book entry in this series by this author (a released book, an upcoming/pre-order book, or a firm announcement of one) extract its data. Skip results that are: reviews or discussions of a book without any new release info, unrelated books by other authors, other series by the same author, retailer category/search pages, fan wiki summaries of the whole series, news unrelated to a specific book, or fan speculation/discussion about a future book that has no confirmed title yet (e.g. only referred to as "the next book" or "an untitled sequel").
+Below are {count} web search results returned for this search. For EACH result that actually describes a specific book entry by {title_scope} (a released book, an upcoming/pre-order book, or a firm announcement of one) extract its data. Skip results that are: reviews or discussions of a book without any new release info,{skip_other_series} retailer category/search pages, fan wiki summaries of a whole series, news unrelated to a specific book, or fan speculation/discussion about a future book that has no confirmed title yet (e.g. only referred to as "the next book" or "an untitled sequel").
 
 Search results:
 {snippets}
@@ -578,12 +599,12 @@ Search results:
 A retailer listing existing (e.g. a Kindle Store page) is NOT proof a book has already been released -- pre-order listings look identical to a snippet with no date. If the snippet/title does not explicitly confirm a release date or that the book is already out, set "is_upcoming" to true and "published_date" to null rather than guessing it's already available -- it's far more useful to flag a book as "coming soon, exact date unconfirmed" than to wrongly tell a reader something is ready to read.
 
 Respond with ONLY a JSON array (no prose, no markdown code fences). Each element must have this shape:
-{{"result_index": <int, the [N] index above>, "title": <string, the clean book title without the series name or a "Book N" suffix>, "book_number": <int or null, this book's position in the series if stated or clearly implied>, "author_names": [<string>, ...], "published_date": <string, "YYYY-MM-DD"/"YYYY-MM"/"YYYY" if EXPLICITLY stated in the snippet, else null>, "is_upcoming": <bool, see rule above>, "isbn13": <string or null>}}
+{{"result_index": <int, the [N] index above>, "title": <string, the clean book title without the series name or a "Book N" suffix>, "series_name": <string or null, the name of the series this book belongs to, if any -- null if it's a standalone>, "book_number": <int or null, this book's position in its series if stated or clearly implied>, "author_names": [<string>, ...], "published_date": <string, "YYYY-MM-DD"/"YYYY-MM"/"YYYY" if EXPLICITLY stated in the snippet, else null>, "is_upcoming": <bool, see rule above>, "isbn13": <string or null>}}
 
 If none of the results are genuine matches, respond with exactly: []"""
 
 
-def _structure_web_results_with_llm(series_name: str, author: str, raw_results: list[dict]) -> list[dict]:
+def _structure_web_results_with_llm(series_name: str | None, author: str, raw_results: list[dict]) -> list[dict]:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key or not raw_results:
         return []
@@ -594,8 +615,29 @@ def _structure_web_results_with_llm(series_name: str, author: str, raw_results: 
         f"[{i}] Title: {r['title']}\nSnippet: {r['description']}\nURL: {r['url']}"
         for i, r in enumerate(raw_results)
     )
+    series_name = str(series_name or "").strip()
+    if series_name:
+        # Scoped to one specific series (the normal Check Now case) -- other
+        # series by the same author are noise here, so explicitly excluded.
+        scope_line = f'Target series: "{series_name}"'
+        skip_other_series = " unrelated books by other authors, other series by the same author,"
+        title_scope = "this series by this author"
+    else:
+        # Author-wide discovery has no single series to scope to -- every
+        # series and standalone by this author is in scope, so the "other
+        # series by the same author" exclusion from the scoped case would be
+        # wrong here and is dropped.
+        scope_line = "Target: ANY book by this author, across all of their series and standalone works."
+        skip_other_series = " unrelated books by other authors,"
+        title_scope = "this author"
+
     prompt = _WEB_SEARCH_STRUCTURING_PROMPT.format(
-        series_name=series_name, author=author, count=len(raw_results), snippets=snippets
+        scope_line=scope_line,
+        author=author,
+        count=len(raw_results),
+        snippets=snippets,
+        skip_other_series=skip_other_series,
+        title_scope=title_scope,
     )
 
     client = anthropic.Anthropic(api_key=api_key)
@@ -666,7 +708,7 @@ def _refine_undated_web_search_result(result: dict, series_name: str, author: st
     return result
 
 
-def _fetch_web_search(queries: list[str], series_name: str, author: str) -> list[dict]:
+def _fetch_web_search(queries: list[str], series_name: str | None, author: str) -> list[dict]:
     raw_results: list[dict] = []
     seen_urls: set[str] = set()
     query_errors: list[Exception] = []
@@ -734,6 +776,11 @@ def _fetch_web_search(queries: list[str], series_name: str, author: str) -> list
                 "language": "",
                 "series_number_hint": book_number,
                 "upcoming_hint": upcoming_hint,
+                # The LLM's own guess at which series (if any) this result
+                # belongs to -- used as a per-candidate series-name signal by
+                # discover_candidates_for_author (see series_name_hint on the
+                # Hardcover provider for the same purpose).
+                "series_name_hint": str(item.get("series_name") or "").strip() or None,
             }
         )
 
@@ -775,7 +822,14 @@ def _filter_and_merge(
         has_number_hint = bool(raw.get("series_number_hint")) or bool(
             infer_number_from_title(title, series_name)
         )
-        if looks_like_series_index_entry(title, series_name, isbn13, has_number_hint):
+        # discover_candidates_for_series always knows the one series it's
+        # checking, so that fixed name is authoritative here. Author-wide
+        # discovery has no such fixed name (series_name is None) and instead
+        # falls back to each individual candidate's own guessed series name
+        # (from Hardcover's index or the web-search LLM pass) so the same
+        # stub-listing check still applies per-candidate.
+        effective_series_name = series_name or raw.get("series_name_hint")
+        if looks_like_series_index_entry(title, effective_series_name, isbn13, has_number_hint):
             continue
 
         title_key = core_title_key(title)
@@ -947,4 +1001,84 @@ def discover_candidates_for_series(
         "provider_failures": provider_failures,
         "all_providers_failed": all_providers_failed,
         "used_author_fallback": used_author_fallback,
+    }
+
+
+def discover_candidates_for_author(
+    author: str,
+    *,
+    exclude_title_keys: set[str] | None = None,
+    progress_callback=None,
+) -> dict:
+    """Find candidate books by a specific author, across ALL of their series
+    and standalone works -- the "More by this author" feature.
+
+    Deliberately much lighter than discover_candidates_for_series: one plain
+    author-bibliography query per catalog API (no series name to search
+    against) plus at most one Brave web-search query -- no lookahead
+    queries, since there's no single "next book number" to look ahead from
+    when the results can span several different series at once. Each
+    candidate carries its own guessed series name (see series_name_hint on
+    the Hardcover/web-search providers) rather than being checked against
+    one fixed series name.
+    """
+    exclude_title_keys = exclude_title_keys or set()
+    author = str(author or "").strip()
+    provider_failures: list[dict] = []
+
+    if not author:
+        return {"candidates": [], "provider_failures": [], "all_providers_failed": False}
+
+    if progress_callback:
+        progress_callback({"current_pass": f"Searching all books by {author}"})
+
+    query_author = primary_author_name(author)
+    any_provider_succeeded = False
+
+    google_raw: list[dict] = []
+    try:
+        google_raw = _fetch_google_books(f'inauthor:"{query_author}"')
+        any_provider_succeeded = True
+    except Exception as exc:
+        provider_failures.append({"provider": "google_books", "error": str(exc)})
+
+    openlibrary_raw: list[dict] = []
+    try:
+        openlibrary_raw = _fetch_openlibrary(f'author:"{query_author}"')
+        any_provider_succeeded = True
+    except Exception as exc:
+        provider_failures.append({"provider": "openlibrary", "error": str(exc)})
+
+    hardcover_raw: list[dict] = []
+    try:
+        hardcover_raw = _fetch_hardcover(query_author)
+        if hardcover_raw or os.environ.get("HARDCOVER_API_KEY", "").strip():
+            any_provider_succeeded = True
+    except Exception as exc:
+        provider_failures.append({"provider": "hardcover", "error": str(exc)})
+
+    web_search_raw: list[dict] = []
+    if os.environ.get("BRAVE_SEARCH_API_KEY", "").strip() and os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        try:
+            web_search_raw = _fetch_web_search([f"{query_author} new books"], None, author)
+            any_provider_succeeded = True
+        except Exception as exc:
+            provider_failures.append({"provider": "web_search", "error": str(exc)})
+
+    combined = _filter_and_merge(
+        [*hardcover_raw, *google_raw, *openlibrary_raw, *web_search_raw],
+        author,
+        exclude_title_keys,
+        confidence="author_wide",
+    )
+
+    all_providers_failed = bool(provider_failures) and not any_provider_succeeded
+
+    if progress_callback:
+        progress_callback({"current_pass": "Done", "total": 1, "completed": 1})
+
+    return {
+        "candidates": combined,
+        "provider_failures": provider_failures,
+        "all_providers_failed": all_providers_failed,
     }

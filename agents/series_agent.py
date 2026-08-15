@@ -523,12 +523,7 @@ class SeriesIntelligenceAgent:
                         known_bare_titles.add(candidate_bare_key)
 
                 parsed_date = discovery_engine.parse_flexible_date(raw.get("published_date"))
-                # Hardcover explicitly flags books it knows aren't out yet
-                # even when it has no parseable release date -- fall back to
-                # that hint only when there's no date to compare against.
-                is_upcoming = bool(parsed_date and parsed_date > today) or bool(
-                    parsed_date is None and raw.get("upcoming_hint")
-                )
+                is_upcoming = discovery_engine.classify_upcoming(parsed_date, raw.get("upcoming_hint"))
 
                 # Give the stored title a recognizable series suffix when
                 # the source didn't provide one (see _title_references_series)
@@ -613,3 +608,75 @@ class SeriesIntelligenceAgent:
                     terminal_error=f"{type(exc).__name__}: {exc}",
                 )
             raise
+
+
+def discover_more_by_author(db: Session, author: str) -> dict:
+    """"More by this author" -- a lightweight, on-demand discovery across
+    ALL of an author's tracked series and standalone books at once.
+
+    Unlike run_series_check, this is not scoped to one series, does not
+    write anything to the database, and returns its candidate list directly
+    -- the caller (the API layer) decides per-row whether/how to add a
+    match via the normal create-book/create-series endpoints, per the "no
+    auto-created series from a guessed name" rule.
+    """
+    author = str(author or "").strip()
+    if not author:
+        return {"author": author, "candidates": [], "provider_failures": [], "all_providers_failed": False}
+
+    owned_books = [
+        book
+        for book in db.query(Book).filter(Book.author.isnot(None)).all()
+        if str(book.record_status or "") != "deleted" and _authors_match_exact(author, book.author)
+    ]
+    exclude_title_keys = {discovery_engine.core_title_key(book.title) for book in owned_books if book.title}
+    known_isbns = {str(book.isbn13 or "").strip() for book in owned_books if str(book.isbn13 or "").strip()}
+
+    # Lets the caller offer "add to this existing series" instead of
+    # silently creating a new one from the LLM's guessed series name -- this
+    # function only reports the match, it never creates or links anything.
+    tracked_series_by_name = {
+        _normalize_identity_text(series.name): series
+        for series in db.query(Series).filter(Series.author.isnot(None)).all()
+        if _authors_match_exact(author, series.author)
+    }
+
+    discovery = discovery_engine.discover_candidates_for_author(author, exclude_title_keys=exclude_title_keys)
+
+    results: list[dict] = []
+    for raw in discovery["candidates"]:
+        isbn13 = str(raw.get("isbn13") or "").strip()
+        if isbn13 and isbn13 in known_isbns:
+            continue
+
+        title = str(raw.get("title") or "").strip()
+        series_name_guess = str(raw.get("series_name_hint") or "").strip() or None
+        series_number = raw.get("series_number_hint") or discovery_engine.infer_number_from_title(
+            title, series_name_guess
+        )
+        matched_series = tracked_series_by_name.get(_normalize_identity_text(series_name_guess)) if series_name_guess else None
+
+        parsed_date = discovery_engine.parse_flexible_date(raw.get("published_date"))
+        is_upcoming = discovery_engine.classify_upcoming(parsed_date, raw.get("upcoming_hint"))
+
+        results.append(
+            {
+                "title": title,
+                "author": author,
+                "series_name": series_name_guess,
+                "matched_series_id": matched_series.id if matched_series else None,
+                "series_number": series_number,
+                "status": "upcoming" if is_upcoming else "available",
+                "release_date": parsed_date.isoformat() if parsed_date else None,
+                "source_url": raw.get("source_url"),
+                "isbn13": isbn13 or None,
+                "provider": raw.get("source"),
+            }
+        )
+
+    return {
+        "author": author,
+        "candidates": results,
+        "provider_failures": discovery["provider_failures"],
+        "all_providers_failed": discovery["all_providers_failed"],
+    }

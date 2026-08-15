@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 import crud
 import schemas
+from agents.series_agent import discover_more_by_author
 from intelligence import lookup_book_summary
 from routers.deps import enforce_access, get_db
 
@@ -34,6 +35,14 @@ def read_books_by_series(series_id: int, db: Session = Depends(get_db)):
 @router.get("/lookup")
 def lookup_book(title: str, author: str | None = None):
     return lookup_book_summary(title, author)
+
+
+# "More by this author" -- synchronous and lightweight by design (one query
+# per catalog API plus at most one web search, no lookahead queries), so no
+# background job/polling is needed the way series check needs one.
+@router.get("/discover_by_author")
+def discover_by_author(author: str, db: Session = Depends(get_db)):
+    return discover_more_by_author(db, author)
 
 
 @router.get("/{book_id}", response_model=schemas.BookResponse)
