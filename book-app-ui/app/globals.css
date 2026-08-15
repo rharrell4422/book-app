@@ -133,6 +133,7 @@
   --animate-float: float 7s ease-in-out infinite;
   --animate-spine-pulse: spine-pulse 4s ease-in-out infinite;
   --animate-drift: drift 18s ease-in-out infinite;
+  --animate-wave-bob: wave-bob 5s ease-in-out infinite;
 }
 
 @keyframes float {
@@ -166,6 +167,21 @@
   }
   50% {
     transform: translate(4%, 3%) scale(1.1);
+  }
+}
+
+/* Applied to a <g> wrapping each book-spine bar (see book-spines.tsx) --
+   kept separate from the bar's own "spine-pulse" (opacity/filter) so both
+   can run at once: a single Tailwind animate-* utility sets the whole
+   `animation` shorthand, so stacking two of them on one element would have
+   the second silently override the first rather than combine. */
+@keyframes wave-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
   }
 }
 
