@@ -40,6 +40,13 @@ export function setShareToken(token: string) {
 }
 
 export function getCurrentRole(): AccessRole {
+  // Local-dev-only convenience, mirroring AUTH_DISABLED on the backend
+  // (routers/deps.py): set NEXT_PUBLIC_AUTH_DISABLED=true in a local
+  // .env.local (gitignored, never the deployed frontend's config) to skip
+  // the login screen when browsing your own machine. The backend still
+  // needs its own AUTH_DISABLED set for requests to actually succeed --
+  // this only controls whether this app shows the login form.
+  if (process.env.NEXT_PUBLIC_AUTH_DISABLED === "true") return "owner";
   if (getOwnerToken()) return "owner";
   if (getShareToken()) return "viewer";
   return null;

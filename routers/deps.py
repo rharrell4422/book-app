@@ -69,6 +69,19 @@ JWT_ALGORITHM = "HS256"
 OWNER_TOKEN_TTL_DAYS = 30
 
 
+def _auth_disabled() -> bool:
+    """AUTH_DISABLED is a local-dev-only convenience: set it in your own
+    .env (never in a deployed environment's config) to skip the
+    password/share-token login entirely when running against your own
+    machine. Read fresh on every call rather than cached as a module-level
+    constant, so tests/conftest.py can force it off for the duration of the
+    suite regardless of import order, and so toggling it locally doesn't
+    require restarting anything but the reload that already happens on
+    every code change.
+    """
+    return os.environ.get("AUTH_DISABLED", "").strip().lower() in ("1", "true", "yes")
+
+
 def create_owner_token() -> str:
     payload = {
         "role": "owner",
@@ -87,6 +100,9 @@ def _is_valid_owner_token(token: str) -> bool:
 
 def get_access_level(request: Request) -> str:
     """Returns "owner", "viewer", or "anonymous" for the current request."""
+    if _auth_disabled():
+        return "owner"
+
     auth_header = request.headers.get("authorization", "")
     if auth_header.lower().startswith("bearer "):
         token = auth_header[len("bearer "):]
