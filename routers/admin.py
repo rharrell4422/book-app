@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from database import DATABASE_PATH, engine
-from intelligence import purge_orphaned_books
+from intelligence import find_ghost_profile_books, purge_orphaned_books, repair_ghost_profile_books
 from routers.deps import get_db, require_owner, require_owner_or_backup_token
 
 # No router-level dependency here (unlike other routers) because export_db
@@ -22,6 +22,25 @@ def purge_orphaned_books_endpoint(db: Session = Depends(get_db)):
     """Delete books left pointing at a series that was deleted without
     cascading. Safe to run any time; it's a no-op if there are none."""
     return purge_orphaned_books(db)
+
+
+@router.get("/ghost_profile_books", dependencies=[Depends(require_owner)])
+def list_ghost_profile_books_endpoint(db: Session = Depends(get_db)):
+    """Read-only report of books whose profile_id doesn't match the
+    profile_id of the series they're linked to (see
+    intelligence.find_ghost_profile_books). Safe to call any time; makes no
+    changes."""
+    entries = find_ghost_profile_books(db)
+    return {"count": len(entries), "entries": entries}
+
+
+@router.post("/repair_ghost_profile_books", dependencies=[Depends(require_owner)])
+def repair_ghost_profile_books_endpoint(db: Session = Depends(get_db)):
+    """Reassign every book found by /admin/ghost_profile_books to its
+    series' own profile_id, directly on the live database -- no
+    export/import round trip needed. Safe to run any time; it's a no-op if
+    there are none."""
+    return repair_ghost_profile_books(db)
 
 
 @router.get("/export_db", dependencies=[Depends(require_owner_or_backup_token)])

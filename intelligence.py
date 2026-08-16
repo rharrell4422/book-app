@@ -145,6 +145,59 @@ def purge_orphaned_books(db) -> dict:
     }
 
 
+def find_ghost_profile_books(db) -> list[dict]:
+    """Books whose profile_id doesn't match the profile_id of the series
+    they're linked to (see repair_ghost_profile_books for how this happens).
+    Read-only -- safe to call any time to check for contamination."""
+    rows = (
+        db.query(Book, Series)
+        .join(Series, Book.series_id == Series.id)
+        .filter(Book.profile_id != Series.profile_id)
+        .all()
+    )
+    return [
+        {
+            "book_id": book.id,
+            "title": book.title,
+            "current_profile_id": book.profile_id,
+            "correct_profile_id": series.profile_id,
+            "series_id": series.id,
+            "series_name": series.name,
+        }
+        for book, series in rows
+    ]
+
+
+def repair_ghost_profile_books(db) -> dict:
+    """Reassign every "ghost" book found by find_ghost_profile_books to its
+    series' own profile_id.
+
+    Background: Book.profile_id defaults to "robbie" when not passed
+    explicitly (see models.py). A book-creation path that forgets to set it
+    explicitly -- e.g. the "Check for New" discovery job before it was fixed
+    in services/series_check_engine.py -- silently tags the new row
+    profile_id="robbie" while it stays linked to whichever profile's series
+    triggered the discovery. That row becomes invisible to every
+    profile-scoped books query for the series' *actual* owner, yet still
+    shows up in "robbie"'s flat library list (which only filters by
+    profile_id, not by whether the linked series also belongs to robbie).
+    """
+    ghosts = find_ghost_profile_books(db)
+    if ghosts:
+        book_ids = [entry["book_id"] for entry in ghosts]
+        books_by_id = {book.id: book for book in db.query(Book).filter(Book.id.in_(book_ids)).all()}
+        for entry in ghosts:
+            book = books_by_id.get(entry["book_id"])
+            if book is not None:
+                book.profile_id = entry["correct_profile_id"]
+        db.commit()
+
+    return {
+        "repaired_count": len(ghosts),
+        "repaired_entries": ghosts,
+    }
+
+
 def _extract_series_position(text: str | None) -> int | None:
     if not text:
         return None
