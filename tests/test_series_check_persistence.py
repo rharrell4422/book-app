@@ -181,6 +181,69 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
         self.db.refresh(existing)
         self.assertEqual(existing.source_url, "https://www.amazon.com/dp/EXAMPLE8")
 
+    def test_dedupe_collapse_merges_release_date_from_loser_into_keeper(self):
+        # Reproduces the real-world "Quest Academy" / "Ultimate Level" /
+        # "The Bad Guys" data loss: two active rows end up sharing the same
+        # series+book_number (e.g. an older enriched row plus a
+        # re-discovered duplicate with a cleaner title but no dates). The
+        # dedupe collapse passes correctly pick a single survivor, but used
+        # to just mark the loser "deleted" without copying over any date
+        # the *keeper* was missing -- silently reverting a confirmed
+        # release_date back to "Needs Date Verification" on the surviving
+        # row. Both rows lack publication_date/asin/is_read so the
+        # keeper_score/existing_score tuples tie and the *second* row
+        # (`richer`) wins as keeper via score comparison order; either way,
+        # the release_date from the loser must survive onto whichever row
+        # is kept.
+        richer = Book(
+            title="Quest Academy: Scavengers",
+            author="Some Author",
+            series_id=self.series.id,
+            book_number=2.0,
+            series_order=2,
+            record_status="active",
+            is_read=False,
+            read_status="available",
+            release_date=None,
+            source_url=None,
+        )
+        from datetime import date
+
+        richer.release_date = date(2026, 6, 30)
+        thinner = Book(
+            title="Scavengers: Quest Academy, Book 2",
+            author="Some Author",
+            series_id=self.series.id,
+            book_number=2.0,
+            series_order=2,
+            record_status="active",
+            is_read=False,
+            read_status="available",
+            release_date=None,
+            source_url=None,
+        )
+        self.db.add_all([richer, thinner])
+        self.db.commit()
+
+        self._run_job_with_mocked_discovery([])
+
+        survivors = (
+            self.db.query(Book)
+            .filter(Book.series_id == self.series.id, Book.book_number == 2.0)
+            .filter(Book.record_status != "deleted")
+            .all()
+        )
+        self.assertEqual(len(survivors), 1, "dedupe collapse should leave exactly one active row")
+        self.assertEqual(survivors[0].release_date, date(2026, 6, 30))
+
+        deleted = (
+            self.db.query(Book)
+            .filter(Book.series_id == self.series.id, Book.book_number == 2.0)
+            .filter(Book.record_status == "deleted")
+            .all()
+        )
+        self.assertEqual(len(deleted), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

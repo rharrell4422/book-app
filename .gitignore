@@ -13,6 +13,7 @@ __pycache__/
 *.db-shm
 *.db-wal
 *.bak
+*.bak.*
 *.swp
 *.swo
 venv/

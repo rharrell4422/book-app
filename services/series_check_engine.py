@@ -68,6 +68,51 @@ def _classify_discovered_status(candidate: dict, today: date) -> tuple[str, date
     return "available", publication_date, expected_date
 
 
+# Fields a user (or an earlier, richer discovery pass) may have set that
+# the dedupe collapse passes below must not silently lose just because the
+# row holding them scored lower overall (e.g. a re-discovered duplicate
+# with a cleaner title but no date info, competing against an older row
+# that has a confirmed release_date on it). Deliberately excludes fields
+# the collapse's own scoring already governs (asin, edition/format,
+# is_read, publication_date's *presence*) to avoid fighting the keeper
+# selection logic -- this only backfills gaps, never overwrites a value the
+# keeper already has.
+_DEDUPE_MERGE_FIELDS = (
+    "release_date",
+    "publication_date",
+    "read_date",
+    "rating",
+    "review",
+    "notes",
+    "source_url",
+    "isbn",
+    "isbn13",
+    "goodreads_id",
+    "storygraph_id",
+    "google_books_id",
+)
+
+
+def _merge_loser_fields_into_keeper(keeper: models.Book, loser: models.Book) -> None:
+    """Copy any of _DEDUPE_MERGE_FIELDS the loser has that the keeper is
+    missing, before the loser is marked deleted. Without this, a dedupe
+    collapse can silently discard a user-entered or previously-discovered
+    date/rating/note just because the *other* row won on edition/is_read/
+    asin -- see the Quest Academy / Ultimate Level / The Bad Guys cases
+    this was written to fix.
+    """
+    for field in _DEDUPE_MERGE_FIELDS:
+        if getattr(keeper, field, None) in (None, ""):
+            loser_value = getattr(loser, field, None)
+            if loser_value not in (None, ""):
+                setattr(keeper, field, loser_value)
+
+    if bool(loser.is_read) and not bool(keeper.is_read):
+        keeper.is_read = True
+        keeper.read_date = keeper.read_date or loser.read_date
+        keeper.read_status = "read"
+
+
 def _build_series_counters(db: Session, series_id: int) -> dict:
     books = (
         db.query(models.Book)
@@ -431,6 +476,7 @@ def run_series_check_job_full(series_id: int) -> None:
                     loser.id,
                     key,
                 )
+                _merge_loser_fields_into_keeper(identity_keeper[key], loser)
                 loser.record_status = "deleted"
                 db_changed = True
 
@@ -479,6 +525,7 @@ def run_series_check_job_full(series_id: int) -> None:
                     loser.id,
                     series_book_key,
                 )
+                _merge_loser_fields_into_keeper(series_book_keeper[series_book_key], loser)
                 loser.record_status = "deleted"
                 db_changed = True
 
