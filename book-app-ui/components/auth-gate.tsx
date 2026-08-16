@@ -14,6 +14,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { ConfirmDialog, type ConfirmDialogState } from "@/components/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
@@ -268,6 +269,59 @@ function RenameProfileForm({
   );
 }
 
+function ResetLibrarySection({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
+  const { toast } = useToast();
+  const { activeProfile, resetActiveProfileLibrary } = useProfile();
+  const [confirmState, setConfirmState] = useState<ConfirmDialogState | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  if (!activeProfile) return null;
+
+  async function handleReset() {
+    setBusy(true);
+    try {
+      await resetActiveProfileLibrary();
+      onOpenChange(false);
+      toast({
+        title: "Library reset",
+        description: `${activeProfile!.display_name}'s books and series were deleted. You'll be prompted to import again.`,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Couldn't reset that library.";
+      toast({ title: "Reset failed", description: message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <div className="flex flex-col gap-2 border-t pt-4">
+        <p className="text-xs font-medium text-muted-foreground">Danger zone</p>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={busy}
+          className="justify-start border-destructive/40 text-destructive hover:bg-destructive/10"
+          onClick={() =>
+            setConfirmState({
+              title: `Reset ${activeProfile.display_name}'s library?`,
+              description: `This permanently deletes all ${activeProfile.book_count} book(s) and every series in this profile so you can re-import from scratch. This can't be undone, and only affects this profile -- other profiles are untouched.`,
+              confirmLabel: "Delete everything and start over",
+              destructive: true,
+              onConfirm: handleReset,
+            })
+          }
+        >
+          Reset &amp; re-import library…
+        </Button>
+      </div>
+      <ConfirmDialog state={confirmState} onOpenChange={(open) => !open && setConfirmState(null)} />
+    </>
+  );
+}
+
 function RenameProfileDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const { activeProfile } = useProfile();
 
@@ -275,7 +329,7 @@ function RenameProfileDialog({ open, onOpenChange }: { open: boolean; onOpenChan
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
-          <DialogTitle>Rename this profile</DialogTitle>
+          <DialogTitle>Manage this profile</DialogTitle>
           <DialogDescription>
             Call this library whatever you&rsquo;d like -- it won&rsquo;t affect anything already in it.
           </DialogDescription>
@@ -284,12 +338,15 @@ function RenameProfileDialog({ open, onOpenChange }: { open: boolean; onOpenChan
             re-seeded from the current display name every time the dialog
             opens, instead of reacting to prop changes with an effect. */}
         {open && activeProfile ? (
-          <RenameProfileForm
-            key={activeProfile.id}
-            profileId={activeProfile.id}
-            initialDisplayName={activeProfile.display_name}
-            onOpenChange={onOpenChange}
-          />
+          <>
+            <RenameProfileForm
+              key={activeProfile.id}
+              profileId={activeProfile.id}
+              initialDisplayName={activeProfile.display_name}
+              onOpenChange={onOpenChange}
+            />
+            <ResetLibrarySection onOpenChange={onOpenChange} />
+          </>
         ) : null}
       </DialogContent>
     </Dialog>

@@ -28,6 +28,7 @@ from sqlalchemy.orm import sessionmaker
 
 from database import Base
 from importer.importer import (
+    _series_link_decision,
     preview_import,
     read_excel_file,
     reset_profile_data,
@@ -148,6 +149,77 @@ class RunImportScopedIntelligenceTest(unittest.TestCase):
             db.close()
 
         self.assertNotIn(robbie_series_id, recalculated_series_ids)
+
+
+class ExplicitSeriesNameAutoLinksOnFirstImportTest(unittest.TestCase):
+    """Regression test for the real-world "Mackenzie's first import" bug:
+    a brand-new profile with zero series on record, importing rows whose
+    spreadsheet already has a Series column filled in, must auto-create
+    and link that series with no per-row confirmation. The old rule only
+    ever linked to an *already-existing* canonical series -- which a
+    profile's very first import can never have -- so every series-tagged
+    row silently failed to link (or, for unnumbered titles, demanded a
+    confirmation that could never actually resolve, since resolving also
+    only linked to a pre-existing series)."""
+
+    def setUp(self):
+        self.engine, self.SessionLocal = _new_in_memory_session_factory()
+        self.csv_path = _write_csv(
+            [
+                ["Title", "Author", "Series", "Book #"],
+                # Unnumbered title -- used to require confirmation despite
+                # an explicit Series column being present.
+                ["Scavengers", "Author One", "Quest Academy", "2"],
+                # Numbered title -- used to silently drop the series link
+                # because no canonical "Quest Academy" series existed yet.
+                ["Quest Academy Book 1", "Author One", "Quest Academy", "1"],
+                # No series at all -- should stay standalone, no confirmation.
+                ["A Standalone Novel", "Author Two", "", ""],
+            ]
+        )
+
+    def tearDown(self):
+        os.remove(self.csv_path)
+        Base.metadata.drop_all(bind=self.engine)
+        self.engine.dispose()
+
+    def test_series_tagged_rows_auto_link_without_confirmation(self):
+        with patch("importer.importer.SessionLocal", self.SessionLocal):
+            result = run_import(self.csv_path, profile_id="mackenzie")
+
+        self.assertEqual(result["imported_count"], 3)
+        self.assertEqual(result["confirmation_required_count"], 0)
+
+        db = self.SessionLocal()
+        try:
+            series_rows = db.query(Series).filter(Series.profile_id == "mackenzie").all()
+            self.assertEqual(len(series_rows), 1)
+            quest_academy = series_rows[0]
+            self.assertEqual(quest_academy.name, "Quest Academy")
+
+            books_by_title = {
+                b.title: b for b in db.query(Book).filter(Book.profile_id == "mackenzie").all()
+            }
+            self.assertEqual(books_by_title["Scavengers"].series_id, quest_academy.id)
+            self.assertEqual(books_by_title["Quest Academy Book 1"].series_id, quest_academy.id)
+            self.assertIsNone(books_by_title["A Standalone Novel"].series_id)
+        finally:
+            db.close()
+
+    def test_decision_helper_never_asks_for_confirmation_when_series_name_given(self):
+        db = self.SessionLocal()
+        try:
+            decision = _series_link_decision(
+                db, {"title": "Scavengers", "series_name": "Quest Academy"}, "mackenzie"
+            )
+            self.assertTrue(decision["should_link"])
+            self.assertFalse(decision["needs_confirmation"])
+
+            standalone_decision = _series_link_decision(db, {"title": "Lone Book", "series_name": ""}, "mackenzie")
+            self.assertFalse(standalone_decision["should_link"])
+            self.assertFalse(standalone_decision["needs_confirmation"])
+        finally:
+            db.close()
 
 
 class ExcelMasterSheetFallbackTest(unittest.TestCase):

@@ -23,6 +23,7 @@ type ProfileContextValue = {
   refreshProfiles: () => Promise<Profile[]>;
   createProfile: (id: string, displayName: string) => Promise<Profile>;
   renameProfile: (id: string, displayName: string) => Promise<Profile>;
+  resetActiveProfileLibrary: () => Promise<void>;
 };
 
 const ProfileContext = createContext<ProfileContextValue>({
@@ -36,6 +37,9 @@ const ProfileContext = createContext<ProfileContextValue>({
     throw new Error("ProfileProvider not mounted");
   },
   renameProfile: async () => {
+    throw new Error("ProfileProvider not mounted");
+  },
+  resetActiveProfileLibrary: async () => {
     throw new Error("ProfileProvider not mounted");
   },
 });
@@ -95,6 +99,15 @@ export function ProfileProvider({ children }: { children: React.ReactNode }) {
     [refreshProfiles]
   );
 
+  const resetActiveProfileLibrary = useCallback(async () => {
+    // Targets whichever profile is active server-side (X-Profile-Id header,
+    // see profile-storage.ts) -- callers must only surface this from a spot
+    // where the currently-selected profile is unambiguous (the profile
+    // menu), same caution as the backend route's own docstring.
+    await fetchApiWithFallback("/import/reset_profile", { method: "POST" });
+    await refreshProfiles();
+  }, [refreshProfiles]);
+
   useEffect(() => {
     if (!authReady || !role) return;
 
@@ -143,7 +156,17 @@ export function ProfileProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <ProfileContext.Provider
-      value={{ profileId, profiles, activeProfile, ready, setProfileId, refreshProfiles, createProfile, renameProfile }}
+      value={{
+        profileId,
+        profiles,
+        activeProfile,
+        ready,
+        setProfileId,
+        refreshProfiles,
+        createProfile,
+        renameProfile,
+        resetActiveProfileLibrary,
+      }}
     >
       {children}
     </ProfileContext.Provider>

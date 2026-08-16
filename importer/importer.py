@@ -386,70 +386,52 @@ def _find_existing_series_by_name(db: Session, series_name: str | None, profile_
 
 
 def _series_link_decision(db: Session, book_data: Dict[str, Any], profile_id: str) -> Dict[str, Any]:
-    """Decide whether series linkage is automatic or requires user confirmation.
+    """Decide whether a row's series linkage is automatic.
 
-    Rules:
-    1) Numbered title markers => auto-series only when canonical series exists.
-    2) Unnumbered title => require confirmation before series linkage.
-    3) Never infer series name from title text.
+    An explicit Series column in the spreadsheet is first-class,
+    user-supplied evidence -- unlike inferring a series from patterns in
+    the title text (which this deliberately never does), there's nothing
+    ambiguous about a row that already says what series it belongs to. So
+    any non-blank series_name is trusted outright: get-or-create the
+    canonical series for this profile and link immediately, no per-row
+    confirmation. This matches how the ~2,300 books already in the app
+    were treated (no confirmation gate) and how a normal "Series" column
+    export should behave.
+
+    The old version of this rule only ever *linked* to an already-existing
+    canonical series and never created one -- which meant a profile's
+    first-ever import (zero series on record yet) could never auto-link a
+    single row, *and* could never successfully resolve a "yes" confirmation
+    either, since resolving also only linked to a pre-existing series. That
+    combination is what forced a same-name Series column import into a
+    wall of per-row confirmations that couldn't even complete when answered.
+
+    Rows with no Series value at all import as standalone -- there's no
+    name to link or confirm against, so we don't ask; if a title looks
+    numbered but the sheet left the series blank, it's still standalone.
+    Any of these can be linked afterward via the normal "Edit book" flow,
+    which is the "fix it only if it's wrong" model instead of a mandatory
+    per-row validation pass.
     """
     series_name = str(book_data.get("series_name") or "").strip()
-    title = str(book_data.get("title") or "").strip()
-    explicit_confirmation = _parse_bool(book_data.get("series_confirmed"))
-    has_number_marker = _title_has_clear_series_number(title)
+    has_number_marker = _title_has_clear_series_number(str(book_data.get("title") or "").strip())
 
     if not series_name:
-        if not has_number_marker:
-            return {
-                "should_link": False,
-                "series": None,
-                "needs_confirmation": True,
-                "reason": "unnumbered_title_no_series_name_requires_confirmation",
-                "has_number_marker": False,
-            }
         return {
             "should_link": False,
             "series": None,
             "needs_confirmation": False,
-            "reason": "numbered_title_no_series_name",
+            "reason": "no_series_name_provided",
             "has_number_marker": has_number_marker,
         }
 
-    canonical_series = _find_existing_series_by_name(db, series_name, profile_id)
-
-    if has_number_marker:
-        if canonical_series:
-            return {
-                "should_link": True,
-                "series": canonical_series,
-                "needs_confirmation": False,
-                "reason": "numbered_title_auto_series",
-                "has_number_marker": True,
-            }
-        return {
-            "should_link": False,
-            "series": None,
-            "needs_confirmation": False,
-            "reason": "numbered_title_canonical_missing",
-            "has_number_marker": True,
-        }
-
-    # Unnumbered titles require explicit user confirmation.
-    if explicit_confirmation is True and canonical_series:
-        return {
-            "should_link": True,
-            "series": canonical_series,
-            "needs_confirmation": False,
-            "reason": "user_confirmed_unnumbered_title",
-            "has_number_marker": False,
-        }
-
     return {
-        "should_link": False,
-        "series": None,
-        "needs_confirmation": True,
-        "reason": "unnumbered_title_requires_confirmation",
-        "has_number_marker": False,
+        "should_link": True,
+        "series": None,  # resolved via get_or_create_series (may create or reuse)
+        "series_name": series_name,
+        "needs_confirmation": False,
+        "reason": "explicit_series_name",
+        "has_number_marker": has_number_marker,
     }
 
 def get_or_create_series(
@@ -462,7 +444,10 @@ def get_or_create_series(
     if not series_name:
         return None
 
-    existing = db.query(Series).filter(Series.name == series_name, Series.profile_id == profile_id).first()
+    # Reuse the same case-insensitive lookup as everywhere else in this
+    # file, so "Quest Academy" and "quest academy" in different rows of the
+    # same import can't create two separate canonical series.
+    existing = _find_existing_series_by_name(db, series_name, profile_id)
     if existing:
         # Optionally update finished/total_books if provided
         if series_finished_flag is not None:
@@ -506,22 +491,26 @@ def create_or_update_book(db: Session, book_data: Dict[str, Any], profile_id: st
     series_finished_flag = parse_series_finished_flag(raw_series_finished_flag)
 
     decision = _series_link_decision(db, book_data, profile_id)
-    series = decision.get("series") if decision.get("should_link") else None
-
-    if series:
-        # Keep canonical series metadata fresh when import includes explicit values.
-        if series_finished_flag is not None:
-            series.is_finished = bool(series_finished_flag)
-        if series_total_books is not None:
-            series.total_books = series_total_books
-        # Discovery searches by Series.author, so backfill it from the
-        # imported row rather than leaving discovery permanently unable to
-        # run for series that were created without one.
-        import_author = str(book_data.get("author") or "").strip()
-        if import_author and not str(series.author or "").strip():
-            series.author = import_author
-        db.commit()
-        db.refresh(series)
+    series = None
+    if decision.get("should_link"):
+        # get_or_create_series both finds-or-creates the canonical series
+        # and freshens its is_finished/total_books from this row.
+        series = get_or_create_series(
+            db,
+            decision.get("series_name") or str(series_name or "").strip(),
+            profile_id,
+            total_books=series_total_books,
+            series_finished_flag=series_finished_flag,
+        )
+        if series:
+            # Discovery searches by Series.author, so backfill it from the
+            # imported row rather than leaving discovery permanently unable
+            # to run for series that were created without one.
+            import_author = str(book_data.get("author") or "").strip()
+            if import_author and not str(series.author or "").strip():
+                series.author = import_author
+                db.commit()
+                db.refresh(series)
 
     if decision.get("needs_confirmation"):
         existing_row = book_data.get("import_raw_row") if isinstance(book_data.get("import_raw_row"), dict) else {}
