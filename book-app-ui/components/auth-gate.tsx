@@ -22,6 +22,8 @@ import { useProfile } from "@/lib/profile-context";
 import { fetchApiWithFallback } from "@/lib/api-client";
 import { setNotifyListener } from "@/lib/notify";
 import { OnboardingImport } from "@/components/onboarding/onboarding-import";
+import { BottomNav } from "@/components/mobile/bottom-nav";
+import { cn } from "@/lib/utils";
 
 function NotifyBridge() {
   const { toast } = useToast();
@@ -344,6 +346,74 @@ function ProfileSwitcher() {
   );
 }
 
+/**
+ * Consolidates profile switching, renaming, adding, sharing, and sign-out
+ * into a single modal for the mobile bottom nav's "Profile" tab -- the
+ * desktop TopBar spreads these across a select + icon buttons, which
+ * doesn't fit a thumb-sized nav bar. Reuses the same dialogs/handlers as
+ * the desktop ProfileSwitcher rather than duplicating profile logic.
+ */
+function MobileProfileSheet({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  const { logout } = useAuth();
+  const { profileId, profiles, setProfileId } = useProfile();
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [renameDialogOpen, setRenameDialogOpen] = useState(false);
+
+  return (
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Profile</DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-1">
+            {profiles.map((profile) => (
+              <button
+                key={profile.id}
+                type="button"
+                onClick={() => {
+                  setProfileId(profile.id);
+                  onOpenChange(false);
+                }}
+                className={cn(
+                  "flex items-center justify-between rounded-md border px-3 py-2 text-left text-sm",
+                  profile.id === profileId ? "border-primary bg-primary/5 font-medium" : "border-transparent"
+                )}
+              >
+                {profile.display_name}
+                {profile.id === profileId ? (
+                  <PencilIcon
+                    className="h-4 w-4 text-muted-foreground"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setRenameDialogOpen(true);
+                    }}
+                  />
+                ) : null}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() => setAddDialogOpen(true)}
+              className="rounded-md border border-dashed px-3 py-2 text-left text-sm text-muted-foreground"
+            >
+              + Add profile…
+            </button>
+          </div>
+          <DialogFooter className="flex-col gap-2 sm:flex-col">
+            <ShareLinkButton />
+            <Button variant="outline" size="sm" onClick={logout}>
+              Sign out
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <AddProfileDialog open={addDialogOpen} onOpenChange={setAddDialogOpen} />
+      <RenameProfileDialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen} />
+    </>
+  );
+}
+
 function TopBar() {
   const { role, logout } = useAuth();
   // The landing page ("/") is a deliberately dark, full-bleed hero (see
@@ -366,11 +436,15 @@ function TopBar() {
   if (role === "owner") {
     return (
       <div
-        className={
+        className={cn(
+          // Owner profile/share/sign-out controls move into the mobile
+          // bottom nav's Profile tab (MobileProfileSheet) below md, so this
+          // row -- sized for a mouse, not a thumb -- only renders on desktop.
+          "hidden items-center justify-end gap-2 md:flex",
           isLanding
-            ? "absolute inset-x-0 top-0 z-10 flex items-center justify-end gap-2 px-4 py-3 text-white/80"
-            : "flex items-center justify-end gap-2 border-b bg-muted/40 px-4 py-1.5"
-        }
+            ? "absolute inset-x-0 top-0 z-10 px-4 py-3 text-white/80"
+            : "border-b bg-muted/40 px-4 py-1.5"
+        )}
       >
         <ProfileSwitcher />
         <ShareLinkButton />
@@ -392,6 +466,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   // that choice persisting -- switching away and back re-evaluates has_data
   // fresh, same as a first visit.
   const [skippedProfileId, setSkippedProfileId] = useState<string | null>(null);
+  const [mobileProfileSheetOpen, setMobileProfileSheetOpen] = useState(false);
 
   if (!ready) {
     return null;
@@ -413,6 +488,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const needsOnboarding = Boolean(
     profileReady && activeProfile && !activeProfile.has_data && profileId !== skippedProfileId
   );
+  const showBottomNav = role === "owner" && !needsOnboarding;
 
   return (
     <div className="flex min-h-full flex-col">
@@ -423,7 +499,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           page just does useEffect(() => fetch..., []) on mount), so a full
           remount is what makes every page's own data fetch re-run against
           the newly-selected profile without touching each page individually. */}
-      <div className="flex-1" key={profileId}>
+      <div className={cn("flex-1", showBottomNav && "pb-16 md:pb-0")} key={profileId}>
         {needsOnboarding && activeProfile ? (
           <OnboardingImport
             profile={activeProfile}
@@ -436,6 +512,12 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           children
         )}
       </div>
+      {showBottomNav ? (
+        <div className="md:hidden">
+          <BottomNav onOpenProfile={() => setMobileProfileSheetOpen(true)} />
+          <MobileProfileSheet open={mobileProfileSheetOpen} onOpenChange={setMobileProfileSheetOpen} />
+        </div>
+      ) : null}
     </div>
   );
 }

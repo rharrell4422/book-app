@@ -16,6 +16,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { MobileSeriesList } from "@/components/series/mobile-series-list";
+import { useIsMobile } from "@/hooks/use-mobile";
 
 type SeriesRow = {
   id: number;
@@ -334,6 +336,7 @@ function sanitizeSavedSeriesColumnWidths(value: unknown): Record<SeriesColumnKey
 
 export default function SeriesPage() {
   const { toast } = useToast();
+  const isMobile = useIsMobile();
   const [series, setSeries] = useState<SeriesRow[]>([]);
   const [viewMode, setViewMode] = useState<"ongoing" | "finished">("ongoing");
   const [quickSearch, setQuickSearch] = useState("");
@@ -928,6 +931,27 @@ export default function SeriesPage() {
         ) : null}
       </div>
 
+      {isMobile ? (
+        <MobileSeriesList
+          items={sortedSeries.map((s) => {
+            const state = getSeriesState(s);
+            return {
+              series: s,
+              hasNewAvailableBooks: state.has_new_available_books,
+              hasNewUpcomingBooks: state.has_new_upcoming_books,
+              hasUnreadBooks: state.has_unread_books,
+              missingBooksLabel: formatMissingBooksLabel(s.missing_books),
+              lastCheckedDisplay: formatDate(s.last_checked),
+              checkState: rowCheckState[s.id] ?? null,
+            };
+          })}
+          viewMode={viewMode}
+          checkingSeriesId={loadingId}
+          onCheckNow={handleCheckNow}
+          onDismissCheckState={dismissCheckBanner}
+          getCheckStateClassName={(tone) => getCheckBannerClassName(tone as CheckBannerTone)}
+        />
+      ) : (
       <div ref={tableWrapRef} className="overflow-x-auto rounded-lg border bg-card/80">
         <Table className="w-full table-fixed text-sm [&_th]:h-9 [&_th]:py-1 [&_td]:py-1">
           <TableHeader>
@@ -1101,6 +1125,7 @@ export default function SeriesPage() {
           </TableBody>
         </Table>
       </div>
+      )}
       <p className="text-xs text-muted-foreground">
         Showing {sortedSeries.length} of {viewMode === "ongoing" ? ongoingCount : finishedCount} series.
       </p>

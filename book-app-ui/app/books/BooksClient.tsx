@@ -36,6 +36,8 @@ import {
 } from "@/components/books/edit-book-dialog";
 import { BookSummaryDialog } from "@/components/series/book-summary-dialog";
 import { MoreByAuthorDialog } from "@/components/books/more-by-author-dialog";
+import { MobileBookList } from "@/components/books/mobile-book-list";
+import { useIsMobile } from "@/hooks/use-mobile";
 
 import {
   Table,
@@ -216,6 +218,7 @@ export default function BooksClient() {
   const { toast } = useToast();
   const { role } = useAuth();
   const canEdit = role === "owner";
+  const isMobile = useIsMobile();
   const [books, setBooks] = useState<BookRow[]>([]);
   const [seriesList, setSeriesList] = useState<SeriesOption[]>([]);
   const [loading, setLoading] = useState(false);
@@ -1143,6 +1146,28 @@ export default function BooksClient() {
         </div>
       </div>
 
+      {isMobile ? (
+        <MobileBookList
+          items={sortedBooks.map((b) => {
+            const status = getBookStatus(b);
+            return {
+              book: b,
+              status,
+              statusChipClass: getStatusChipClass(status),
+              unconfirmedDate: hasUnconfirmedReleaseDate(status, b),
+              displayDate: formatDate(getDisplayDate(b)),
+            };
+          })}
+          canEdit={canEdit}
+          onToggleRead={toggleRead}
+          onEdit={openEditBookDialog}
+          onDelete={deleteBook}
+          onOpenSummary={openSummaryEditor}
+          onMoreByAuthor={(author) => setMoreByAuthorTarget(author)}
+          onViewSeries={(seriesId) => router.push(`/series/${seriesId}`)}
+          onCheckOnline={(book) => window.open(getCheckOnlineUrl(book), "_blank", "noopener,noreferrer")}
+        />
+      ) : (
       <div ref={tableWrapRef} className="overflow-x-auto rounded-lg border bg-card/80">
         <Table className="w-full min-w-[880px] table-fixed text-sm [&_th]:h-9 [&_th]:py-1 [&_td]:py-1">
           <TableHeader>
@@ -1405,6 +1430,7 @@ export default function BooksClient() {
           </TableBody>
         </Table>
       </div>
+      )}
       <p className="text-xs text-muted-foreground">
         Showing {sortedBooks.length} of {books.length} books.
       </p>

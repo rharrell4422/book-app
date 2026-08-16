@@ -34,6 +34,8 @@ import { EditBookDialog, type EditBookFormState } from "@/components/series/edit
 import { BookSummaryDialog } from "@/components/series/book-summary-dialog";
 import { NormalizeTitlesDialog } from "@/components/series/normalize-titles-dialog";
 import { MoreByAuthorDialog } from "@/components/books/more-by-author-dialog";
+import { MobileSeriesBookList } from "@/components/series/mobile-series-book-list";
+import { useIsMobile } from "@/hooks/use-mobile";
 
  type TitleNormalizationMode = "keep_original" | "clean_up" | "new_clean_title" | "match_other_titles";
 type TitleNormalizationWizardMode = TitleNormalizationMode | "custom";
@@ -511,6 +513,7 @@ function sortBooksBySeriesOrder(books: BookRecord[]): BookRecord[] {
 export default function SeriesDetailPage() {
   const { role } = useAuth();
   const canEdit = role === "owner";
+  const isMobile = useIsMobile();
   const params = useParams();
   const searchParams = useSearchParams();
   const seriesId = params.seriesId as string;
@@ -1845,11 +1848,33 @@ export default function SeriesDetailPage() {
       </div>
 
       {recentAddMessage ? (
-        <div className="fixed bottom-4 right-4 z-50 max-w-md rounded-md border-2 border-emerald-900 bg-emerald-800 px-3 py-2 text-sm font-semibold text-white shadow-2xl">
+        // bottom-20 (not bottom-4) on mobile clears the fixed bottom nav
+        // (BottomNav, ~4rem tall) added in auth-gate.tsx -- otherwise this
+        // toast renders on top of the nav's tab labels.
+        <div className="fixed bottom-20 right-4 z-50 max-w-md rounded-md border-2 border-emerald-900 bg-emerald-800 px-3 py-2 text-sm font-semibold text-white shadow-2xl md:bottom-4">
           {recentAddMessage}
         </div>
       ) : null}
 
+      {isMobile ? (
+        <MobileSeriesBookList
+          items={displayedBooks.map((book) => {
+            const status = getBookStatus(book);
+            return {
+              book,
+              status,
+              statusChipClass: getStatusChipClass(status),
+              unconfirmedDate: hasUnconfirmedReleaseDate(status, book),
+              displayDate: formatDate(getBookDate(book)),
+            };
+          })}
+          canEdit={canEdit}
+          onEdit={handleEditBookTitle}
+          onOpenSummary={openSummaryEditor}
+          onMoreByAuthor={(author) => setMoreByAuthorTarget(author)}
+          onCheckOnline={(book) => window.open(getCheckOnlineUrl(book), "_blank", "noopener,noreferrer")}
+        />
+      ) : (
       <div ref={booksTableWrapRef} className="overflow-x-auto rounded-lg border bg-card/80">
       <Table className="w-full table-fixed">
         <TableHeader>
@@ -1994,6 +2019,7 @@ export default function SeriesDetailPage() {
         </TableBody>
       </Table>
       </div>
+      )}
 
       <BookSummaryDialog
         open={Boolean(summaryEditorBook)}
