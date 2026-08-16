@@ -63,6 +63,26 @@ def read_series(db: Session = Depends(get_db), profile_id: str = Depends(get_cur
     return responses
 
 
+# Slim, paginated variant of read_series() for clients that only need
+# list/card fields -- notably, it never nests each series' full books[]
+# array the way SeriesResponse does, which today duplicates every book's
+# full payload once per series. Additive: existing callers of GET /series/
+# are completely unaffected. Full per-book detail is still available via
+# GET /series/{id}.
+@router.get("/light", response_model=List[schemas.SeriesListItem])
+def read_series_light(
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    profile_id: str = Depends(get_current_profile_id),
+):
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 200")
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset must be >= 0")
+    return crud.get_all_series(db, profile_id, limit=limit, offset=offset)
+
+
 @router.get("/{series_id}", response_model=schemas.SeriesDetailResponse)
 def read_series_by_id(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
     db_series = crud.get_series(db, series_id, profile_id)

@@ -82,6 +82,27 @@ class BookResponse(BookBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+# Slim projection of BookResponse for list/card views (mobile, or any client
+# that doesn't need all ~40 fields just to render a title/author/status
+# row). Deliberately excludes heavy text fields (auto_summary, review,
+# notes) and the long tail of external-id columns. cover_url is not a real
+# column yet -- reserved here for the Phase 1.5 cover-art follow-up so this
+# schema doesn't need another breaking change when that field lands.
+class BookListItem(BaseModel):
+    id: int
+    title: str
+    author: str
+    series_id: Optional[int] = None
+    series_name: Optional[str] = None
+    book_number: Optional[float] = None
+    read_status: Optional[str] = None
+    is_read: Optional[bool] = None
+    is_upcoming_final: Optional[bool] = None
+    rating: Optional[int] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class BookUpdate(BaseModel):
     title: Optional[str] = None
     author: Optional[str] = None
@@ -166,6 +187,26 @@ class SeriesResponse(SeriesBase):
     series_state: SeriesState | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+# Slim projection of SeriesResponse for list/card views -- notably, it never
+# nests the series' books[] the way SeriesResponse does, which is what
+# duplicates every book's full payload once per series on GET /series/.
+# Full per-book detail is still available via GET /series/{id}.
+class SeriesListItem(BaseModel):
+    id: int
+    name: str
+    author: Optional[str] = None
+    total_books: Optional[int] = None
+    read_count: Optional[int] = None
+    unread_count: Optional[int] = None
+    is_finished: Optional[bool] = None
+    has_new_books: Optional[bool] = None
+    has_unread_books: Optional[bool] = None
+    has_upcoming_books: Optional[bool] = None
+    is_caught_up: Optional[bool] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
 
 class SeriesDetailResponse(BaseModel):
     id: int

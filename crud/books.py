@@ -117,13 +117,21 @@ def create_book(db: Session, book, profile_id: str):
     return db_book
 
 
-def get_all_books(db: Session, profile_id: str):
-    return (
+def get_all_books(db: Session, profile_id: str, limit: int | None = None, offset: int | None = None):
+    query = (
         db.query(Book)
         .filter(Book.profile_id == profile_id)
         .filter(or_(Book.record_status.is_(None), Book.record_status != "deleted"))
-        .all()
+        # Stable ordering is required once limit/offset paging is in play --
+        # without it, successive pages can repeat or skip rows depending on
+        # the database's default (unordered) scan order.
+        .order_by(Book.id)
     )
+    if offset is not None:
+        query = query.offset(offset)
+    if limit is not None:
+        query = query.limit(limit)
+    return query.all()
 
 
 def get_book(db: Session, book_id: int, profile_id: str):

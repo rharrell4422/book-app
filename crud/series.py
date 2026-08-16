@@ -21,8 +21,13 @@ def create_series(db: Session, series, profile_id: str):
     return db_series
 
 
-def get_all_series(db: Session, profile_id: str):
-    return db.query(Series).filter(Series.profile_id == profile_id).all()
+def get_all_series(db: Session, profile_id: str, limit: int | None = None, offset: int | None = None):
+    query = db.query(Series).filter(Series.profile_id == profile_id).order_by(Series.id)
+    if offset is not None:
+        query = query.offset(offset)
+    if limit is not None:
+        query = query.limit(limit)
+    return query.all()
 
 
 def get_series(db: Session, series_id: int, profile_id: str):

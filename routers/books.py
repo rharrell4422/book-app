@@ -32,6 +32,25 @@ def read_books(db: Session = Depends(get_db), profile_id: str = Depends(get_curr
     return crud.get_all_books(db, profile_id)
 
 
+# Slim, paginated variant of read_books() for clients that only need
+# list/card fields (mobile, future infinite-scroll views) -- avoids shipping
+# every book's full ~40-field payload (auto_summary, review, notes, every
+# external id) just to render a title/author/status row. Additive: existing
+# callers of GET /books/ are completely unaffected.
+@router.get("/light", response_model=List[schemas.BookListItem])
+def read_books_light(
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    profile_id: str = Depends(get_current_profile_id),
+):
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 200")
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset must be >= 0")
+    return crud.get_all_books(db, profile_id, limit=limit, offset=offset)
+
+
 @router.get("/by_series/{series_id}", response_model=List[schemas.BookResponse])
 def read_books_by_series(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
     return crud.get_books_by_series(db, series_id, profile_id)
