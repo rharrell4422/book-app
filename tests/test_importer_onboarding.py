@@ -27,7 +27,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from database import Base
+import importer.importer as importer_module
 from importer.importer import (
+    _is_meaningful_series_name,
     _series_link_decision,
     preview_import,
     read_excel_file,
@@ -218,6 +220,123 @@ class ExplicitSeriesNameAutoLinksOnFirstImportTest(unittest.TestCase):
             standalone_decision = _series_link_decision(db, {"title": "Lone Book", "series_name": ""}, "mackenzie")
             self.assertFalse(standalone_decision["should_link"])
             self.assertFalse(standalone_decision["needs_confirmation"])
+        finally:
+            db.close()
+
+
+class PlaceholderSeriesNameIsRejectedTest(unittest.TestCase):
+    """Regression test for the real-world "Mackenzie's library" bug: her
+    spreadsheet used a "\u2014 <Author Name>" marker in the Series column for
+    standalone books (a common personal-tracker convention for "not part of
+    a series"), which the auto-link fix above then trusted as a literal
+    series name -- creating a bogus "\u2014 Rebecca Yarros" series that
+    swallowed every standalone book by that author and emptied the actual
+    "standalone books" view."""
+
+    def test_dash_author_marker_is_not_a_meaningful_series_name(self):
+        self.assertFalse(_is_meaningful_series_name("\u2014 Rebecca Yarros", "Rebecca Yarros"))
+        self.assertFalse(_is_meaningful_series_name("- Rebecca Yarros", "Rebecca Yarros"))
+        self.assertFalse(_is_meaningful_series_name("-- Rebecca Yarros", "Rebecca Yarros"))
+
+    def test_bare_placeholder_values_are_not_meaningful_series_names(self):
+        for placeholder in ("-", "--", "\u2014", "N/A", "n/a", "None", "TBD", "standalone", "   "):
+            self.assertFalse(_is_meaningful_series_name(placeholder, "Some Author"), placeholder)
+
+    def test_real_series_names_are_still_meaningful(self):
+        self.assertTrue(_is_meaningful_series_name("Quest Academy", "Rebecca Yarros"))
+        # A series literally named after its author (e.g. eponymous series)
+        # is still meaningful as long as it isn't just a dash marker.
+        self.assertTrue(_is_meaningful_series_name("Rebecca Yarros", "Rebecca Yarros"))
+
+    def setUp(self):
+        self.engine, self.SessionLocal = _new_in_memory_session_factory()
+        self.csv_path = _write_csv(
+            [
+                ["Title", "Author", "Series", "Book #"],
+                ["Fourth Wing", "Rebecca Yarros", "Empyrean", "1"],
+                ["Iron Flame", "Rebecca Yarros", "Empyrean", "2"],
+                # Standalone books tagged with the "-- Author" placeholder
+                # convention instead of being left blank.
+                ["Onyx Storm Prequel", "Rebecca Yarros", "\u2014 Rebecca Yarros", ""],
+                ["A Different Standalone", "Rebecca Yarros", "-- Rebecca Yarros", ""],
+            ]
+        )
+
+    def tearDown(self):
+        os.remove(self.csv_path)
+        Base.metadata.drop_all(bind=self.engine)
+        self.engine.dispose()
+
+    def test_placeholder_tagged_rows_stay_standalone_not_a_bogus_series(self):
+        with patch("importer.importer.SessionLocal", self.SessionLocal):
+            result = run_import(self.csv_path, profile_id="mackenzie")
+
+        self.assertEqual(result["imported_count"], 4)
+
+        db = self.SessionLocal()
+        try:
+            series_names = {
+                s.name for s in db.query(Series).filter(Series.profile_id == "mackenzie").all()
+            }
+            self.assertEqual(series_names, {"Empyrean"})
+
+            books_by_title = {
+                b.title: b for b in db.query(Book).filter(Book.profile_id == "mackenzie").all()
+            }
+            self.assertIsNone(books_by_title["Onyx Storm Prequel"].series_id)
+            self.assertIsNone(books_by_title["A Different Standalone"].series_id)
+        finally:
+            db.close()
+
+
+class RunImportPerSeriesIntelligenceIsolationTest(unittest.TestCase):
+    """Regression test for the "finished series show no total" bug: the
+    post-import intelligence recompute loop used to share a single
+    try/except around the *entire* per-profile loop, so one series raising
+    partway through silently skipped recomputing every series queued after
+    it -- leaving their total_books/etc. stale or blank even though their
+    books imported correctly."""
+
+    def setUp(self):
+        self.engine, self.SessionLocal = _new_in_memory_session_factory()
+        self.csv_path = _write_csv(
+            [
+                ["Title", "Author", "Series", "Book #"],
+                ["Broken Series Book", "Author One", "Broken Series", "1"],
+                ["Finished Series Book 1", "Author Two", "Finished Series", "1"],
+                ["Finished Series Book 2", "Author Two", "Finished Series", "2"],
+            ]
+        )
+
+    def tearDown(self):
+        os.remove(self.csv_path)
+        Base.metadata.drop_all(bind=self.engine)
+        self.engine.dispose()
+
+    def test_one_series_raising_does_not_block_recompute_for_the_rest(self):
+        real_recalculate_intelligence = importer_module.recalculate_intelligence
+
+        def flaky_recalculate_intelligence(db, series_id, scan_result=None):
+            series = db.query(Series).filter(Series.id == series_id).first()
+            if series and series.name == "Broken Series":
+                raise RuntimeError("simulated bad data for this one series")
+            return real_recalculate_intelligence(db, series_id, scan_result=scan_result)
+
+        with patch("importer.importer.SessionLocal", self.SessionLocal), patch(
+            "importer.importer.recalculate_intelligence", side_effect=flaky_recalculate_intelligence
+        ):
+            run_import(self.csv_path, profile_id="mackenzie")
+
+        db = self.SessionLocal()
+        try:
+            finished_series = (
+                db.query(Series)
+                .filter(Series.profile_id == "mackenzie", Series.name == "Finished Series")
+                .first()
+            )
+            # Despite "Broken Series" raising, "Finished Series" (queued
+            # after it) must still get its total_books computed.
+            self.assertEqual(finished_series.total_books, 2)
         finally:
             db.close()
 

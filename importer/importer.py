@@ -385,6 +385,41 @@ def _find_existing_series_by_name(db: Session, series_name: str | None, profile_
     )
 
 
+_SERIES_NAME_LEADING_MARKER_PATTERN = re.compile(r"^[\s\-\u2010-\u2015_.:]+")
+_NON_SERIES_PLACEHOLDER_VALUES = {"n a", "na", "none", "standalone", "tbd", "unknown", "n"}
+
+
+def _is_meaningful_series_name(series_name: Any, author: Any = None) -> bool:
+    """Reject spreadsheet "Series" values that are really just a personal
+    tracker's placeholder for "not part of a series", not an actual series
+    name -- e.g. a bare "-"/"--"/em-dash, or (the real-world case this was
+    added for) a "\u2014 Author Name" marker some trackers put in the Series
+    column for a standalone book by that author. Without this filter, an
+    explicit-but-meaningless Series value is trusted exactly like a real
+    one and creates a bogus series that swallows every standalone book by
+    that author (and empties the actual "standalone books" view).
+    """
+    candidate = str(series_name or "").strip()
+    if not candidate:
+        return False
+
+    normalized = normalize_header(candidate)
+    if not normalized or normalized in _NON_SERIES_PLACEHOLDER_VALUES:
+        return False
+
+    author_text = str(author or "").strip()
+    if author_text:
+        after_marker = _SERIES_NAME_LEADING_MARKER_PATTERN.sub("", candidate).strip()
+        # Only treat "matches the author" as disqualifying when a leading
+        # dash/marker was actually present and stripped -- a series simply
+        # named after its author with no marker (an eponymous series) is
+        # still a real, explicit signal worth trusting.
+        if after_marker and after_marker != candidate and after_marker.lower() == author_text.lower():
+            return False
+
+    return True
+
+
 def _series_link_decision(db: Session, book_data: Dict[str, Any], profile_id: str) -> Dict[str, Any]:
     """Decide whether a row's series linkage is automatic.
 
@@ -416,12 +451,12 @@ def _series_link_decision(db: Session, book_data: Dict[str, Any], profile_id: st
     series_name = str(book_data.get("series_name") or "").strip()
     has_number_marker = _title_has_clear_series_number(str(book_data.get("title") or "").strip())
 
-    if not series_name:
+    if not series_name or not _is_meaningful_series_name(series_name, book_data.get("author")):
         return {
             "should_link": False,
             "series": None,
             "needs_confirmation": False,
-            "reason": "no_series_name_provided",
+            "reason": "no_series_name_provided" if not series_name else "series_name_looks_like_placeholder",
             "has_number_marker": has_number_marker,
         }
 
@@ -758,9 +793,23 @@ def run_import(file_path: str, *, profile_id: str = DEFAULT_IMPORT_PROFILE_ID, i
         profile_series_ids = [
             row[0] for row in db.query(Series.id).filter(Series.profile_id == profile_id).all()
         ]
+        recomputed_count = 0
         for series_id in profile_series_ids:
-            recalculate_intelligence(db, series_id)
-        print(f"Series intelligence recomputed for {len(profile_series_ids)} series in profile '{profile_id}'.")
+            try:
+                recalculate_intelligence(db, series_id)
+                recomputed_count += 1
+            except Exception as e:
+                # Each series gets its own try/except -- one series with
+                # unusual data (e.g. odd book numbers) throwing here must
+                # not abort the loop and leave every *other* series in this
+                # import with a stale/blank total_books. A single shared
+                # try around the whole loop previously did exactly that.
+                db.rollback()
+                print(f"Warning: failed to recompute intelligence for series {series_id}: {e}")
+        print(
+            f"Series intelligence recomputed for {recomputed_count}/{len(profile_series_ids)} "
+            f"series in profile '{profile_id}'."
+        )
     except Exception as e:
         print(f"Warning: failed to recompute series intelligence: {e}")
 
