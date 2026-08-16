@@ -645,7 +645,17 @@ def _fetch_hardcover(query: str, max_results: int = 25) -> list[dict]:
         raw_position = featured_series.get("position")
         if raw_position is not None:
             try:
-                series_position = int(round(float(raw_position)))
+                # Rounding to the nearest int used to collapse Hardcover's
+                # fractional positions (0.5-style companion novellas/side
+                # stories, e.g. "Threshing Day" at position 3.5 in The
+                # Empyrean) into a whole number -- and Python's round-half-
+                # to-even rounds X.5 *up* whenever the next integer is even,
+                # so position 3.5 became "Book 4", making a side story
+                # indistinguishable from (and blocking/confusing detection
+                # of) the real next numbered entry. Keep the float as-is so
+                # downstream code can tell a companion book (non-integer
+                # position) apart from a genuine next-in-sequence book.
+                series_position = float(raw_position)
             except (TypeError, ValueError):
                 series_position = None
 

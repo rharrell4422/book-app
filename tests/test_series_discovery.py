@@ -795,6 +795,39 @@ class HardcoverProviderTest(unittest.TestCase):
         self.assertEqual(results[0]["series_name_hint"], "Unbound")
         self.assertEqual(results[0]["series_number_hint"], 12)
 
+    def test_fractional_series_position_is_not_rounded_to_next_integer(self):
+        # Regression (live bug): Hardcover tags companion/side-story content
+        # with a fractional position (e.g. "Threshing Day", a short story
+        # collection in Rebecca Yarros's The Empyrean universe, at position
+        # 3.5). Rounding that to the nearest int used to turn it into
+        # "Book 4" -- indistinguishable from (and mistaken for) the real
+        # next numbered entry in the main series, even though Hardcover
+        # itself classifies it as a side book, not book 4. Note Python's
+        # round-half-to-even means 3.5 specifically rounds *up* to 4, which
+        # is exactly what happened here.
+        hits = [
+            {
+                "document": {
+                    "title": "Threshing Day",
+                    "author_names": ["Rebecca Yarros"],
+                    "isbns": [],
+                    "release_date": "2026-09-29",
+                    "featured_series": {
+                        "position": 3.5,
+                        "unreleased": True,
+                        "series": {"id": 1, "name": "The Empyrean"},
+                    },
+                }
+            }
+        ]
+        with patch.object(discovery_engine, "os") as mock_os, patch.object(
+            discovery_engine.httpx, "post", return_value=self._mock_response(hits)
+        ):
+            mock_os.environ.get.return_value = "test-key"
+            results = discovery_engine._fetch_hardcover("Rebecca Yarros")
+
+        self.assertEqual(results[0]["series_number_hint"], 3.5)
+
     def test_series_total_hint_prefers_primary_books_count(self):
         # Verified against a live API response for Glynn Stewart's "Exile"
         # series: books_count (4) includes a 0.5 novella, primary_books_count
