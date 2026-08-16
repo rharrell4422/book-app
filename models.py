@@ -34,11 +34,40 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class Profile(Base):
+    """A library, not an account. Multiple profiles can exist under the one
+    login this app has today (see routers/deps.py) -- each is a fully
+    isolated set of series/books, scoped by the profile_id column on those
+    tables below. Deliberately a separate table from `users` rather than a
+    rename of it: `users` is reserved for real future per-account logins,
+    and `owner_user_id` here (unused/unenforced for now, like `owner_id`
+    above) is the eventual attachment point -- when real accounts exist, a
+    user's profiles are just `WHERE owner_user_id = current_user.id`, no
+    further schema change needed.
+    """
+
+    __tablename__ = "profiles"
+
+    id = Column(String, primary_key=True)
+    display_name = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    is_default = Column(Boolean, default=False)
+    owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+
 class Series(Base):
     __tablename__ = "series"
 
     id = Column(Integer, primary_key=True, index=True)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    # default="robbie" (not just the migration's backfill) so that any code
+    # path constructing a Series/Book without an explicit profile_id --
+    # notably the many pre-existing unit tests that build these rows
+    # directly -- still gets a valid row instead of a NOT NULL failure.
+    # Every real request path (routers/*, importer, agents/series_agent.py)
+    # always passes profile_id explicitly; this default only ever matters
+    # for code that predates profiles entirely.
+    profile_id = Column(String, ForeignKey("profiles.id"), nullable=False, index=True, default="robbie")
 
     # Core
     name = Column(String, nullable=False)
@@ -135,6 +164,8 @@ class Book(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    # See Series.profile_id above for why this has a default.
+    profile_id = Column(String, ForeignKey("profiles.id"), nullable=False, index=True, default="robbie")
 
     # Core identity
     title = Column(String, nullable=False)

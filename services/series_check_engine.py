@@ -15,7 +15,6 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 import models
-import crud
 import library_sync
 from book_metadata_utils import parse_publication_date
 from database import SessionLocal
@@ -112,7 +111,13 @@ def _build_status_bar(series: "models.Series") -> dict:
 def run_series_check_job_full(series_id: int) -> None:
     db = SessionLocal()
     try:
-        db_series = crud.get_series(db, series_id)
+        # Not crud.get_series: this internal background job is only ever
+        # scheduled for a series_id the API layer already validated against
+        # the caller's profile (see routers/series.py's /check endpoint) --
+        # re-deriving/threading a profile_id all the way through the job
+        # queue would be redundant, since a series_id alone already
+        # uniquely identifies one profile via its own profile_id column.
+        db_series = db.query(models.Series).filter(models.Series.id == series_id).first()
         if db_series:
             logger.info("CHECK NOW triggered for series_id=%s, series_name=%s", series_id, db_series.name)
         fallback_missing = [7]
@@ -170,7 +175,7 @@ def run_series_check_job_full(series_id: int) -> None:
                 failure.get("error") or "unknown",
             )
 
-        db_series = crud.get_series(db, series_id)
+        db_series = db.query(models.Series).filter(models.Series.id == series_id).first()
         if not db_series:
             raise RuntimeError(f"Series {series_id} not found during check job")
 

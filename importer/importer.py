@@ -13,7 +13,7 @@ try:
 
     from database import SessionLocal
     from models import Series, Book
-    from intelligence import recompute_series_intelligence
+    from intelligence import recalculate_intelligence
 except Exception as e:
     print("\n\n🔥 IMPORTER MODULE FAILED DURING IMPORT 🔥")
     traceback.print_exc()
@@ -124,7 +124,14 @@ def parse_date(value: Any):
 # ------------------------------------------------------------
 
 def read_excel_file(file_path: str) -> Tuple[List[str], List[List[Any]]]:
-    df = pd.read_excel(file_path, sheet_name="Master")
+    """Read the "Master" sheet if present (Robbie's personal template), or
+    fall back to the workbook's first sheet -- a brand-new user's own
+    export (or a Google Sheets download) has no reason to use that sheet
+    name, and previously this would raise and block onboarding entirely."""
+    try:
+        df = pd.read_excel(file_path, sheet_name="Master")
+    except ValueError:
+        df = pd.read_excel(file_path, sheet_name=0)
     headers = list(df.columns)
     rows = df.values.tolist()
     return headers, rows
@@ -354,8 +361,10 @@ def _should_create_series_link(book_data: Dict[str, Any]) -> bool:
     )
 
 
-def _find_existing_series_by_name(db: Session, series_name: str | None) -> Series | None:
-    """Return an existing canonical series record by name.
+def _find_existing_series_by_name(db: Session, series_name: str | None, profile_id: str) -> Series | None:
+    """Return an existing canonical series record by name, scoped to one
+    profile's library -- Robbie and Daughter can each track a same-named
+    series independently.
 
     Import flow policy: do not auto-create new series from title-derived variations.
     A row links to series only when the provided series_name matches an existing
@@ -365,14 +374,18 @@ def _find_existing_series_by_name(db: Session, series_name: str | None) -> Serie
     if not cleaned:
         return None
 
-    existing = db.query(Series).filter(Series.name == cleaned).first()
+    existing = db.query(Series).filter(Series.name == cleaned, Series.profile_id == profile_id).first()
     if existing:
         return existing
 
-    return db.query(Series).filter(func.lower(Series.name) == cleaned.lower()).first()
+    return (
+        db.query(Series)
+        .filter(func.lower(Series.name) == cleaned.lower(), Series.profile_id == profile_id)
+        .first()
+    )
 
 
-def _series_link_decision(db: Session, book_data: Dict[str, Any]) -> Dict[str, Any]:
+def _series_link_decision(db: Session, book_data: Dict[str, Any], profile_id: str) -> Dict[str, Any]:
     """Decide whether series linkage is automatic or requires user confirmation.
 
     Rules:
@@ -402,7 +415,7 @@ def _series_link_decision(db: Session, book_data: Dict[str, Any]) -> Dict[str, A
             "has_number_marker": has_number_marker,
         }
 
-    canonical_series = _find_existing_series_by_name(db, series_name)
+    canonical_series = _find_existing_series_by_name(db, series_name, profile_id)
 
     if has_number_marker:
         if canonical_series:
@@ -439,7 +452,9 @@ def _series_link_decision(db: Session, book_data: Dict[str, Any]) -> Dict[str, A
         "has_number_marker": False,
     }
 
-def get_or_create_series(db: Session, series_name: str, total_books: Any = None, series_finished_flag: Any = None) -> Series:
+def get_or_create_series(
+    db: Session, series_name: str, profile_id: str, total_books: Any = None, series_finished_flag: Any = None
+) -> Series:
     if not series_name:
         return None
 
@@ -447,7 +462,7 @@ def get_or_create_series(db: Session, series_name: str, total_books: Any = None,
     if not series_name:
         return None
 
-    existing = db.query(Series).filter(Series.name == series_name).first()
+    existing = db.query(Series).filter(Series.name == series_name, Series.profile_id == profile_id).first()
     if existing:
         # Optionally update finished/total_books if provided
         if series_finished_flag is not None:
@@ -473,6 +488,7 @@ def get_or_create_series(db: Session, series_name: str, total_books: Any = None,
         name=series_name,
         is_finished=is_finished,
         total_books=total,
+        profile_id=profile_id,
     )
     db.add(new_series)
     db.commit()
@@ -480,15 +496,16 @@ def get_or_create_series(db: Session, series_name: str, total_books: Any = None,
     return new_series
 
 
-def create_or_update_book(db: Session, book_data: Dict[str, Any]) -> tuple[Book, Dict[str, Any]]:
+def create_or_update_book(db: Session, book_data: Dict[str, Any], profile_id: str) -> tuple[Book, Dict[str, Any]]:
     series_name = book_data.get("series_name")
-    series_total_books = book_data.get("series_total_books") or book_data.get("series_total") or None
+    book_number_value = _to_float(book_data.get("book_number"))
+    series_total_books = _to_int(book_data.get("series_total_books") or book_data.get("series_total"))
     raw_series_finished_flag = book_data.get("series_finished")
     if raw_series_finished_flag is None and "is_series_finished" in book_data:
         raw_series_finished_flag = book_data.get("is_series_finished")
     series_finished_flag = parse_series_finished_flag(raw_series_finished_flag)
 
-    decision = _series_link_decision(db, book_data)
+    decision = _series_link_decision(db, book_data, profile_id)
     series = decision.get("series") if decision.get("should_link") else None
 
     if series:
@@ -496,10 +513,7 @@ def create_or_update_book(db: Session, book_data: Dict[str, Any]) -> tuple[Book,
         if series_finished_flag is not None:
             series.is_finished = bool(series_finished_flag)
         if series_total_books is not None:
-            try:
-                series.total_books = int(series_total_books)
-            except Exception:
-                pass
+            series.total_books = series_total_books
         # Discovery searches by Series.author, so backfill it from the
         # imported row rather than leaving discovery permanently unable to
         # run for series that were created without one.
@@ -521,6 +535,7 @@ def create_or_update_book(db: Session, book_data: Dict[str, Any]) -> tuple[Book,
 
     # Map PRD fields → DB fields
     db_book = Book(
+        profile_id=profile_id,
         title=book_data.get("title"),
         author=book_data.get("author"),
         subtitle=book_data.get("subtitle"),
@@ -528,19 +543,19 @@ def create_or_update_book(db: Session, book_data: Dict[str, Any]) -> tuple[Book,
         publication_date=book_data.get("publication_date"),
         release_date=book_data.get("release_date"),
         series_id=series.id if series else None,
-        series_order=book_data.get("book_number"),
+        series_order=_to_int(book_number_value),
         series_total_books=series_total_books,
         is_series_finished=series_finished_flag,
-        book_number=book_data.get("book_number"),
+        book_number=book_number_value,
         is_read=book_data.get("is_read"),
         read_date=book_data.get("date_read"),
-        rating=book_data.get("rating"),
+        rating=_to_int(book_data.get("rating")),
         notes=book_data.get("notes"),
         review=book_data.get("review"),
         tags=book_data.get("tags"),
         publisher=book_data.get("publisher"),
         edition=book_data.get("edition"),
-        pages=book_data.get("pages"),
+        pages=_to_int(book_data.get("pages")),
         language=book_data.get("language"),
         isbn=book_data.get("isbn"),
         isbn13=book_data.get("isbn13"),
@@ -566,6 +581,42 @@ def create_or_update_book(db: Session, book_data: Dict[str, Any]) -> tuple[Book,
 # Main Import Function
 # ------------------------------------------------------------
 
+def _to_float(value: Any) -> float | None:
+    """Coerce a spreadsheet cell to a float, treating blanks as None rather
+    than letting SQLAlchemy raise on `float('')` -- a blank "Book #" cell
+    is the normal case for a standalone (non-series) book in real user
+    spreadsheets, not a data error.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(value: Any) -> int | None:
+    parsed = _to_float(value)
+    return int(parsed) if parsed is not None else None
+
+
+def validate_book_row(book_data: Dict[str, Any]) -> List[str]:
+    """Return a list of validation error codes for a parsed row. `title` and
+    `author` are the only two DB-required fields (see `models.Book`); a row
+    missing either would otherwise raise an IntegrityError mid-import and
+    abort every row after it.
+    """
+    errors: List[str] = []
+    if not str(book_data.get("title") or "").strip():
+        errors.append("missing_title")
+    if not str(book_data.get("author") or "").strip():
+        errors.append("missing_author")
+    return errors
+
+
 def _prompt_series_confirmation(book_data: Dict[str, Any], reason: str) -> bool:
     title = str(book_data.get("title") or "").strip() or "(untitled)"
     series_name = str(book_data.get("series_name") or "").strip() or "(no series name)"
@@ -579,7 +630,68 @@ def _prompt_series_confirmation(book_data: Dict[str, Any], reason: str) -> bool:
     return answer in {"y", "yes"}
 
 
-def run_import(file_path: str, *, interactive_confirm: bool = False):
+DEFAULT_IMPORT_PROFILE_ID = "robbie"
+
+
+def preview_import(file_path: str, *, profile_id: str = DEFAULT_IMPORT_PROFILE_ID, sample_size: int = 20) -> Dict[str, Any]:
+    """Parse a spreadsheet without writing anything to the database. Powers
+    the onboarding wizard's "preview parsed rows" / "confirm before import"
+    steps. Series-link decisions are computed read-only (no series are
+    created) purely so the preview can warn about rows that will need
+    confirmation after the real import runs.
+    """
+    db: Session = SessionLocal()
+    try:
+        headers, rows = load_file(file_path)
+        mapping, unknown_headers = map_headers(headers)
+
+        sample_rows: List[Dict[str, Any]] = []
+        validation_warnings: List[Dict[str, Any]] = []
+        confirmation_count = 0
+
+        for index, row in enumerate(rows):
+            row_number = index + 2  # header is row 1 in the source spreadsheet
+            try:
+                book_data, _ = import_row(headers, row)
+            except Exception as e:
+                validation_warnings.append({"row_number": row_number, "errors": [f"parse_error: {e}"]})
+                continue
+
+            errors = validate_book_row(book_data)
+            if errors:
+                validation_warnings.append(
+                    {"row_number": row_number, "title": book_data.get("title"), "errors": errors}
+                )
+
+            decision = _series_link_decision(db, book_data, profile_id)
+            if decision.get("needs_confirmation"):
+                confirmation_count += 1
+
+            if len(sample_rows) < sample_size:
+                sample_rows.append(
+                    {
+                        "row_number": row_number,
+                        "title": book_data.get("title"),
+                        "author": book_data.get("author"),
+                        "series_name": book_data.get("series_name"),
+                        "book_number": book_data.get("book_number"),
+                        "needs_series_confirmation": bool(decision.get("needs_confirmation")),
+                    }
+                )
+
+        return {
+            "row_count": len(rows),
+            "unknown_headers": unknown_headers,
+            "sample_rows": sample_rows,
+            "validation_warnings": validation_warnings,
+            "valid_row_count": len(rows) - len(validation_warnings),
+            "series_confirmation_expected_count": confirmation_count,
+        }
+    finally:
+        db.close()
+
+
+def run_import(file_path: str, *, profile_id: str = DEFAULT_IMPORT_PROFILE_ID, interactive_confirm: bool = False):
     db: Session = SessionLocal()
 
     print(f"Loading file: {file_path}")
@@ -595,39 +707,71 @@ def run_import(file_path: str, *, interactive_confirm: bool = False):
 
     imported_ids: List[int] = []
     confirmation_required: List[Dict[str, Any]] = []
+    failed_rows: List[Dict[str, Any]] = []
 
-    for row in rows:
-        book_data, unknown_data = import_row(headers, row)
+    for index, row in enumerate(rows):
+        row_number = index + 2  # header is row 1 in the source spreadsheet
+        book_data: Dict[str, Any] | None = None
+        try:
+            book_data, unknown_data = import_row(headers, row)
 
-        if interactive_confirm:
-            preview_decision = _series_link_decision(db, book_data)
-            if preview_decision.get("needs_confirmation"):
-                if _prompt_series_confirmation(book_data, str(preview_decision.get("reason") or "confirmation_required")):
-                    book_data["series_confirmed"] = True
+            validation_errors = validate_book_row(book_data)
+            if validation_errors:
+                raise ValueError(", ".join(validation_errors))
 
-        book, decision = create_or_update_book(db, book_data)
-        imported_ids.append(book.id)
-        print(f"Imported book: {book.title} (ID: {book.id})")
+            if interactive_confirm:
+                preview_decision = _series_link_decision(db, book_data, profile_id)
+                if preview_decision.get("needs_confirmation"):
+                    if _prompt_series_confirmation(book_data, str(preview_decision.get("reason") or "confirmation_required")):
+                        book_data["series_confirmed"] = True
 
-        if decision.get("needs_confirmation"):
-            confirmation_required.append(
+            book, decision = create_or_update_book(db, book_data, profile_id)
+            imported_ids.append(book.id)
+            print(f"Imported book: {book.title} (ID: {book.id})")
+
+            if decision.get("needs_confirmation"):
+                confirmation_required.append(
+                    {
+                        "book_id": book.id,
+                        "title": book.title,
+                        "author": book.author,
+                        "series_name": str(book_data.get("series_name") or "").strip() or None,
+                        "reason": decision.get("reason"),
+                    }
+                )
+        except Exception as e:
+            # A single malformed row (missing required fields, a DB
+            # constraint violation, an unparseable value, etc.) must not
+            # abort every row after it -- collect it and keep going so one
+            # bad line in a 40-row onboarding spreadsheet doesn't leave the
+            # profile half-imported with no way to tell which rows landed.
+            db.rollback()
+            failed_rows.append(
                 {
-                    "book_id": book.id,
-                    "title": book.title,
-                    "author": book.author,
-                    "series_name": str(book_data.get("series_name") or "").strip() or None,
-                    "reason": decision.get("reason"),
+                    "row_number": row_number,
+                    "title": (book_data or {}).get("title"),
+                    "error": str(e),
                 }
             )
+            print(f"Warning: skipped row {row_number}: {e}")
+            continue
 
     print(f"Import complete. {len(imported_ids)} books imported.")
     if confirmation_required:
         print(f"Series confirmation required for {len(confirmation_required)} row(s).")
+    if failed_rows:
+        print(f"Skipped {len(failed_rows)} invalid row(s).")
 
-    # Recompute intelligence after import
+    # Recompute intelligence after import, scoped to this profile's series
+    # only -- the importer used to sweep every series across every profile,
+    # which is correct but does needless work on unrelated libraries.
     try:
-        recompute_series_intelligence(db)
-        print("Series intelligence recomputed.")
+        profile_series_ids = [
+            row[0] for row in db.query(Series.id).filter(Series.profile_id == profile_id).all()
+        ]
+        for series_id in profile_series_ids:
+            recalculate_intelligence(db, series_id)
+        print(f"Series intelligence recomputed for {len(profile_series_ids)} series in profile '{profile_id}'.")
     except Exception as e:
         print(f"Warning: failed to recompute series intelligence: {e}")
 
@@ -637,6 +781,8 @@ def run_import(file_path: str, *, interactive_confirm: bool = False):
         "imported_ids": imported_ids,
         "confirmation_required_count": len(confirmation_required),
         "confirmation_required": confirmation_required,
+        "failed_count": len(failed_rows),
+        "failed_rows": failed_rows,
     }
 
 
@@ -648,6 +794,22 @@ def reset_database(db: Session):
     return deleted_books, deleted_series
 
 
+def reset_profile_data(db: Session, profile_id: str):
+    """Delete only one profile's books and series. Used by onboarding's
+    "start over" action to let a still-empty profile safely retry a failed
+    or unwanted upload -- unlike `reset_database`, this never touches other
+    profiles' libraries.
+    """
+    deleted_books = (
+        db.query(Book).filter(Book.profile_id == profile_id).delete(synchronize_session=False)
+    )
+    deleted_series = (
+        db.query(Series).filter(Series.profile_id == profile_id).delete(synchronize_session=False)
+    )
+    db.commit()
+    return deleted_books, deleted_series
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Import books from CSV/XLSX into Book App database")
     parser.add_argument("file", help="Path to import file (.csv/.xlsx/.xls)")
@@ -655,6 +817,11 @@ def parse_args():
         "--reset-db",
         action="store_true",
         help="Wipe books and series tables before import",
+    )
+    parser.add_argument(
+        "--profile",
+        default=DEFAULT_IMPORT_PROFILE_ID,
+        help=f"Profile id to attribute imported rows to (default: {DEFAULT_IMPORT_PROFILE_ID})",
     )
     return parser.parse_args()
 
@@ -670,5 +837,5 @@ if __name__ == "__main__":
         finally:
             reset_session.close()
 
-    run_import(args.file, interactive_confirm=True)
+    run_import(args.file, profile_id=args.profile, interactive_confirm=True)
 

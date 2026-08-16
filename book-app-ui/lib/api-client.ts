@@ -6,6 +6,7 @@
  */
 
 import { getAuthHeaders } from "./auth-storage";
+import { getProfileHeaders } from "./profile-storage";
 import { notify } from "./notify";
 
 const STATIC_API_BASE_CANDIDATES = [
@@ -48,6 +49,7 @@ export async function fetchApiWithFallback(path: string, init?: RequestInit) {
     headers: {
       ...(baseRequestInit.headers || {}),
       ...getAuthHeaders(),
+      ...getProfileHeaders(),
     },
   };
   const baseCandidates = getApiBaseCandidates();

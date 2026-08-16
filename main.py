@@ -9,7 +9,7 @@ from bootstrap import (
     clear_stale_ghost_flags_on_read_books,
     run_migrations,
 )
-from routers import admin, auth, books, imports, series
+from routers import admin, auth, books, imports, profiles, series
 
 # Bring the DB schema up to date (see bootstrap.run_migrations) before
 # anything else touches it.
@@ -51,6 +51,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(admin.router)
+app.include_router(profiles.router)
 app.include_router(series.router)
 app.include_router(books.router)
 app.include_router(imports.router)

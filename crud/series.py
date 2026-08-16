@@ -11,8 +11,9 @@ from models import Series, Book
 _SERIES_COLUMN_NAMES = {column.key for column in inspect(Series).columns}
 
 
-def create_series(db: Session, series):
+def create_series(db: Session, series, profile_id: str):
     payload = {k: v for k, v in series.model_dump().items() if k in _SERIES_COLUMN_NAMES}
+    payload["profile_id"] = profile_id
     db_series = Series(**payload)
     db.add(db_series)
     db.commit()
@@ -20,23 +21,27 @@ def create_series(db: Session, series):
     return db_series
 
 
-def get_all_series(db: Session):
-    return db.query(Series).all()
+def get_all_series(db: Session, profile_id: str):
+    return db.query(Series).filter(Series.profile_id == profile_id).all()
 
 
-def get_series(db: Session, series_id: int):
-    return db.query(Series).filter(Series.id == series_id).first()
+def get_series(db: Session, series_id: int, profile_id: str):
+    return db.query(Series).filter(Series.id == series_id, Series.profile_id == profile_id).first()
 
 
-def get_series_by_name(db: Session, series_name: str):
+def get_series_by_name(db: Session, series_name: str, profile_id: str):
     cleaned = str(series_name or "").strip()
     if not cleaned:
         return None
-    return db.query(Series).filter(func.lower(Series.name) == cleaned.lower()).first()
+    return (
+        db.query(Series)
+        .filter(Series.profile_id == profile_id, func.lower(Series.name) == cleaned.lower())
+        .first()
+    )
 
 
-def update_series(db: Session, series_id: int, series):
-    db_series = db.query(Series).filter(Series.id == series_id).first()
+def update_series(db: Session, series_id: int, series, profile_id: str):
+    db_series = db.query(Series).filter(Series.id == series_id, Series.profile_id == profile_id).first()
     if not db_series:
         return None
 
@@ -49,8 +54,8 @@ def update_series(db: Session, series_id: int, series):
     return db_series
 
 
-def delete_series(db: Session, series_id: int):
-    db_series = db.query(Series).filter(Series.id == series_id).first()
+def delete_series(db: Session, series_id: int, profile_id: str):
+    db_series = db.query(Series).filter(Series.id == series_id, Series.profile_id == profile_id).first()
     if not db_series:
         return None
 

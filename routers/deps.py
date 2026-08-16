@@ -4,7 +4,9 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 from fastapi import Depends, HTTPException, Request
+from sqlalchemy.orm import Session
 
+import models
 from database import SessionLocal
 
 
@@ -14,6 +16,37 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+# --- Current profile (library) -----------------------------------------
+#
+# Profiles are data separation, not a security boundary (see the
+# multi-profile plan) -- this is deliberately *not* part of the JWT/auth
+# scheme above. It's a plain request header, resolved here so every
+# library-scoped router can depend on it the same way they depend on
+# get_db. A request with no header at all (any client that predates this
+# feature) resolves to the default profile, so nothing breaks during
+# rollout.
+def get_current_profile_id(request: Request, db: Session = Depends(get_db)) -> str:
+    requested_id = request.headers.get("x-profile-id")
+    if requested_id:
+        profile = db.query(models.Profile).filter(models.Profile.id == requested_id).first()
+        if not profile:
+            raise HTTPException(status_code=400, detail=f"Unknown profile: {requested_id}")
+        return profile.id
+
+    default_profile = db.query(models.Profile).filter(models.Profile.is_default.is_(True)).first()
+    if default_profile:
+        return default_profile.id
+
+    # Defensive fallback only -- migrations always seed at least one
+    # profile, so this should never actually be hit outside of a
+    # mid-migration or misconfigured database.
+    any_profile = db.query(models.Profile).first()
+    if any_profile:
+        return any_profile.id
+
+    raise HTTPException(status_code=500, detail="No profiles configured")
 
 
 # --- Access control ---------------------------------------------------

@@ -11,6 +11,25 @@ from intelligence import recalculate_intelligence
 BOOK_COLUMN_KEYS = {column.key for column in Book.__table__.columns}
 
 
+class InvalidSeriesForProfileError(ValueError):
+    """Raised when a book create/update payload's series_id belongs to a
+    different profile than the one making the request. series_id is a
+    plain client-settable field on BookBase, so without this check a
+    request could link a book into another profile's series just by
+    guessing/reusing an id -- everything else in this module already scopes
+    reads/writes to the calling profile by row id, but that alone doesn't
+    stop a *foreign key value* pointing across profiles.
+    """
+
+
+def _validate_series_belongs_to_profile(db: Session, series_id: int | None, profile_id: str) -> None:
+    if series_id is None:
+        return
+    exists = db.query(Series.id).filter(Series.id == series_id, Series.profile_id == profile_id).first()
+    if not exists:
+        raise InvalidSeriesForProfileError(f"Series {series_id} does not belong to profile '{profile_id}'")
+
+
 def _backfill_series_author_if_missing(db: Session, series_id: int | None, book_author: str | None) -> None:
     """Discovery searches by Series.author, so keep it populated. If a series
     has no author on file yet, adopt the author of a book being added/edited
@@ -84,8 +103,10 @@ def _should_clear_ghost_flags(db_book: Book, payload: dict) -> bool:
     return title_changed or marked_read or has_read_status or has_read_date
 
 
-def create_book(db: Session, book):
+def create_book(db: Session, book, profile_id: str):
     payload = _book_payload(book)
+    _validate_series_belongs_to_profile(db, payload.get("series_id"), profile_id)
+    payload["profile_id"] = profile_id
     db_book = Book(**payload)
     db.add(db_book)
     db.commit()
@@ -96,25 +117,30 @@ def create_book(db: Session, book):
     return db_book
 
 
-def get_all_books(db: Session):
-    return db.query(Book).filter(or_(Book.record_status.is_(None), Book.record_status != "deleted")).all()
+def get_all_books(db: Session, profile_id: str):
+    return (
+        db.query(Book)
+        .filter(Book.profile_id == profile_id)
+        .filter(or_(Book.record_status.is_(None), Book.record_status != "deleted"))
+        .all()
+    )
 
 
-def get_book(db: Session, book_id: int):
-    return db.query(Book).filter(Book.id == book_id).first()
+def get_book(db: Session, book_id: int, profile_id: str):
+    return db.query(Book).filter(Book.id == book_id, Book.profile_id == profile_id).first()
 
 
-def get_books_by_series(db: Session, series_id: int):
+def get_books_by_series(db: Session, series_id: int, profile_id: str):
     return (
         db.query(models.Book)
-        .filter(models.Book.series_id == series_id)
+        .filter(models.Book.series_id == series_id, models.Book.profile_id == profile_id)
         .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
         .order_by(models.Book.book_number.asc())
         .all()
     )
 
-def update_book(db: Session, book_id: int, book):
-    db_book = db.query(Book).filter(Book.id == book_id).first()
+def update_book(db: Session, book_id: int, book, profile_id: str):
+    db_book = db.query(Book).filter(Book.id == book_id, Book.profile_id == profile_id).first()
     if not db_book:
         return None
 
@@ -122,6 +148,8 @@ def update_book(db: Session, book_id: int, book):
     # Keep explicit nulls on update so users can intentionally clear fields like
     # book_number/series_order in mixed-numbering series.
     payload = _book_payload(book, exclude_unset=True, include_none=True)
+    if "series_id" in payload:
+        _validate_series_belongs_to_profile(db, payload.get("series_id"), profile_id)
     if _should_clear_ghost_flags(db_book, payload):
         payload.setdefault("is_missing", False)
         payload.setdefault("is_upcoming_auto", False)
@@ -139,8 +167,8 @@ def update_book(db: Session, book_id: int, book):
     return db_book
 
 
-def delete_book(db: Session, book_id: int):
-    db_book = db.query(Book).filter(Book.id == book_id).first()
+def delete_book(db: Session, book_id: int, profile_id: str):
+    db_book = db.query(Book).filter(Book.id == book_id, Book.profile_id == profile_id).first()
     if not db_book:
         return False
 

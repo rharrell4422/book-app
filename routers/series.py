@@ -13,7 +13,7 @@ from intelligence import (
     recalculate_intelligence,
     recalculate_series_state_for_series,
 )
-from routers.deps import enforce_access, get_db
+from routers.deps import enforce_access, get_current_profile_id, get_db
 from services.series_check_engine import (
     SERIES_CHECK_TIMEOUT_SECONDS,
     run_series_check_job_full,
@@ -33,15 +33,17 @@ router = APIRouter(prefix="/series", tags=["series"], dependencies=[Depends(enfo
 # normalized it away -- is handled directly instead of needing a redirect.
 @router.post("/", response_model=schemas.SeriesResponse)
 @router.post("", response_model=schemas.SeriesResponse, include_in_schema=False)
-def create_series(series: schemas.SeriesBase, db: Session = Depends(get_db)):
+def create_series(
+    series: schemas.SeriesBase, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)
+):
     series.title_normalization_mode_override = normalize_title_normalization_mode(series.title_normalization_mode_override)
-    return crud.create_series(db=db, series=series)
+    return crud.create_series(db=db, series=series, profile_id=profile_id)
 
 
 @router.get("/", response_model=List[schemas.SeriesResponse])
 @router.get("", response_model=List[schemas.SeriesResponse], include_in_schema=False)
-def read_series(db: Session = Depends(get_db)):
-    all_series = crud.get_all_series(db)
+def read_series(db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
+    all_series = crud.get_all_series(db, profile_id)
     responses = []
     for series in all_series:
         response = schemas.SeriesResponse.model_validate(series)
@@ -62,12 +64,12 @@ def read_series(db: Session = Depends(get_db)):
 
 
 @router.get("/{series_id}", response_model=schemas.SeriesDetailResponse)
-def read_series_by_id(series_id: int, db: Session = Depends(get_db)):
-    db_series = crud.get_series(db, series_id)
+def read_series_by_id(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
+    db_series = crud.get_series(db, series_id, profile_id)
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
 
-    books = crud.get_books_by_series(db, series_id)
+    books = crud.get_books_by_series(db, series_id, profile_id)
 
     sorted_books = sorted(books, key=lambda b: (b.book_number or 0))
     series_author = db_series.author or next((book.author for book in sorted_books if book.author), None)
@@ -104,9 +106,14 @@ def read_series_by_id(series_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/{series_id}", response_model=schemas.SeriesResponse)
-def update_series(series_id: int, series: schemas.SeriesBase, db: Session = Depends(get_db)):
+def update_series(
+    series_id: int,
+    series: schemas.SeriesBase,
+    db: Session = Depends(get_db),
+    profile_id: str = Depends(get_current_profile_id),
+):
     series.title_normalization_mode_override = normalize_title_normalization_mode(series.title_normalization_mode_override)
-    updated = crud.update_series(db, series_id, series)
+    updated = crud.update_series(db, series_id, series, profile_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Series not found")
     recalculate_intelligence(db, series_id)
@@ -114,12 +121,12 @@ def update_series(series_id: int, series: schemas.SeriesBase, db: Session = Depe
 
 
 @router.post("/{series_id}/mark_unfinished")
-def mark_series_unfinished(series_id: int, db: Session = Depends(get_db)):
-    db_series = crud.get_series(db, series_id)
+def mark_series_unfinished(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
+    db_series = crud.get_series(db, series_id, profile_id)
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
 
-    books = crud.get_books_by_series(db, series_id)
+    books = crud.get_books_by_series(db, series_id, profile_id)
     for book in books:
         book.is_series_finished = False
 
@@ -128,7 +135,7 @@ def mark_series_unfinished(series_id: int, db: Session = Depends(get_db)):
 
     db.commit()
     recalculate_intelligence(db, series_id)
-    is_finished = bool((crud.get_series(db, series_id) or db_series).is_finished)
+    is_finished = bool((crud.get_series(db, series_id, profile_id) or db_series).is_finished)
 
     return {
         "series_id": series_id,
@@ -139,12 +146,12 @@ def mark_series_unfinished(series_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{series_id}/mark_finished")
-def mark_series_finished(series_id: int, db: Session = Depends(get_db)):
-    db_series = crud.get_series(db, series_id)
+def mark_series_finished(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
+    db_series = crud.get_series(db, series_id, profile_id)
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
 
-    books = crud.get_books_by_series(db, series_id)
+    books = crud.get_books_by_series(db, series_id, profile_id)
     for book in books:
         book.is_series_finished = True
 
@@ -153,7 +160,7 @@ def mark_series_finished(series_id: int, db: Session = Depends(get_db)):
 
     db.commit()
     recalculate_intelligence(db, series_id)
-    is_finished = bool((crud.get_series(db, series_id) or db_series).is_finished)
+    is_finished = bool((crud.get_series(db, series_id, profile_id) or db_series).is_finished)
 
     return {
         "series_id": series_id,
@@ -167,9 +174,10 @@ def mark_series_finished(series_id: int, db: Session = Depends(get_db)):
 async def check_series_for_new_books(
     series_id: int,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    profile_id: str = Depends(get_current_profile_id),
 ):
-    db_series = crud.get_series(db, series_id)
+    db_series = crud.get_series(db, series_id, profile_id)
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
 
@@ -212,8 +220,8 @@ async def check_series_for_new_books(
 
 
 @router.get("/{series_id}/check")
-def get_series_check_status(series_id: int, db: Session = Depends(get_db)):
-    db_series = crud.get_series(db, series_id)
+def get_series_check_status(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
+    db_series = crud.get_series(db, series_id, profile_id)
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
 
@@ -249,8 +257,13 @@ def get_series_check_status(series_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{series_id}/check/status")
-def get_series_check_progress_status(series_id: int, session_id: str | None = None, db: Session = Depends(get_db)):
-    db_series = crud.get_series(db, series_id)
+def get_series_check_progress_status(
+    series_id: int,
+    session_id: str | None = None,
+    db: Session = Depends(get_db),
+    profile_id: str = Depends(get_current_profile_id),
+):
+    db_series = crud.get_series(db, series_id, profile_id)
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
 
@@ -330,8 +343,8 @@ def get_series_check_progress_status(series_id: int, session_id: str | None = No
 
 
 @router.post("/{series_id}/clear_new_books")
-def clear_series_new_books(series_id: int, db: Session = Depends(get_db)):
-    db_series = crud.get_series(db, series_id)
+def clear_series_new_books(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
+    db_series = crud.get_series(db, series_id, profile_id)
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
 
@@ -349,12 +362,17 @@ def clear_series_new_books(series_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{series_id}/normalize_titles")
-def normalize_series_titles(series_id: int, payload: schemas.NormalizeTitlesRequest, db: Session = Depends(get_db)):
-    db_series = crud.get_series(db, series_id)
+def normalize_series_titles(
+    series_id: int,
+    payload: schemas.NormalizeTitlesRequest,
+    db: Session = Depends(get_db),
+    profile_id: str = Depends(get_current_profile_id),
+):
+    db_series = crud.get_series(db, series_id, profile_id)
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
 
-    books = crud.get_books_by_series(db, series_id)
+    books = crud.get_books_by_series(db, series_id, profile_id)
     result = normalize_series_book_titles(db, db_series, books, payload)
     if result.get("error") == "invalid_normalization_mode":
         raise HTTPException(status_code=422, detail="Invalid normalization_mode")
@@ -366,8 +384,8 @@ def normalize_series_titles(series_id: int, payload: schemas.NormalizeTitlesRequ
 
 
 @router.post("/{series_id}/recalculate_intelligence")
-def rebuild_series_intelligence(series_id: int, db: Session = Depends(get_db)):
-    db_series = crud.get_series(db, series_id)
+def rebuild_series_intelligence(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
+    db_series = crud.get_series(db, series_id, profile_id)
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
 
@@ -378,8 +396,8 @@ def rebuild_series_intelligence(series_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/{series_id}")
-def delete_series(series_id: int, db: Session = Depends(get_db)):
-    deleted_result = crud.delete_series(db, series_id)
+def delete_series(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
+    deleted_result = crud.delete_series(db, series_id, profile_id)
     if not deleted_result:
         raise HTTPException(status_code=404, detail="Series not found")
     return {

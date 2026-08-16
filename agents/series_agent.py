@@ -368,7 +368,9 @@ class SeriesIntelligenceAgent:
             # doesn't leak candidates into this one.
             other_series_by_author = [
                 other
-                for other in db.query(Series).filter(Series.author.isnot(None)).all()
+                for other in db.query(Series)
+                .filter(Series.author.isnot(None), Series.profile_id == series.profile_id)
+                .all()
                 if other.id != series_id and _authors_match_exact(series_author, other.author)
             ]
             author_owned_titles = {discovery_engine.core_title_key(book.title) for book in active_series_books if book.title}
@@ -628,15 +630,23 @@ def _candidate_richness_score(candidate: dict) -> int:
     return score
 
 
-def _owned_book_indexes(db: Session, author: str) -> dict:
+def _owned_book_indexes(db: Session, author: str, profile_id: str = "robbie") -> dict:
     """Shared by discover_more_by_author and discover_series_by_name --
     both need the exact same "what does this author's owned library already
     contain" picture to decide what's genuinely new, just starting from a
     different raw candidate list (author-wide vs. one targeted series).
+
+    profile_id scopes both the owned-books and tracked-series lookups
+    below -- without it, a book Robbie owns by this author would
+    incorrectly suppress a genuinely-new discovery result for Daughter's
+    copy of the same book. Defaults to "robbie" only so pre-existing
+    single-profile callers (tests, scripts) don't all need updating --
+    every real request path (routers/books.py) always passes it explicitly
+    from get_current_profile_id.
     """
     owned_books = [
         book
-        for book in db.query(Book).filter(Book.author.isnot(None)).all()
+        for book in db.query(Book).filter(Book.author.isnot(None), Book.profile_id == profile_id).all()
         if str(book.record_status or "") != "deleted" and _authors_match_exact(author, book.author)
     ]
 
@@ -680,7 +690,7 @@ def _owned_book_indexes(db: Session, author: str) -> dict:
     # exact-text lookup missed that and reported it "not yet tracked").
     tracked_series_by_name = {
         discovery_engine.normalize_series_branding_name(series.name): series
-        for series in db.query(Series).filter(Series.author.isnot(None)).all()
+        for series in db.query(Series).filter(Series.author.isnot(None), Series.profile_id == profile_id).all()
         if _authors_match_exact(author, series.author)
     }
 
@@ -835,7 +845,7 @@ def _build_discovery_candidate_entries(raw_candidates: list[dict], author: str, 
     )
 
 
-def discover_more_by_author(db: Session, author: str) -> dict:
+def discover_more_by_author(db: Session, author: str, profile_id: str = "robbie") -> dict:
     """"More by this author" -- a lightweight, on-demand discovery across
     ALL of an author's tracked series and standalone books at once.
 
@@ -848,13 +858,14 @@ def discover_more_by_author(db: Session, author: str) -> dict:
     Deliberately a broad, shallow sweep (one query per catalog API, no
     per-series lookahead) -- see discover_series_by_name for the deeper,
     targeted counterpart used to fill in a specific series this pass didn't
-    fully cover.
+    fully cover. profile_id scopes the "already owned" check to just this
+    profile's library (see _owned_book_indexes).
     """
     author = str(author or "").strip()
     if not author:
         return {"author": author, "candidates": [], "provider_failures": [], "all_providers_failed": False}
 
-    indexes = _owned_book_indexes(db, author)
+    indexes = _owned_book_indexes(db, author, profile_id)
     discovery = discovery_engine.discover_candidates_for_author(author, exclude_title_keys=indexes["known_title_keys"])
     results = _build_discovery_candidate_entries(discovery["candidates"], author, indexes)
 
@@ -866,7 +877,7 @@ def discover_more_by_author(db: Session, author: str) -> dict:
     }
 
 
-def discover_series_by_name(db: Session, series_name: str, author: str) -> dict:
+def discover_series_by_name(db: Session, series_name: str, author: str, profile_id: str = "robbie") -> dict:
     """Deeper, targeted counterpart to discover_more_by_author's broad
     sweep -- used to fill in a specific series the broad pass only
     partially found.
@@ -886,7 +897,7 @@ def discover_series_by_name(db: Session, series_name: str, author: str) -> dict:
     if not series_name or not author:
         return {"series_name": series_name, "author": author, "candidates": [], "provider_failures": [], "all_providers_failed": False}
 
-    indexes = _owned_book_indexes(db, author)
+    indexes = _owned_book_indexes(db, author, profile_id)
     discovery = discovery_engine.discover_candidates_for_series(
         series_name, author, exclude_title_keys=indexes["known_title_keys"], allow_author_fallback=False
     )

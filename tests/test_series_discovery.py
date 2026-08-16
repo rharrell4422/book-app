@@ -2727,7 +2727,7 @@ class ManualDeleteRecalculationTest(unittest.TestCase):
         keep_read.is_read = True
         self.db.commit()
 
-        deleted = crud.delete_book(self.db, delete_target.id)
+        deleted = crud.delete_book(self.db, delete_target.id, profile_id="robbie")
         self.assertTrue(deleted)
 
         refreshed = self.db.query(Series).filter(Series.id == self.series.id).first()

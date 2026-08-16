@@ -42,7 +42,7 @@ class SeriesCrudTest(unittest.TestCase):
         # This is exactly what the "/series/" POST endpoint passes through:
         # a full SeriesBase, including its None-valued derived fields.
         payload = schemas.SeriesBase(name="Koban", author="Stephen W Bennett", is_finished=True)
-        series = crud.create_series(self.db, payload)
+        series = crud.create_series(self.db, payload, profile_id="robbie")
 
         self.assertIsNotNone(series.id)
         self.assertEqual(series.name, "Koban")
@@ -59,7 +59,7 @@ class SeriesCrudTest(unittest.TestCase):
         self.db.refresh(series)
 
         payload = schemas.SeriesBase(name="Renamed", author="Someone Else", is_finished=True)
-        updated = crud.update_series(self.db, series.id, payload)
+        updated = crud.update_series(self.db, series.id, payload, profile_id="robbie")
 
         self.assertIsNotNone(updated)
         self.assertEqual(updated.name, "Renamed")

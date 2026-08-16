@@ -3,6 +3,27 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, ConfigDict
 
 # ------------------------------------------------------------
+# Profile schemas
+# ------------------------------------------------------------
+
+
+class ProfileResponse(BaseModel):
+    id: str
+    display_name: str
+    is_default: bool
+    created_at: datetime
+    book_count: int = 0
+    has_data: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProfileCreate(BaseModel):
+    id: str
+    display_name: str
+
+
+# ------------------------------------------------------------
 # Book Schemas
 # ------------------------------------------------------------
 
