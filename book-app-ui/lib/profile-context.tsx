@@ -22,6 +22,7 @@ type ProfileContextValue = {
   setProfileId: (id: string) => void;
   refreshProfiles: () => Promise<Profile[]>;
   createProfile: (id: string, displayName: string) => Promise<Profile>;
+  renameProfile: (id: string, displayName: string) => Promise<Profile>;
 };
 
 const ProfileContext = createContext<ProfileContextValue>({
@@ -32,6 +33,9 @@ const ProfileContext = createContext<ProfileContextValue>({
   setProfileId: () => {},
   refreshProfiles: async () => [],
   createProfile: async () => {
+    throw new Error("ProfileProvider not mounted");
+  },
+  renameProfile: async () => {
     throw new Error("ProfileProvider not mounted");
   },
 });
@@ -75,6 +79,20 @@ export function ProfileProvider({ children }: { children: React.ReactNode }) {
       return created;
     },
     [refreshProfiles, setProfileId]
+  );
+
+  const renameProfile = useCallback(
+    async (id: string, displayName: string) => {
+      const response = await fetchApiWithFallback(`/profiles/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ display_name: displayName }),
+      });
+      const updated: Profile = await response.json();
+      await refreshProfiles();
+      return updated;
+    },
+    [refreshProfiles]
   );
 
   useEffect(() => {
@@ -125,7 +143,7 @@ export function ProfileProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <ProfileContext.Provider
-      value={{ profileId, profiles, activeProfile, ready, setProfileId, refreshProfiles, createProfile }}
+      value={{ profileId, profiles, activeProfile, ready, setProfileId, refreshProfiles, createProfile, renameProfile }}
     >
       {children}
     </ProfileContext.Provider>

@@ -57,3 +57,26 @@ def create_profile(profile: schemas.ProfileCreate, db: Session = Depends(get_db)
     db.commit()
     db.refresh(db_profile)
     return _to_profile_response(db_profile, book_count=0)
+
+
+@router.patch("/{profile_id}", response_model=schemas.ProfileResponse, dependencies=[Depends(require_owner)])
+def rename_profile(profile_id: str, payload: schemas.ProfileUpdate, db: Session = Depends(get_db)):
+    """Rename a profile -- e.g. so whoever's library "daughter" is doesn't
+    have to live with that placeholder name forever and can call it
+    whatever they want. Only the display name is editable; the id (and
+    therefore every profile_id-scoped row already linked to it) never
+    changes."""
+    display_name = payload.display_name.strip()
+    if not display_name:
+        raise HTTPException(status_code=422, detail="Display name is required")
+
+    db_profile = db.query(models.Profile).filter(models.Profile.id == profile_id).first()
+    if not db_profile:
+        raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+
+    db_profile.display_name = display_name
+    db.commit()
+    db.refresh(db_profile)
+
+    book_count = db.query(models.Book).filter(models.Book.profile_id == profile_id).count()
+    return _to_profile_response(db_profile, book_count)

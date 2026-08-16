@@ -23,6 +23,10 @@ class ProfileCreate(BaseModel):
     display_name: str
 
 
+class ProfileUpdate(BaseModel):
+    display_name: str
+
+
 # ------------------------------------------------------------
 # Book Schemas
 # ------------------------------------------------------------

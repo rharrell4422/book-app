@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
+import { PencilIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -206,9 +207,97 @@ function AddProfileDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
   );
 }
 
+function RenameProfileForm({
+  profileId,
+  initialDisplayName,
+  onOpenChange,
+}: {
+  profileId: string;
+  initialDisplayName: string;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const { toast } = useToast();
+  const { renameProfile } = useProfile();
+  const [displayName, setDisplayName] = useState(initialDisplayName);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    const trimmed = displayName.trim();
+    if (!trimmed) {
+      setError("Enter a name for this profile.");
+      return;
+    }
+
+    setSubmitting(true);
+    setError(null);
+    try {
+      await renameProfile(profileId, trimmed);
+      onOpenChange(false);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Couldn't rename that profile.";
+      setError(message);
+      toast({ title: "Couldn't rename profile", description: message });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor="rename-profile-name">Name</Label>
+        <Input
+          id="rename-profile-name"
+          autoFocus
+          value={displayName}
+          onChange={(event) => setDisplayName(event.target.value)}
+          placeholder="e.g. Daughter's Library"
+        />
+      </div>
+      {error && <p className="text-sm text-destructive">{error}</p>}
+      <DialogFooter>
+        <Button type="submit" disabled={submitting || !displayName.trim()}>
+          {submitting ? "Saving..." : "Save name"}
+        </Button>
+      </DialogFooter>
+    </form>
+  );
+}
+
+function RenameProfileDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  const { activeProfile } = useProfile();
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Rename this profile</DialogTitle>
+          <DialogDescription>
+            Call this library whatever you&rsquo;d like -- it won&rsquo;t affect anything already in it.
+          </DialogDescription>
+        </DialogHeader>
+        {/* Keyed by profile id + open state so the form's local state is
+            re-seeded from the current display name every time the dialog
+            opens, instead of reacting to prop changes with an effect. */}
+        {open && activeProfile ? (
+          <RenameProfileForm
+            key={activeProfile.id}
+            profileId={activeProfile.id}
+            initialDisplayName={activeProfile.display_name}
+            onOpenChange={onOpenChange}
+          />
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function ProfileSwitcher() {
   const { profileId, profiles, setProfileId } = useProfile();
   const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [renameDialogOpen, setRenameDialogOpen] = useState(false);
 
   function handleChange(value: string) {
     if (value === ADD_PROFILE_SENTINEL) {
@@ -223,20 +312,34 @@ function ProfileSwitcher() {
   // already exist.
   return (
     <>
-      <select
-        aria-label="Switch library"
-        value={profileId ?? ""}
-        onChange={(event) => handleChange(event.target.value)}
-        className="h-8 rounded-md border border-input bg-background px-2 text-sm text-foreground"
-      >
-        {profiles.map((profile) => (
-          <option key={profile.id} value={profile.id}>
-            {profile.display_name}
-          </option>
-        ))}
-        <option value={ADD_PROFILE_SENTINEL}>+ Add profile…</option>
-      </select>
+      <div className="flex items-center gap-1">
+        <select
+          aria-label="Switch library"
+          value={profileId ?? ""}
+          onChange={(event) => handleChange(event.target.value)}
+          className="h-8 rounded-md border border-input bg-background px-2 text-sm text-foreground"
+        >
+          {profiles.map((profile) => (
+            <option key={profile.id} value={profile.id}>
+              {profile.display_name}
+            </option>
+          ))}
+          <option value={ADD_PROFILE_SENTINEL}>+ Add profile…</option>
+        </select>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Rename this profile"
+          title="Rename this profile"
+          disabled={!profileId}
+          onClick={() => setRenameDialogOpen(true)}
+        >
+          <PencilIcon />
+        </Button>
+      </div>
       <AddProfileDialog open={addDialogOpen} onOpenChange={setAddDialogOpen} />
+      <RenameProfileDialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen} />
     </>
   );
 }
