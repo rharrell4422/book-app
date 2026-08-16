@@ -283,11 +283,18 @@ def lookup_book_summary(
 
 
 def recount_series_aggregates_for_series(db, series_id: int) -> dict:
-    books = (
-        db.query(Book)
-        .filter(Book.series_id == series_id)
-        .all()
-    )
+    # Filtering by profile_id here too (not just series_id) is
+    # defense-in-depth against a book ending up linked to this series_id
+    # under a different profile_id than the series' own -- e.g. a bug in a
+    # book-creation path that forgets to set profile_id explicitly (it
+    # defaults to "robbie" on the Book model). Without this, such a "ghost"
+    # book is invisible in every profile-scoped books query yet still
+    # inflates this series' aggregates.
+    series_profile_id = db.query(Series.profile_id).filter(Series.id == series_id).scalar()
+    books_query = db.query(Book).filter(Book.series_id == series_id)
+    if series_profile_id is not None:
+        books_query = books_query.filter(Book.profile_id == series_profile_id)
+    books = books_query.all()
 
     active_books = [book for book in books if str(getattr(book, "record_status", "active") or "active") != "deleted"]
     deleted_books = [book for book in books if str(getattr(book, "record_status", "active") or "active") == "deleted"]
@@ -333,7 +340,9 @@ def compute_series_intelligence_for_series(db, series_id: int) -> dict:
 
     books = (
         db.query(Book)
-        .filter(Book.series_id == series_id)
+        # profile_id filter is defense-in-depth -- see the matching comment
+        # in recount_series_aggregates_for_series above.
+        .filter(Book.series_id == series_id, Book.profile_id == series.profile_id)
         .all()
     )
     active_books = [book for book in books if str(getattr(book, "record_status", "active") or "active") != "deleted"]

@@ -93,6 +93,62 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
         self.assertIsNotNone(book)
         self.assertEqual(book.source_url, "https://www.amazon.com/dp/EXAMPLE8")
 
+    def test_new_book_inherits_series_profile_id_not_default(self):
+        # Regression test: Book.profile_id defaults to "robbie" when not set
+        # explicitly (see models.py). A newly discovered book must inherit
+        # the *series'* own profile_id instead of silently falling back to
+        # that default -- otherwise it becomes an invisible "ghost" row that
+        # no profile-scoped query can see, while still counting toward that
+        # series' aggregates (total_books, has_new_upcoming_books, etc.).
+        other_profile_series = Series(name="Mackenzie's Series", author="Some Author", profile_id="mackenzie")
+        self.db.add(other_profile_series)
+        self.db.commit()
+        self.db.refresh(other_profile_series)
+
+        mocked_result = {
+            "series_id": other_profile_series.id,
+            "added_books": [
+                {
+                    "title": "Some Future Book",
+                    "author": "Some Author",
+                    "series_name": "Mackenzie's Series",
+                    "book_number": 4,
+                    "source_url": None,
+                    "provider": "web_search",
+                    "publication_date": None,
+                    "expected_date": None,
+                    "status_hint": "upcoming",
+                    "asin_or_id": "web_search:example4",
+                    "is_missing": False,
+                    "status": "upcoming",
+                    "canonical_metadata": {
+                        "title_normalized": "Some Future Book",
+                        "series_name_normalized": "Mackenzie's Series",
+                        "book_number_normalized": 4,
+                        "publish_date_normalized": None,
+                        "upcoming_date_normalized": None,
+                        "availability": "upcoming",
+                        "edition_type": "unknown",
+                        "title_selector": None,
+                    },
+                }
+            ],
+            "provider_failures": [],
+            "all_providers_failed": False,
+        }
+        with patch.object(series_check_engine, "SessionLocal", self.SessionLocal), patch.object(
+            library_sync, "SessionLocal", self.SessionLocal
+        ), patch.object(series_check_engine.series_agent, "run_series_check", return_value=mocked_result):
+            series_check_engine.run_series_check_job_full(other_profile_series.id)
+
+        book = (
+            self.db.query(Book)
+            .filter(Book.series_id == other_profile_series.id, Book.book_number == 4.0)
+            .first()
+        )
+        self.assertIsNotNone(book)
+        self.assertEqual(book.profile_id, "mackenzie")
+
     def test_new_book_with_no_source_url_leaves_it_null(self):
         self._run_job_with_mocked_discovery(
             [
