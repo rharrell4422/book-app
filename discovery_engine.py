@@ -99,7 +99,15 @@ NON_NEW_RELEASE_TITLE_MARKERS = (
     "omnibus",
     "box set",
     "boxset",
-    "collection",
+    # "collection" deliberately excluded (regression, live bug): a brand
+    # new companion release can legitimately be branded as a "collection"
+    # of new short stories -- e.g. Rebecca Yarros's "Threshing Day (Wing
+    # and Claw Collection)", a real September 2026 Empyrean release, not a
+    # repackaging of already-published books. This marker was too broad;
+    # a true bundle of existing content is already caught by the more
+    # specific markers below (omnibus/box set/bundle/"complete series") or
+    # by series_agent's is_compilation_of_owned_titles check, which flags a
+    # candidate that spells out 2+ already-owned titles by name.
     "compilation",
     "anthology",
     "complete series",

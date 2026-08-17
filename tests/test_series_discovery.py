@@ -144,6 +144,17 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
         self.assertTrue(discovery_engine.looks_like_non_new_release("Cherry Blossom Girls: French Edition"))
         self.assertFalse(discovery_engine.looks_like_non_new_release("Cherry Blossom Girls Book 7"))
 
+    def test_looks_like_non_new_release_does_not_flag_a_new_short_story_collection(self):
+        # Regression (live bug): "Threshing Day (Wing and Claw Collection)"
+        # is a real, brand-new September 2026 Empyrean release (a themed
+        # collection of new short stories), not a repackaging of
+        # already-published books -- but the bare "collection" marker used
+        # to reject it outright, so "Check for New" silently found zero
+        # candidates for it on every run.
+        self.assertFalse(
+            discovery_engine.looks_like_non_new_release("Threshing Day (Wing and Claw Collection)")
+        )
+
     def test_looks_like_non_new_release_filters_series_volume_compilations(self):
         # Regression (live bug): "Safehold Series, Volume I" and "The
         # Safehold Series, Volume I: Off Armageddon Reef, ..." are both a
@@ -443,6 +454,39 @@ class DiscoverCandidatesForSeriesTest(unittest.TestCase):
             )
 
         self.assertEqual(result["candidates"], [])
+
+    def test_surfaces_a_companion_collection_with_fractional_series_position(self):
+        # Regression (live bug), end-to-end through discover_candidates_for_series:
+        # Rebecca Yarros's "Threshing Day (Wing and Claw Collection)" is a
+        # real September 2026 Empyrean release at Hardcover series position
+        # 3.5 -- it used to be silently dropped by looks_like_non_new_release
+        # (bare "collection" marker), so "Check for New" found nothing at
+        # all for it on every run.
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[
+                {
+                    "source": "hardcover",
+                    "source_id": "hc-threshing-day",
+                    "title": "Threshing Day (Wing and Claw Collection)",
+                    "authors": ["Rebecca Yarros"],
+                    "published_date": "2026-09-29",
+                    "isbn13": "9781682818084",
+                    "source_url": None,
+                    "language": "",
+                    "series_number_hint": 3.5,
+                    "upcoming_hint": True,
+                    "series_name_hint": "The Empyrean",
+                }
+            ],
+        ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ):
+            result = discovery_engine.discover_candidates_for_series("The Empyrean", "Rebecca Yarros")
+
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["candidates"][0]["series_number_hint"], 3.5)
 
     def test_excludes_bare_series_name_listing_with_no_number_or_isbn(self):
         # Regression (live bug): Google Books/OpenLibrary both returned a
