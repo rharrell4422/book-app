@@ -1,14 +1,20 @@
 ---
-description: Always commit and push code changes to main right after making them
+description: Never run git commit/push yourself -- always hand the user copy-pasteable commands to run in their own terminal
 alwaysApply: true
 ---
 
-# Commit and Push After Code Changes
+# Commit and Push After Code Changes -- User Runs Git, Not the Agent
 
-Railway auto-deploys straight from `main`, and the user wants changes shipped
-without having to ask for a commit every time. After making a code change in
-this repo (backend or frontend) and verifying it (tests/build/lint as
-applicable), commit and push it in the same turn -- don't wait to be asked.
+Railway auto-deploys straight from `main`, and the user wants every code
+change committed and pushed promptly -- but the user explicitly does NOT
+want the agent invoking `git commit`/`git push` itself (even though it's
+technically low-cost to do so). Every commit/push must be run by the user,
+from their own terminal.
+
+After making a code change in this repo (backend or frontend) and verifying
+it (tests/build/lint as applicable), do NOT call the Shell tool with
+`git commit` or `git push`. Instead, output a ready-to-copy command block in
+the same turn -- don't wait to be asked:
 
 ```bash
 git add <files>
@@ -21,8 +27,10 @@ EOF
 git push
 ```
 
-- Stage only the files relevant to the change (avoid `git add -A` if there
-  are unrelated stray/generated files sitting in the tree).
-- Skip auto-committing for purely exploratory/diagnostic one-off scripts the
-  user is running locally to debug, or whenever the user explicitly says
-  not to commit yet.
+- List the exact files to stage (avoid `git add -A` if there are unrelated
+  stray/generated files sitting in the tree).
+- `git status`/`git diff`/`git log` (read-only) are fine to run directly --
+  only the actual commit/push must be left to the user.
+- If the user explicitly asks the agent to run git itself for a specific
+  case, that's fine for that instance, but default back to handing over
+  commands afterward unless told otherwise.

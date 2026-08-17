@@ -61,7 +61,18 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          // max-h + overflow-y-auto: a dialog's own content (Header + the
+          // caller's fields + Footer, all flat siblings here -- no separate
+          // "body" slot to scope scrolling to) can be taller than a mobile
+          // viewport, especially once the on-screen keyboard eats roughly
+          // half of it. Without a height cap the dialog just centers itself
+          // and overflows both above and below the screen with no way to
+          // scroll to whatever got pushed off -- e.g. AddBookDialog's "Find
+          // details" button and Save button below the fold, unreachable
+          // (live bug). dvh (not vh) so the cap actually shrinks along with
+          // the visible viewport once the keyboard opens, instead of being
+          // computed against the keyboard-covered layout height.
+          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] max-h-[85dvh] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className
         )}
         {...props}
