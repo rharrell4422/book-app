@@ -1,6 +1,7 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 
 import { fetchApiWithFallback } from "./api-client";
 import { useAuth } from "./auth-context";
@@ -45,15 +46,38 @@ const ProfileContext = createContext<ProfileContextValue>({
 });
 
 export function ProfileProvider({ children }: { children: React.ReactNode }) {
+  const router = useRouter();
   const { role, ready: authReady } = useAuth();
   const [profileId, setProfileIdState] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [ready, setReady] = useState(false);
 
-  const setProfileId = useCallback((id: string) => {
-    setStoredProfileId(id);
-    setProfileIdState(id);
-  }, []);
+  // Tracks the previously-active profile without making setProfileId
+  // depend on (and re-create every time) `profileId` itself.
+  const profileIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    profileIdRef.current = profileId;
+  }, [profileId]);
+
+  const setProfileId = useCallback(
+    (id: string) => {
+      const isSwitchingToADifferentProfile = profileIdRef.current !== null && profileIdRef.current !== id;
+      setStoredProfileId(id);
+      setProfileIdState(id);
+      if (isSwitchingToADifferentProfile) {
+        // Series/book ids aren't shared across profiles -- staying on a
+        // series or book detail route after switching would keep that
+        // route's id mounted under the *new* profile and try to load data
+        // that either doesn't exist there or belongs to someone else
+        // entirely (live bug: switching profiles mid-troubleshooting left
+        // the series detail page open, showing stale/wrong data with no
+        // indication the profile had even changed). The main library is
+        // the one page guaranteed to make sense for any profile.
+        router.push("/books");
+      }
+    },
+    [router]
+  );
 
   const refreshProfiles = useCallback(async () => {
     try {
