@@ -236,6 +236,36 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
             )
         )
 
+    def test_looks_like_series_index_entry_ignores_a_leading_article_mismatch(self):
+        # Regression (live bug): a profile's series was auto-created from an
+        # imported spreadsheet's bare series column value ("Empyrean", no
+        # "The"), while Google Books' own bare-series-listing records used
+        # the full name with its article ("The Empyrean" / "The Empyrean
+        # Series"). The exact-text comparison never matched, so both stub
+        # listings sailed through as if they were new, unread books --
+        # exactly the pattern this whole check exists to catch, just missed
+        # over one word.
+        self.assertTrue(
+            discovery_engine.looks_like_series_index_entry("The Empyrean", "Empyrean", isbn13=None, has_number_hint=False)
+        )
+        self.assertTrue(
+            discovery_engine.looks_like_series_index_entry(
+                "The Empyrean Series", "Empyrean", isbn13=None, has_number_hint=False
+            )
+        )
+        # Same mismatch in the other direction (tracked series carries the
+        # article, candidate's title doesn't).
+        self.assertTrue(
+            discovery_engine.looks_like_series_index_entry("Empyrean", "The Empyrean", isbn13=None, has_number_hint=False)
+        )
+        # A real, individually-cataloged book still isn't caught just
+        # because it happens to share a root word with the series name.
+        self.assertFalse(
+            discovery_engine.looks_like_series_index_entry(
+                "The Empyrean Rises", "Empyrean", isbn13=None, has_number_hint=False
+            )
+        )
+
     def test_normalize_series_branding_name_strips_generic_words(self):
         # Regression (live bug): an author-wide discovery pass guessed
         # series name "Duchy of Terra Universe" for a book already owned

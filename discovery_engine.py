@@ -218,10 +218,25 @@ def looks_like_series_index_entry(
     series_norm = normalize_text(series_name)
     if not title_norm or not series_norm:
         return False
-    if title_norm == series_norm:
-        return True
     stripped = normalize_series_branding_name(title)
-    return bool(stripped) and stripped == series_norm
+    title_forms = {title_norm, stripped} if stripped else {title_norm}
+    if series_norm in title_forms:
+        return True
+    # Second live regression on the same fix: a profile's tracked series was
+    # auto-created from an imported spreadsheet's bare series column value
+    # ("Empyrean"), while Google Books' own bare-series-listing records used
+    # the full, article-carrying name ("The Empyrean" / "The Empyrean
+    # Series") -- the same stub-listing pattern above, just missed because
+    # the two sides disagreed on a leading "The". Comparing article-stripped
+    # forms here is safe specifically because series_name is always the one
+    # already-known series this check is evaluating a candidate against --
+    # never a lookup across a profile's *other*, unrelated tracked series
+    # (that broader ambiguity is why normalize_series_branding_name/
+    # _strip_leading_article aren't merged for series matching in general;
+    # see _strip_leading_article's docstring).
+    series_no_article = _strip_leading_article(series_norm)
+    title_forms_no_article = {_strip_leading_article(form) for form in title_forms}
+    return bool(series_no_article) and series_no_article in title_forms_no_article
 
 
 # Catches the common indie-publishing convention of naming a spin-off

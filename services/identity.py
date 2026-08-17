@@ -58,6 +58,21 @@ def _normalize_title_for_identity(value: str | None) -> str:
     )
     text = re.sub(r"\s*[:\-]\s*(audible|kindle|paperback|hardcover)\b.*$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+,\s+book\s+\d+\b", "", text, flags=re.IGNORECASE)
+    # A signed/autographed copy is a printing variant, not a different book --
+    # same live regression class as the format markers above (live bug: a
+    # discovered "Iron Flame SIGNED" listing carried its own real ISBN, so it
+    # skipped every other dedupe path and got persisted as a brand new book
+    # alongside the already-owned "Iron Flame" instead of being recognized as
+    # the same title). Only stripped as a bracketed or trailing qualifier
+    # (never mid-title) so a title that genuinely contains the word --
+    # e.g. "The Signed Confession" -- is left untouched.
+    text = re.sub(r"\((?:signed|autographed)(?:\s+(?:edition|copy))?\)", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\s*[:\-]?\s*(?:signed|autographed)(?:\s+(?:edition|copy|by\s+the\s+author))?\s*$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
     return _normalize_identity_text(text)
 
 
