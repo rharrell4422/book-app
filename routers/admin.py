@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from database import DATABASE_PATH, engine
 from intelligence import (
+    find_fractional_identity_collisions,
     find_ghost_profile_books,
     list_soft_deleted_books,
     purge_orphaned_books,
@@ -66,6 +67,20 @@ def restore_book_endpoint(book_id: int, db: Session = Depends(get_db)):
     Only touches that one row's status -- doesn't undo any field merge a
     dedupe collapse may have made onto whichever row "won"."""
     return restore_soft_deleted_book(db, book_id)
+
+
+@router.get("/fractional_identity_collisions", dependencies=[Depends(require_owner)])
+def fractional_identity_collisions_endpoint(db: Session = Depends(get_db)):
+    """Read-only, narrow diagnostic: unlike /admin/deleted_books (which lists
+    every soft-deleted book, including ordinary/legitimate duplicate
+    collapses), this only reports the specific damage pattern from the fixed
+    services/identity.py truncation bug -- two genuinely different-numbered
+    books in one series (e.g. 3 and 3.5) that used to share an identity key
+    and got wrongly collapsed together. Each group lists every member so you
+    can see exactly what's active vs. soft-deleted before restoring
+    anything."""
+    entries = find_fractional_identity_collisions(db)
+    return {"count": len(entries), "entries": entries}
 
 
 @router.get("/export_db", dependencies=[Depends(require_owner_or_backup_token)])

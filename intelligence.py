@@ -239,6 +239,79 @@ def restore_soft_deleted_book(db, book_id: int) -> dict:
     return {"status": "restored", "book_id": book_id, "title": book.title}
 
 
+def _truncated_identity_number(book_number) -> int | None:
+    """Reproduces the *pre-fix* (buggy) services/identity.py behavior:
+    int(float(book_number)), which truncates a fractional number down to
+    its whole-number neighbor instead of rounding. Used only to retroactively
+    find rows affected by that bug -- see find_fractional_identity_collisions."""
+    try:
+        if book_number is None:
+            return None
+        parsed = int(float(book_number))
+        return parsed if parsed > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def find_fractional_identity_collisions(db) -> list[dict]:
+    """Finds the specific damage pattern left by the (now-fixed)
+    services/identity.py bug: two books in the same series with genuinely
+    *different* book_number values (e.g. 3 and 3.5) that used to truncate to
+    the same identity key, so a Check for New dedupe pass treated them as
+    the same book and collapsed one into "deleted" (or merged its fields
+    onto the other).
+
+    Deliberately narrow, unlike list_soft_deleted_books: a soft-deleted row
+    only shows up here if there's a *different-numbered* sibling (active or
+    also deleted) in the same series that collides with it under the old
+    truncating key. A soft-deleted row from an ordinary, legitimate
+    duplicate collapse (same book found via two providers, same or no
+    book_number) is not included.
+    """
+    all_books = (
+        db.query(Book, Series)
+        .outerjoin(Series, Book.series_id == Series.id)
+        .filter(Book.series_id.isnot(None), Book.book_number.isnot(None))
+        .all()
+    )
+
+    groups: dict[tuple[int, int], list[tuple]] = {}
+    for book, series in all_books:
+        truncated = _truncated_identity_number(book.book_number)
+        if truncated is None:
+            continue
+        groups.setdefault((book.series_id, truncated), []).append((book, series))
+
+    collisions: list[dict] = []
+    for (series_id, truncated), members in groups.items():
+        distinct_numbers = {float(book.book_number) for book, _series in members}
+        has_deleted = any(str(book.record_status or "") == "deleted" for book, _series in members)
+        if len(distinct_numbers) <= 1 or not has_deleted:
+            continue
+
+        series_name = next((series.name for _book, series in members if series), None)
+        collisions.append(
+            {
+                "series_id": series_id,
+                "series_name": series_name,
+                "collided_truncated_number": truncated,
+                "members": [
+                    {
+                        "book_id": book.id,
+                        "title": book.title,
+                        "book_number": book.book_number,
+                        "record_status": book.record_status or "active",
+                        "is_read": bool(book.is_read),
+                        "read_status": book.read_status,
+                    }
+                    for book, _series in members
+                ],
+            }
+        )
+
+    return collisions
+
+
 def _extract_series_position(text: str | None) -> int | None:
     if not text:
         return None
