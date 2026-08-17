@@ -7,7 +7,13 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from database import DATABASE_PATH, engine
-from intelligence import find_ghost_profile_books, purge_orphaned_books, repair_ghost_profile_books
+from intelligence import (
+    find_ghost_profile_books,
+    list_soft_deleted_books,
+    purge_orphaned_books,
+    repair_ghost_profile_books,
+    restore_soft_deleted_book,
+)
 from routers.deps import get_db, require_owner, require_owner_or_backup_token
 
 # No router-level dependency here (unlike other routers) because export_db
@@ -41,6 +47,25 @@ def repair_ghost_profile_books_endpoint(db: Session = Depends(get_db)):
     export/import round trip needed. Safe to run any time; it's a no-op if
     there are none."""
     return repair_ghost_profile_books(db)
+
+
+@router.get("/deleted_books", dependencies=[Depends(require_owner)])
+def list_deleted_books_endpoint(series_id: int | None = None, db: Session = Depends(get_db)):
+    """Read-only report of soft-deleted books (record_status="deleted"),
+    optionally filtered to one series_id. These rows are never actually
+    removed from the table -- e.g. the "loser" side of a Check for New
+    dedupe collapse -- so this is how to find and recover one that was
+    wrongly collapsed away."""
+    entries = list_soft_deleted_books(db, series_id=series_id)
+    return {"count": len(entries), "entries": entries}
+
+
+@router.post("/restore_book/{book_id}", dependencies=[Depends(require_owner)])
+def restore_book_endpoint(book_id: int, db: Session = Depends(get_db)):
+    """Set one specific soft-deleted book back to record_status="active".
+    Only touches that one row's status -- doesn't undo any field merge a
+    dedupe collapse may have made onto whichever row "won"."""
+    return restore_soft_deleted_book(db, book_id)
 
 
 @router.get("/export_db", dependencies=[Depends(require_owner_or_backup_token)])

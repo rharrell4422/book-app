@@ -198,6 +198,47 @@ def repair_ghost_profile_books(db) -> dict:
     }
 
 
+def list_soft_deleted_books(db, series_id: int | None = None) -> list[dict]:
+    """Books currently marked record_status="deleted" (soft-deleted, not
+    actually removed from the table) -- e.g. the "loser" side of a Check for
+    New dedupe collapse. Useful for recovering a row that a collapse pass
+    wrongly picked as the duplicate, since soft-deleting never touches the
+    row's other fields."""
+    query = db.query(Book, Series).outerjoin(Series, Book.series_id == Series.id).filter(Book.record_status == "deleted")
+    if series_id is not None:
+        query = query.filter(Book.series_id == series_id)
+    rows = query.all()
+    return [
+        {
+            "book_id": book.id,
+            "title": book.title,
+            "book_number": book.book_number,
+            "series_id": book.series_id,
+            "series_name": series.name if series else None,
+            "is_read": bool(book.is_read),
+            "read_status": book.read_status,
+            "publication_date": book.publication_date.isoformat() if book.publication_date else None,
+            "release_date": book.release_date.isoformat() if book.release_date else None,
+            "rating": book.rating,
+            "notes": book.notes,
+        }
+        for book, series in rows
+    ]
+
+
+def restore_soft_deleted_book(db, book_id: int) -> dict:
+    """Set record_status back to "active" for one specific book row, with no
+    other field changes. Does not touch any other row -- if a dedupe
+    collapse also merged fields onto whichever row "won", those need fixing
+    separately (see list_soft_deleted_books' docstring)."""
+    book = db.query(Book).filter(Book.id == book_id).first()
+    if not book:
+        return {"status": "not_found", "book_id": book_id}
+    book.record_status = "active"
+    db.commit()
+    return {"status": "restored", "book_id": book_id, "title": book.title}
+
+
 def _extract_series_position(text: str | None) -> int | None:
     if not text:
         return None
