@@ -237,6 +237,75 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
         self.db.refresh(existing)
         self.assertEqual(existing.source_url, "https://www.amazon.com/dp/EXAMPLE8")
 
+    def test_companion_book_with_fractional_number_does_not_clobber_real_book(self):
+        # Regression (live bug): a discovered companion/side-story book at a
+        # fractional series position (e.g. "Threshing Day" at 3.5 in The
+        # Empyrean) used to share an identity key with the real numbered
+        # book it truncated down to (book 3, "Onyx Storm") -- see
+        # services/identity.py's _normalized_book_number_value. That made
+        # the persistence layer treat the new companion candidate as an
+        # *update* to the existing book-3 row (overwriting its title/status)
+        # instead of inserting a distinct new row, effectively destroying
+        # the real book 3 the moment the companion book was discovered.
+        onyx_storm = Book(
+            title="Onyx Storm",
+            author="Some Author",
+            series_id=self.series.id,
+            book_number=3.0,
+            series_order=3,
+            record_status="active",
+            is_read=True,
+            read_status="read",
+        )
+        self.db.add(onyx_storm)
+        self.db.commit()
+        onyx_storm_id = onyx_storm.id
+
+        self._run_job_with_mocked_discovery(
+            [
+                {
+                    "title": "Threshing Day: (The First Peacemaker Book 3.5)",
+                    "author": "Some Author",
+                    "series_name": "The First Peacemaker",
+                    "book_number": 3.5,
+                    "source_url": None,
+                    "provider": "hardcover",
+                    "publication_date": None,
+                    "expected_date": "2026-09-29",
+                    "status_hint": "upcoming",
+                    "asin_or_id": "hardcover:threshing-day",
+                    "is_missing": False,
+                    "status": "upcoming",
+                    "canonical_metadata": {
+                        "title_normalized": "Threshing Day: (The First Peacemaker Book 3.5)",
+                        "series_name_normalized": "The First Peacemaker",
+                        "book_number_normalized": 3.5,
+                        "publish_date_normalized": None,
+                        "upcoming_date_normalized": "2026-09-29",
+                        "availability": "upcoming",
+                        "edition_type": "unknown",
+                        "title_selector": None,
+                    },
+                }
+            ]
+        )
+
+        self.db.refresh(onyx_storm)
+        self.assertEqual(onyx_storm.id, onyx_storm_id)
+        self.assertEqual(onyx_storm.title, "Onyx Storm")
+        self.assertTrue(onyx_storm.is_read)
+        self.assertEqual(onyx_storm.read_status, "read")
+        self.assertEqual(str((onyx_storm.record_status or "active")), "active")
+
+        companion = (
+            self.db.query(Book)
+            .filter(Book.series_id == self.series.id, Book.book_number == 3.5)
+            .first()
+        )
+        self.assertIsNotNone(companion)
+        self.assertNotEqual(companion.id, onyx_storm_id)
+        self.assertEqual(companion.read_status, "upcoming")
+
     def test_dedupe_collapse_merges_release_date_from_loser_into_keeper(self):
         # Reproduces the real-world "Quest Academy" / "Ultimate Level" /
         # "The Bad Guys" data loss: two active rows end up sharing the same

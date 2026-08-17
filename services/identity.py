@@ -61,11 +61,21 @@ def _normalize_title_for_identity(value: str | None) -> str:
     return _normalize_identity_text(text)
 
 
-def _normalized_book_number_value(value) -> int | None:
+def _normalized_book_number_value(value) -> float | None:
+    # Deliberately keeps fractional precision (used to be int(float(value)),
+    # which truncates -- NOT rounds -- so book_number 3.5 collapsed to the
+    # same value as 3. That made a companion/side-story book (e.g. "Threshing
+    # Day" at position 3.5 in The Empyrean) share an identity key with the
+    # real book 3 ("Onyx Storm"), so every matching/dedup pass below treated
+    # them as the same row -- merging the companion book's fields into (or
+    # collapsing away) the real numbered entry it shares a truncated number
+    # with. Book numbers must stay exact here since this key answers "is
+    # this the same book as one already in the database?", not "which whole
+    # number is this closest to?".
     try:
         if value is None or str(value).strip() == "":
             return None
-        parsed = int(float(value))
+        parsed = float(value)
         return parsed if parsed > 0 else None
     except (TypeError, ValueError):
         return None
@@ -76,7 +86,12 @@ def _series_book_identity_key(series_name: str | None, book_number) -> str | Non
     normalized_book_number = _normalized_book_number_value(book_number)
     if not normalized_series or normalized_book_number is None:
         return None
-    return f"{normalized_series}|{normalized_book_number}"
+    number_text = (
+        str(int(normalized_book_number))
+        if normalized_book_number.is_integer()
+        else str(normalized_book_number)
+    )
+    return f"{normalized_series}|{number_text}"
 
 
 def _canonical_title_identity_key(title: str | None) -> str | None:
