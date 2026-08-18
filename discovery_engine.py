@@ -1606,6 +1606,379 @@ def _reconstruct_series_skeleton(
     }
 
 
+# Thresholds gating _reconcile_candidates_with_llm -- deliberately
+# conservative so the (comparatively expensive, latency-adding) LLM pass
+# only runs when the cheap, deterministic fusion above actually left
+# something messy behind, not on every Check Now run.
+RECONCILIATION_SERIES_COMPLETENESS_THRESHOLD = 0.8
+RECONCILIATION_METADATA_COMPLETENESS_THRESHOLD = 0.5
+RECONCILIATION_DISAGREEMENT_RATIO_THRESHOLD = 0.2
+
+# Bounds how many candidates get sent into one reconciliation prompt --
+# keeps the call's cost/latency bounded for an unusually noisy fetch.
+# Anything beyond this is passed through untouched rather than dropped.
+RECONCILIATION_MAX_CANDIDATES = 40
+
+
+def _candidate_has_provenance_disagreement(candidate: "UnifiedCandidate") -> bool:
+    """True if the raw members _fuse_and_score_candidates grouped into this
+    one candidate don't actually agree with each other on book number or
+    ISBN -- i.e. fusion picked *a* value (the first non-null one it found),
+    but the providers disagreed about what that value should be. That's
+    exactly the kind of conflict a deterministic "first non-null wins"
+    backfill can't adjudicate well, and is one of the signals
+    _needs_llm_reconciliation uses to decide the fused set is worth a
+    second, LLM-driven look.
+    """
+    if len(candidate.source_provenance) < 2:
+        return False
+    numbers = {
+        round(float(member["series_number_hint"]), 2)
+        for member in candidate.source_provenance
+        if member.get("series_number_hint") is not None
+    }
+    if len(numbers) > 1:
+        return True
+    isbns = {
+        str(member["isbn13"]).strip() for member in candidate.source_provenance if str(member.get("isbn13") or "").strip()
+    }
+    return len(isbns) > 1
+
+
+def _needs_llm_reconciliation(unified_candidates: list["UnifiedCandidate"], series_name: str | None) -> bool:
+    """Gates _reconcile_candidates_with_llm. Only worth the extra LLM call
+    when the deterministic fusion pass actually left something messy: the
+    series looks incomplete (few distinct book numbers relative to the
+    highest one seen), providers actively disagreed with each other on some
+    candidates, or the fused metadata is thin across the board. A clean,
+    complete, well-agreed-upon result skips this entirely -- fusion alone
+    is enough.
+    """
+    if len(unified_candidates) < 2:
+        return False
+
+    numbers = sorted(
+        {
+            int(number)
+            for candidate in unified_candidates
+            for number in (_resolve_candidate_number(candidate, series_name),)
+            if number is not None and float(number).is_integer()
+        }
+    )
+    if numbers:
+        expected_total = numbers[-1]
+        series_completeness = len(numbers) / expected_total
+        if series_completeness < RECONCILIATION_SERIES_COMPLETENESS_THRESHOLD:
+            _log(f"LLM reconciliation triggered: series completeness {series_completeness:.0%} below threshold")
+            return True
+
+    disagreement_count = sum(1 for candidate in unified_candidates if _candidate_has_provenance_disagreement(candidate))
+    if disagreement_count / len(unified_candidates) > RECONCILIATION_DISAGREEMENT_RATIO_THRESHOLD:
+        _log(
+            f"LLM reconciliation triggered: provider disagreement on "
+            f"{disagreement_count}/{len(unified_candidates)} candidates"
+        )
+        return True
+
+    avg_completeness = sum(candidate.metadata_completeness_score for candidate in unified_candidates) / len(
+        unified_candidates
+    )
+    if avg_completeness < RECONCILIATION_METADATA_COMPLETENESS_THRESHOLD:
+        _log(f"LLM reconciliation triggered: average metadata completeness {avg_completeness:.0%} below threshold")
+        return True
+
+    return False
+
+
+def _format_candidate_for_reconciliation(index: int, candidate: "UnifiedCandidate") -> str:
+    sources = list(dict.fromkeys(str(member.get("source") or "unknown") for member in candidate.source_provenance))
+    return (
+        f"[{index}] title={candidate.title!r} authors={candidate.authors!r} "
+        f"series_number={candidate.series_number} isbn13={candidate.isbn13 or 'null'} "
+        f"published_date={candidate.published_date or 'null'!r} sources={sources} "
+        f"metadata_completeness={candidate.metadata_completeness_score}"
+    )
+
+
+def _coerce_reconciled_float(value) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_reconciled_str(value) -> str | None:
+    cleaned = str(value or "").strip()
+    return cleaned or None
+
+
+def _reconciled_completeness_score(
+    title: str, authors: list[str], series_name: str | None, series_number: float | None, isbn13: str | None,
+    published_date: str | None, description,
+) -> float:
+    # Mirrors _fuse_and_score_candidates' own present-field-count approach
+    # (same _METADATA_COMPLETENESS_FIELDS) so a reconciled candidate's score
+    # stays comparable to one that only ever went through plain fusion.
+    completeness_values = {
+        "title": title,
+        "authors": authors,
+        "series_name_hint": series_name,
+        "series_number_hint": series_number,
+        "isbn13": isbn13,
+        "published_date": published_date,
+        "description": description,
+    }
+    present_count = sum(
+        1
+        for field in _METADATA_COMPLETENESS_FIELDS
+        for value in (completeness_values.get(field),)
+        if (value if not isinstance(value, list) else bool(value)) not in (None, "", False)
+    )
+    return round(present_count / len(_METADATA_COMPLETENESS_FIELDS), 4)
+
+
+def _apply_reconciliation_entry(entry: dict, members: list["UnifiedCandidate"]) -> "UnifiedCandidate":
+    """Turns one entry of _reconcile_candidates_with_llm's response (plus
+    the UnifiedCandidate(s) it references) into a single resolved
+    UnifiedCandidate.
+
+    A single-member entry (the model found nothing to merge it with) only
+    ever *backfills* a field that candidate was missing -- it never
+    overwrites a value the candidate already had, so one LLM misread can't
+    quietly corrupt a candidate that didn't actually need reconciling. A
+    multi-member entry is a real merge: the model's own resolved values are
+    trusted first (that's the point of asking it to pick the best value
+    across disagreeing sources), falling back to whichever merged member
+    has a non-null value if the model left a field null.
+    """
+    primary = members[0]
+
+    if len(members) == 1:
+        title = primary.title
+        authors = primary.authors
+        series_name = primary.series_name
+        series_number = primary.series_number
+        isbn13 = primary.isbn13
+        published_date = primary.published_date
+
+        if series_number is None:
+            series_number = _coerce_reconciled_float(entry.get("series_number"))
+        if series_name is None:
+            series_name = _coerce_reconciled_str(entry.get("series_name"))
+        if not isbn13:
+            candidate_isbn = _coerce_reconciled_str(entry.get("isbn13"))
+            if candidate_isbn and len(candidate_isbn) == 13 and candidate_isbn.isdigit():
+                isbn13 = candidate_isbn
+        if not published_date:
+            published_date = _coerce_reconciled_str(entry.get("published_date"))
+
+        provenance = [dict(item) for item in primary.source_provenance] or [{}]
+        provenance[0] = {
+            **provenance[0],
+            "series_number_hint": series_number if series_number is not None else provenance[0].get("series_number_hint"),
+            "series_name_hint": series_name or provenance[0].get("series_name_hint"),
+            "isbn13": isbn13 or provenance[0].get("isbn13"),
+            "published_date": published_date or provenance[0].get("published_date"),
+        }
+
+        completeness = _reconciled_completeness_score(
+            title, authors, series_name, series_number, isbn13, published_date, provenance[0].get("description")
+        )
+
+        return UnifiedCandidate(
+            title=title,
+            authors=authors,
+            series_name=series_name,
+            series_number=series_number,
+            isbn13=isbn13,
+            edition_type="bundle" if entry.get("is_bundle") else primary.edition_type,
+            published_date=published_date,
+            source_provenance=provenance,
+            confidence_score=primary.confidence_score,
+            metadata_completeness_score=max(primary.metadata_completeness_score, completeness),
+            upcoming_hint=primary.upcoming_hint,
+        )
+
+    title = _coerce_reconciled_str(entry.get("title")) or primary.title
+    author_names = entry.get("author_names")
+    authors = list(author_names) if isinstance(author_names, list) and author_names else None
+    if not authors:
+        authors = next((member.authors for member in members if member.authors), [])
+    series_name = _coerce_reconciled_str(entry.get("series_name")) or next(
+        (member.series_name for member in members if member.series_name), None
+    )
+    series_number = _coerce_reconciled_float(entry.get("series_number"))
+    if series_number is None:
+        series_number = next((member.series_number for member in members if member.series_number is not None), None)
+    isbn13_candidate = _coerce_reconciled_str(entry.get("isbn13"))
+    if isbn13_candidate and len(isbn13_candidate) == 13 and isbn13_candidate.isdigit():
+        isbn13 = isbn13_candidate
+    else:
+        isbn13 = next((member.isbn13 for member in members if member.isbn13), None)
+    published_date = _coerce_reconciled_str(entry.get("published_date")) or next(
+        (member.published_date for member in members if member.published_date), None
+    )
+
+    provenance: list[dict] = []
+    for member in members:
+        provenance.extend(dict(item) for item in member.source_provenance)
+    if not provenance:
+        provenance = [{}]
+    provenance[0] = {
+        **provenance[0],
+        "authors": authors,
+        "isbn13": isbn13,
+        "published_date": published_date,
+        "series_name_hint": series_name,
+        "series_number_hint": series_number,
+    }
+
+    unique_sources = list(dict.fromkeys(str(item.get("source") or "unknown") for item in provenance))
+    confidence_score = round(
+        min(max(member.confidence_score for member in members) + (0.1 if len(unique_sources) > 1 else 0.0), 1.0), 4
+    )
+    completeness = _reconciled_completeness_score(
+        title, authors, series_name, series_number, isbn13, published_date, provenance[0].get("description")
+    )
+
+    return UnifiedCandidate(
+        title=title,
+        authors=list(authors or []),
+        series_name=series_name,
+        series_number=series_number,
+        isbn13=isbn13,
+        edition_type="bundle" if entry.get("is_bundle") else "unknown",
+        published_date=published_date,
+        source_provenance=provenance,
+        confidence_score=confidence_score,
+        metadata_completeness_score=max(completeness, max(member.metadata_completeness_score for member in members)),
+        upcoming_hint=next((member.upcoming_hint for member in members if member.upcoming_hint is not None), None),
+    )
+
+
+# Deliberately a completely separate prompt from _WEB_SEARCH_STRUCTURING_PROMPT
+# -- that one extracts book data from raw web-search snippets; this one takes
+# already-structured UnifiedCandidates and reconciles disagreements between
+# them. Changing one should never risk affecting the other.
+_LLM_RECONCILIATION_PROMPT = """You are reconciling a messy, possibly-duplicated list of book candidates for one series, assembled from several different data providers (catalog APIs and web search) that don't always agree with each other.
+
+Series: "{series_name}"
+
+Below are {count} candidates. Each may be missing information, and two or more entries may actually describe the SAME real book (e.g. one provider has "Book Three" as the title with no ISBN, another has the real subtitle and an ISBN but no book number).
+
+Candidates:
+{candidate_listing}
+
+For EACH candidate above, decide which other candidates (if any) describe the same real book, and merge them into one resolved entry. Every candidate index 0-{max_index} must appear in EXACTLY ONE resolved entry's "source_indices" -- if a candidate doesn't match any other, it is still its own resolved entry with just its own index. For each resolved entry, normalize the book number to a plain number (e.g. "Three"/"Vol. 3"/"#3" -> 3) and pick the most complete/likely-correct value for each field across whichever candidates you merged into it, resolving any disagreement (e.g. two different book numbers) by picking the value supported by more of the merged candidates, or the more specific/authoritative-looking one if it's a tie. If a candidate appears to be a bundle/omnibus of multiple existing volumes rather than a single new one, set "is_bundle" to true.
+
+Respond with ONLY a JSON object (no prose, no markdown code fences) of this exact shape:
+{{"resolved_candidates": [{{"source_indices": [<int>, ...], "title": <string>, "series_name": <string or null>, "series_number": <number or null>, "isbn13": <string or null>, "author_names": [<string>, ...], "published_date": <string or null>, "is_bundle": <bool>, "notes": <short string explaining what changed, or "" if nothing did>}}, ...], "missing_volume_suggestions": [<int, a book number you suspect exists but isn't in the candidate list above, based on the candidates' own text>, ...]}}"""
+
+
+def _reconcile_candidates_with_llm(
+    unified_candidates: list["UnifiedCandidate"],
+    series_name: str | None,
+) -> list["UnifiedCandidate"]:
+    """Single conditional LLM pass over an already-fused candidate set for
+    one series -- normalizes series names/book numbers, merges candidates
+    that plain identity-key fusion couldn't recognize as the same book
+    (different title formatting, one has an ISBN the other lacks, etc.),
+    flags suspected bundles, and surfaces (but does not itself act on --
+    see _reconstruct_series_skeleton for actually searching for them)
+    suspected missing volume numbers. Gated by _needs_llm_reconciliation;
+    only called when fusion alone left the set looking incomplete,
+    internally disagreeing, or thin on metadata.
+
+    Deliberately conservative on failure: a missing API key, empty input,
+    a network/parse error, or a response that doesn't cleanly partition
+    every input candidate exactly once all fall back to returning
+    unified_candidates completely unchanged -- this is an enrichment step,
+    never allowed to lose or corrupt a candidate fusion already produced.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key or len(unified_candidates) < 2:
+        return unified_candidates
+
+    # Anything beyond the cap was never sent to the model and is passed
+    # through untouched below, rather than silently dropped.
+    candidates = unified_candidates[:RECONCILIATION_MAX_CANDIDATES]
+
+    import anthropic
+
+    candidate_listing = "\n".join(
+        _format_candidate_for_reconciliation(index, candidate) for index, candidate in enumerate(candidates)
+    )
+    prompt = _LLM_RECONCILIATION_PROMPT.format(
+        series_name=series_name or "unknown",
+        count=len(candidates),
+        candidate_listing=candidate_listing,
+        max_index=len(candidates) - 1,
+    )
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=3000,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=WEB_SEARCH_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:  # a reconciliation failure should never sink the candidates fusion already found
+        _log(f"LLM reconciliation call failed: {exc}")
+        return unified_candidates
+
+    text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text").strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return unified_candidates
+
+    if not isinstance(parsed, dict):
+        return unified_candidates
+
+    resolved_entries = parsed.get("resolved_candidates")
+    if not isinstance(resolved_entries, list) or not resolved_entries:
+        return unified_candidates
+
+    missing_volume_suggestions = parsed.get("missing_volume_suggestions")
+    if isinstance(missing_volume_suggestions, list) and missing_volume_suggestions:
+        _log(f"LLM reconciliation suspects missing volume(s): {missing_volume_suggestions}")
+
+    # Every original index must be claimed by exactly one entry -- anything
+    # else means the model didn't cleanly partition the input (overlap,
+    # gap, or a garbage index), and trusting a partial/overlapping response
+    # risks silently dropping or duplicating a candidate fusion already
+    # handled correctly.
+    seen_indices: set[int] = set()
+    valid_entries: list[dict] = []
+    for entry in resolved_entries:
+        if not isinstance(entry, dict):
+            return unified_candidates
+        indices = entry.get("source_indices")
+        if not isinstance(indices, list) or not indices:
+            return unified_candidates
+        try:
+            indices = [int(index) for index in indices]
+        except (TypeError, ValueError):
+            return unified_candidates
+        if any(index < 0 or index >= len(candidates) or index in seen_indices for index in indices):
+            return unified_candidates
+        seen_indices.update(indices)
+        valid_entries.append({**entry, "source_indices": indices})
+
+    if seen_indices != set(range(len(candidates))):
+        return unified_candidates
+
+    reconciled = [_apply_reconciliation_entry(entry, [candidates[i] for i in entry["source_indices"]]) for entry in valid_entries]
+
+    return reconciled + unified_candidates[len(candidates):]
+
+
 def discover_candidates_for_series(
     series_name: str,
     author: str,
@@ -1711,6 +2084,13 @@ def discover_candidates_for_series(
     # unchanged -- it still receives the same flat dict shape it always
     # has, just pre-fused/enriched instead of four raw lists concatenated.
     fused_candidates = _fuse_and_score_candidates(fetch_results, author, series_name)
+    # Conditional LLM reconciliation -- only when fusion alone left the set
+    # looking incomplete, internally disagreeing, or thin on metadata (see
+    # _needs_llm_reconciliation). Runs before _filter_and_merge so any
+    # normalized/merged candidate it produces still goes through the exact
+    # same filtering every other candidate does.
+    if _needs_llm_reconciliation(fused_candidates, series_name):
+        fused_candidates = _reconcile_candidates_with_llm(fused_candidates, series_name)
     combined = _filter_and_merge(
         [_unified_candidate_to_raw_dict(candidate) for candidate in fused_candidates],
         author,
@@ -1763,6 +2143,8 @@ def discover_candidates_for_series(
             any_provider_succeeded = True
 
         fused_fallback_candidates = _fuse_and_score_candidates(fallback_results, author, series_name)
+        if _needs_llm_reconciliation(fused_fallback_candidates, series_name):
+            fused_fallback_candidates = _reconcile_candidates_with_llm(fused_fallback_candidates, series_name)
         combined = _filter_and_merge(
             [_unified_candidate_to_raw_dict(candidate) for candidate in fused_fallback_candidates],
             author,
