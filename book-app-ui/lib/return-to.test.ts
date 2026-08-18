@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   isSeriesReturnTo,
+  parseNeedsDates,
   parsePositiveId,
+  parseSeriesBookSort,
   safeReturnTo,
   seriesAddBookHref,
   seriesDetailPath,
@@ -40,17 +42,48 @@ describe("withPin", () => {
 
 describe("series helpers", () => {
   it("builds a series detail path with fromView", () => {
-    expect(seriesDetailPath(12, "finished")).toBe("/series/12?fromView=finished");
-    expect(seriesDetailPath(12, "ongoing")).toBe("/series/12?fromView=ongoing");
+    expect(seriesDetailPath(12, { fromView: "finished" })).toBe("/series/12?fromView=finished");
+    expect(seriesDetailPath(12, { fromView: "ongoing" })).toBe("/series/12?fromView=ongoing");
   });
 
-  it("encodes returnTo so fromView stays nested", () => {
-    expect(seriesAddBookHref(12, "finished")).toBe(
+  it("omits default sort and filter state", () => {
+    expect(seriesDetailPath(12, { fromView: "ongoing", sort: "series", needsDates: false })).toBe(
+      "/series/12?fromView=ongoing",
+    );
+    expect(seriesDetailPath(12)).toBe("/series/12");
+  });
+
+  it("serializes non-default sort and filter state", () => {
+    expect(seriesDetailPath(12, { fromView: "ongoing", sort: "az", needsDates: true })).toBe(
+      "/series/12?fromView=ongoing&sort=az&needsDates=1",
+    );
+    expect(seriesDetailPath(12, { sort: "az" })).toBe("/series/12?sort=az");
+  });
+
+  it("encodes returnTo so view state stays nested", () => {
+    expect(seriesAddBookHref(12, { fromView: "finished" })).toBe(
       "/add-book?seriesId=12&returnTo=%2Fseries%2F12%3FfromView%3Dfinished",
     );
-    expect(seriesEditBookHref(44, 12, "ongoing")).toBe(
+    expect(seriesEditBookHref(44, 12, { fromView: "ongoing" })).toBe(
       "/edit-book/44?returnTo=%2Fseries%2F12%3FfromView%3Dongoing",
     );
+  });
+
+  it("carries sort and filter through the add/edit round trip", () => {
+    expect(seriesEditBookHref(44, 12, { fromView: "ongoing", sort: "az", needsDates: true })).toBe(
+      "/edit-book/44?returnTo=%2Fseries%2F12%3FfromView%3Dongoing%26sort%3Daz%26needsDates%3D1",
+    );
+  });
+
+  it("parses sort and filter params, falling back to defaults", () => {
+    expect(parseSeriesBookSort("az")).toBe("az");
+    expect(parseSeriesBookSort("series")).toBe("series");
+    expect(parseSeriesBookSort("nonsense")).toBe("series");
+    expect(parseSeriesBookSort(null)).toBe("series");
+
+    expect(parseNeedsDates("1")).toBe(true);
+    expect(parseNeedsDates("0")).toBe(false);
+    expect(parseNeedsDates(null)).toBe(false);
   });
 
   it("parses a series id from returnTo", () => {

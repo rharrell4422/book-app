@@ -2,10 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import Link from "next/link";
 import { AlertTriangleIcon, SearchIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import Spinner from "@/components/ui/spinner";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
 import { scheduleSeriesCheckReset } from "@/lib/series-check-progress";
 import { fetchApiWithFallback } from "@/lib/api-client";
@@ -34,10 +32,20 @@ import { BookSummaryDialog } from "@/components/series/book-summary-dialog";
 import { NormalizeTitlesDialog } from "@/components/series/normalize-titles-dialog";
 import { MoreByAuthorDialog } from "@/components/books/more-by-author-dialog";
 import { MobileSeriesBookList } from "@/components/series/mobile-series-book-list";
+import { SeriesDetailHeader } from "@/components/series/series-detail-header";
 import { useDeviceClass } from "@/hooks/use-device-class";
-import { useIsMobile } from "@/hooks/use-mobile";
 import { getDeviceClass } from "@/lib/device-class";
-import { parsePositiveId, seriesAddBookHref, seriesDetailPath, seriesEditBookHref, withPin } from "@/lib/return-to";
+import {
+  parseNeedsDates,
+  parsePositiveId,
+  parseSeriesBookSort,
+  seriesAddBookHref,
+  seriesDetailPath,
+  seriesEditBookHref,
+  withPin,
+  type SeriesBookSort,
+  type SeriesViewState,
+} from "@/lib/return-to";
 
  type TitleNormalizationMode = "keep_original" | "clean_up" | "new_clean_title" | "match_other_titles";
 type TitleNormalizationWizardMode = TitleNormalizationMode | "custom";
@@ -153,6 +161,8 @@ const SERIES_DETAIL_RESIZE_NEIGHBOR: Record<SeriesDetailColumnKey, SeriesDetailC
 };
 
 const SERIES_DETAIL_TABLE_COLUMN_WIDTHS_STORAGE_PREFIX = "seriesDetailTableColumnWidthsV1:";
+/** How long a book stays visually highlighted after `pin` scrolls it into view. */
+const PIN_HIGHLIGHT_DURATION_MS = 2600;
 const TITLE_NORMALIZATION_MODES: TitleNormalizationMode[] = ["keep_original", "clean_up", "new_clean_title", "match_other_titles"];
 const TITLE_NORMALIZATION_WIZARD_MODES: TitleNormalizationWizardMode[] = ["keep_original", "clean_up", "new_clean_title", "match_other_titles", "custom"];
 const CUSTOM_TITLE_PATTERN_PRESETS = [
@@ -492,15 +502,25 @@ function sortBooksBySeriesOrder(books: BookRecord[]): BookRecord[] {
 export default function SeriesDetailPage() {
   const { role } = useAuth();
   const canEdit = role === "owner";
-  const isMobile = useIsMobile();
   const deviceClass = useDeviceClass();
+  // Phone and tablet share the compact card surface, matching how Add/Edit
+  // Book already route by device class rather than by viewport width alone.
+  const isCompact = deviceClass !== "desktop";
   const router = useRouter();
   const params = useParams();
   const searchParams = useSearchParams();
   const seriesId = params.seriesId as string;
   const fromView = searchParams.get("fromView") === "finished" ? "finished" : "ongoing";
   const pinnedBookId = parsePositiveId(searchParams.get("pin"));
+  const bookSortMode = parseSeriesBookSort(searchParams.get("sort"));
+  const needsVerificationOnly = parseNeedsDates(searchParams.get("needsDates"));
   const viewAllSeriesHref = `/series?view=${fromView}`;
+  // Everything except `pin`, which is a one-shot reveal rather than durable
+  // view state and so is deliberately excluded from the returnTo round trip.
+  const viewState = useMemo<SeriesViewState>(
+    () => ({ fromView, sort: bookSortMode, needsDates: needsVerificationOnly }),
+    [fromView, bookSortMode, needsVerificationOnly],
+  );
   const [series, setSeries] = useState<SeriesRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -511,8 +531,7 @@ export default function SeriesDetailPage() {
   const [notesDraft, setNotesDraft] = useState("");
   const [summarySaving, setSummarySaving] = useState(false);
   const [moreByAuthorTarget, setMoreByAuthorTarget] = useState<string | null>(null);
-  const [bookSortMode, setBookSortMode] = useState<"series" | "az">("series");
-  const [needsVerificationOnly, setNeedsVerificationOnly] = useState(false);
+  const [highlightedBookId, setHighlightedBookId] = useState<number | null>(null);
   const [recentAddMessage, setRecentAddMessage] = useState<string | null>(null);
   const [seriesCheckLoading, setSeriesCheckLoading] = useState(false);
   const [seriesCheckProgress, setSeriesCheckProgress] = useState(0);
@@ -534,6 +553,7 @@ export default function SeriesDetailPage() {
   const addMessageTimeoutRef = useRef<number | null>(null);
   const seriesCheckResetTimeoutRef = useRef<number | null>(null);
   const booksTableWrapRef = useRef<HTMLDivElement | null>(null);
+  const consumedPinRef = useRef<number | null>(null);
   const resizeStateRef = useRef<{
     key: SeriesDetailColumnKey;
     neighborKey: SeriesDetailColumnKey;
@@ -757,6 +777,38 @@ export default function SeriesDetailPage() {
     };
   }, []);
 
+  // `pin` reveals the book the user just added or edited by scrolling to it
+  // in its natural position, rather than hoisting it to the top of the list
+  // and leaving the ordering scrambled. It is consumed exactly once and then
+  // dropped from the URL so it can't resurface on a later back-navigation.
+  useEffect(() => {
+    if (!pinnedBookId) {
+      consumedPinRef.current = null;
+      return;
+    }
+    if (loading || consumedPinRef.current === pinnedBookId) {
+      return;
+    }
+
+    consumedPinRef.current = pinnedBookId;
+
+    const target = document.querySelector<HTMLElement>(`[data-book-id="${pinnedBookId}"]`);
+    if (target) {
+      const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      target.scrollIntoView({ block: "center", behavior: prefersReducedMotion ? "auto" : "smooth" });
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setHighlightedBookId(pinnedBookId);
+    }
+
+    router.replace(seriesDetailPath(Number(seriesId), viewState), { scroll: false });
+  }, [loading, pinnedBookId, router, seriesId, viewState]);
+
+  useEffect(() => {
+    if (highlightedBookId === null) return;
+    const timeoutId = window.setTimeout(() => setHighlightedBookId(null), PIN_HIGHLIGHT_DURATION_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [highlightedBookId]);
+
   if (loading) {
     return <div className="p-6">Loading series...</div>;
   }
@@ -769,7 +821,11 @@ export default function SeriesDetailPage() {
     return <div className="p-6">Series not found.</div>;
   }
 
-  let displayedBooks = (() => {
+  // Survives `pin` being cleared from the URL, so a book revealed by the
+  // add/edit round trip stays put for the length of its highlight.
+  const revealedBookId = highlightedBookId ?? pinnedBookId;
+
+  const orderedBooks = (() => {
     if (bookSortMode === "az") {
       return [...books].sort((a, b) =>
         String(a?.title || "").localeCompare(String(b?.title || ""), undefined, {
@@ -806,20 +862,24 @@ export default function SeriesDetailPage() {
     const pinnedIdSet = new Set(pinnedUpcoming.map((book) => Number(book?.id)));
     const rest = ordered.filter((book) => !pinnedIdSet.has(Number(book?.id)));
     return [...pinnedUpcoming, ...rest];
-  })().filter((book) => !needsVerificationOnly || hasUnconfirmedReleaseDate(getBookStatus(book), book));
-  if (pinnedBookId) {
-    const pinnedIndex = displayedBooks.findIndex((book) => Number(book?.id) === pinnedBookId);
-    if (pinnedIndex > 0) {
-      const next = [...displayedBooks];
-      const [pinned] = next.splice(pinnedIndex, 1);
-      displayedBooks = [pinned, ...next];
-    } else if (pinnedIndex < 0) {
-      const pinnedBook = books.find((book) => Number(book?.id) === pinnedBookId);
-      if (pinnedBook) {
-        displayedBooks = [pinnedBook, ...displayedBooks];
-      }
+  })();
+
+  const displayedBooks = (() => {
+    const visible = orderedBooks.filter(
+      (book) => !needsVerificationOnly || hasUnconfirmedReleaseDate(getBookStatus(book), book),
+    );
+    if (!revealedBookId || visible.some((book) => Number(book?.id) === revealedBookId)) {
+      return visible;
     }
-  }
+
+    // An edit can push a book out of the active filter (e.g. confirming its
+    // release date clears "needs verification"). Keeping it in its natural
+    // position gives the reveal something to scroll to instead of the book
+    // silently vanishing the moment it was saved.
+    const visibleIds = new Set(visible.map((book) => Number(book?.id)));
+    visibleIds.add(revealedBookId);
+    return orderedBooks.filter((book) => visibleIds.has(Number(book?.id)));
+  })();
   const missingOrders: string[] = Array.isArray(series.missing_books)
     ? series.missing_books
     : [];
@@ -1223,13 +1283,26 @@ export default function SeriesDetailPage() {
   }
 
 
+  /** Sort/filter live in the URL so Add/Edit can carry them in `returnTo`. */
+  function applyViewState(next: Partial<SeriesViewState>) {
+    router.replace(seriesDetailPath(Number(seriesId), { ...viewState, ...next }), { scroll: false });
+  }
+
+  function setBookSortMode(sort: SeriesBookSort) {
+    applyViewState({ sort });
+  }
+
+  function toggleNeedsVerificationOnly() {
+    applyViewState({ needsDates: !needsVerificationOnly });
+  }
+
   function startAddBook() {
     if (!series) return;
     if (getDeviceClass() === "desktop") {
       setAddBookDialogOpen(true);
       return;
     }
-    router.push(seriesAddBookHref(Number(series.id), fromView));
+    router.push(seriesAddBookHref(Number(series.id), viewState));
   }
 
   function startEditBook(book: BookRecord) {
@@ -1239,12 +1312,12 @@ export default function SeriesDetailPage() {
       setEditBookDialogOpen(true);
       return;
     }
-    router.push(seriesEditBookHref(Number(book.id), Number(series.id), fromView));
+    router.push(seriesEditBookHref(Number(book.id), Number(series.id), viewState));
   }
 
   function pinBookOnSeriesPage(bookId: number) {
     if (!series || !Number.isFinite(bookId) || bookId <= 0) return;
-    router.replace(withPin(seriesDetailPath(Number(series.id), fromView), bookId), { scroll: false });
+    router.replace(withPin(seriesDetailPath(Number(series.id), viewState), bookId), { scroll: false });
   }
 
   async function handleApplyTitleNormalization() {
@@ -1490,156 +1563,41 @@ export default function SeriesDetailPage() {
 
   return (
     <div className="p-2 space-y-1.5">
-      <div className="space-y-1.5 rounded-lg border bg-card/60 px-3 py-2">
-        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <h1 className="text-xl font-bold leading-tight">{series.name}</h1>
-            <span className="text-sm text-muted-foreground">{series.author || "Unknown author"}</span>
-          </div>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
-            <span>Unread <span className="font-semibold text-foreground">{unreadCount}</span></span>
-            <span>Read <span className="font-semibold text-foreground">{readCount}</span></span>
-            <span>Total <span className="font-semibold text-foreground">{totalBooks}</span></span>
-            <span>Upcoming <span className="font-semibold text-foreground">{upcomingCount}</span></span>
-            {needsVerificationCount > 0 ? (
-              <button
-                type="button"
-                title="Books flagged as upcoming/available with no confirmed release date -- click to filter to just these"
-                onClick={() => setNeedsVerificationOnly((prev) => !prev)}
-                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-semibold transition-colors ${
-                  needsVerificationOnly
-                    ? "border-amber-400 bg-amber-200 text-amber-900"
-                    : "border-amber-300 bg-amber-100 text-amber-800 hover:bg-amber-200"
-                }`}
-              >
-                <AlertTriangleIcon className="h-3 w-3" />
-                Needs date verification {needsVerificationCount}
-              </button>
-            ) : null}
-            <span className="text-muted-foreground/50">|</span>
-            <span>Status <span className="font-semibold text-foreground">{series.series_status || "Unknown"}</span></span>
-            <span>Next unread <span className="font-semibold text-foreground">{series.next_unread_book_number ?? "—"}</span></span>
-            <span>Next upcoming <span className="font-semibold text-foreground">{series.next_upcoming_book_number ?? "—"}</span></span>
-            <span>Missing <span className="font-semibold text-foreground">{missingOrders.length}</span></span>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap items-center gap-2">
-            {canEdit ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={startAddBook}
-              >
-                Add Book
-              </Button>
-            ) : null}
-            {canEdit ? (
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={() => void handleCheckForNew()}
-                disabled={seriesCheckLoading}
-              >
-                {seriesCheckLoading ? `Checking ${series.name}…` : `Check ${series.name} for New`}
-              </Button>
-            ) : null}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={handleSearchForNextBookOnline}
-              title={
-                nextBookNumber
-                  ? `Search online for Book ${nextBookNumber} -- use this if "Check for New" doesn't find a book you know exists`
-                  : "Search online for the next book in this series -- use this if \"Check for New\" doesn't find a book you know exists"
-              }
-            >
-              Search Book {nextBookNumber ?? "?"} Online
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={handleSeriesRecap}
-              title="Opens ChatGPT in a new tab with a pre-filled recap prompt for this series"
-            >
-              Series Recap
-            </Button>
-            {seriesCheckLoading ? (
-              <div className="flex min-w-[240px] items-center gap-2 rounded border bg-background px-2 py-1 text-xs">
-                <Spinner />
-                <div className="w-32 overflow-hidden rounded-full bg-slate-200">
-                  <div
-                    className="h-1.5 bg-slate-700 transition-all duration-500"
-                    style={{ width: `${Math.max(4, seriesCheckProgress)}%` }}
-                  />
-                </div>
-                <span className={seriesCheckStillChecking ? "animate-pulse text-muted-foreground" : "text-muted-foreground"}>
-                  {seriesCheckStillChecking ? "Still checking..." : `${seriesCheckProgress}%`}
-                </span>
-                {seriesCheckCurrentPass ? (
-                  <span className="text-muted-foreground">{seriesCheckCurrentPass}</span>
-                ) : null}
-              </div>
-            ) : null}
-            {canEdit ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setNormalizeWizardMode(seriesNormalizationMode);
-                  setNormalizeTitlesDialogOpen(true);
-                }}
-              >
-                Optional Title Normalization
-              </Button>
-            ) : null}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {canEdit ? (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleToggleSeriesFinished}
-                disabled={finishedToggleSaving}
-              >
-                {finishedToggleSaving
-                  ? "Saving..."
-                  : series.is_finished
-                    ? "Move to unfinished"
-                    : "Move to finished"}
-              </Button>
-            ) : null}
-            <Link href="/books">
-              <Button variant="outline" size="sm">Back to Library</Button>
-            </Link>
-            <Link href={viewAllSeriesHref}>
-              <Button variant="secondary" size="sm">View all series</Button>
-            </Link>
-            {canEdit ? (
-              <Button
-                type="button"
-                variant="destructive"
-                size="sm"
-                onClick={() => void handleDeleteSeriesWithBooks()}
-                disabled={deleteSeriesSaving}
-              >
-                {deleteSeriesSaving ? "Deleting series..." : "Delete series + books"}
-              </Button>
-            ) : null}
-          </div>
-        </div>
-
-        {series.description && (
-          <p className="line-clamp-2 max-w-4xl text-xs leading-5 text-muted-foreground">{series.description}</p>
-        )}
-      </div>
+      <SeriesDetailHeader
+        compact={isCompact}
+        canEdit={canEdit}
+        series={series}
+        stats={{
+          unread: unreadCount,
+          read: readCount,
+          total: totalBooks,
+          upcoming: upcomingCount,
+          missing: missingOrders.length,
+          needsVerification: needsVerificationCount,
+        }}
+        needsVerificationOnly={needsVerificationOnly}
+        onToggleNeedsVerification={toggleNeedsVerificationOnly}
+        nextBookNumber={nextBookNumber}
+        viewAllSeriesHref={viewAllSeriesHref}
+        check={{
+          loading: seriesCheckLoading,
+          progress: seriesCheckProgress,
+          currentPass: seriesCheckCurrentPass,
+          stillChecking: seriesCheckStillChecking,
+        }}
+        finishedToggleSaving={finishedToggleSaving}
+        deleteSeriesSaving={deleteSeriesSaving}
+        onAddBook={startAddBook}
+        onCheckForNew={() => void handleCheckForNew()}
+        onSearchNextBookOnline={handleSearchForNextBookOnline}
+        onSeriesRecap={handleSeriesRecap}
+        onNormalizeTitles={() => {
+          setNormalizeWizardMode(seriesNormalizationMode);
+          setNormalizeTitlesDialogOpen(true);
+        }}
+        onToggleFinished={handleToggleSeriesFinished}
+        onDeleteSeries={() => void handleDeleteSeriesWithBooks()}
+      />
 
       {recentAddMessage ? (
         // bottom-20 (not bottom-4) on mobile clears the fixed bottom nav
@@ -1650,7 +1608,7 @@ export default function SeriesDetailPage() {
         </div>
       ) : null}
 
-      {isMobile ? (
+      {isCompact ? (
         <MobileSeriesBookList
           items={displayedBooks.map((book) => {
             const status = getBookStatus(book);
@@ -1663,7 +1621,7 @@ export default function SeriesDetailPage() {
             };
           })}
           canEdit={canEdit}
-          pinnedBookId={pinnedBookId}
+          highlightedBookId={revealedBookId}
           onEdit={startEditBook}
           onOpenSummary={openSummaryEditor}
           onMoreByAuthor={(author) => setMoreByAuthorTarget(author)}
@@ -1748,7 +1706,15 @@ export default function SeriesDetailPage() {
             const displayDate = getBookDate(book);
             const unconfirmedDate = hasUnconfirmedReleaseDate(status, book);
             return (
-              <TableRow key={book.id} className={Number(book.id) === pinnedBookId ? "bg-emerald-50/80" : undefined}>
+              <TableRow
+                key={book.id}
+                data-book-id={book.id}
+                className={
+                  Number(book.id) === revealedBookId
+                    ? "bg-emerald-50/80 transition-colors duration-500"
+                    : "transition-colors duration-500"
+                }
+              >
                 <TableCell className="truncate" title={book.title ?? undefined}>
                   <div>{book.title || "—"}</div>
                 </TableCell>
