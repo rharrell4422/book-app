@@ -33,6 +33,7 @@ from datetime import date
 
 import httpx
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 
 # Loaded here (rather than relying on the entry point having done it first)
 # so this module reads the right API key regardless of import order.
@@ -1166,6 +1167,290 @@ def _fetch_all_providers_parallel(
     return results
 
 
+_METADATA_COMPLETENESS_FIELDS = (
+    "title",
+    "authors",
+    "series_name_hint",
+    "series_number_hint",
+    "isbn13",
+    "published_date",
+    "description",
+)
+
+# Rough per-provider weight for confidence_score, mirroring the same
+# hardcover > google_books > openlibrary > web_search trust ordering
+# discover_candidates_for_series's own merge-priority comment already
+# documents elsewhere (Hardcover's series data is structured/curated;
+# web_search's is an LLM's best-effort read of free-text search snippets).
+# Corroboration across multiple *different* providers and a real ISBN both
+# add on top of this base weight rather than replacing it.
+_PROVIDER_CONFIDENCE_WEIGHT = {
+    "hardcover": 0.4,
+    "google_books": 0.3,
+    "openlibrary": 0.25,
+    "web_search": 0.15,
+}
+
+
+class UnifiedCandidate(BaseModel):
+    """One real-world book, after _fuse_and_score_candidates has merged
+    every raw provider hit that plausibly refers to it -- matched by the
+    same isbn13 -> title_key -> normalized-title identity chain
+    _filter_and_merge's own seen_keys dedupe already uses -- into a single
+    representation.
+
+    This does not replace _filter_and_merge's author/language/placeholder/
+    bundle-title/series-index/already-owned filtering. See
+    _fuse_and_score_candidates and _unified_candidate_to_raw_dict, which
+    converts instances of this back into the exact flat dict shape every
+    _fetch_* provider (and _filter_and_merge) already expects, so that
+    filtering keeps running completely unchanged on the fused result.
+    confidence_score/metadata_completeness_score/source_provenance are new,
+    additive fields -- nothing downstream reads them yet, but they're
+    carried through the dict conversion so a later phase can.
+    """
+
+    title: str
+    authors: list[str] = Field(default_factory=list)
+    series_name: str | None = None
+    series_number: float | None = None
+    isbn13: str | None = None
+    edition_type: str = "unknown"
+    published_date: str | None = None
+    source_provenance: list[dict] = Field(default_factory=list)
+    confidence_score: float = 0.0
+    metadata_completeness_score: float = 0.0
+    upcoming_hint: bool | None = None
+
+
+def _first_present_field(members: list[dict], field: str, *, exclude_sources: set[str] | None = None):
+    """First non-empty value for `field` across a group of raw candidate
+    dicts already confirmed to be the same real book (see
+    _fuse_and_score_candidates) -- used to backfill a gap in the group's
+    primary/representative member from one of its duplicates. `exclude_sources`
+    lets a caller withhold a specific provider from being trusted as a
+    backfill source for one particular field (see isbn13 handling below)
+    without affecting any other field.
+    """
+    for member in members:
+        if exclude_sources and str(member.get("source") or "") in exclude_sources:
+            continue
+        value = member.get(field)
+        if isinstance(value, list):
+            if value:
+                return value
+        elif value not in (None, ""):
+            return value
+    return None
+
+
+def _fuse_and_score_candidates(
+    provider_results: dict,
+    author: str,
+    series_name: str | None,
+) -> list[UnifiedCandidate]:
+    """Groups every raw candidate _fetch_all_providers_parallel returned --
+    across all four providers -- by real-world-book identity (the same
+    isbn13 -> title_key -> normalized-title chain _filter_and_merge's own
+    seen_keys dedupe already uses), then fuses each group into one
+    UnifiedCandidate: a representative dict (the highest-priority member --
+    hardcover > google_books > openlibrary > web_search, the same priority
+    order callers already concatenate provider_results in) with any
+    *missing* fields backfilled from the other members of that same
+    confirmed-duplicate group, plus a confidence_score and
+    metadata_completeness_score.
+
+    Deliberately leaves ALL of _filter_and_merge's own filtering untouched --
+    this only pre-deduplicates and enriches what _filter_and_merge receives,
+    it doesn't decide what survives.
+
+    `authors`/`language` are backfilled slightly differently from every
+    other field: instead of always preferring the primary member's own
+    value, they prefer whichever group member's value would actually pass
+    _filter_and_merge's author-match/language checks (falling back to the
+    primary's own value if none do). Without this, collapsing straight to
+    the primary member's fields could make a group *more* likely to be
+    dropped than before fusion existed -- pre-fusion, _filter_and_merge
+    evaluated every duplicate separately and any single one of them passing
+    was enough for that identity key to survive; post-fusion there's only
+    one fused dict per identity, so it needs the best-available author/
+    language value among the group, not just whichever provider happened to
+    sort first.
+
+    isbn13 is also handled differently from the other backfilled fields:
+    web_search's isbn13 is an LLM's guess parsed out of unstructured
+    search-result text (see _fetch_web_search), not a catalog-verified
+    identifier like the other three providers'. It's trusted the same as
+    any provider for *identity grouping* (a wrong guess there just fails to
+    group, it doesn't wrongly merge two different books), but it is not
+    trusted to *backfill* an ISBN onto a duplicate that arrived from a
+    different, ISBN-less provider, since a wrong backfilled ISBN would
+    directly change that candidate's dedupe key and stub-listing check
+    inside _filter_and_merge.
+    """
+    ordered_raw: list[dict] = [
+        *(provider_results.get("hardcover") or []),
+        *(provider_results.get("google") or []),
+        *(provider_results.get("openlibrary") or []),
+        *(provider_results.get("web") or []),
+    ]
+
+    groups: dict[str, list[dict]] = {}
+    group_order: list[str] = []
+    for raw in ordered_raw:
+        title = str(raw.get("title") or "").strip()
+        if not title:
+            continue
+        isbn13 = str(raw.get("isbn13") or "").strip()
+        identity_key = isbn13 or core_title_key(title) or normalize_text(title)
+        if identity_key not in groups:
+            groups[identity_key] = []
+            group_order.append(identity_key)
+        groups[identity_key].append(raw)
+
+    fused: list[UnifiedCandidate] = []
+    for identity_key in group_order:
+        members = groups[identity_key]
+        primary = members[0]
+
+        author_matching_authors = next(
+            (member.get("authors") for member in members if _author_matches(member.get("authors") or [], author)),
+            None,
+        )
+        merged_authors = list(author_matching_authors or _first_present_field(members, "authors") or [])
+
+        language_ok_member = next(
+            (member for member in members if is_english_or_unknown(member.get("language"))), primary
+        )
+        merged_language = language_ok_member.get("language")
+
+        merged_isbn13 = str(primary.get("isbn13") or "").strip() or None
+        if not merged_isbn13:
+            backfilled_isbn = _first_present_field(members, "isbn13", exclude_sources={"web_search"})
+            merged_isbn13 = str(backfilled_isbn).strip() if backfilled_isbn else None
+
+        merged_published_date = str(
+            primary.get("published_date") or _first_present_field(members, "published_date") or ""
+        ).strip()
+        merged_description = primary.get("description") or _first_present_field(members, "description")
+        merged_series_name_hint = primary.get("series_name_hint") or _first_present_field(members, "series_name_hint")
+        merged_series_number_hint = primary.get("series_number_hint") or _first_present_field(
+            members, "series_number_hint"
+        )
+        merged_series_total_hint = primary.get("series_total_hint") or _first_present_field(
+            members, "series_total_hint"
+        )
+        merged_upcoming_hint = primary.get("upcoming_hint")
+        if merged_upcoming_hint is None:
+            merged_upcoming_hint = _first_present_field(members, "upcoming_hint")
+        merged_source_url = primary.get("source_url") or _first_present_field(members, "source_url")
+
+        unique_sources = list(dict.fromkeys(str(member.get("source") or "unknown") for member in members))
+        confidence = sum(_PROVIDER_CONFIDENCE_WEIGHT.get(source, 0.1) for source in unique_sources)
+        if len(unique_sources) > 1:
+            confidence += 0.1
+        if merged_isbn13:
+            confidence += 0.1
+        if merged_authors and _author_matches(merged_authors, author):
+            confidence += 0.1
+        confidence_score = round(min(confidence, 1.0), 4)
+
+        completeness_values = {
+            "title": primary.get("title"),
+            "authors": merged_authors,
+            "series_name_hint": merged_series_name_hint,
+            "series_number_hint": merged_series_number_hint,
+            "isbn13": merged_isbn13,
+            "published_date": merged_published_date,
+            "description": merged_description,
+        }
+        present_count = sum(
+            1
+            for field in _METADATA_COMPLETENESS_FIELDS
+            for value in (completeness_values.get(field),)
+            if (value if not isinstance(value, list) else bool(value)) not in (None, "", False)
+        )
+        metadata_completeness_score = round(present_count / len(_METADATA_COMPLETENESS_FIELDS), 4)
+
+        try:
+            series_number_value = float(merged_series_number_hint) if merged_series_number_hint is not None else None
+        except (TypeError, ValueError):
+            series_number_value = None
+
+        # Carry the backfilled (not just the primary's raw) hint fields
+        # forward via the provenance entries themselves, so
+        # _unified_candidate_to_raw_dict can recover them without needing
+        # extra non-spec fields on the model -- see its own docstring.
+        provenance = [dict(member) for member in members]
+        provenance[0] = {
+            **provenance[0],
+            "authors": merged_authors,
+            "language": merged_language,
+            "isbn13": merged_isbn13,
+            "published_date": merged_published_date,
+            "description": merged_description,
+            "series_name_hint": merged_series_name_hint,
+            "series_number_hint": merged_series_number_hint,
+            "series_total_hint": merged_series_total_hint,
+            "upcoming_hint": merged_upcoming_hint,
+            "source_url": merged_source_url,
+        }
+
+        fused.append(
+            UnifiedCandidate(
+                title=str(primary.get("title") or "").strip(),
+                authors=merged_authors,
+                series_name=series_name or (str(merged_series_name_hint).strip() if merged_series_name_hint else None),
+                series_number=series_number_value,
+                isbn13=merged_isbn13,
+                edition_type="unknown",
+                published_date=merged_published_date or None,
+                source_provenance=provenance,
+                confidence_score=confidence_score,
+                metadata_completeness_score=metadata_completeness_score,
+                upcoming_hint=bool(merged_upcoming_hint) if merged_upcoming_hint is not None else None,
+            )
+        )
+
+    return fused
+
+
+def _unified_candidate_to_raw_dict(candidate: UnifiedCandidate) -> dict:
+    """Converts a fused UnifiedCandidate back into the flat dict shape every
+    _fetch_* provider (and _filter_and_merge) already expects, so fusion is
+    a drop-in step in front of unchanged merge/filter logic.
+
+    Starts from the fused/backfilled representative dict fusion already
+    built (source_provenance[0] -- see _fuse_and_score_candidates, which
+    overwrites that entry's own author/language/isbn13/hint fields with the
+    group's backfilled values while leaving source/source_id/source_url on
+    it) and overlays the UnifiedCandidate's own title/authors/isbn13/
+    published_date/upcoming_hint on top, since those are the fields fusion
+    computed with the extra author-match/isbn-trust care described in
+    _fuse_and_score_candidates.
+    """
+    provenance = candidate.source_provenance or [{}]
+    base = dict(provenance[0])
+    base.update(
+        {
+            "title": candidate.title,
+            "authors": list(candidate.authors),
+            "isbn13": candidate.isbn13,
+            "published_date": candidate.published_date or "",
+            "upcoming_hint": candidate.upcoming_hint,
+            # New, additive fields -- _filter_and_merge doesn't read these
+            # today (nothing downstream does yet), but they ride along on
+            # the dict unchanged since _filter_and_merge spreads **raw into
+            # its own output.
+            "confidence_score": candidate.confidence_score,
+            "metadata_completeness_score": candidate.metadata_completeness_score,
+            "source_provenance": candidate.source_provenance,
+            "edition_type": candidate.edition_type,
+        }
+    )
+    return base
+
+
 def discover_candidates_for_series(
     series_name: str,
     author: str,
@@ -1252,14 +1537,21 @@ def discover_candidates_for_series(
         else:
             any_provider_succeeded = True
 
-    # Hardcover listed first: when multiple sources return the same book,
-    # dedup keeps whichever copy appears first, and Hardcover's explicit
-    # series-position/release-status fields are more trustworthy than
-    # Google Books/OpenLibrary free-text for indie/self-published LitRPG,
-    # which both of those APIs tend to index/cover poorly. Web search is
-    # listed last since it's the least structured of the four sources.
+    # Fuse each real book's raw hits (across all four providers) into one
+    # enriched candidate before merging/filtering -- see
+    # _fuse_and_score_candidates. Hardcover listed first inside it (and
+    # inside fetch_results itself): when multiple sources return the same
+    # book, fusion's own backfill keeps whichever copy appears first as the
+    # base, and Hardcover's explicit series-position/release-status fields
+    # are more trustworthy than Google Books/OpenLibrary free-text for
+    # indie/self-published LitRPG, which both of those APIs tend to index/
+    # cover poorly. Web search is listed last since it's the least
+    # structured of the four sources. _filter_and_merge itself is
+    # unchanged -- it still receives the same flat dict shape it always
+    # has, just pre-fused/enriched instead of four raw lists concatenated.
+    fused_candidates = _fuse_and_score_candidates(fetch_results, author, series_name)
     combined = _filter_and_merge(
-        [*hardcover_raw, *google_raw, *openlibrary_raw, *web_search_raw],
+        [_unified_candidate_to_raw_dict(candidate) for candidate in fused_candidates],
         author,
         exclude_title_keys,
         confidence="targeted",
@@ -1304,8 +1596,9 @@ def discover_candidates_for_series(
         elif hardcover_fallback or os.environ.get("HARDCOVER_API_KEY", "").strip():
             any_provider_succeeded = True
 
+        fused_fallback_candidates = _fuse_and_score_candidates(fallback_results, author, series_name)
         combined = _filter_and_merge(
-            [*hardcover_fallback, *google_fallback, *openlibrary_fallback],
+            [_unified_candidate_to_raw_dict(candidate) for candidate in fused_fallback_candidates],
             author,
             exclude_title_keys,
             confidence="author_fallback",
@@ -1480,8 +1773,9 @@ def discover_candidates_for_author(
         else:
             any_provider_succeeded = True
 
+    fused_candidates = _fuse_and_score_candidates(fetch_results, author, None)
     combined = _filter_and_merge(
-        [*hardcover_raw, *google_raw, *openlibrary_raw, *web_search_raw],
+        [_unified_candidate_to_raw_dict(candidate) for candidate in fused_candidates],
         author,
         exclude_title_keys,
         confidence="author_wide",
