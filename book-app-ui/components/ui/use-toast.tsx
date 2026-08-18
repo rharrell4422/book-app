@@ -1,6 +1,8 @@
 "use client";
 
-import { createContext, useContext, useState } from "react";
+import { createContext, useCallback, useContext, useRef, useState } from "react";
+
+import { addToastRecord, removeToastRecord, scheduleToastAutoDismiss } from "@/lib/toast-scheduler";
 
 type ToastData = {
   id: string;
@@ -11,21 +13,42 @@ type ToastData = {
 
 const ToastContext = createContext<{
   toasts: ToastData[];
-  toast: (data: Omit<ToastData, "id">) => void;
+  toast: (data: Omit<ToastData, "id">) => string;
+  dismiss: (id: string) => void;
 }>({
   toasts: [],
-  toast: () => {},
+  toast: () => "",
+  dismiss: () => {},
 });
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastData[]>([]);
+  // Tracks each toast's auto-dismiss canceler so a manual dismiss() (or the
+  // MAX_VISIBLE_TOASTS cap dropping an older one) doesn't leave a stray
+  // timer that fires later against an id that's no longer in the list.
+  const dismissTimersRef = useRef(new Map<string, () => void>());
 
-  function toast(data: Omit<ToastData, "id">) {
-    setToasts((prev) => [...prev, { id: Math.random().toString(), ...data }]);
-  }
+  const dismiss = useCallback((id: string) => {
+    dismissTimersRef.current.get(id)?.();
+    dismissTimersRef.current.delete(id);
+    setToasts((prev) => removeToastRecord(prev, id));
+  }, []);
+
+  const toast = useCallback(
+    (data: Omit<ToastData, "id">) => {
+      const id = Math.random().toString(36).slice(2);
+      setToasts((prev) => addToastRecord(prev, { id, ...data }));
+      dismissTimersRef.current.set(
+        id,
+        scheduleToastAutoDismiss(() => dismiss(id)),
+      );
+      return id;
+    },
+    [dismiss],
+  );
 
   return (
-    <ToastContext.Provider value={{ toasts, toast }}>
+    <ToastContext.Provider value={{ toasts, toast, dismiss }}>
       {children}
     </ToastContext.Provider>
   );

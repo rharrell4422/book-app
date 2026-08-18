@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { AlertTriangleIcon, BookOpenIcon, CheckIcon, ExternalLinkIcon, FileTextIcon, PencilIcon, RotateCcwIcon, SearchIcon, Trash2Icon, XIcon } from "lucide-react";
+import { AlertTriangleIcon, XIcon } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
+import { BookActionIcon } from "@/components/books/book-action-icon";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
 import { fetchApiWithFallback } from "@/lib/api-client";
 import { ValueFilterMenu } from "@/components/value-filter-menu";
@@ -1037,97 +1038,28 @@ export default function BooksClient() {
                     <TableCell className="whitespace-nowrap">
                       <div className="flex items-center gap-0.5">
                       {b.series_id ? (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        title="View books in this series"
-                        aria-label="View books in this series"
-                        onClick={() => router.push(`/series/${b.series_id}`)}
-                      >
-                        <BookOpenIcon />
-                      </Button>
-                    ) : (
-                      // Standalone books have no series page/Series Recap to lean
-                      // on, so this is their one AI-summary entry point -- series
-                      // books intentionally don't get this button here.
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        title={b.auto_summary || b.notes ? "View/edit summary and notes" : "Fetch an AI summary for this book"}
-                        aria-label={b.auto_summary || b.notes ? "View/edit summary and notes" : "Fetch an AI summary for this book"}
-                        onClick={() => openSummaryEditor(b)}
-                      >
-                        <FileTextIcon />
-                      </Button>
-                    )}
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-xs"
-                      title={
-                        unconfirmedDate
-                          ? "No confirmed date yet -- click to verify with the retailer"
-                          : b.source_url
-                            ? "Check source listing"
-                            : "Search for this book online"
-                      }
-                      aria-label={b.source_url ? "Check source listing" : "Search for this book online"}
-                      className={unconfirmedDate ? "text-amber-600 hover:text-amber-700" : undefined}
-                      onClick={() => window.open(getCheckOnlineUrl(b), "_blank", "noopener,noreferrer")}
-                    >
-                      <ExternalLinkIcon />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-xs"
-                      title="More by this author"
-                      aria-label="More by this author"
-                      onClick={() => setMoreByAuthorTarget(String(b.author || ""))}
-                    >
-                      <SearchIcon />
-                    </Button>
-                    {canEdit ? (
-                    <>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon-xs"
-                      title={b.is_read ? "Mark unread" : "Mark read"}
-                      aria-label={b.is_read ? "Mark unread" : "Mark read"}
-                      className={
-                        b.is_read
-                          ? "border-rose-300 text-rose-700 hover:bg-rose-50"
-                          : "border-emerald-300 text-emerald-700 hover:bg-emerald-50"
-                      }
-                      onClick={() => toggleRead(b)}
-                    >
-                      {b.is_read ? <RotateCcwIcon /> : <CheckIcon />}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon-xs"
-                      title="Edit book"
-                      aria-label="Edit book"
-                      onClick={() => startEditBook(b)}
-                    >
-                      <PencilIcon />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="destructive"
-                      size="icon-xs"
-                      title="Delete book"
-                      aria-label="Delete book"
-                      onClick={() => deleteBook(b.id)}
-                    >
-                      <Trash2Icon />
-                    </Button>
-                    </>
-                    ) : null}
+                        <BookActionIcon state="series" onClick={() => router.push(`/series/${b.series_id}`)} />
+                      ) : (
+                        // Standalone books have no series page/Series Recap to lean
+                        // on, so this is their one AI-summary entry point -- series
+                        // books intentionally don't get this button here.
+                        <BookActionIcon
+                          state={b.auto_summary || b.notes ? "summaryStandaloneHasContent" : "summaryStandaloneEmpty"}
+                          onClick={() => openSummaryEditor(b)}
+                        />
+                      )}
+                      <BookActionIcon
+                        state={unconfirmedDate ? "unconfirmedDate" : b.source_url ? "hasSourceUrl" : "missingSourceUrl"}
+                        onClick={() => window.open(getCheckOnlineUrl(b), "_blank", "noopener,noreferrer")}
+                      />
+                      <BookActionIcon state="moreByAuthor" onClick={() => setMoreByAuthorTarget(String(b.author || ""))} />
+                      {canEdit ? (
+                        <>
+                          <BookActionIcon state={b.is_read ? "read" : "unread"} onClick={() => toggleRead(b)} />
+                          <BookActionIcon state="edit" onClick={() => startEditBook(b)} />
+                          <BookActionIcon state="delete" onClick={() => deleteBook(b.id)} />
+                        </>
+                      ) : null}
                       </div>
                     </TableCell>
                   </TableRow>

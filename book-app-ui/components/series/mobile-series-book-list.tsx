@@ -1,8 +1,8 @@
 "use client";
 
-import { AlertTriangleIcon, ExternalLinkIcon, FileTextIcon, PencilIcon, SearchIcon } from "lucide-react";
+import { AlertTriangleIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { BookActionIcon } from "@/components/books/book-action-icon";
 
 export type MobileSeriesBook = {
   id: number;
@@ -80,27 +80,16 @@ export function MobileSeriesBookList({
           {displayDate ? <p className="mt-1.5 text-xs text-muted-foreground">{displayDate}</p> : null}
 
           <div className="mt-2 flex items-center gap-1 border-t pt-2">
-            <Button type="button" variant="ghost" size="icon-xs" title="View/edit summary and notes" aria-label="View/edit summary and notes" onClick={() => onOpenSummary(book)}>
-              <FileTextIcon />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              title={unconfirmedDate ? "No confirmed date -- verify with retailer" : "Check source listing"}
-              aria-label="Check online"
-              className={unconfirmedDate ? "text-amber-600 hover:text-amber-700" : undefined}
+            <BookActionIcon state="summarySeries" onClick={() => onOpenSummary(book)} />
+            <BookActionIcon
+              state={unconfirmedDate ? "unconfirmedDate" : book.source_url ? "hasSourceUrl" : "missingSourceUrl"}
               onClick={() => onCheckOnline(book)}
-            >
-              <ExternalLinkIcon />
-            </Button>
-            <Button type="button" variant="ghost" size="icon-xs" title="More by this author" aria-label="More by this author" onClick={() => onMoreByAuthor(String(book.author || ""))}>
-              <SearchIcon />
-            </Button>
+            />
+            <BookActionIcon state="moreByAuthor" onClick={() => onMoreByAuthor(String(book.author || ""))} />
             {canEdit ? (
-              <Button type="button" variant="outline" size="icon-xs" title="Edit book" aria-label="Edit book" className="ml-auto" onClick={() => onEdit(book)}>
-                <PencilIcon />
-              </Button>
+              <div className="ml-auto">
+                <BookActionIcon state="edit" onClick={() => onEdit(book)} />
+              </div>
             ) : null}
           </div>
         </li>

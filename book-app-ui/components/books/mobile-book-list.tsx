@@ -1,18 +1,8 @@
 "use client";
 
-import {
-  AlertTriangleIcon,
-  BookOpenIcon,
-  CheckIcon,
-  ExternalLinkIcon,
-  FileTextIcon,
-  PencilIcon,
-  RotateCcwIcon,
-  SearchIcon,
-  Trash2Icon,
-} from "lucide-react";
+import { AlertTriangleIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { BookActionIcon } from "@/components/books/book-action-icon";
 
 export type MobileBookCardBook = {
   id: number;
@@ -97,61 +87,24 @@ export function MobileBookList({
 
           <div className="mt-2 flex items-center gap-1 border-t pt-2">
             {book.series_id ? (
-              <Button type="button" variant="ghost" size="icon-xs" title="View series" aria-label="View series" onClick={() => onViewSeries(Number(book.series_id))}>
-                <BookOpenIcon />
-              </Button>
+              <BookActionIcon state="series" onClick={() => onViewSeries(Number(book.series_id))} />
             ) : (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                title={book.auto_summary || book.notes ? "View/edit summary and notes" : "Fetch an AI summary"}
-                aria-label="View/edit summary and notes"
+              <BookActionIcon
+                state={book.auto_summary || book.notes ? "summaryStandaloneHasContent" : "summaryStandaloneEmpty"}
                 onClick={() => onOpenSummary(book)}
-              >
-                <FileTextIcon />
-              </Button>
+              />
             )}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              title={unconfirmedDate ? "No confirmed date -- verify with retailer" : "Check source listing"}
-              aria-label="Check online"
-              className={unconfirmedDate ? "text-amber-600 hover:text-amber-700" : undefined}
+            <BookActionIcon
+              state={unconfirmedDate ? "unconfirmedDate" : book.source_url ? "hasSourceUrl" : "missingSourceUrl"}
               onClick={() => onCheckOnline(book)}
-            >
-              <ExternalLinkIcon />
-            </Button>
-            <Button type="button" variant="ghost" size="icon-xs" title="More by this author" aria-label="More by this author" onClick={() => onMoreByAuthor(String(book.author || ""))}>
-              <SearchIcon />
-            </Button>
+            />
+            <BookActionIcon state="moreByAuthor" onClick={() => onMoreByAuthor(String(book.author || ""))} />
             {canEdit ? (
-              <>
-                <div className="ml-auto flex items-center gap-1">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon-xs"
-                    title={book.is_read ? "Mark unread" : "Mark read"}
-                    aria-label={book.is_read ? "Mark unread" : "Mark read"}
-                    className={
-                      book.is_read
-                        ? "border-rose-300 text-rose-700 hover:bg-rose-50"
-                        : "border-emerald-300 text-emerald-700 hover:bg-emerald-50"
-                    }
-                    onClick={() => onToggleRead(book)}
-                  >
-                    {book.is_read ? <RotateCcwIcon /> : <CheckIcon />}
-                  </Button>
-                  <Button type="button" variant="outline" size="icon-xs" title="Edit book" aria-label="Edit book" onClick={() => onEdit(book)}>
-                    <PencilIcon />
-                  </Button>
-                  <Button type="button" variant="destructive" size="icon-xs" title="Delete book" aria-label="Delete book" onClick={() => onDelete(Number(book.id))}>
-                    <Trash2Icon />
-                  </Button>
-                </div>
-              </>
+              <div className="ml-auto flex items-center gap-1">
+                <BookActionIcon state={book.is_read ? "read" : "unread"} onClick={() => onToggleRead(book)} />
+                <BookActionIcon state="edit" onClick={() => onEdit(book)} />
+                <BookActionIcon state="delete" onClick={() => onDelete(Number(book.id))} />
+              </div>
             ) : null}
           </div>
         </li>

@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { CheckIcon, ExternalLinkIcon, FileTextIcon, PencilIcon, RotateCcwIcon, SearchIcon, Trash2Icon } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
+import { BookActionIcon } from "@/components/books/book-action-icon";
+import { MobileBookList } from "@/components/books/mobile-book-list";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
 import { fetchApiWithFallback } from "@/lib/api-client";
 import { ValueFilterMenu } from "@/components/value-filter-menu";
@@ -15,6 +16,7 @@ import {
   formatDate,
   getCheckOnlineUrl,
   getStatusChipClass,
+  hasUnconfirmedReleaseDate,
   isPastOrTodayDate,
   parseFlexibleDate,
 } from "@/lib/book-format";
@@ -372,6 +374,7 @@ export default function StandaloneBooksClient() {
         </div>
       </div>
 
+      {deviceClass === "desktop" ? (
       <div className="overflow-x-auto rounded-lg border bg-card/80">
         <Table className="w-full min-w-[720px] text-sm [&_th]:h-9 [&_th]:py-1 [&_td]:py-1">
           <TableHeader>
@@ -435,6 +438,7 @@ export default function StandaloneBooksClient() {
           <TableBody>
             {sortedBooks.map((b) => {
               const status = getBookStatus(b);
+              const unconfirmedDate = hasUnconfirmedReleaseDate(status, b);
               return (
                 <TableRow key={b.id}>
                   <TableCell className="truncate" title={b.title ?? undefined}>{b.title || "—"}</TableCell>
@@ -445,73 +449,20 @@ export default function StandaloneBooksClient() {
                   <TableCell>{formatDate(getDisplayDate(b))}</TableCell>
                   <TableCell className="whitespace-nowrap">
                     <div className="flex items-center gap-0.5">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        title={b.source_url ? "Check source listing" : "Search for this book online"}
-                        aria-label={b.source_url ? "Check source listing" : "Search for this book online"}
+                      <BookActionIcon
+                        state={unconfirmedDate ? "unconfirmedDate" : b.source_url ? "hasSourceUrl" : "missingSourceUrl"}
                         onClick={() => window.open(getCheckOnlineUrl(b), "_blank", "noopener,noreferrer")}
-                      >
-                        <ExternalLinkIcon />
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        title="More by this author"
-                        aria-label="More by this author"
-                        onClick={() => setMoreByAuthorTarget(String(b.author || ""))}
-                      >
-                        <SearchIcon />
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        title={b.auto_summary || b.notes ? "View/edit summary and notes" : "Fetch an AI summary for this book"}
-                        aria-label={b.auto_summary || b.notes ? "View/edit summary and notes" : "Fetch an AI summary for this book"}
+                      />
+                      <BookActionIcon state="moreByAuthor" onClick={() => setMoreByAuthorTarget(String(b.author || ""))} />
+                      <BookActionIcon
+                        state={b.auto_summary || b.notes ? "summaryStandaloneHasContent" : "summaryStandaloneEmpty"}
                         onClick={() => openSummaryEditor(b)}
-                      >
-                        <FileTextIcon />
-                      </Button>
+                      />
                       {canEdit ? (
                         <>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="icon-xs"
-                            title={b.is_read ? "Mark unread" : "Mark read"}
-                            aria-label={b.is_read ? "Mark unread" : "Mark read"}
-                            className={
-                              b.is_read
-                                ? "border-rose-300 text-rose-700 hover:bg-rose-50"
-                                : "border-emerald-300 text-emerald-700 hover:bg-emerald-50"
-                            }
-                            onClick={() => toggleRead(b)}
-                          >
-                            {b.is_read ? <RotateCcwIcon /> : <CheckIcon />}
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="icon-xs"
-                            title="Edit book"
-                            aria-label="Edit book"
-                            onClick={() => startEditBook(b)}
-                          >
-                            <PencilIcon />
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="destructive"
-                            size="icon-xs"
-                            title="Delete book"
-                            aria-label="Delete book"
-                            onClick={() => deleteBook(b.id)}
-                          >
-                            <Trash2Icon />
-                          </Button>
+                          <BookActionIcon state={b.is_read ? "read" : "unread"} onClick={() => toggleRead(b)} />
+                          <BookActionIcon state="edit" onClick={() => startEditBook(b)} />
+                          <BookActionIcon state="delete" onClick={() => deleteBook(b.id)} />
                         </>
                       ) : null}
                     </div>
@@ -522,6 +473,29 @@ export default function StandaloneBooksClient() {
           </TableBody>
         </Table>
       </div>
+      ) : (
+        <MobileBookList
+          items={sortedBooks.map((b) => {
+            const status = getBookStatus(b);
+            return {
+              book: b,
+              status,
+              statusChipClass: getStatusChipClass(status, "compact"),
+              unconfirmedDate: hasUnconfirmedReleaseDate(status, b),
+              displayDate: formatDate(getDisplayDate(b)),
+            };
+          })}
+          canEdit={canEdit}
+          onToggleRead={toggleRead}
+          onEdit={startEditBook}
+          onDelete={deleteBook}
+          onOpenSummary={openSummaryEditor}
+          onMoreByAuthor={(author) => setMoreByAuthorTarget(author)}
+          // Standalone books never have a series_id, so this is never invoked.
+          onViewSeries={() => {}}
+          onCheckOnline={(book) => window.open(getCheckOnlineUrl(book), "_blank", "noopener,noreferrer")}
+        />
+      )}
       <p className="text-xs text-muted-foreground">
         Showing {sortedBooks.length} of {totalBooks} standalone books.
       </p>

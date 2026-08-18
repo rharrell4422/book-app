@@ -20,8 +20,12 @@ export function ToastDescription({ children }: { children: React.ReactNode }) {
   return <div className="toast-description">{children}</div>;
 }
 
-export function ToastClose() {
-  return <button className="toast-close">×</button>;
+export function ToastClose({ onClick }: { onClick?: () => void }) {
+  return (
+    <button type="button" className="toast-close" aria-label="Dismiss" onClick={onClick}>
+      ×
+    </button>
+  );
 }
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {

@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { AlertTriangleIcon, SearchIcon } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { AlertTriangleIcon } from "lucide-react";
+import { BookActionIcon } from "@/components/books/book-action-icon";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
 import { scheduleSeriesCheckReset } from "@/lib/series-check-progress";
 import { fetchApiWithFallback } from "@/lib/api-client";
@@ -1731,48 +1731,18 @@ export default function SeriesDetailPage() {
                 </TableCell>
                 <TableCell>{formatDate(displayDate)}</TableCell>
                 <TableCell>{book.book_number ?? "—"}</TableCell>
-                <TableCell className="space-x-2 whitespace-nowrap">
-                  {canEdit ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => startEditBook(book)}
-                      title="Change title, author, book #, status, date, or delete this book"
-                    >
-                      Edit book
-                    </Button>
-                  ) : null}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => openSummaryEditor(book)}
-                    title="View/edit the AI summary and your personal notes for this book -- use Series Recap above for a catch-up across the whole series"
-                  >
-                    Notes
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className={unconfirmedDate ? "border-amber-300 text-amber-700 hover:bg-amber-50" : undefined}
-                    title={
-                      unconfirmedDate
-                        ? "No confirmed date yet -- click to verify with the retailer"
-                        : book.source_url
-                          ? "Check source listing"
-                          : "Search for this book online"
-                    }
-                    onClick={() => window.open(getCheckOnlineUrl(book), "_blank", "noopener,noreferrer")}
-                  >
-                    {unconfirmedDate ? "Verify date" : "Check online"}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    title="Search for more books by this author, across all their series and standalone works"
-                    onClick={() => setMoreByAuthorTarget(String(book.author || ""))}
-                  >
-                    <SearchIcon />
-                  </Button>
+                <TableCell className="whitespace-nowrap">
+                  <div className="flex items-center gap-0.5">
+                    <BookActionIcon state="summarySeries" onClick={() => openSummaryEditor(book)} />
+                    <BookActionIcon
+                      state={unconfirmedDate ? "unconfirmedDate" : book.source_url ? "hasSourceUrl" : "missingSourceUrl"}
+                      onClick={() => window.open(getCheckOnlineUrl(book), "_blank", "noopener,noreferrer")}
+                    />
+                    <BookActionIcon state="moreByAuthor" onClick={() => setMoreByAuthorTarget(String(book.author || ""))} />
+                    {canEdit ? (
+                      <BookActionIcon state="edit" onClick={() => startEditBook(book)} />
+                    ) : null}
+                  </div>
                 </TableCell>
               </TableRow>
             );
