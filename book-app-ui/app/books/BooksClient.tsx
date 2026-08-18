@@ -22,13 +22,7 @@ import {
   toDateValue,
   toIsoDateString,
 } from "@/lib/book-format";
-import {
-  AddBookDialog,
-  EMPTY_ADD_BOOK_FORM,
-  type AddBookFormState,
-  type LookupResultState,
-  normalizeLookupMatchedTitle,
-} from "@/components/books/add-book-dialog";
+import { AddBookDialog } from "@/components/books/add-book-dialog";
 import {
   EditBookDialog,
   EMPTY_EDIT_BOOK_FORM,
@@ -37,7 +31,9 @@ import {
 import { BookSummaryDialog } from "@/components/series/book-summary-dialog";
 import { MoreByAuthorDialog } from "@/components/books/more-by-author-dialog";
 import { MobileBookList } from "@/components/books/mobile-book-list";
+import { useDeviceClass } from "@/hooks/use-device-class";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { getDeviceClass } from "@/lib/device-class";
 
 import {
   Table,
@@ -219,14 +215,11 @@ export default function BooksClient() {
   const { role } = useAuth();
   const canEdit = role === "owner";
   const isMobile = useIsMobile();
+  const deviceClass = useDeviceClass();
   const [books, setBooks] = useState<BookRow[]>([]);
   const [seriesList, setSeriesList] = useState<SeriesOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
-  const [savingBook, setSavingBook] = useState(false);
-  const [lookingUpBook, setLookingUpBook] = useState(false);
-  const [showLookupSummary, setShowLookupSummary] = useState(false);
-  const [addBookForm, setAddBookForm] = useState<AddBookFormState>(EMPTY_ADD_BOOK_FORM);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [savingEditBook, setSavingEditBook] = useState(false);
   const [editBookForm, setEditBookForm] = useState<EditBookFormState>(EMPTY_EDIT_BOOK_FORM);
@@ -237,7 +230,6 @@ export default function BooksClient() {
   const [summaryFetching, setSummaryFetching] = useState(false);
   const [summarySaving, setSummarySaving] = useState(false);
   const [moreByAuthorTarget, setMoreByAuthorTarget] = useState<string | null>(null);
-  const [lookupResult, setLookupResult] = useState<LookupResultState | null>(null);
   const [valueFilters, setValueFilters] = useState({
     title: [] as string[],
     author: [] as string[],
@@ -269,6 +261,7 @@ export default function BooksClient() {
   const router = useRouter();
   const seriesId = searchParams.get("series_id");
   const returnTo = searchParams.get("returnTo");
+  const pinParam = searchParams.get("pin");
 
   useEffect(() => {
     const rafId = window.requestAnimationFrame(() => {
@@ -304,6 +297,15 @@ export default function BooksClient() {
       router.replace(safeReturnTo || `/series/${seriesId}`, { scroll: false });
     }
   }, [router, returnTo, seriesId]);
+
+  useEffect(() => {
+    if (!pinParam) return;
+    const parsed = Number(pinParam);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- URL pin from /add-book
+      setPinnedBookId(parsed);
+    }
+  }, [pinParam]);
 
   const totalBooks = books.length;
   const statusSummary = books.reduce(
@@ -586,76 +588,6 @@ export default function BooksClient() {
     document.body.style.userSelect = "none";
   }
 
-  function updateAddBookForm<K extends keyof AddBookFormState>(key: K, value: AddBookFormState[K]) {
-    setAddBookForm((prev) => ({ ...prev, [key]: value }));
-  }
-
-  function resetAddBookForm() {
-    setAddBookForm(EMPTY_ADD_BOOK_FORM);
-    setLookupResult(null);
-    setShowLookupSummary(false);
-  }
-
-  async function handleFindDetails() {
-    const title = addBookForm.title.trim();
-    const author = addBookForm.author.trim();
-
-    if (!title) {
-      toast({
-        title: "Need a title",
-        description: "Enter at least the book title before using Find details.",
-      });
-      return;
-    }
-
-    setLookingUpBook(true);
-
-    try {
-      const params = new URLSearchParams();
-      params.set("title", title);
-      if (author) {
-        params.set("author", author);
-      }
-
-      const response = await fetchApiWithFallback(`/books/lookup?${params.toString()}`);
-      if (!response.ok) {
-        throw new Error(`Lookup failed (${response.status})`);
-      }
-
-      const data: LookupResultState = await response.json();
-      setLookupResult(data);
-
-      if (!data.found) {
-        toast({
-          title: "No details found",
-          description: "No match was found. You can still add the book manually.",
-        });
-        return;
-      }
-
-      setAddBookForm((prev) => ({
-        ...prev,
-        title: normalizeLookupMatchedTitle(data.matched_title) || prev.title,
-        author: data.matched_author?.trim() || prev.author,
-        autoSummary: data.summary || prev.autoSummary,
-      }));
-      setShowLookupSummary(false);
-
-      toast({
-        title: "Details found",
-        description: "Matched title and author were applied to the form.",
-      });
-    } catch (error) {
-      console.error("Error looking up book:", error);
-      toast({
-        title: "Lookup error",
-        description: error instanceof Error ? error.message : "Unable to look up book details.",
-      });
-    } finally {
-      setLookingUpBook(false);
-    }
-  }
-
   const fetchBooks = useCallback(async () => {
     setLoading(true);
     try {
@@ -855,116 +787,6 @@ export default function BooksClient() {
     }
   }
 
-  async function handleAddBook() {
-    const title = addBookForm.title.trim();
-    const author = addBookForm.author.trim();
-    const seriesName = addBookForm.seriesName.trim();
-    const bookNumberText = addBookForm.bookNumber.trim();
-
-    if (!title || !author) {
-      toast({
-        title: "Missing info",
-        description: "Title and author are required.",
-      });
-      return;
-    }
-
-    const parsedBookNumber = bookNumberText ? Number(bookNumberText) : null;
-    if (bookNumberText && !Number.isFinite(parsedBookNumber)) {
-      toast({
-        title: "Invalid book number",
-        description: "Book number must be numeric when provided.",
-      });
-      return;
-    }
-
-    setSavingBook(true);
-
-    try {
-      let resolvedSeriesId: number | null = null;
-
-      if (seriesName) {
-        const normalizedSeriesName = normalizeText(seriesName);
-        const normalizedAuthor = normalizeText(author);
-        const matchedSeries = seriesList.find((series) => {
-          if (normalizeText(series.name) !== normalizedSeriesName) return false;
-
-          const existingAuthor = normalizeText(series.author);
-          return !existingAuthor || !normalizedAuthor || existingAuthor === normalizedAuthor;
-        });
-
-        if (matchedSeries) {
-          resolvedSeriesId = Number(matchedSeries.id);
-        } else {
-          const createSeriesResponse = await fetchApiWithFallback("/series/", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              name: seriesName,
-              author,
-            }),
-          });
-
-          if (!createSeriesResponse.ok) {
-            throw new Error(`Failed to create series (${createSeriesResponse.status})`);
-          }
-
-          const createdSeries = await createSeriesResponse.json();
-          resolvedSeriesId = Number(createdSeries.id);
-        }
-      }
-
-      const readStatus = addBookForm.status;
-      const isRead = readStatus === "read";
-      const readDate = readStatus === "read"
-        ? (addBookForm.readDate || new Date().toISOString().split("T")[0])
-        : null;
-      const releaseDate = readStatus !== "read" ? addBookForm.releaseDate.trim() : "";
-
-      const createBookResponse = await fetchApiWithFallback("/books/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title,
-          author,
-          series_id: resolvedSeriesId,
-          series_order: parsedBookNumber,
-          book_number: parsedBookNumber,
-          release_date: releaseDate || undefined,
-          publication_date: addBookForm.publicationDate || undefined,
-          read_date: readDate || undefined,
-          read_status: readStatus,
-          is_read: isRead,
-          auto_summary: addBookForm.autoSummary || undefined,
-        }),
-      });
-
-      if (!createBookResponse.ok) {
-        throw new Error(`Failed to create book (${createBookResponse.status})`);
-      }
-
-      const createdBook = await createBookResponse.json();
-      await Promise.all([fetchBooks(), fetchSeriesList()]);
-      setPinnedBookId(Number(createdBook?.id ?? null));
-      setAddDialogOpen(false);
-      resetAddBookForm();
-      toast({
-        title: "Book added",
-        description: resolvedSeriesId
-          ? `Added ${createdBook.title} and attached it to a series.`
-          : `Added ${createdBook.title} to your library.`,
-      });
-    } catch (error) {
-      console.error("Error adding book:", error);
-      toast({
-        title: "Error",
-        description: error instanceof Error ? error.message : "Failed to add book.",
-      });
-    } finally {
-      setSavingBook(false);
-    }
-  }
-
   function openEditBookDialog(book: BookRow) {
     setEditBookForm({
       id: Number(book.id),
@@ -1132,7 +954,20 @@ export default function BooksClient() {
 
         <div className="flex flex-wrap gap-2">
           {canEdit ? (
-            <Button type="button" onClick={() => setAddDialogOpen(true)}>Add Book</Button>
+            <Button
+              type="button"
+              onClick={() => {
+                // Read matchMedia at click time so a phone/tablet tap during
+                // the desktop server snapshot cannot open the Radix dialog.
+                if (getDeviceClass() === "desktop") {
+                  setAddDialogOpen(true);
+                } else {
+                  router.push("/add-book");
+                }
+              }}
+            >
+              Add Book
+            </Button>
           ) : null}
           <Link href="/books">
             <Button type="button" variant="outline">All Books</Button>
@@ -1436,28 +1271,19 @@ export default function BooksClient() {
       </p>
       {loading && <p className="text-sm text-muted-foreground">Loading books…</p>}
 
-      <AddBookDialog
-        open={addDialogOpen}
-        onOpenChange={setAddDialogOpen}
-        form={addBookForm}
-        onFieldChange={updateAddBookForm}
-        onStatusChange={(nextStatus) => {
-          setAddBookForm((prev) => ({
-            ...prev,
-            status: nextStatus,
-            readDate: nextStatus === "read" ? prev.readDate : "",
-            releaseDate: nextStatus === "upcoming" ? prev.releaseDate : "",
-          }));
-        }}
-        seriesList={seriesList}
-        lookingUpBook={lookingUpBook}
-        lookupResult={lookupResult}
-        showLookupSummary={showLookupSummary}
-        onToggleLookupSummary={() => setShowLookupSummary((prev) => !prev)}
-        onFindDetails={handleFindDetails}
-        onSave={handleAddBook}
-        saving={savingBook}
-      />
+      {deviceClass === "desktop" ? (
+        <AddBookDialog
+          open={addDialogOpen}
+          onOpenChange={setAddDialogOpen}
+          onSuccess={async (createdBook) => {
+            const id = Number(createdBook?.id);
+            if (Number.isFinite(id) && id > 0) {
+              setPinnedBookId(id);
+            }
+            await Promise.all([fetchBooks(), fetchSeriesList()]);
+          }}
+        />
+      ) : null}
 
       <EditBookDialog
         open={editDialogOpen}

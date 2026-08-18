@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 import { Providers } from "./providers";
@@ -6,6 +6,11 @@ import { Providers } from "./providers";
 export const metadata: Metadata = {
   title: "ReaderPro",
   description: "Your personal book intelligence engine",
+};
+
+export const viewport: Viewport = {
+  viewportFit: "cover",
+  interactiveWidget: "resizes-content",
 };
 
 export default function RootLayout({
