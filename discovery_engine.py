@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 import httpx
@@ -1074,6 +1075,97 @@ def _filter_and_merge(
     return merged
 
 
+def _fetch_all_providers_parallel(
+    query_author: str,
+    series_name: str | None,
+    targeted_query_text: str,
+    highest_owned_book_number: int | None,
+    *,
+    author: str,
+    openlibrary_query: str | None = None,
+    web_search_queries: list[str] | None = None,
+    enable_web_search: bool = True,
+) -> dict:
+    """Fetch Google Books, OpenLibrary, Hardcover, and (optionally) the
+    Brave+LLM web-search provider concurrently instead of one after another.
+
+    This only changes *how* the four provider calls are issued (threaded
+    instead of sequential) -- it does not change what gets sent to each
+    provider, nor how each provider's own errors/timeouts are handled.
+    Every _fetch_* function keeps its own REQUEST_TIMEOUT_SECONDS/
+    WEB_SEARCH_TIMEOUT_SECONDS and lets its own exceptions propagate exactly
+    as before; this function just catches whichever one propagates from
+    each thread so a single slow/failing provider can't block -- or crash --
+    the others, mirroring the previous per-provider try/except blocks.
+
+    Default query construction below reproduces
+    discover_candidates_for_series's targeted (primary) pass exactly:
+    Google gets `"<series>" inauthor:"<author>"` (or plain `inauthor:` with
+    no series name), OpenLibrary/Hardcover both get the bare
+    `targeted_query_text`, and the web-search query list is the
+    lookahead-aware "<series> book <N>" set gated on highest_owned_book_number.
+    Callers whose query shape genuinely differs -- the author-bibliography
+    fallback pass and discover_candidates_for_author's plain author-wide
+    sweep, both of which use OpenLibrary's `author:"<name>"` field query and
+    (for the latter) a different web-search query -- pass
+    openlibrary_query/web_search_queries explicitly to reproduce their own
+    existing query text unchanged; the fallback pass also passes
+    enable_web_search=False since it never queries web search at all.
+
+    Returns {"google": [...], "openlibrary": [...], "hardcover": [...],
+    "web": [...]} exactly like the four raw lists the sequential calls used
+    to produce, plus "_failures": {provider_key: exception} for any provider
+    whose call raised -- callers use that to build the same
+    provider_failures/any_provider_succeeded bookkeeping they always have,
+    unchanged.
+    """
+    google_query = f'"{series_name}" inauthor:"{query_author}"' if series_name else f'inauthor:"{query_author}"'
+    resolved_openlibrary_query = openlibrary_query if openlibrary_query is not None else targeted_query_text
+    hardcover_query = targeted_query_text
+
+    if web_search_queries is not None:
+        resolved_web_queries = web_search_queries
+    else:
+        resolved_web_queries = [targeted_query_text] if targeted_query_text else []
+        if series_name and highest_owned_book_number:
+            lookahead_author = f" {query_author}" if query_author else ""
+            resolved_web_queries += [
+                f'"{series_name}"{lookahead_author} book {number}'
+                for number in range(
+                    highest_owned_book_number + 1, highest_owned_book_number + 1 + WEB_SEARCH_LOOKAHEAD_BOOKS
+                )
+            ]
+
+    run_web_search = bool(
+        enable_web_search
+        and resolved_web_queries
+        and os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()
+        and os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    )
+
+    tasks: dict[str, tuple] = {
+        "google": (_fetch_google_books, (google_query,)),
+        "openlibrary": (_fetch_openlibrary, (resolved_openlibrary_query,)),
+        "hardcover": (_fetch_hardcover, (hardcover_query,)),
+    }
+    if run_web_search:
+        tasks["web"] = (_fetch_web_search, (resolved_web_queries, series_name, author))
+
+    results: dict[str, list[dict]] = {"google": [], "openlibrary": [], "hardcover": [], "web": []}
+    failures: dict[str, Exception] = {}
+
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        future_to_provider = {executor.submit(func, *args): provider for provider, (func, args) in tasks.items()}
+        for future, provider in future_to_provider.items():
+            try:
+                results[provider] = future.result()
+            except Exception as exc:  # one provider's failure shouldn't sink the others
+                failures[provider] = exc
+
+    results["_failures"] = failures
+    return results
+
+
 def discover_candidates_for_series(
     series_name: str,
     author: str,
@@ -1115,57 +1207,50 @@ def discover_candidates_for_series(
     targeted_query_text = f"{series_name} {query_author}".strip()
     any_provider_succeeded = False
 
-    google_raw: list[dict] = []
-    try:
-        google_query = f'"{series_name}" inauthor:"{query_author}"' if series_name else f'inauthor:"{query_author}"'
-        google_raw = _fetch_google_books(google_query)
-        any_provider_succeeded = True
-    except Exception as exc:
-        provider_failures.append({"provider": "google_books", "error": str(exc)})
+    # Google/OpenLibrary/Hardcover/web-search fetched concurrently (see
+    # _fetch_all_providers_parallel) instead of one after another -- query
+    # construction and per-provider error handling are unchanged, only the
+    # scheduling is. Default query formulas there match this targeted pass
+    # exactly (Google gets "<series>" inauthor:"<author>", OpenLibrary/
+    # Hardcover both get the bare targeted_query_text, and the web-search
+    # query list is the lookahead-aware "<series> book <N>" set below).
+    fetch_results = _fetch_all_providers_parallel(
+        query_author,
+        series_name,
+        targeted_query_text,
+        highest_owned_book_number,
+        author=author,
+    )
+    failures = fetch_results["_failures"]
 
-    openlibrary_raw: list[dict] = []
-    try:
-        openlibrary_raw = _fetch_openlibrary(targeted_query_text)
+    google_raw = fetch_results["google"]
+    if "google" in failures:
+        provider_failures.append({"provider": "google_books", "error": str(failures["google"])})
+    else:
         any_provider_succeeded = True
-    except Exception as exc:
-        provider_failures.append({"provider": "openlibrary", "error": str(exc)})
 
-    hardcover_raw: list[dict] = []
-    try:
-        hardcover_raw = _fetch_hardcover(targeted_query_text)
-        if hardcover_raw or os.environ.get("HARDCOVER_API_KEY", "").strip():
-            any_provider_succeeded = True
-    except Exception as exc:
-        provider_failures.append({"provider": "hardcover", "error": str(exc)})
+    openlibrary_raw = fetch_results["openlibrary"]
+    if "openlibrary" in failures:
+        provider_failures.append({"provider": "openlibrary", "error": str(failures["openlibrary"])})
+    else:
+        any_provider_succeeded = True
+
+    hardcover_raw = fetch_results["hardcover"]
+    if "hardcover" in failures:
+        provider_failures.append({"provider": "hardcover", "error": str(failures["hardcover"])})
+    elif hardcover_raw or os.environ.get("HARDCOVER_API_KEY", "").strip():
+        any_provider_succeeded = True
 
     # Live web search fills the coverage gap the catalog APIs above have for
     # indie/self-published titles and pure announcements -- only runs when
     # both a Brave key and an Anthropic key are configured, since it needs
     # both to search and to structure the results.
-    web_search_raw: list[dict] = []
+    web_search_raw = fetch_results["web"]
     if os.environ.get("BRAVE_SEARCH_API_KEY", "").strip() and os.environ.get("ANTHROPIC_API_KEY", "").strip():
-        web_search_queries = [targeted_query_text] if targeted_query_text else []
-        if series_name and highest_owned_book_number:
-            # Include the author name in these queries, not just the series
-            # name: a generic/common-word series title (e.g. "The World
-            # Book") can collide with an unrelated, heavily-indexed brand
-            # (here, the actual "World Book" encyclopedia, itself sold in
-            # 20+ numbered volumes) and get completely swamped out by that
-            # in a "<series> book <N>" search. Adding the author as a soft
-            # ranking signal resolved this in the live regression case
-            # without needing an exact-phrase match.
-            lookahead_author = f" {query_author}" if query_author else ""
-            web_search_queries += [
-                f'"{series_name}"{lookahead_author} book {number}'
-                for number in range(
-                    highest_owned_book_number + 1, highest_owned_book_number + 1 + WEB_SEARCH_LOOKAHEAD_BOOKS
-                )
-            ]
-        try:
-            web_search_raw = _fetch_web_search(web_search_queries, series_name, author)
+        if "web" in failures:
+            provider_failures.append({"provider": "web_search", "error": str(failures["web"])})
+        else:
             any_provider_succeeded = True
-        except Exception as exc:
-            provider_failures.append({"provider": "web_search", "error": str(exc)})
 
     # Hardcover listed first: when multiple sources return the same book,
     # dedup keeps whichever copy appears first, and Hardcover's explicit
@@ -1187,27 +1272,37 @@ def discover_candidates_for_series(
         if progress_callback:
             progress_callback({"current_pass": f"Broadening search to all books by {author}"})
 
-        google_fallback: list[dict] = []
-        try:
-            google_fallback = _fetch_google_books(f'inauthor:"{query_author}"')
-            any_provider_succeeded = True
-        except Exception as exc:
-            provider_failures.append({"provider": "google_books_fallback", "error": str(exc)})
+        # No web search on this fallback pass (never has been) -- pass
+        # enable_web_search=False rather than omitting web entirely so the
+        # helper's return shape stays consistent regardless of caller.
+        fallback_results = _fetch_all_providers_parallel(
+            query_author,
+            None,
+            query_author,
+            None,
+            author=author,
+            openlibrary_query=f'author:"{query_author}"',
+            enable_web_search=False,
+        )
+        fallback_failures = fallback_results["_failures"]
 
-        openlibrary_fallback: list[dict] = []
-        try:
-            openlibrary_fallback = _fetch_openlibrary(f'author:"{query_author}"')
+        google_fallback = fallback_results["google"]
+        if "google" in fallback_failures:
+            provider_failures.append({"provider": "google_books_fallback", "error": str(fallback_failures["google"])})
+        else:
             any_provider_succeeded = True
-        except Exception as exc:
-            provider_failures.append({"provider": "openlibrary_fallback", "error": str(exc)})
 
-        hardcover_fallback: list[dict] = []
-        try:
-            hardcover_fallback = _fetch_hardcover(query_author)
-            if hardcover_fallback or os.environ.get("HARDCOVER_API_KEY", "").strip():
-                any_provider_succeeded = True
-        except Exception as exc:
-            provider_failures.append({"provider": "hardcover_fallback", "error": str(exc)})
+        openlibrary_fallback = fallback_results["openlibrary"]
+        if "openlibrary" in fallback_failures:
+            provider_failures.append({"provider": "openlibrary_fallback", "error": str(fallback_failures["openlibrary"])})
+        else:
+            any_provider_succeeded = True
+
+        hardcover_fallback = fallback_results["hardcover"]
+        if "hardcover" in fallback_failures:
+            provider_failures.append({"provider": "hardcover_fallback", "error": str(fallback_failures["hardcover"])})
+        elif hardcover_fallback or os.environ.get("HARDCOVER_API_KEY", "").strip():
+            any_provider_succeeded = True
 
         combined = _filter_and_merge(
             [*hardcover_fallback, *google_fallback, *openlibrary_fallback],
@@ -1345,35 +1440,45 @@ def discover_candidates_for_author(
     query_author = primary_author_name(author)
     any_provider_succeeded = False
 
-    google_raw: list[dict] = []
-    try:
-        google_raw = _fetch_google_books(f'inauthor:"{query_author}"')
+    # No single "next book number" to look ahead from here (results can
+    # span several different series at once), so pass the plain "<author>
+    # new books" query explicitly rather than the lookahead-aware default --
+    # see _fetch_all_providers_parallel's docstring.
+    fetch_results = _fetch_all_providers_parallel(
+        query_author,
+        None,
+        query_author,
+        None,
+        author=author,
+        openlibrary_query=f'author:"{query_author}"',
+        web_search_queries=[f"{query_author} new books"],
+    )
+    failures = fetch_results["_failures"]
+
+    google_raw = fetch_results["google"]
+    if "google" in failures:
+        provider_failures.append({"provider": "google_books", "error": str(failures["google"])})
+    else:
         any_provider_succeeded = True
-    except Exception as exc:
-        provider_failures.append({"provider": "google_books", "error": str(exc)})
 
-    openlibrary_raw: list[dict] = []
-    try:
-        openlibrary_raw = _fetch_openlibrary(f'author:"{query_author}"')
+    openlibrary_raw = fetch_results["openlibrary"]
+    if "openlibrary" in failures:
+        provider_failures.append({"provider": "openlibrary", "error": str(failures["openlibrary"])})
+    else:
         any_provider_succeeded = True
-    except Exception as exc:
-        provider_failures.append({"provider": "openlibrary", "error": str(exc)})
 
-    hardcover_raw: list[dict] = []
-    try:
-        hardcover_raw = _fetch_hardcover(query_author)
-        if hardcover_raw or os.environ.get("HARDCOVER_API_KEY", "").strip():
-            any_provider_succeeded = True
-    except Exception as exc:
-        provider_failures.append({"provider": "hardcover", "error": str(exc)})
+    hardcover_raw = fetch_results["hardcover"]
+    if "hardcover" in failures:
+        provider_failures.append({"provider": "hardcover", "error": str(failures["hardcover"])})
+    elif hardcover_raw or os.environ.get("HARDCOVER_API_KEY", "").strip():
+        any_provider_succeeded = True
 
-    web_search_raw: list[dict] = []
+    web_search_raw = fetch_results["web"]
     if os.environ.get("BRAVE_SEARCH_API_KEY", "").strip() and os.environ.get("ANTHROPIC_API_KEY", "").strip():
-        try:
-            web_search_raw = _fetch_web_search([f"{query_author} new books"], None, author)
+        if "web" in failures:
+            provider_failures.append({"provider": "web_search", "error": str(failures["web"])})
+        else:
             any_provider_succeeded = True
-        except Exception as exc:
-            provider_failures.append({"provider": "web_search", "error": str(exc)})
 
     combined = _filter_and_merge(
         [*hardcover_raw, *google_raw, *openlibrary_raw, *web_search_raw],
