@@ -4,8 +4,8 @@ import { useSyncExternalStore } from "react";
 
 /**
  * Keyboard overlap below the visual viewport, in CSS pixels.
- * Used only by /add-book so the sticky Save bar stays above the on-screen
- * keyboard. Returns 0 when visualViewport is unavailable.
+ * Used by /add-book and /edit-book/[id] so the sticky Save bar stays above
+ * the on-screen keyboard. Returns 0 when visualViewport is unavailable.
  */
 function getBottomInset(): number {
   if (typeof window === "undefined") {

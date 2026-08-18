@@ -20,14 +20,9 @@ import {
   normalizeText,
   parseFlexibleDate,
   toDateValue,
-  toIsoDateString,
 } from "@/lib/book-format";
 import { AddBookDialog } from "@/components/books/add-book-dialog";
-import {
-  EditBookDialog,
-  EMPTY_EDIT_BOOK_FORM,
-  type EditBookFormState,
-} from "@/components/books/edit-book-dialog";
+import { EditBookDialog } from "@/components/books/edit-book-dialog";
 import { BookSummaryDialog } from "@/components/series/book-summary-dialog";
 import { MoreByAuthorDialog } from "@/components/books/more-by-author-dialog";
 import { MobileBookList } from "@/components/books/mobile-book-list";
@@ -204,12 +199,6 @@ function sanitizeSavedColumnWidths(value: unknown): Record<ResizableColumnKey, n
   return normalized;
 }
 
-type SeriesOption = {
-  id: number;
-  name: string;
-  author?: string | null;
-};
-
 export default function BooksClient() {
   const { toast } = useToast();
   const { role } = useAuth();
@@ -217,12 +206,10 @@ export default function BooksClient() {
   const isMobile = useIsMobile();
   const deviceClass = useDeviceClass();
   const [books, setBooks] = useState<BookRow[]>([]);
-  const [seriesList, setSeriesList] = useState<SeriesOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
-  const [savingEditBook, setSavingEditBook] = useState(false);
-  const [editBookForm, setEditBookForm] = useState<EditBookFormState>(EMPTY_EDIT_BOOK_FORM);
+  const [editBookId, setEditBookId] = useState<number | null>(null);
   const [pinnedBookId, setPinnedBookId] = useState<number | null>(null);
   const [summaryEditorBook, setSummaryEditorBook] = useState<BookRow | null>(null);
   const [summaryDraft, setSummaryDraft] = useState("");
@@ -602,25 +589,14 @@ export default function BooksClient() {
     }
   }, [seriesId]);
 
-  const fetchSeriesList = useCallback(async () => {
-    try {
-      const response = await fetchApiWithFallback("/series/", { cache: "no-store" });
-      const data = await response.json();
-      setSeriesList(Array.isArray(data) ? data : []);
-    } catch (error) {
-      console.error("Error fetching series:", error);
-    }
-  }, []);
-
   useEffect(() => {
     if (seriesId) return;
-    // fetchBooks/fetchSeriesList set loading state synchronously before
-    // their first await -- standard "fetch on mount" pattern, not derived
-    // state that could be computed during render.
+    // fetchBooks sets loading state synchronously before its first await --
+    // standard "fetch on mount" pattern, not derived state that could be
+    // computed during render.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchBooks();
-    fetchSeriesList();
-  }, [seriesId, fetchBooks, fetchSeriesList]);
+  }, [seriesId, fetchBooks]);
 
   useEffect(() => {
     const unsubscribe = subscribeBookStatusUpdates((payload) => {
@@ -787,117 +763,12 @@ export default function BooksClient() {
     }
   }
 
-  function openEditBookDialog(book: BookRow) {
-    setEditBookForm({
-      id: Number(book.id),
-      title: String(book.title || ""),
-      author: String(book.author || ""),
-      seriesName: String(book.series_name || ""),
-      bookNumber: book.book_number !== null && book.book_number !== undefined ? String(book.book_number) : "",
-      status: getBookStatus(book),
-      date: toIsoDateString(getDisplayDate(book)) || "",
-    });
-    setEditDialogOpen(true);
-  }
-
-  async function handleSaveBookEdit() {
-    const bookId = Number(editBookForm.id);
-    if (!Number.isFinite(bookId) || bookId <= 0) return;
-
-    const title = editBookForm.title.trim();
-    const author = editBookForm.author.trim();
-    if (!title || !author) {
-      toast({ title: "Missing info", description: "Title and author are required." });
-      return;
-    }
-
-    const numberRaw = editBookForm.bookNumber.trim();
-    const parsedBookNumber = numberRaw ? Number(numberRaw) : null;
-    if (numberRaw && !Number.isFinite(parsedBookNumber)) {
-      toast({ title: "Invalid book number", description: "Book number must be numeric when provided." });
-      return;
-    }
-
-    setSavingEditBook(true);
-    try {
-      let resolvedSeriesId: number | null = null;
-      const seriesName = editBookForm.seriesName.trim();
-
-      if (seriesName) {
-        const normalizedSeriesName = normalizeText(seriesName);
-        const normalizedAuthor = normalizeText(author);
-        const matchedSeries = seriesList.find((series) => {
-          if (normalizeText(series.name) !== normalizedSeriesName) return false;
-          const existingAuthor = normalizeText(series.author);
-          return !existingAuthor || !normalizedAuthor || existingAuthor === normalizedAuthor;
-        });
-
-        if (matchedSeries) {
-          resolvedSeriesId = Number(matchedSeries.id);
-        } else {
-          const createSeriesResponse = await fetchApiWithFallback("/series/", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: seriesName, author }),
-          });
-          if (!createSeriesResponse.ok) {
-            throw new Error(`Failed to create series (${createSeriesResponse.status})`);
-          }
-          const createdSeries = await createSeriesResponse.json();
-          resolvedSeriesId = Number(createdSeries.id);
-        }
-      }
-
-      const status = editBookForm.status;
-      const rawDate = editBookForm.date.trim();
-      const normalizedDate = rawDate ? toIsoDateString(rawDate) : null;
-      if (rawDate && !normalizedDate) {
-        toast({
-          title: "Invalid date",
-          description: "Use a valid date format, such as YYYY-MM-DD.",
-        });
-        return;
-      }
-      const payload: Record<string, unknown> = {
-        title,
-        author,
-        series_id: resolvedSeriesId,
-        series_order: parsedBookNumber,
-        book_number: parsedBookNumber,
-        read_status: status,
-        is_read: status === "read",
-      };
-
-      if (status === "read") {
-        payload.read_date = normalizedDate || new Date().toISOString().split("T")[0];
-        payload.release_date = null;
-      } else {
-        payload.read_date = null;
-        payload.release_date = normalizedDate || null;
-      }
-
-      const response = await fetchApiWithFallback(`/books/${bookId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to update book (${response.status})`);
-      }
-
-      const updatedBook = await response.json();
-      setBooks((prev) => prev.map((item) => (item.id === updatedBook.id ? { ...item, ...updatedBook } : item)));
-      publishBookStatusUpdate(updatedBook);
-      setEditDialogOpen(false);
-      setEditBookForm(EMPTY_EDIT_BOOK_FORM);
-      toast({ title: "Book updated", description: `Saved changes for ${updatedBook.title}.` });
-      await fetchSeriesList();
-    } catch (error) {
-      console.error("Error updating book:", error);
-      toast({ title: "Error", description: error instanceof Error ? error.message : "Failed to update book." });
-    } finally {
-      setSavingEditBook(false);
+  function startEditBook(book: BookRow) {
+    if (getDeviceClass() === "desktop") {
+      setEditBookId(Number(book.id));
+      setEditDialogOpen(true);
+    } else {
+      router.push(`/edit-book/${book.id}`);
     }
   }
 
@@ -995,7 +866,7 @@ export default function BooksClient() {
           })}
           canEdit={canEdit}
           onToggleRead={toggleRead}
-          onEdit={openEditBookDialog}
+          onEdit={startEditBook}
           onDelete={deleteBook}
           onOpenSummary={openSummaryEditor}
           onMoreByAuthor={(author) => setMoreByAuthorTarget(author)}
@@ -1241,7 +1112,7 @@ export default function BooksClient() {
                       size="icon-xs"
                       title="Edit book"
                       aria-label="Edit book"
-                      onClick={() => openEditBookDialog(b)}
+                      onClick={() => startEditBook(b)}
                     >
                       <PencilIcon />
                     </Button>
@@ -1280,24 +1151,24 @@ export default function BooksClient() {
             if (Number.isFinite(id) && id > 0) {
               setPinnedBookId(id);
             }
-            await Promise.all([fetchBooks(), fetchSeriesList()]);
+            await fetchBooks();
           }}
         />
       ) : null}
 
-      <EditBookDialog
-        open={editDialogOpen}
-        onOpenChange={(open) => {
-          setEditDialogOpen(open);
-          if (!open) {
-            setEditBookForm(EMPTY_EDIT_BOOK_FORM);
-          }
-        }}
-        form={editBookForm}
-        onFormChange={setEditBookForm}
-        onSave={handleSaveBookEdit}
-        saving={savingEditBook}
-      />
+      {deviceClass === "desktop" ? (
+        <EditBookDialog
+          bookId={editBookId}
+          open={editDialogOpen}
+          onOpenChange={(open) => {
+            setEditDialogOpen(open);
+            if (!open) setEditBookId(null);
+          }}
+          onSuccess={async () => {
+            await fetchBooks();
+          }}
+        />
+      ) : null}
 
       <BookSummaryDialog
         open={Boolean(summaryEditorBook)}
@@ -1325,7 +1196,6 @@ export default function BooksClient() {
         canEdit={canEdit}
         onBookAdded={() => {
           fetchBooks();
-          fetchSeriesList();
         }}
       />
 

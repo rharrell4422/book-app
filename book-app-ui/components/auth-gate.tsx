@@ -519,7 +519,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const { role, ready } = useAuth();
   const { profileId, activeProfile, ready: profileReady, refreshProfiles } = useProfile();
   const pathname = usePathname();
-  const isAddBookRoute = pathname === "/add-book" || pathname.startsWith("/add-book/");
+  const isFormRoute =
+    pathname === "/add-book" ||
+    pathname.startsWith("/add-book/") ||
+    pathname.startsWith("/edit-book/");
   // Onboarding can be dismissed for the current profile (e.g. someone who
   // wants to add books manually instead of importing a spreadsheet) without
   // that choice persisting -- switching away and back re-evaluates has_data
@@ -547,7 +550,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const needsOnboarding = Boolean(
     profileReady && activeProfile && !activeProfile.has_data && profileId !== skippedProfileId
   );
-  const showBottomNav = role === "owner" && !needsOnboarding && !isAddBookRoute;
+  const showBottomNav = role === "owner" && !needsOnboarding && !isFormRoute;
 
   return (
     <div className="flex min-h-full flex-col">

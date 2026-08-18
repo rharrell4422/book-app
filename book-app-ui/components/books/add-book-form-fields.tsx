@@ -65,6 +65,7 @@ export function AddBookFormFields({
   showLookupSummary,
   onToggleLookupSummary,
   onFindDetails,
+  fieldIdPrefix = "add-book",
 }: {
   form: AddBookFormState;
   onFieldChange: <K extends keyof AddBookFormState>(key: K, value: AddBookFormState[K]) => void;
@@ -75,6 +76,7 @@ export function AddBookFormFields({
   showLookupSummary: boolean;
   onToggleLookupSummary: () => void;
   onFindDetails: () => void;
+  fieldIdPrefix?: string;
 }) {
   return (
     <>
@@ -90,9 +92,9 @@ export function AddBookFormFields({
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1 sm:col-span-2">
-          <Label htmlFor="add-book-title">Title</Label>
+          <Label htmlFor={`${fieldIdPrefix}-title`}>Title</Label>
           <Input
-            id="add-book-title"
+            id={`${fieldIdPrefix}-title`}
             value={form.title}
             onChange={(event) => onFieldChange("title", event.target.value)}
             placeholder="Book title"
@@ -100,9 +102,9 @@ export function AddBookFormFields({
         </div>
 
         <div className="space-y-1 sm:col-span-2">
-          <Label htmlFor="add-book-author">Author</Label>
+          <Label htmlFor={`${fieldIdPrefix}-author`}>Author</Label>
           <Input
-            id="add-book-author"
+            id={`${fieldIdPrefix}-author`}
             value={form.author}
             onChange={(event) => onFieldChange("author", event.target.value)}
             placeholder="Author name"
@@ -147,15 +149,15 @@ export function AddBookFormFields({
         </div>
 
         <div className="space-y-1">
-          <Label htmlFor="add-book-series">Series name</Label>
+          <Label htmlFor={`${fieldIdPrefix}-series`}>Series name</Label>
           <Input
-            id="add-book-series"
-            list="series-options"
+            id={`${fieldIdPrefix}-series`}
+            list={`${fieldIdPrefix}-series-options`}
             value={form.seriesName}
             onChange={(event) => onFieldChange("seriesName", event.target.value)}
             placeholder="Optional series"
           />
-          <datalist id="series-options">
+          <datalist id={`${fieldIdPrefix}-series-options`}>
             {seriesList.map((series) => (
               <option key={series.id} value={series.name} />
             ))}
@@ -163,9 +165,9 @@ export function AddBookFormFields({
         </div>
 
         <div className="space-y-1">
-          <Label htmlFor="add-book-number">Book number</Label>
+          <Label htmlFor={`${fieldIdPrefix}-number`}>Book number</Label>
           <Input
-            id="add-book-number"
+            id={`${fieldIdPrefix}-number`}
             value={form.bookNumber}
             onChange={(event) => onFieldChange("bookNumber", event.target.value)}
             placeholder="Optional number"
@@ -173,9 +175,9 @@ export function AddBookFormFields({
         </div>
 
         <div className="space-y-1">
-          <Label htmlFor="add-book-status">Status</Label>
+          <Label htmlFor={`${fieldIdPrefix}-status`}>Status</Label>
           <select
-            id="add-book-status"
+            id={`${fieldIdPrefix}-status`}
             value={form.status}
             onChange={(event) => onStatusChange(event.target.value as BookStatus)}
             className="h-9 w-full rounded-md border bg-background px-2 text-sm"
@@ -188,9 +190,9 @@ export function AddBookFormFields({
         </div>
 
         <div className="space-y-1">
-          <Label htmlFor="add-book-release-date">Date (planned/release)</Label>
+          <Label htmlFor={`${fieldIdPrefix}-release-date`}>Date (planned/release)</Label>
           <Input
-            id="add-book-release-date"
+            id={`${fieldIdPrefix}-release-date`}
             type="date"
             value={form.releaseDate}
             onChange={(event) => onFieldChange("releaseDate", event.target.value)}
@@ -199,9 +201,9 @@ export function AddBookFormFields({
         </div>
 
         <div className="space-y-1">
-          <Label htmlFor="add-book-publication-date">Publication date</Label>
+          <Label htmlFor={`${fieldIdPrefix}-publication-date`}>Publication date</Label>
           <Input
-            id="add-book-publication-date"
+            id={`${fieldIdPrefix}-publication-date`}
             type="date"
             value={form.publicationDate}
             onChange={(event) => onFieldChange("publicationDate", event.target.value)}
@@ -209,9 +211,9 @@ export function AddBookFormFields({
         </div>
 
         <div className="space-y-1">
-          <Label htmlFor="add-book-read-date">Read date</Label>
+          <Label htmlFor={`${fieldIdPrefix}-read-date`}>Read date</Label>
           <Input
-            id="add-book-read-date"
+            id={`${fieldIdPrefix}-read-date`}
             type="date"
             value={form.readDate}
             onChange={(event) => onFieldChange("readDate", event.target.value)}
@@ -219,11 +221,11 @@ export function AddBookFormFields({
           />
         </div>
 
-        {lookupResult?.summary && showLookupSummary ? (
+        {showLookupSummary && (lookupResult?.summary || form.autoSummary) ? (
           <div className="space-y-1 sm:col-span-2">
-            <Label htmlFor="add-book-summary">Found summary</Label>
+            <Label htmlFor={`${fieldIdPrefix}-summary`}>Summary</Label>
             <textarea
-              id="add-book-summary"
+              id={`${fieldIdPrefix}-summary`}
               value={form.autoSummary}
               onChange={(event) => onFieldChange("autoSummary", event.target.value)}
               className="min-h-16 w-full rounded-lg border border-input bg-transparent px-2.5 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"

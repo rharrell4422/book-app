@@ -55,11 +55,12 @@ function DialogContent({
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
 }) {
-  // Centered dialog for all breakpoints. Phone/tablet Add Book uses the
-  // /add-book page instead of a full-screen sheet -- do not reintroduce a
-  // mobile inset-0/100dvh sheet here or those two surfaces would overlap.
-  // Edit Book, Series Add Book, summaries, and other dialogs still have the
-  // iPad/phone keyboard overlap issue; those are follow-up device-class pages.
+  // Centered dialog for all breakpoints. Phone/tablet Add Book and Edit Book
+  // use /add-book and /edit-book/[id] instead of a full-screen sheet -- do
+  // not reintroduce a mobile inset-0/100dvh sheet here or those surfaces
+  // would overlap. Series Add Book, series Edit Book, summaries, and other
+  // dialogs still have the iPad/phone keyboard overlap issue; those are
+  // follow-up device-class pages.
   return (
     <DialogPortal>
       <DialogOverlay />
