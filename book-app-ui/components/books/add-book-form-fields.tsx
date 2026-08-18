@@ -66,6 +66,7 @@ export function AddBookFormFields({
   onToggleLookupSummary,
   onFindDetails,
   fieldIdPrefix = "add-book",
+  seriesLocked = false,
 }: {
   form: AddBookFormState;
   onFieldChange: <K extends keyof AddBookFormState>(key: K, value: AddBookFormState[K]) => void;
@@ -77,6 +78,7 @@ export function AddBookFormFields({
   onToggleLookupSummary: () => void;
   onFindDetails: () => void;
   fieldIdPrefix?: string;
+  seriesLocked?: boolean;
 }) {
   return (
     <>
@@ -152,16 +154,23 @@ export function AddBookFormFields({
           <Label htmlFor={`${fieldIdPrefix}-series`}>Series name</Label>
           <Input
             id={`${fieldIdPrefix}-series`}
-            list={`${fieldIdPrefix}-series-options`}
+            list={seriesLocked ? undefined : `${fieldIdPrefix}-series-options`}
             value={form.seriesName}
             onChange={(event) => onFieldChange("seriesName", event.target.value)}
             placeholder="Optional series"
+            disabled={seriesLocked}
+            readOnly={seriesLocked}
           />
-          <datalist id={`${fieldIdPrefix}-series-options`}>
-            {seriesList.map((series) => (
-              <option key={series.id} value={series.name} />
-            ))}
-          </datalist>
+          {seriesLocked ? (
+            <p className="text-[11px] text-muted-foreground">Locked to this series.</p>
+          ) : null}
+          {seriesLocked ? null : (
+            <datalist id={`${fieldIdPrefix}-series-options`}>
+              {seriesList.map((series) => (
+                <option key={series.id} value={series.name} />
+              ))}
+            </datalist>
+          )}
         </div>
 
         <div className="space-y-1">
@@ -170,7 +179,7 @@ export function AddBookFormFields({
             id={`${fieldIdPrefix}-number`}
             value={form.bookNumber}
             onChange={(event) => onFieldChange("bookNumber", event.target.value)}
-            placeholder="Optional number"
+            placeholder={seriesLocked ? "e.g. 28" : "Optional number"}
           />
         </div>
 

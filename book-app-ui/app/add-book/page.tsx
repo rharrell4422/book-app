@@ -1,20 +1,53 @@
 "use client";
 
-import { useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import { AddBookFormFields } from "@/components/books/add-book-form-fields";
 import { BookFormPageChrome } from "@/components/books/book-form-page-chrome";
 import { useAddBookForm } from "@/hooks/use-add-book-form";
 import { useDeviceClass } from "@/hooks/use-device-class";
+import { fetchApiWithFallback } from "@/lib/api-client";
 import { useAuth } from "@/lib/auth-context";
 import { getDeviceClass } from "@/lib/device-class";
+import { parsePositiveId, safeReturnTo, seriesDetailPath, withPin } from "@/lib/return-to";
 
-export default function AddBookPage() {
+function AddBookPageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { role } = useAuth();
   const deviceClass = useDeviceClass();
   const canEdit = role === "owner";
+  const lockedSeriesId = parsePositiveId(searchParams.get("seriesId"));
+  const returnTo = safeReturnTo(searchParams.get("returnTo"));
+  const fallbackHref = lockedSeriesId ? seriesDetailPath(lockedSeriesId) : "/books";
+  const cancelHref = returnTo || fallbackHref;
+
+  const [lockedSeries, setLockedSeries] = useState<{ name: string; author: string } | null>(null);
+
+  useEffect(() => {
+    if (!lockedSeriesId) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetchApiWithFallback(`/series/${lockedSeriesId}`, { cache: "no-store" });
+        if (!response.ok || cancelled) return;
+        const data = await response.json();
+        if (cancelled) return;
+        setLockedSeries({
+          name: String(data?.name || ""),
+          author: String(data?.author || "").trim() || "Unknown author",
+        });
+      } catch (error) {
+        console.error("Error loading series for add book:", error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [lockedSeriesId]);
 
   const {
     form,
@@ -23,6 +56,7 @@ export default function AddBookPage() {
     lookingUpBook,
     lookupResult,
     showLookupSummary,
+    seriesLocked,
     updateAddBookForm,
     onStatusChange,
     onToggleLookupSummary,
@@ -30,20 +64,29 @@ export default function AddBookPage() {
     handleAddBook,
   } = useAddBookForm({
     enabled: deviceClass !== "desktop" && canEdit,
+    lockedSeriesId,
+    initialValues:
+      lockedSeriesId && lockedSeries
+        ? {
+            seriesName: lockedSeries.name,
+            author: lockedSeries.author,
+            status: "upcoming",
+          }
+        : undefined,
     onSuccess: (createdBook) => {
       if (Number.isFinite(createdBook.id) && createdBook.id > 0) {
-        router.push(`/books?pin=${createdBook.id}`);
+        router.push(withPin(cancelHref, createdBook.id));
         return;
       }
-      router.push("/books");
+      router.push(cancelHref);
     },
   });
 
   useEffect(() => {
     if (getDeviceClass() === "desktop" || !canEdit) {
-      router.replace("/books");
+      router.replace(cancelHref);
     }
-  }, [canEdit, deviceClass, router]);
+  }, [canEdit, deviceClass, cancelHref, router]);
 
   if (deviceClass === "desktop" || !canEdit) {
     return null;
@@ -52,8 +95,12 @@ export default function AddBookPage() {
   return (
     <BookFormPageChrome
       title="Add Book"
-      subtitle="Add a standalone book or start a new series."
-      onCancel={() => router.push("/books")}
+      subtitle={
+        seriesLocked
+          ? `Adding to ${lockedSeries?.name || "this series"}.`
+          : "Add a standalone book or start a new series."
+      }
+      onCancel={() => router.push(cancelHref)}
       onSave={handleAddBook}
       saving={saving}
       saveLabel="Save book"
@@ -68,7 +115,16 @@ export default function AddBookPage() {
         showLookupSummary={showLookupSummary}
         onToggleLookupSummary={onToggleLookupSummary}
         onFindDetails={handleFindDetails}
+        seriesLocked={seriesLocked}
       />
     </BookFormPageChrome>
+  );
+}
+
+export default function AddBookPage() {
+  return (
+    <Suspense fallback={<div className="p-6 text-sm text-muted-foreground">Loading…</div>}>
+      <AddBookPageInner />
+    </Suspense>
   );
 }

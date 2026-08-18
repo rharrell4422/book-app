@@ -56,11 +56,9 @@ function DialogContent({
   showCloseButton?: boolean
 }) {
   // Centered dialog for all breakpoints. Phone/tablet Add Book and Edit Book
-  // use /add-book and /edit-book/[id] instead of a full-screen sheet -- do
-  // not reintroduce a mobile inset-0/100dvh sheet here or those surfaces
-  // would overlap. Series Add Book, series Edit Book, summaries, and other
-  // dialogs still have the iPad/phone keyboard overlap issue; those are
-  // follow-up device-class pages.
+  // (Library and Series) use /add-book and /edit-book/[id] instead of a
+  // full-screen sheet -- do not reintroduce a mobile inset-0/100dvh sheet
+  // here or those surfaces would overlap.
   return (
     <DialogPortal>
       <DialogOverlay />

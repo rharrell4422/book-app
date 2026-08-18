@@ -14,6 +14,8 @@ export function BookFormPageChrome({
   saveLabel,
   savingLabel,
   saveDisabled,
+  onDelete,
+  deleteLabel,
   children,
 }: {
   title: string;
@@ -24,6 +26,8 @@ export function BookFormPageChrome({
   saveLabel: string;
   savingLabel?: string;
   saveDisabled?: boolean;
+  onDelete?: () => void;
+  deleteLabel?: string;
   children: ReactNode;
 }) {
   const keyboardInset = useVisualViewportBottomInset();
@@ -55,9 +59,27 @@ export function BookFormPageChrome({
           paddingBottom: saveBarPadding,
         }}
       >
-        <Button type="button" className="w-full" onClick={onSave} disabled={saving || saveDisabled}>
-          {saving ? savingLabel || "Saving..." : saveLabel}
-        </Button>
+        <div className={onDelete ? "flex gap-2" : undefined}>
+          {onDelete ? (
+            <Button
+              type="button"
+              variant="destructive"
+              className="flex-1"
+              onClick={onDelete}
+              disabled={saving || saveDisabled}
+            >
+              {deleteLabel || "Delete book"}
+            </Button>
+          ) : null}
+          <Button
+            type="button"
+            className={onDelete ? "flex-1" : "w-full"}
+            onClick={onSave}
+            disabled={saving || saveDisabled}
+          >
+            {saving ? savingLabel || "Saving..." : saveLabel}
+          </Button>
+        </div>
       </div>
     </div>
   );

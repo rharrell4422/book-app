@@ -10,7 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { AddBookFormFields } from "@/components/books/add-book-form-fields";
-import { useAddBookForm, type CreatedBook } from "@/hooks/use-add-book-form";
+import { useAddBookForm, type AddBookFormInitialValues, type CreatedBook } from "@/hooks/use-add-book-form";
 
 /** Desktop Add Book surface. Phone/tablet use the /add-book page instead. */
 
@@ -18,11 +18,16 @@ export function AddBookDialog({
   open,
   onOpenChange,
   onSuccess,
+  lockedSeriesId,
+  initialValues,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSuccess: (createdBook: CreatedBook) => void | Promise<void>;
+  lockedSeriesId?: number | null;
+  initialValues?: AddBookFormInitialValues;
 }) {
+  const seriesLocked = Boolean(lockedSeriesId && lockedSeriesId > 0);
   const {
     form,
     seriesList,
@@ -36,6 +41,9 @@ export function AddBookDialog({
     handleFindDetails,
     handleAddBook,
   } = useAddBookForm({
+    enabled: open,
+    lockedSeriesId,
+    initialValues,
     onSuccess: async (createdBook) => {
       await onSuccess(createdBook);
       onOpenChange(false);
@@ -48,7 +56,9 @@ export function AddBookDialog({
         <DialogHeader>
           <DialogTitle>Add Book</DialogTitle>
           <DialogDescription>
-            Add a standalone book or start a new series by entering the first book you already own.
+            {seriesLocked
+              ? "Add a book to this series. Series membership is locked."
+              : "Add a standalone book or start a new series by entering the first book you already own."}
           </DialogDescription>
         </DialogHeader>
 
@@ -62,6 +72,7 @@ export function AddBookDialog({
           showLookupSummary={showLookupSummary}
           onToggleLookupSummary={onToggleLookupSummary}
           onFindDetails={handleFindDetails}
+          seriesLocked={seriesLocked}
         />
 
         <DialogFooter showCloseButton>

@@ -19,12 +19,17 @@ export function EditBookDialog({
   open,
   onOpenChange,
   onSuccess,
+  lockSeriesId,
+  onDelete,
 }: {
   bookId: number | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSuccess: (updatedBook: UpdatedBook) => void | Promise<void>;
+  lockSeriesId?: number | null;
+  onDelete?: () => void;
 }) {
+  const seriesLocked = Boolean(lockSeriesId && lockSeriesId > 0);
   const {
     form,
     seriesList,
@@ -40,6 +45,7 @@ export function EditBookDialog({
   } = useEditBookForm({
     bookId,
     enabled: open && bookId !== null && bookId > 0,
+    lockSeriesId,
     onSuccess: async (updatedBook) => {
       await onSuccess(updatedBook);
       onOpenChange(false);
@@ -52,7 +58,9 @@ export function EditBookDialog({
         <DialogHeader>
           <DialogTitle>Edit Book</DialogTitle>
           <DialogDescription>
-            Update core book metadata from the library without leaving this page.
+            {seriesLocked
+              ? "Update this book in the series. Series membership is locked."
+              : "Update core book metadata from the library without leaving this page."}
           </DialogDescription>
         </DialogHeader>
 
@@ -67,9 +75,15 @@ export function EditBookDialog({
           showLookupSummary={showLookupSummary}
           onToggleLookupSummary={onToggleLookupSummary}
           onFindDetails={handleFindDetails}
+          seriesLocked={seriesLocked}
         />
 
-        <DialogFooter showCloseButton>
+        <DialogFooter showCloseButton className={onDelete ? "sm:justify-between" : undefined}>
+          {onDelete ? (
+            <Button type="button" variant="destructive" onClick={onDelete} disabled={saving} className="sm:mr-auto">
+              Delete book
+            </Button>
+          ) : null}
           <Button type="button" onClick={handleSave} disabled={saving}>
             {saving ? "Saving..." : "Save changes"}
           </Button>

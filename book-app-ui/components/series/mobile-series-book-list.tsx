@@ -32,6 +32,7 @@ export type MobileSeriesBookItem = {
 export function MobileSeriesBookList({
   items,
   canEdit,
+  pinnedBookId,
   onEdit,
   onOpenSummary,
   onMoreByAuthor,
@@ -39,6 +40,7 @@ export function MobileSeriesBookList({
 }: {
   items: MobileSeriesBookItem[];
   canEdit: boolean;
+  pinnedBookId?: number | null;
   onEdit: (book: MobileSeriesBook) => void;
   onOpenSummary: (book: MobileSeriesBook) => void;
   onMoreByAuthor: (author: string) => void;
@@ -51,7 +53,7 @@ export function MobileSeriesBookList({
   return (
     <ul className="flex flex-col gap-2 px-2">
       {items.map(({ book, status, statusChipClass, unconfirmedDate, displayDate }) => (
-        <li key={book.id} className="rounded-lg border bg-card/80 p-3">
+          <li key={book.id} className={`rounded-lg border bg-card/80 p-3${Number(book.id) === pinnedBookId ? " border-emerald-400 bg-emerald-50/80" : ""}`}>
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
               <p className="truncate text-sm font-semibold leading-tight">

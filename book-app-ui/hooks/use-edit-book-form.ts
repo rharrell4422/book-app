@@ -12,6 +12,7 @@ import {
 import { useToast } from "@/components/ui/use-toast";
 import { fetchApiWithFallback } from "@/lib/api-client";
 import { type BookStatus, normalizeText, toIsoDateString } from "@/lib/book-format";
+import { lockedSeriesEditDates } from "@/lib/locked-series-edit";
 import { publishBookStatusUpdate } from "@/lib/book-status-sync";
 
 export type UpdatedBook = {
@@ -66,14 +67,18 @@ export function useEditBookForm(options: {
   bookId: number | null;
   enabled?: boolean;
   onSuccess?: (updatedBook: UpdatedBook) => void | Promise<void>;
+  lockSeriesId?: number | null;
 }) {
   const { toast } = useToast();
   const bookId = options.bookId;
   const enabled = options.enabled ?? true;
   const onSuccess = options.onSuccess;
+  const lockSeriesId = options.lockSeriesId ?? null;
+  const seriesLocked = lockSeriesId !== null && lockSeriesId > 0;
 
   const [form, setForm] = useState<AddBookFormState>(EMPTY_ADD_BOOK_FORM);
   const [seriesList, setSeriesList] = useState<AddBookSeriesOption[]>([]);
+  const [loadedBook, setLoadedBook] = useState<BookRecord | null>(null);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(false);
   const [notFound, setNotFound] = useState(false);
@@ -105,6 +110,7 @@ export function useEditBookForm(options: {
 
       if (bookResponse.status === 404) {
         setNotFound(true);
+        setLoadedBook(null);
         setForm(EMPTY_ADD_BOOK_FORM);
         return;
       }
@@ -114,6 +120,11 @@ export function useEditBookForm(options: {
 
       const book: BookRecord = await bookResponse.json();
       const nextForm = formFromBook(book, series);
+      if (seriesLocked) {
+        const lockedSeries = series.find((item) => Number(item.id) === lockSeriesId);
+        nextForm.seriesName = String(book.series_name || lockedSeries?.name || nextForm.seriesName);
+      }
+      setLoadedBook(book);
       setForm(nextForm);
       setLookupResult(null);
       setShowLookupSummary(Boolean(nextForm.autoSummary));
@@ -126,7 +137,7 @@ export function useEditBookForm(options: {
     } finally {
       setLoading(false);
     }
-  }, [bookId, fetchSeriesList, toast]);
+  }, [bookId, fetchSeriesList, toast, seriesLocked, lockSeriesId]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -136,6 +147,7 @@ export function useEditBookForm(options: {
   }, [enabled, loadBook]);
 
   function updateForm<K extends keyof AddBookFormState>(key: K, value: AddBookFormState[K]) {
+    if (seriesLocked && key === "seriesName") return;
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
@@ -238,7 +250,9 @@ export function useEditBookForm(options: {
     try {
       let resolvedSeriesId: number | null = null;
 
-      if (seriesName) {
+      if (seriesLocked) {
+        resolvedSeriesId = lockSeriesId;
+      } else if (seriesName) {
         const normalizedSeriesName = normalizeText(seriesName);
         const normalizedAuthor = normalizeText(author);
         const matchedSeries = seriesList.find((series) => {
@@ -265,10 +279,20 @@ export function useEditBookForm(options: {
 
       const readStatus = form.status;
       const isRead = readStatus === "read";
-      const readDate = readStatus === "read"
+      const libraryReadDate = readStatus === "read"
         ? (form.readDate || new Date().toISOString().split("T")[0])
         : null;
-      const releaseDate = readStatus !== "read" ? form.releaseDate.trim() : "";
+      const libraryReleaseDate = readStatus !== "read" ? form.releaseDate.trim() : "";
+
+      const lockedDates = seriesLocked
+        ? lockedSeriesEditDates({
+            status: form.status,
+            releaseDate: form.releaseDate,
+            readDate: form.readDate,
+            existingReleaseDate: loadedBook?.release_date,
+            existingPublicationDate: loadedBook?.publication_date,
+          })
+        : null;
 
       const response = await fetchApiWithFallback(`/books/${bookId}`, {
         method: "PUT",
@@ -279,11 +303,11 @@ export function useEditBookForm(options: {
           series_id: resolvedSeriesId,
           series_order: parsedBookNumber,
           book_number: parsedBookNumber,
-          release_date: releaseDate || null,
+          release_date: lockedDates ? lockedDates.release_date : (libraryReleaseDate || null),
           publication_date: form.publicationDate || null,
-          read_date: readDate,
-          read_status: readStatus,
-          is_read: isRead,
+          read_date: lockedDates ? lockedDates.read_date : libraryReadDate,
+          read_status: lockedDates ? lockedDates.read_status : readStatus,
+          is_read: lockedDates ? lockedDates.is_read : isRead,
           auto_summary: form.autoSummary || null,
         }),
       });
@@ -326,6 +350,7 @@ export function useEditBookForm(options: {
     lookingUpBook,
     lookupResult,
     showLookupSummary,
+    seriesLocked,
     updateForm,
     onStatusChange,
     onToggleLookupSummary: () => setShowLookupSummary((prev) => !prev),

@@ -1,31 +1,31 @@
 "use client";
 
-import { Suspense, useEffect } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { AddBookFormFields } from "@/components/books/add-book-form-fields";
 import { BookFormPageChrome } from "@/components/books/book-form-page-chrome";
+import { useToast } from "@/components/ui/use-toast";
 import { useDeviceClass } from "@/hooks/use-device-class";
 import { useEditBookForm } from "@/hooks/use-edit-book-form";
+import { fetchApiWithFallback } from "@/lib/api-client";
 import { useAuth } from "@/lib/auth-context";
 import { getDeviceClass } from "@/lib/device-class";
-
-function safeReturnTo(value: string | null) {
-  if (!value || !value.startsWith("/") || value.startsWith("//")) {
-    return null;
-  }
-  return value;
-}
+import { isSeriesReturnTo, parsePositiveId, safeReturnTo, seriesIdFromReturnTo, withPin } from "@/lib/return-to";
 
 function EditBookPageInner() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
   const searchParams = useSearchParams();
+  const { toast } = useToast();
   const { role } = useAuth();
   const deviceClass = useDeviceClass();
   const canEdit = role === "owner";
   const bookId = Number(params?.id);
   const returnTo = safeReturnTo(searchParams.get("returnTo"));
+  const lockSeriesId = parsePositiveId(searchParams.get("seriesId")) ?? seriesIdFromReturnTo(returnTo);
+  const allowDelete = isSeriesReturnTo(returnTo);
+  const [deleting, setDeleting] = useState(false);
 
   const {
     form,
@@ -36,6 +36,7 @@ function EditBookPageInner() {
     lookingUpBook,
     lookupResult,
     showLookupSummary,
+    seriesLocked,
     updateForm,
     onStatusChange,
     onToggleLookupSummary,
@@ -44,9 +45,14 @@ function EditBookPageInner() {
   } = useEditBookForm({
     bookId: Number.isFinite(bookId) && bookId > 0 ? bookId : null,
     enabled: deviceClass !== "desktop" && canEdit && Number.isFinite(bookId) && bookId > 0,
+    lockSeriesId,
     onSuccess: (updatedBook) => {
       if (returnTo) {
-        router.push(returnTo);
+        router.push(
+          Number.isFinite(updatedBook.id) && updatedBook.id > 0
+            ? withPin(returnTo, updatedBook.id)
+            : returnTo,
+        );
         return;
       }
       if (Number.isFinite(updatedBook.id) && updatedBook.id > 0) {
@@ -69,6 +75,32 @@ function EditBookPageInner() {
 
   const goBack = () => router.push(returnTo || "/books");
 
+  async function handleDelete() {
+    if (!Number.isFinite(bookId) || bookId <= 0) return;
+    if (!confirm(`Delete "${form.title || "this book"}"? This cannot be undone.`)) return;
+
+    setDeleting(true);
+    try {
+      const response = await fetchApiWithFallback(`/books/${bookId}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error(`Failed to delete book (${response.status})`);
+      }
+      toast({
+        title: "Book deleted",
+        description: form.title ? `Deleted ${form.title}.` : "The book was deleted.",
+      });
+      router.push(returnTo || "/books");
+    } catch (error) {
+      console.error(error);
+      toast({
+        title: "Delete failed",
+        description: error instanceof Error ? error.message : "Unable to delete book right now.",
+      });
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   if (!Number.isFinite(bookId) || bookId <= 0 || notFound) {
     return (
       <BookFormPageChrome
@@ -87,12 +119,13 @@ function EditBookPageInner() {
   return (
     <BookFormPageChrome
       title="Edit Book"
-      subtitle="Update this book in your library."
+      subtitle={seriesLocked ? "Update this book in the series." : "Update this book in your library."}
       onCancel={goBack}
       onSave={handleSave}
-      saving={saving}
+      saving={saving || deleting}
       saveLabel="Save changes"
       saveDisabled={loading}
+      onDelete={allowDelete ? () => void handleDelete() : undefined}
     >
       {loading ? (
         <p className="text-sm text-muted-foreground">Loading book…</p>
@@ -108,6 +141,7 @@ function EditBookPageInner() {
           showLookupSummary={showLookupSummary}
           onToggleLookupSummary={onToggleLookupSummary}
           onFindDetails={handleFindDetails}
+          seriesLocked={seriesLocked}
         />
       )}
     </BookFormPageChrome>

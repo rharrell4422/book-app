@@ -16,17 +16,37 @@ import {
 export type CreatedBook = {
   id: number;
   title?: string | null;
+  read_status?: string | null;
 };
+
+export type AddBookFormInitialValues = Partial<AddBookFormState>;
+
+function lockedAddDefaults(initialValues?: AddBookFormInitialValues): AddBookFormState {
+  return {
+    ...EMPTY_ADD_BOOK_FORM,
+    status: initialValues?.status ?? "upcoming",
+    seriesName: initialValues?.seriesName ?? "",
+    author: initialValues?.author ?? "",
+    bookNumber: initialValues?.bookNumber ?? "",
+  };
+}
 
 export function useAddBookForm(options?: {
   onSuccess?: (createdBook: CreatedBook) => void | Promise<void>;
   enabled?: boolean;
+  lockedSeriesId?: number | null;
+  initialValues?: AddBookFormInitialValues;
 }) {
   const { toast } = useToast();
   const onSuccess = options?.onSuccess;
   const enabled = options?.enabled ?? true;
+  const lockedSeriesId = options?.lockedSeriesId ?? null;
+  const initialValues = options?.initialValues;
+  const seriesLocked = lockedSeriesId !== null && lockedSeriesId > 0;
 
-  const [form, setForm] = useState<AddBookFormState>(EMPTY_ADD_BOOK_FORM);
+  const [form, setForm] = useState<AddBookFormState>(
+    seriesLocked ? lockedAddDefaults(initialValues) : EMPTY_ADD_BOOK_FORM,
+  );
   const [seriesList, setSeriesList] = useState<AddBookSeriesOption[]>([]);
   const [saving, setSaving] = useState(false);
   const [lookingUpBook, setLookingUpBook] = useState(false);
@@ -45,19 +65,36 @@ export function useAddBookForm(options?: {
   }, []);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || seriesLocked) return;
     // fetchSeriesList sets state synchronously before its first await --
     // standard "fetch on mount" pattern, not derived state.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchSeriesList();
-  }, [enabled, fetchSeriesList]);
+  }, [enabled, seriesLocked, fetchSeriesList]);
+
+  useEffect(() => {
+    if (!enabled || !seriesLocked) return;
+    // Prefill locked series name/author as they arrive (e.g. after GET /series/:id).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setForm((prev) => ({
+      ...prev,
+      status:
+        prev.status === "unread" && !prev.title && !prev.bookNumber
+          ? (initialValues?.status ?? "upcoming")
+          : prev.status,
+      seriesName: initialValues?.seriesName || prev.seriesName,
+      author: prev.author.trim() ? prev.author : (initialValues?.author || ""),
+      bookNumber: prev.bookNumber || initialValues?.bookNumber || "",
+    }));
+  }, [enabled, seriesLocked, initialValues?.seriesName, initialValues?.author, initialValues?.status, initialValues?.bookNumber]);
 
   function updateAddBookForm<K extends keyof AddBookFormState>(key: K, value: AddBookFormState[K]) {
+    if (seriesLocked && key === "seriesName") return;
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
   function resetAddBookForm() {
-    setForm(EMPTY_ADD_BOOK_FORM);
+    setForm(seriesLocked ? lockedAddDefaults(initialValues) : EMPTY_ADD_BOOK_FORM);
     setLookupResult(null);
     setShowLookupSummary(false);
   }
@@ -133,7 +170,7 @@ export function useAddBookForm(options?: {
 
   async function handleAddBook() {
     const title = form.title.trim();
-    const author = form.author.trim();
+    const author = form.author.trim() || (seriesLocked ? "Unknown author" : "");
     const seriesName = form.seriesName.trim();
     const bookNumberText = form.bookNumber.trim();
 
@@ -146,7 +183,15 @@ export function useAddBookForm(options?: {
     }
 
     const parsedBookNumber = bookNumberText ? Number(bookNumberText) : null;
-    if (bookNumberText && !Number.isFinite(parsedBookNumber)) {
+    if (seriesLocked) {
+      if (!Number.isFinite(parsedBookNumber) || parsedBookNumber === null || parsedBookNumber <= 0) {
+        toast({
+          title: "Invalid book number",
+          description: "Book number must be a positive number.",
+        });
+        return;
+      }
+    } else if (bookNumberText && !Number.isFinite(parsedBookNumber)) {
       toast({
         title: "Invalid book number",
         description: "Book number must be numeric when provided.",
@@ -159,7 +204,9 @@ export function useAddBookForm(options?: {
     try {
       let resolvedSeriesId: number | null = null;
 
-      if (seriesName) {
+      if (seriesLocked) {
+        resolvedSeriesId = lockedSeriesId;
+      } else if (seriesName) {
         const normalizedSeriesName = normalizeText(seriesName);
         const normalizedAuthor = normalizeText(author);
         const matchedSeries = seriesList.find((series) => {
@@ -222,7 +269,9 @@ export function useAddBookForm(options?: {
       const createdBook = await createBookResponse.json();
       const nextCreatedBookId = Number(createdBook?.id ?? null);
       setCreatedBookId(Number.isFinite(nextCreatedBookId) ? nextCreatedBookId : null);
-      await fetchSeriesList();
+      if (!seriesLocked) {
+        await fetchSeriesList();
+      }
       resetAddBookForm();
       toast({
         title: "Book added",
@@ -234,6 +283,7 @@ export function useAddBookForm(options?: {
         await onSuccess?.({
           id: nextCreatedBookId,
           title: createdBook.title,
+          read_status: createdBook.read_status,
         });
       } catch (error) {
         console.error("Error after adding book:", error);
@@ -257,6 +307,7 @@ export function useAddBookForm(options?: {
     lookupResult,
     showLookupSummary,
     createdBookId,
+    seriesLocked,
     updateAddBookForm,
     resetAddBookForm,
     onStatusChange,

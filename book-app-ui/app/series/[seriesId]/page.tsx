@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { AlertTriangleIcon, SearchIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -26,16 +26,18 @@ import {
   hasUnconfirmedReleaseDate,
   isFutureDate,
   isPastOrTodayDate,
-  toIsoDateString,
 } from "@/lib/book-format";
 import { ConfirmDialog, type ConfirmDialogState } from "@/components/confirm-dialog";
-import { AddBookDialog } from "@/components/series/add-book-dialog";
-import { EditBookDialog, type EditBookFormState } from "@/components/series/edit-book-dialog";
+import { AddBookDialog } from "@/components/books/add-book-dialog";
+import { EditBookDialog } from "@/components/books/edit-book-dialog";
 import { BookSummaryDialog } from "@/components/series/book-summary-dialog";
 import { NormalizeTitlesDialog } from "@/components/series/normalize-titles-dialog";
 import { MoreByAuthorDialog } from "@/components/books/more-by-author-dialog";
 import { MobileSeriesBookList } from "@/components/series/mobile-series-book-list";
+import { useDeviceClass } from "@/hooks/use-device-class";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { getDeviceClass } from "@/lib/device-class";
+import { parsePositiveId, seriesAddBookHref, seriesDetailPath, seriesEditBookHref, withPin } from "@/lib/return-to";
 
  type TitleNormalizationMode = "keep_original" | "clean_up" | "new_clean_title" | "match_other_titles";
 type TitleNormalizationWizardMode = TitleNormalizationMode | "custom";
@@ -291,29 +293,6 @@ function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-/** Best-effort normalize a raw form date input to YYYY-MM-DD, but (unlike
- * toIsoDateString) falls back to returning the original string untouched
- * rather than null when the format isn't recognized -- this feeds a payload
- * field that's fine being sent through as-is for the backend to reject. */
-function normalizeDateInput(value: string | null | undefined): string | null {
-  const raw = String(value || "").trim();
-  if (!raw) return null;
-
-  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(raw)) {
-    return raw;
-  }
-
-  const mdyMatch = raw.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/);
-  if (mdyMatch) {
-    const month = mdyMatch[1].padStart(2, "0");
-    const day = mdyMatch[2].padStart(2, "0");
-    const year = mdyMatch[3];
-    return `${year}-${month}-${day}`;
-  }
-
-  return raw;
-}
-
 function hasUpcomingBookSignals(book: BookRecord) {
   const status = String(book.read_status || "").trim().toLowerCase();
   if (status === "upcoming" || status === "tbr" || status === "to be read") {
@@ -514,10 +493,13 @@ export default function SeriesDetailPage() {
   const { role } = useAuth();
   const canEdit = role === "owner";
   const isMobile = useIsMobile();
+  const deviceClass = useDeviceClass();
+  const router = useRouter();
   const params = useParams();
   const searchParams = useSearchParams();
   const seriesId = params.seriesId as string;
   const fromView = searchParams.get("fromView") === "finished" ? "finished" : "ongoing";
+  const pinnedBookId = parsePositiveId(searchParams.get("pin"));
   const viewAllSeriesHref = `/series?view=${fromView}`;
   const [series, setSeries] = useState<SeriesRecord | null>(null);
   const [loading, setLoading] = useState(true);
@@ -537,11 +519,6 @@ export default function SeriesDetailPage() {
   const [seriesCheckCurrentPass, setSeriesCheckCurrentPass] = useState<string | null>(null);
   const [seriesCheckStillChecking, setSeriesCheckStillChecking] = useState(false);
   const [addBookDialogOpen, setAddBookDialogOpen] = useState(false);
-  const [addBookSaving, setAddBookSaving] = useState(false);
-  const [addBookTitle, setAddBookTitle] = useState("");
-  const [addBookNumber, setAddBookNumber] = useState("");
-  const [addBookStatus, setAddBookStatus] = useState<"upcoming" | "unread" | "available" | "read">("upcoming");
-  const [addBookDate, setAddBookDate] = useState("");
   const [recentUpcomingBookIds, setRecentUpcomingBookIds] = useState<number[]>([]);
   const [titleNormalizeSaving, setTitleNormalizeSaving] = useState(false);
   const [normalizeWizardMode, setNormalizeWizardMode] = useState<TitleNormalizationWizardMode>("clean_up");
@@ -551,15 +528,7 @@ export default function SeriesDetailPage() {
   const [normalizeTitlesDialogOpen, setNormalizeTitlesDialogOpen] = useState(false);
   const [deleteSeriesSaving, setDeleteSeriesSaving] = useState(false);
   const [editBookDialogOpen, setEditBookDialogOpen] = useState(false);
-  const [savingEditBook, setSavingEditBook] = useState(false);
-  const [editBookForm, setEditBookForm] = useState<EditBookFormState>({
-    id: null,
-    title: "",
-    author: "",
-    bookNumber: "",
-    status: "unread",
-    date: "",
-  });
+  const [editBookId, setEditBookId] = useState<number | null>(null);
   const [columnWidths, setColumnWidths] = useState<Record<SeriesDetailColumnKey, number>>(DEFAULT_SERIES_DETAIL_COLUMN_WIDTHS);
   const { toast } = useToast();
   const addMessageTimeoutRef = useRef<number | null>(null);
@@ -800,7 +769,7 @@ export default function SeriesDetailPage() {
     return <div className="p-6">Series not found.</div>;
   }
 
-  const displayedBooks = (() => {
+  let displayedBooks = (() => {
     if (bookSortMode === "az") {
       return [...books].sort((a, b) =>
         String(a?.title || "").localeCompare(String(b?.title || ""), undefined, {
@@ -838,6 +807,19 @@ export default function SeriesDetailPage() {
     const rest = ordered.filter((book) => !pinnedIdSet.has(Number(book?.id)));
     return [...pinnedUpcoming, ...rest];
   })().filter((book) => !needsVerificationOnly || hasUnconfirmedReleaseDate(getBookStatus(book), book));
+  if (pinnedBookId) {
+    const pinnedIndex = displayedBooks.findIndex((book) => Number(book?.id) === pinnedBookId);
+    if (pinnedIndex > 0) {
+      const next = [...displayedBooks];
+      const [pinned] = next.splice(pinnedIndex, 1);
+      displayedBooks = [pinned, ...next];
+    } else if (pinnedIndex < 0) {
+      const pinnedBook = books.find((book) => Number(book?.id) === pinnedBookId);
+      if (pinnedBook) {
+        displayedBooks = [pinnedBook, ...displayedBooks];
+      }
+    }
+  }
   const missingOrders: string[] = Array.isArray(series.missing_books)
     ? series.missing_books
     : [];
@@ -1241,133 +1223,28 @@ export default function SeriesDetailPage() {
   }
 
 
-  async function handleEditBookTitle(book: BookRecord) {
-    const status = (getBookStatus(book) as "unread" | "upcoming" | "available" | "read") || "unread";
-    setEditBookForm({
-      id: Number(book.id),
-      title: String(book.title || ""),
-      author: String(book.author || ""),
-      bookNumber: book.book_number !== null && book.book_number !== undefined ? String(book.book_number) : "",
-      status,
-      date: toIsoDateString(getBookDate(book)) || "",
-    });
-    setEditBookDialogOpen(true);
+  function startAddBook() {
+    if (!series) return;
+    if (getDeviceClass() === "desktop") {
+      setAddBookDialogOpen(true);
+      return;
+    }
+    router.push(seriesAddBookHref(Number(series.id), fromView));
   }
 
-  async function handleSaveBookEdit() {
-    const bookId = Number(editBookForm.id);
-    if (!Number.isFinite(bookId) || bookId <= 0) return;
-
-    const title = editBookForm.title.trim();
-    const author = editBookForm.author.trim();
-    if (!title || !author) {
-      toast({ title: "Missing fields", description: "Title and author are required." });
+  function startEditBook(book: BookRecord) {
+    if (!series) return;
+    if (getDeviceClass() === "desktop") {
+      setEditBookId(Number(book.id));
+      setEditBookDialogOpen(true);
       return;
     }
+    router.push(seriesEditBookHref(Number(book.id), Number(series.id), fromView));
+  }
 
-    const numberRaw = editBookForm.bookNumber.trim();
-    const parsedBookNumber = numberRaw ? Number(numberRaw) : null;
-    if (numberRaw && !Number.isFinite(parsedBookNumber)) {
-      toast({ title: "Invalid book number", description: "Book number must be numeric when provided." });
-      return;
-    }
-
-    const rawDate = editBookForm.date.trim();
-    const normalizedDate = rawDate ? toIsoDateString(rawDate) : null;
-    if (rawDate && !normalizedDate) {
-      toast({ title: "Invalid date", description: "Use a valid date format, such as YYYY-MM-DD." });
-      return;
-    }
-
-    setSavingEditBook(true);
-    try {
-      const status = editBookForm.status;
-      const existingBook = books.find((item) => item.id === bookId) || null;
-      const payload: Record<string, unknown> = {
-        title,
-        author,
-        series_id: Number(series?.id),
-        series_order: parsedBookNumber,
-        book_number: parsedBookNumber,
-        read_status: status,
-        is_read: status === "read",
-      };
-
-      if (status === "read") {
-        payload.read_date = normalizedDate || new Date().toISOString().split("T")[0];
-        payload.release_date = null;
-      } else if (status === "unread") {
-        payload.read_date = null;
-      } else if (status === "upcoming") {
-        payload.read_date = null;
-        payload.release_date =
-          normalizedDate || toIsoDateString(existingBook?.release_date || existingBook?.publication_date) || null;
-      } else {
-        // available
-        payload.read_date = null;
-        const existingDate = toIsoDateString(existingBook?.release_date || existingBook?.publication_date);
-        payload.release_date = !existingDate || isPastOrTodayDate(existingDate) ? normalizedDate || null : normalizedDate || existingDate;
-      }
-
-      // Absorbed from the old standalone "Set Status" flow: a release date
-      // that ends up in the future forces status to "upcoming", and one
-      // that has already passed forces "available" -- so picking a date
-      // here can't leave the status pill contradicting the date.
-      const effectiveReleaseDate =
-        String(payload.release_date || "").trim() ||
-        toIsoDateString(existingBook?.release_date || existingBook?.publication_date);
-      if (!payload.read_date && effectiveReleaseDate) {
-        if (isFutureDate(effectiveReleaseDate)) {
-          payload.read_status = "upcoming";
-          payload.is_read = false;
-          payload.release_date = effectiveReleaseDate;
-        } else if (isPastOrTodayDate(effectiveReleaseDate)) {
-          payload.read_status = "available";
-          payload.is_read = false;
-          // Keep the confirmed date instead of nulling it -- otherwise saving a
-          // manually-verified release date (e.g. via "Check online") on a book
-          // that's flipping to "available" silently loses that date and the
-          // book immediately re-flags as "needs date verification".
-          payload.release_date = effectiveReleaseDate;
-        }
-      }
-
-      const response = await fetchApiWithFallback(`/books/${bookId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to update book (${response.status})`);
-      }
-
-      const updatedBook = await response.json();
-      setSeries((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          books: Array.isArray(prev.books)
-            ? prev.books.map((item) => (item.id === updatedBook.id ? { ...item, ...updatedBook } : item))
-            : prev.books,
-        };
-      });
-      publishBookStatusUpdate(updatedBook);
-      setEditBookDialogOpen(false);
-      flashAddedMessage(`Book updated: ${updatedBook.title || title}`);
-      toast({
-        title: "Book updated",
-        description: "Changes were saved and reflected in the Library view.",
-      });
-    } catch (error) {
-      console.error(error);
-      toast({
-        title: "Update failed",
-        description: error instanceof Error ? error.message : "Unable to update book right now.",
-      });
-    } finally {
-      setSavingEditBook(false);
-    }
+  function pinBookOnSeriesPage(bookId: number) {
+    if (!series || !Number.isFinite(bookId) || bookId <= 0) return;
+    router.replace(withPin(seriesDetailPath(Number(series.id), fromView), bookId), { scroll: false });
   }
 
   async function handleApplyTitleNormalization() {
@@ -1561,14 +1438,10 @@ export default function SeriesDetailPage() {
   }
 
   function handleDeleteBookBeingEdited() {
-    // Edit Book now owns delete too (collapsed from 3 separate row buttons
-    // -- Set Status, Edit book, Delete -- into one), so this looks the
-    // book up from the currently-open form's id rather than needing its
-    // own book reference passed in.
-    const bookId = Number(editBookForm.id);
-    const book = books.find((item) => item.id === bookId);
+    const book = books.find((item) => item.id === editBookId);
     if (!book) return;
     setEditBookDialogOpen(false);
+    setEditBookId(null);
     handleDeleteBook(book);
   }
 
@@ -1615,85 +1488,6 @@ export default function SeriesDetailPage() {
     }
   }
 
-  async function handleCreateBookFromDialog() {
-    if (!series) return;
-
-    const title = String(addBookTitle || "").trim();
-    const parsedNumber = Number(addBookNumber);
-    if (!title) {
-      toast({ title: "Missing title", description: "Title is required." });
-      return;
-    }
-    if (!Number.isFinite(parsedNumber) || parsedNumber <= 0) {
-      toast({ title: "Invalid book number", description: "Book number must be a positive number." });
-      return;
-    }
-
-    const normalizedDate = normalizeDateInput(addBookDate);
-    const today = new Date().toISOString().split("T")[0];
-    const payload: Record<string, unknown> = {
-      title,
-      author: String(series.author || "Unknown author").trim() || "Unknown author",
-      series_id: Number(series.id),
-      series_order: parsedNumber,
-      book_number: parsedNumber,
-      read_status: addBookStatus,
-      is_read: addBookStatus === "read",
-    };
-
-    if (addBookStatus === "read") {
-      payload.read_date = normalizedDate || today;
-    } else if (normalizedDate) {
-      payload.release_date = normalizedDate;
-    }
-
-    setAddBookSaving(true);
-    try {
-      const response = await fetchApiWithFallback("/books/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        let detail = "";
-        try {
-          const data = await response.json();
-          detail = data?.detail ? ` - ${data.detail}` : "";
-        } catch {
-          // ignore
-        }
-        throw new Error(`Failed to add book (${response.status})${detail}`);
-      }
-
-      const createdBook = await response.json();
-      if (addBookStatus === "upcoming") {
-        setRecentUpcomingBookIds((prev) => [Number(createdBook.id), ...prev.filter((id) => id !== Number(createdBook.id))]);
-      }
-      setSeries((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          books: sortBooksBySeriesOrder([...(prev.books || []), createdBook]),
-        };
-      });
-
-      setAddBookTitle("");
-      setAddBookNumber("");
-      setAddBookStatus("upcoming");
-      setAddBookDate("");
-      setAddBookDialogOpen(false);
-      flashAddedMessage(`Added book #${parsedNumber}: ${title}`);
-      await refreshSeriesFromApi();
-    } catch (err) {
-      console.error(err);
-      const message = err instanceof Error ? err.message : "Unable to add book right now.";
-      toast({ title: "Add book failed", description: message });
-    } finally {
-      setAddBookSaving(false);
-    }
-  }
-
   return (
     <div className="p-2 space-y-1.5">
       <div className="space-y-1.5 rounded-lg border bg-card/60 px-3 py-2">
@@ -1737,7 +1531,7 @@ export default function SeriesDetailPage() {
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => setAddBookDialogOpen(true)}
+                onClick={startAddBook}
               >
                 Add Book
               </Button>
@@ -1869,7 +1663,8 @@ export default function SeriesDetailPage() {
             };
           })}
           canEdit={canEdit}
-          onEdit={handleEditBookTitle}
+          pinnedBookId={pinnedBookId}
+          onEdit={startEditBook}
           onOpenSummary={openSummaryEditor}
           onMoreByAuthor={(author) => setMoreByAuthorTarget(author)}
           onCheckOnline={(book) => window.open(getCheckOnlineUrl(book), "_blank", "noopener,noreferrer")}
@@ -1953,7 +1748,7 @@ export default function SeriesDetailPage() {
             const displayDate = getBookDate(book);
             const unconfirmedDate = hasUnconfirmedReleaseDate(status, book);
             return (
-              <TableRow key={book.id}>
+              <TableRow key={book.id} className={Number(book.id) === pinnedBookId ? "bg-emerald-50/80" : undefined}>
                 <TableCell className="truncate" title={book.title ?? undefined}>
                   <div>{book.title || "—"}</div>
                 </TableCell>
@@ -1975,7 +1770,7 @@ export default function SeriesDetailPage() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => handleEditBookTitle(book)}
+                      onClick={() => startEditBook(book)}
                       title="Change title, author, book #, status, date, or delete this book"
                     >
                       Edit book
@@ -2050,30 +1845,45 @@ export default function SeriesDetailPage() {
         }}
       />
 
-      <AddBookDialog
-        open={addBookDialogOpen}
-        onOpenChange={setAddBookDialogOpen}
-        title={addBookTitle}
-        onTitleChange={setAddBookTitle}
-        bookNumber={addBookNumber}
-        onBookNumberChange={setAddBookNumber}
-        status={addBookStatus}
-        onStatusChange={setAddBookStatus}
-        date={addBookDate}
-        onDateChange={setAddBookDate}
-        onSave={handleCreateBookFromDialog}
-        saving={addBookSaving}
-      />
+      {deviceClass === "desktop" ? (
+        <AddBookDialog
+          open={addBookDialogOpen}
+          onOpenChange={setAddBookDialogOpen}
+          lockedSeriesId={Number(series.id)}
+          initialValues={{
+            seriesName: series.name,
+            author: String(series.author || "").trim() || "Unknown author",
+            status: "upcoming",
+          }}
+          onSuccess={async (createdBook) => {
+            const createdId = Number(createdBook.id);
+            if (String(createdBook.read_status || "").toLowerCase() === "upcoming" && createdId > 0) {
+              setRecentUpcomingBookIds((prev) => [createdId, ...prev.filter((id) => id !== createdId)]);
+            }
+            pinBookOnSeriesPage(createdId);
+            flashAddedMessage(`Added book: ${createdBook.title || "Untitled"}`);
+            await refreshSeriesFromApi();
+          }}
+        />
+      ) : null}
 
-      <EditBookDialog
-        open={editBookDialogOpen}
-        onOpenChange={setEditBookDialogOpen}
-        form={editBookForm}
-        onFormChange={setEditBookForm}
-        onSave={handleSaveBookEdit}
-        saving={savingEditBook}
-        onDelete={handleDeleteBookBeingEdited}
-      />
+      {deviceClass === "desktop" ? (
+        <EditBookDialog
+          open={editBookDialogOpen}
+          onOpenChange={(open) => {
+            setEditBookDialogOpen(open);
+            if (!open) setEditBookId(null);
+          }}
+          bookId={editBookId}
+          lockSeriesId={Number(series.id)}
+          onSuccess={async (updatedBook) => {
+            pinBookOnSeriesPage(Number(updatedBook.id));
+            flashAddedMessage(`Book updated: ${updatedBook.title || "Untitled"}`);
+            await refreshSeriesFromApi();
+          }}
+          onDelete={handleDeleteBookBeingEdited}
+        />
+      ) : null}
 
       <NormalizeTitlesDialog
         open={normalizeTitlesDialogOpen}
