@@ -400,7 +400,42 @@ class SeriesIntelligenceAgent:
             provider_failures = discovery["provider_failures"]
             all_providers_failed = discovery["all_providers_failed"]
 
-            _console_log(f"Candidates found: {len(candidates)} (author_fallback_used={discovery['used_author_fallback']})")
+            # Missing-volume detection: a series can own/find books 1-4 and
+            # 6-9 but nothing for 5 -- that's not book 5 ranking low in the
+            # targeted search, it's that no provider returned it at all, so
+            # no amount of relevance-ranking tuning above recovers it. Fires
+            # a few extra, deliberately narrow "<series> <author> book <N>"
+            # lookahead queries (bounded by
+            # discovery_engine.MAX_MISSING_VOLUME_LOOKAHEAD_QUERIES) for
+            # whichever numbers between 1 and the highest known number have
+            # neither an owned book nor a discovered candidate, and folds any
+            # hits back through the same fuse-then-filter pipeline the
+            # targeted/fallback passes already went through -- belongs_to_series
+            # below still runs against every recovered candidate exactly like
+            # any other, nothing here bypasses it.
+            owned_books_for_skeleton = [
+                {"title": book.title, "book_number": book.book_number, "isbn13": book.isbn13}
+                for book in active_series_books
+            ]
+            skeleton = discovery_engine._reconstruct_series_skeleton(
+                discovery.get("unified_candidates", []),
+                owned_books_for_skeleton,
+                series_name=series.name,
+                author=series_author,
+            )
+            if skeleton["recovered_numbers"]:
+                candidates = discovery_engine._filter_and_merge(
+                    [discovery_engine._unified_candidate_to_raw_dict(candidate) for candidate in skeleton["candidates"]],
+                    series_author,
+                    author_owned_titles,
+                    confidence="author_fallback" if discovery["used_author_fallback"] else "targeted",
+                    series_name=series.name,
+                )
+
+            _console_log(
+                f"Candidates found: {len(candidates)} (author_fallback_used={discovery['used_author_fallback']}, "
+                f"missing_volumes={skeleton['missing_numbers']}, recovered={skeleton['recovered_numbers']})"
+            )
 
             today = date.today()
             available_missing: list[dict] = []

@@ -1451,6 +1451,161 @@ def _unified_candidate_to_raw_dict(candidate: UnifiedCandidate) -> dict:
     return base
 
 
+# Bounds how many gap numbers _reconstruct_series_skeleton will fire a
+# targeted Brave lookahead query for in one call -- a series with a large
+# number of gaps (e.g. only book 1 and book 12 are owned/found) would
+# otherwise turn into a double-digit number of live web searches in a
+# single Check Now run. All still batched into one _fetch_web_search call
+# (one shared Brave loop + one LLM structuring pass), same as the existing
+# highest-owned-number lookahead in _fetch_all_providers_parallel.
+MAX_MISSING_VOLUME_LOOKAHEAD_QUERIES = 6
+
+
+def _resolve_candidate_number(candidate: "UnifiedCandidate", series_name: str | None) -> float | None:
+    """A candidate's own fused series_number (from series_number_hint, see
+    _fuse_and_score_candidates) is preferred; title-text inference is only
+    a fallback for a candidate whose contributing providers never supplied
+    a structured number at all -- the same trust ordering
+    discover_candidates_for_series/series_agent already use elsewhere.
+    """
+    if candidate.series_number is not None:
+        return candidate.series_number
+    inferred = infer_number_from_title(candidate.title, series_name)
+    return float(inferred) if inferred is not None else None
+
+
+def _reconstruct_series_skeleton(
+    unified_candidates: list["UnifiedCandidate"],
+    owned_books: list[dict],
+    *,
+    series_name: str | None = None,
+    author: str | None = None,
+) -> dict:
+    """Infers how many volumes a series is expected to have -- the highest
+    integer book number seen anywhere, across owned_books' book_number,
+    each unified_candidate's own fused series_number, and (for whichever
+    candidates have neither) a title-text inference pass -- builds the full
+    1..N "skeleton" of expected volume numbers, and identifies which of
+    those numbers has no owned book AND no discovered candidate at all.
+
+    For each such gap (up to MAX_MISSING_VOLUME_LOOKAHEAD_QUERIES), fires a
+    targeted Brave+LLM lookahead query ("<series> <author> book <N>")
+    specifically for that missing number. This is more surgical than the
+    generic targeted "<series> <author>" query or the highest-owned-number-
+    only lookahead _fetch_all_providers_parallel already does: it can
+    recover a gap buried in the *middle* of an otherwise-complete series
+    (e.g. owns/found 1-4 and 6-9 but never found 5), not just a gap at the
+    very end.
+
+    Only integer-numbered volumes count toward the skeleton -- a companion
+    0.5/3.5-style novella is real content but isn't a "volume" in the
+    sequential numbering sense a skeleton like this reconstructs (mirrors
+    _fetch_hardcover's own reasoning for keeping series_position as a float
+    instead of rounding it).
+
+    Any newly-recovered candidates are fused back into unified_candidates
+    via _fuse_and_score_candidates (existing candidates given top priority,
+    so a lookahead hit can only *backfill* an already-found candidate, not
+    override it) rather than replacing it outright.
+
+    series_name/author are optional and, when omitted, inferred from
+    unified_candidates' own series_name/authors fields -- series_agent.py,
+    the real caller, always has both on hand directly (series.name/
+    series_author) and passes them explicitly instead of relying on this
+    fallback, which exists mainly so this function still does something
+    sensible if unified_candidates is empty of any usable hint.
+
+    Returns {"candidates": [...], "expected_total": int | None,
+    "missing_numbers": [...], "recovered_numbers": [...]}. "candidates" is
+    unified_candidates with any newly-recovered volumes fused in; when
+    there's nothing missing, no resolvable series_name/author, no resolvable
+    expected total at all, or web search isn't configured
+    (BRAVE_SEARCH_API_KEY/ANTHROPIC_API_KEY), it's returned unchanged.
+    """
+    resolved_series_name = series_name or next((c.series_name for c in unified_candidates if c.series_name), None)
+    resolved_author = author or next(
+        (candidate_author for c in unified_candidates for candidate_author in c.authors if candidate_author), None
+    )
+
+    known_numbers: set[int] = set()
+    for book in owned_books:
+        number = book.get("book_number")
+        try:
+            if number is not None and float(number).is_integer():
+                known_numbers.add(int(float(number)))
+        except (TypeError, ValueError):
+            continue
+    for candidate in unified_candidates:
+        number = _resolve_candidate_number(candidate, resolved_series_name)
+        if number is not None and float(number).is_integer():
+            known_numbers.add(int(number))
+
+    def _result(missing_numbers: list[int], recovered_numbers: list[int], candidates: list["UnifiedCandidate"]) -> dict:
+        return {
+            "candidates": candidates,
+            "expected_total": max(known_numbers) if known_numbers else None,
+            "missing_numbers": missing_numbers,
+            "recovered_numbers": recovered_numbers,
+        }
+
+    if not known_numbers:
+        return _result([], [], unified_candidates)
+
+    expected_total = max(known_numbers)
+    missing_numbers = sorted(set(range(1, expected_total + 1)) - known_numbers)
+
+    if (
+        not missing_numbers
+        or not resolved_series_name
+        or not resolved_author
+        or not (os.environ.get("BRAVE_SEARCH_API_KEY", "").strip() and os.environ.get("ANTHROPIC_API_KEY", "").strip())
+    ):
+        return _result(missing_numbers, [], unified_candidates)
+
+    targeted_missing = missing_numbers[:MAX_MISSING_VOLUME_LOOKAHEAD_QUERIES]
+    lookahead_queries = [f'"{resolved_series_name}" {resolved_author} book {number}' for number in targeted_missing]
+
+    try:
+        lookahead_raw = _fetch_web_search(lookahead_queries, resolved_series_name, resolved_author)
+    except Exception as exc:  # a lookahead failure should never sink the candidates already found
+        _log(f"missing-volume lookahead failed: {exc}")
+        return _result(missing_numbers, [], unified_candidates)
+
+    if not lookahead_raw:
+        return _result(missing_numbers, [], unified_candidates)
+
+    # Existing candidates fed in under the highest-priority bucket key so
+    # fusion's own backfill logic treats a lookahead hit as a supplement to
+    # an already-found candidate (when it matches one by identity) rather
+    # than a competing, potentially-lower-quality duplicate -- see
+    # _fuse_and_score_candidates. Each entry's own "source" field (already
+    # baked in via _unified_candidate_to_raw_dict) is untouched by which
+    # bucket key it's passed under here.
+    existing_raw = [_unified_candidate_to_raw_dict(candidate) for candidate in unified_candidates]
+    refreshed = _fuse_and_score_candidates(
+        {"hardcover": existing_raw, "google": [], "openlibrary": [], "web": lookahead_raw},
+        resolved_author,
+        resolved_series_name,
+    )
+
+    recovered_numbers = sorted(
+        {
+            int(candidate.series_number)
+            for candidate in refreshed
+            if candidate.series_number is not None
+            and float(candidate.series_number).is_integer()
+            and int(candidate.series_number) in targeted_missing
+        }
+    )
+
+    return {
+        "candidates": refreshed,
+        "expected_total": expected_total,
+        "missing_numbers": missing_numbers,
+        "recovered_numbers": recovered_numbers,
+    }
+
+
 def discover_candidates_for_series(
     series_name: str,
     author: str,
@@ -1479,7 +1634,13 @@ def discover_candidates_for_series(
     provider_failures: list[dict] = []
 
     if not author:
-        return {"candidates": [], "provider_failures": [], "all_providers_failed": False, "used_author_fallback": False}
+        return {
+            "candidates": [],
+            "unified_candidates": [],
+            "provider_failures": [],
+            "all_providers_failed": False,
+            "used_author_fallback": False,
+        }
 
     if progress_callback:
         progress_callback({"current_pass": f"Searching for {series_name or author}"})
@@ -1557,6 +1718,11 @@ def discover_candidates_for_series(
         confidence="targeted",
         series_name=series_name,
     )
+    # Tracks whichever fused candidate set actually produced `combined` --
+    # reassigned below if the fallback pass runs -- so callers that want the
+    # pre-filter UnifiedCandidate objects themselves (e.g. series_agent.py's
+    # missing-volume skeleton reconstruction) get the right one either way.
+    final_fused_candidates = fused_candidates
 
     used_author_fallback = False
     if not combined and allow_author_fallback:
@@ -1604,6 +1770,7 @@ def discover_candidates_for_series(
             confidence="author_fallback",
             series_name=series_name,
         )
+        final_fused_candidates = fused_fallback_candidates
 
     # "All providers failed" should mean we got no usable data at all (every
     # call raised), not just that filtering left zero new candidates -- a
@@ -1616,6 +1783,12 @@ def discover_candidates_for_series(
 
     return {
         "candidates": combined,
+        # Pre-filter fused candidates -- additive, existing "candidates" key
+        # unchanged -- so a caller that needs the richer UnifiedCandidate
+        # objects (confidence_score, metadata_completeness_score,
+        # source_provenance, resolved series_number) doesn't have to redo
+        # the fetch+fuse work itself. See _reconstruct_series_skeleton.
+        "unified_candidates": final_fused_candidates,
         "provider_failures": provider_failures,
         "all_providers_failed": all_providers_failed,
         "used_author_fallback": used_author_fallback,
