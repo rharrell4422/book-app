@@ -2317,6 +2317,72 @@ def _filter_cross_series_contamination(
     return filtered
 
 
+# Explicit provider trust ranking, as an ordinal rather than a float weight
+# -- mirrors _PROVIDER_CONFIDENCE_WEIGHT's own hardcover > google_books >
+# openlibrary > web_search ordering, but only used here to break a sort
+# tie between two candidates that share the exact same resolved series
+# number and title (which _filter_and_merge's own dedupe should mostly
+# already prevent, but isn't guaranteed to for every code path feeding
+# finalize_discovery_output -- e.g. a targeted-pass hit and a fallback-pass
+# hit that plain title-key dedupe didn't recognize as the same book). Any
+# other/unrecognized source sorts last.
+_PROVIDER_SORT_RANK = {"hardcover": 0, "google_books": 1, "openlibrary": 2, "web_search": 3}
+
+_TRANSIENT_CANDIDATE_FIELDS = ("confidence_score", "metadata_completeness_score", "source_provenance")
+
+
+def _candidate_sort_key(candidate: dict) -> tuple:
+    title = str(candidate.get("title") or "")
+    number = candidate.get("series_number_hint")
+    if number is None:
+        number = infer_number_from_title(title, candidate.get("series_name_hint"))
+    try:
+        numeric_number = float(number) if number is not None else None
+    except (TypeError, ValueError):
+        numeric_number = None
+
+    # Numbered candidates sort ahead of unnumbered ones (tier 0 vs. 1) and
+    # ascending by number within that tier; unnumbered candidates fall back
+    # to title alone within their own tier.
+    number_tier = (0, numeric_number) if numeric_number is not None else (1, 0.0)
+    provider_rank = _PROVIDER_SORT_RANK.get(str(candidate.get("source") or ""), len(_PROVIDER_SORT_RANK))
+    return (number_tier, normalize_text(title), provider_rank)
+
+
+def finalize_discovery_output(candidates: list[dict]) -> list[dict]:
+    """Last step before a candidate list -- whether from
+    discover_candidates_for_series/discover_candidates_for_author directly,
+    or from series_agent.py's own missing-volume-enriched re-merge (see
+    _reconstruct_series_skeleton) -- is handed off for belongs_to_series
+    filtering, so the shape series_agent.py (and anything downstream of
+    it -- API responses, logs, tests) sees is always the same regardless of
+    run-to-run timing.
+
+    Sorts by series number (when resolvable, else title-only), then title,
+    then provider priority as a final tie-breaker. This matters because
+    _fetch_all_providers_parallel runs Google/OpenLibrary/Hardcover/web
+    search concurrently (see its own docstring) -- any of the four can
+    finish first depending on network timing, so without an explicit sort
+    here the exact same underlying set of discovered books could come back
+    in a different order between two otherwise-identical runs, which would
+    make output diffing/testing unreliable and could subtly change which
+    duplicate "wins" in any downstream logic that processes candidates in
+    list order.
+
+    Also strips the transient, fusion-internal fields
+    _unified_candidate_to_raw_dict rode along on every raw dict --
+    confidence_score, metadata_completeness_score, source_provenance --
+    which are useful *during* the fuse/reconcile/finalize pipeline itself
+    but were never meant to leak into series_agent.py's own candidate shape
+    or anything built on top of it.
+    """
+    sorted_candidates = sorted(candidates, key=_candidate_sort_key)
+    return [
+        {key: value for key, value in candidate.items() if key not in _TRANSIENT_CANDIDATE_FIELDS}
+        for candidate in sorted_candidates
+    ]
+
+
 def discover_candidates_for_series(
     series_name: str,
     author: str,
@@ -2557,12 +2623,18 @@ def discover_candidates_for_series(
         progress_callback({"current_pass": "Done", "total": 1, "completed": 1})
 
     return {
-        "candidates": combined,
+        # Deterministically sorted and stripped of transient fusion-internal
+        # fields -- see finalize_discovery_output. Runs after both the
+        # targeted and (if triggered) fallback passes have already been
+        # merged together above, so it's the true last step on this list.
+        "candidates": finalize_discovery_output(combined),
         # Pre-filter fused candidates -- additive, existing "candidates" key
         # unchanged -- so a caller that needs the richer UnifiedCandidate
         # objects (confidence_score, metadata_completeness_score,
         # source_provenance, resolved series_number) doesn't have to redo
         # the fetch+fuse work itself. See _reconstruct_series_skeleton.
+        # Deliberately NOT passed through finalize_discovery_output --
+        # that strips exactly the fields _reconstruct_series_skeleton needs.
         "unified_candidates": final_fused_candidates,
         "provider_failures": provider_failures,
         "all_providers_failed": all_providers_failed,
@@ -2762,7 +2834,9 @@ def discover_candidates_for_author(
         progress_callback({"current_pass": "Done", "total": 1, "completed": 1})
 
     return {
-        "candidates": combined,
+        # See finalize_discovery_output -- deterministic order, transient
+        # fusion-internal fields stripped.
+        "candidates": finalize_discovery_output(combined),
         "provider_failures": provider_failures,
         "all_providers_failed": all_providers_failed,
     }

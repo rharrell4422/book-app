@@ -435,6 +435,15 @@ class SeriesIntelligenceAgent:
                     confidence="author_fallback" if discovery["used_author_fallback"] else "targeted",
                     series_name=series.name,
                 )
+                # discover_candidates_for_series's own "candidates" already
+                # came back deterministically sorted/stripped (see
+                # finalize_discovery_output), but this re-merge builds a
+                # fresh list straight from _filter_and_merge, which doesn't
+                # do either -- re-apply the same step so a recovered missing
+                # volume doesn't leave the final list's ordering dependent on
+                # dict/set iteration order, or carrying fusion-internal
+                # fields belongs_to_series below was never meant to see.
+                candidates = discovery_engine.finalize_discovery_output(candidates)
 
             _console_log(
                 f"Candidates found: {len(candidates)} (author_fallback_used={discovery['used_author_fallback']}, "
