@@ -1740,6 +1740,7 @@ def _format_candidate_for_reconciliation(index: int, candidate: "UnifiedCandidat
     sources = list(dict.fromkeys(str(member.get("source") or "unknown") for member in candidate.source_provenance))
     return (
         f"[{index}] title={candidate.title!r} authors={candidate.authors!r} "
+        f"series_name={candidate.series_name!r} "
         f"series_number={candidate.series_number} isbn13={candidate.isbn13 or 'null'} "
         f"published_date={candidate.published_date or 'null'!r} sources={sources} "
         f"metadata_completeness={candidate.metadata_completeness_score}"
@@ -1910,15 +1911,17 @@ _LLM_RECONCILIATION_PROMPT = """You are reconciling a messy, possibly-duplicated
 
 Series: "{series_name}"
 
-Below are {count} candidates. Each may be missing information, and two or more entries may actually describe the SAME real book (e.g. one provider has "Book Three" as the title with no ISBN, another has the real subtitle and an ISBN but no book number).
+Below are {count} candidates. Each may be missing information, and two or more entries may actually describe the SAME real book (e.g. one provider has "Book Three" as the title with no ISBN, another has the real subtitle and an ISBN but no book number). Some candidates may also not actually belong to this series at all -- a prolific author often has several different series, and a same-author candidate can slip in here even though it's really from one of those other series.
 
 Candidates:
 {candidate_listing}
 
-For EACH candidate above, decide which other candidates (if any) describe the same real book, and merge them into one resolved entry. Every candidate index 0-{max_index} must appear in EXACTLY ONE resolved entry's "source_indices" -- if a candidate doesn't match any other, it is still its own resolved entry with just its own index. For each resolved entry, normalize the book number to a plain number (e.g. "Three"/"Vol. 3"/"#3" -> 3) and pick the most complete/likely-correct value for each field across whichever candidates you merged into it, resolving any disagreement (e.g. two different book numbers) by picking the value supported by more of the merged candidates, or the more specific/authoritative-looking one if it's a tie. If a candidate appears to be a bundle/omnibus of multiple existing volumes rather than a single new one, set "is_bundle" to true.
+For EACH candidate above, first decide whether it actually belongs to the series named above, "{series_name}". If a candidate clearly belongs to a different, distinct series by the same author (or to a different series entirely), put its index in "excluded_indices" instead of a resolved entry -- do not guess an exclusion just because a field is missing or a series name is slightly differently worded/branded; only exclude when the candidate's own title/series_name clearly point to a genuinely different series.
+
+For every remaining candidate (the ones that do belong to this series), decide which other such candidates (if any) describe the same real book, and merge them into one resolved entry. Every candidate index 0-{max_index} must appear in EXACTLY ONE of: a resolved entry's "source_indices", or "excluded_indices" -- never both, and never omitted entirely. A candidate that belongs to the series but doesn't match any other is still its own resolved entry with just its own index. For each resolved entry, normalize the book number to a plain number (e.g. "Three"/"Vol. 3"/"#3" -> 3) and pick the most complete/likely-correct value for each field across whichever candidates you merged into it, resolving any disagreement (e.g. two different book numbers) by picking the value supported by more of the merged candidates, or the more specific/authoritative-looking one if it's a tie. If a candidate appears to be a bundle/omnibus of multiple existing volumes rather than a single new one, set "is_bundle" to true.
 
 Respond with ONLY a JSON object (no prose, no markdown code fences) of this exact shape:
-{{"resolved_candidates": [{{"source_indices": [<int>, ...], "title": <string>, "series_name": <string or null>, "series_number": <number or null>, "isbn13": <string or null>, "author_names": [<string>, ...], "published_date": <string or null>, "is_bundle": <bool>, "notes": <short string explaining what changed, or "" if nothing did>}}, ...], "missing_volume_suggestions": [<int, a book number you suspect exists but isn't in the candidate list above, based on the candidates' own text>, ...]}}"""
+{{"resolved_candidates": [{{"source_indices": [<int>, ...], "title": <string>, "series_name": <string or null>, "series_number": <number or null>, "isbn13": <string or null>, "author_names": [<string>, ...], "published_date": <string or null>, "is_bundle": <bool>, "notes": <short string explaining what changed, or "" if nothing did>}}, ...], "excluded_indices": [<int, index of a candidate that does NOT belong to this series>, ...], "missing_volume_suggestions": [<int, a book number you suspect exists but isn't in the candidate list above, based on the candidates' own text>, ...]}}"""
 
 
 def _reconcile_candidates_with_llm(
@@ -1929,17 +1932,23 @@ def _reconcile_candidates_with_llm(
     one series -- normalizes series names/book numbers, merges candidates
     that plain identity-key fusion couldn't recognize as the same book
     (different title formatting, one has an ISBN the other lacks, etc.),
-    flags suspected bundles, and surfaces (but does not itself act on --
-    see _reconstruct_series_skeleton for actually searching for them)
-    suspected missing volume numbers. Gated by _needs_llm_reconciliation;
-    only called when fusion alone left the set looking incomplete,
-    internally disagreeing, or thin on metadata.
+    excludes candidates it judges to actually belong to a different series
+    by the same author, flags suspected bundles, and surfaces (but does not
+    itself act on -- see _reconstruct_series_skeleton for actually
+    searching for them) suspected missing volume numbers. Gated by
+    _needs_llm_reconciliation; only called when fusion alone left the set
+    looking incomplete, internally disagreeing, or thin on metadata.
 
     Deliberately conservative on failure: a missing API key, empty input,
     a network/parse error, or a response that doesn't cleanly partition
-    every input candidate exactly once all fall back to returning
-    unified_candidates completely unchanged -- this is an enrichment step,
-    never allowed to lose or corrupt a candidate fusion already produced.
+    every input candidate exactly once between a resolved entry's
+    source_indices and excluded_indices (no gaps, no overlaps, nothing
+    claimed by both) all fall back to returning unified_candidates
+    completely unchanged -- this is an enrichment step, never allowed to
+    lose or corrupt a candidate fusion already produced. An excluded
+    candidate is simply dropped from the returned list -- there is no
+    separate "other books by this author" output for it to land in
+    instead.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key or len(unified_candidates) < 2:
@@ -1995,11 +2004,16 @@ def _reconcile_candidates_with_llm(
     if isinstance(missing_volume_suggestions, list) and missing_volume_suggestions:
         _log(f"LLM reconciliation suspects missing volume(s): {missing_volume_suggestions}")
 
-    # Every original index must be claimed by exactly one entry -- anything
-    # else means the model didn't cleanly partition the input (overlap,
-    # gap, or a garbage index), and trusting a partial/overlapping response
-    # risks silently dropping or duplicating a candidate fusion already
-    # handled correctly.
+    # Every original index must be claimed by exactly one entry, OR listed
+    # in excluded_indices, and never both -- anything else means the model
+    # didn't cleanly partition the input (overlap, gap, garbage index, or
+    # an index silently missing from both), and trusting a
+    # partial/overlapping response risks silently dropping or duplicating a
+    # candidate fusion already handled correctly. Excluding a candidate
+    # (because it belongs to a different series) is the one allowed way for
+    # an index to leave "resolved_candidates" -- it must still be accounted
+    # for, just via excluded_indices instead of a resolved entry.
+    all_indices = set(range(len(candidates)))
     seen_indices: set[int] = set()
     valid_entries: list[dict] = []
     for entry in resolved_entries:
@@ -2017,7 +2031,21 @@ def _reconcile_candidates_with_llm(
         seen_indices.update(indices)
         valid_entries.append({**entry, "source_indices": indices})
 
-    if seen_indices != set(range(len(candidates))):
+    raw_excluded = parsed.get("excluded_indices", [])
+    if raw_excluded and not isinstance(raw_excluded, list):
+        return unified_candidates
+    try:
+        excluded_indices = {int(index) for index in (raw_excluded or [])}
+    except (TypeError, ValueError):
+        return unified_candidates
+    if not excluded_indices.issubset(all_indices):
+        return unified_candidates
+    if seen_indices & excluded_indices:
+        return unified_candidates
+    if excluded_indices:
+        _log(f"LLM reconciliation excluded {len(excluded_indices)} candidate(s) as belonging to a different series")
+
+    if seen_indices | excluded_indices != all_indices:
         return unified_candidates
 
     reconciled = [_apply_reconciliation_entry(entry, [candidates[i] for i in entry["source_indices"]]) for entry in valid_entries]
