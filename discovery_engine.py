@@ -282,7 +282,7 @@ _TITLE_VARIANT_FILLER_TOKENS = {
 
 
 def _title_is_series_variant(
-    title: str, series_name: str | None, isbn13: str | None, has_structured_number_hint: bool
+    title: str, series_name: str | None, isbn13: str | None, structured_number_hint
 ) -> bool:
     """True if `title` is effectively just the series name -- an exact
     match, or a trivial variant of it ("A <Series> Thriller", "<Series>
@@ -296,25 +296,49 @@ def _title_is_series_variant(
     subtitle, nothing but the series' own name and a genre word -- as if it
     were a new, distinctly-titled book).
 
-    has_structured_number_hint must come from a provider's own structured
-    field (e.g. Hardcover's series_number_hint), NOT a number inferred from
-    this same title's own text -- a "Book 6" parsed out of the very title
-    being checked here isn't independent evidence of a real book, since
-    that's exactly the filler text this function exists to see through. A
-    real book's title-independent ISBN or structured series position is
-    real corroborating evidence and should still short-circuit this (same
-    guard looks_like_series_index_entry itself uses), so a legitimate,
-    exactly-eponymous book 1 (e.g. "Mistborn" for "Mistborn", cataloged
-    with an ISBN) is never caught here.
+    structured_number_hint must come from a provider's own structured field
+    (e.g. Hardcover's series_number_hint), NOT a number inferred from this
+    same title's own text -- a "Book 6" parsed out of the very title being
+    checked here isn't independent evidence of a real book on its own, since
+    that's exactly the filler text this function exists to see through.
+    It's still useful as corroboration for a title that also names its own
+    "Book <N>" filler (see below), since a title/provider pair that agree on
+    the same N is a real, self-consistent signal.
+
+    Passing the ISBN through unconditionally short-circuits this (same
+    guard looks_like_series_index_entry itself uses) -- an ISBN is tied to
+    one specific real edition, so it's strong enough evidence on its own.
+
+    For a title that's an EXACT match to the series name -- carrying zero
+    content beyond the series' own branding -- a bare structured number is
+    NOT enough cover unless it's plausibly the series' own eponymous first
+    entry (position 1): a real book is essentially never titled exactly
+    like its series except for that one legitimate case (e.g. "Mistborn"
+    for "Mistborn"). Treating ANY structured number as sufficient cover
+    for an exact-match title was itself a regression: Hardcover assigning
+    a real series-position number (e.g. 6) to what was otherwise still
+    just a bare/placeholder title let that exact malformed combination
+    straight through. A partial/trivial-variant title (e.g. "<Series> Book
+    7") is different -- there the "Book 7" is a common, legitimate
+    self-published title convention (see _TITLE_SERIES_MARKER_PATTERN),
+    and a structured number hint at all (any position, since it's the
+    title's own restated number this time, not an unrelated one) still
+    counts as real corroboration.
     """
-    if isbn13 or has_structured_number_hint:
+    if isbn13:
         return False
     normalized_title = normalize_series_branding_name(str(title or ""))
     normalized_series = normalize_series_branding_name(str(series_name or ""))
     if not normalized_title or not normalized_series:
         return False
     if normalized_title == normalized_series:
-        return True
+        try:
+            is_eponymous_first_entry = structured_number_hint is not None and float(structured_number_hint) == 1
+        except (TypeError, ValueError):
+            is_eponymous_first_entry = False
+        return not is_eponymous_first_entry
+    if structured_number_hint:
+        return False
 
     title_tokens = _token_set(normalized_title)
     series_tokens = _token_set(normalized_series)
@@ -1195,10 +1219,9 @@ def _filter_and_merge(
         # fallback above) so the same stub-listing check still applies
         # per-candidate.
         effective_series_name = series_name or series_name_hint
-        has_structured_number_hint = bool(raw.get("series_number_hint"))
         if looks_like_series_index_entry(
             title, effective_series_name, isbn13, has_number_hint
-        ) or _title_is_series_variant(title, effective_series_name, isbn13, has_structured_number_hint):
+        ) or _title_is_series_variant(title, effective_series_name, isbn13, raw.get("series_number_hint")):
             continue
 
         title_key = core_title_key(title)
@@ -3066,7 +3089,7 @@ def discover_candidates_for_author(
                     str(c.get("title") or ""),
                     c.get("series_name_hint"),
                     str(c.get("isbn13") or "").strip(),
-                    bool(c.get("series_number_hint")),
+                    c.get("series_number_hint"),
                 )
             )
         ]
