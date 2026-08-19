@@ -1360,7 +1360,33 @@ def _fuse_and_score_candidates(
             confidence += 0.1
         if merged_authors and _author_matches(merged_authors, author):
             confidence += 0.1
-        confidence_score = round(min(confidence, 1.0), 4)
+
+        # Series-name agreement: the same kind of provider-disagreement
+        # signal _candidate_has_provenance_disagreement checks for
+        # number/ISBN, applied to series identity, plus a down-score for
+        # candidates that carry no series-name signal at all or explicitly
+        # point at a different series than the one being searched for --
+        # both weaker/contradicting evidence that this candidate actually
+        # belongs to the target series (see _is_cross_series_contamination,
+        # which hard-excludes explicit mismatches only on the fallback
+        # pass -- this applies more broadly, as a soft penalty, to every
+        # fused candidate regardless of which pass produced it).
+        provenance_series_names = {
+            normalize_series_branding_name(str(member.get("series_name_hint") or ""))
+            for member in members
+            if member.get("series_name_hint")
+        }
+        provenance_series_names.discard("")
+        if len(provenance_series_names) > 1:
+            confidence -= 0.1
+        normalized_merged_series_name = (
+            normalize_series_branding_name(str(merged_series_name_hint)) if merged_series_name_hint else ""
+        )
+        if not normalized_merged_series_name:
+            confidence -= 0.05
+        elif series_name and normalized_merged_series_name != normalize_series_branding_name(series_name):
+            confidence -= 0.1
+        confidence_score = round(min(max(confidence, 0.0), 1.0), 4)
 
         completeness_values = {
             "title": primary.get("title"),
@@ -1629,13 +1655,13 @@ RECONCILIATION_MAX_CANDIDATES = 40
 
 def _candidate_has_provenance_disagreement(candidate: "UnifiedCandidate") -> bool:
     """True if the raw members _fuse_and_score_candidates grouped into this
-    one candidate don't actually agree with each other on book number or
-    ISBN -- i.e. fusion picked *a* value (the first non-null one it found),
-    but the providers disagreed about what that value should be. That's
-    exactly the kind of conflict a deterministic "first non-null wins"
-    backfill can't adjudicate well, and is one of the signals
-    _needs_llm_reconciliation uses to decide the fused set is worth a
-    second, LLM-driven look.
+    one candidate don't actually agree with each other on book number,
+    ISBN, or series name -- i.e. fusion picked *a* value (the first
+    non-null one it found), but the providers disagreed about what that
+    value should be. That's exactly the kind of conflict a deterministic
+    "first non-null wins" backfill can't adjudicate well, and is one of the
+    signals _needs_llm_reconciliation uses to decide the fused set is worth
+    a second, LLM-driven look.
     """
     if len(candidate.source_provenance) < 2:
         return False
@@ -1649,7 +1675,20 @@ def _candidate_has_provenance_disagreement(candidate: "UnifiedCandidate") -> boo
     isbns = {
         str(member["isbn13"]).strip() for member in candidate.source_provenance if str(member.get("isbn13") or "").strip()
     }
-    return len(isbns) > 1
+    if len(isbns) > 1:
+        return True
+    # Providers disagreeing on which series a book belongs to (e.g. one
+    # source tagging a candidate under a different Wagner thriller series
+    # than another) is just as real a fusion conflict as disagreeing on
+    # number/ISBN, and the same "first non-null wins" backfill can't
+    # adjudicate it either.
+    series_names = {
+        normalize_series_branding_name(str(member.get("series_name_hint") or ""))
+        for member in candidate.source_provenance
+        if member.get("series_name_hint")
+    }
+    series_names.discard("")
+    return len(series_names) > 1
 
 
 def _needs_llm_reconciliation(unified_candidates: list["UnifiedCandidate"], series_name: str | None) -> bool:
@@ -2283,30 +2322,36 @@ def _is_cross_series_contamination(
     """True only when a fallback candidate is EXPLICITLY tagged -- by its
     own series_name_hint, whether from Hardcover's structured field, the
     web-search LLM pass, or _filter_and_merge's own title-text fallback --
-    as belonging to one of this author's OTHER tracked series, rather than
-    the one actually being checked. A candidate with no series_name_hint at
-    all is never excluded here: "unless EXPLICIT cross-series contamination
-    is detected" means an absence of information is not itself evidence of
-    contamination -- see normalize_series_branding_name's own docstring for
-    why exact-ish rather than substring matching is used (a real, distinct
-    sub-series/rebrand must not be treated as the same series just because
-    it shares the base series' name).
+    as belonging to a DIFFERENT series than the one actually being checked.
+    A candidate with no series_name_hint at all is never excluded here:
+    "unless EXPLICIT cross-series contamination is detected" means an
+    absence of information is not itself evidence of contamination -- see
+    normalize_series_branding_name's own docstring for why exact-ish rather
+    than substring matching is used (a real, distinct sub-series/rebrand
+    must not be treated as the same series just because it shares the base
+    series' name).
+
+    other_known_series_names is accepted for call-site compatibility but no
+    longer gates or narrows this check (regression: an author tracked under
+    only ONE series -- e.g. George Wagner's "Jonathan Hunt Thriller
+    Series" -- had contamination detection effectively disabled entirely,
+    since there were no "other tracked series" to compare against, even
+    though the hint on a contaminating candidate was plainly a different
+    series). Any explicit, non-matching series_name_hint is contamination
+    regardless of whether the user happens to track that other series too.
     """
-    if not other_known_series_names:
-        return False
     hint = normalize_series_branding_name(str(raw.get("series_name_hint") or ""))
     if not hint:
         return False
-    if target_series_name and hint == normalize_series_branding_name(target_series_name):
+    target = normalize_series_branding_name(target_series_name) if target_series_name else ""
+    if target and hint == target:
         return False
-    return hint in {normalize_series_branding_name(name) for name in other_known_series_names if name}
+    return True
 
 
 def _filter_cross_series_contamination(
     fetch_results: dict, target_series_name: str | None, other_known_series_names: set[str] | None
 ) -> dict:
-    if not other_known_series_names:
-        return fetch_results
     filtered = dict(fetch_results)
     for provider in ("google", "openlibrary", "hardcover", "web"):
         filtered[provider] = [
