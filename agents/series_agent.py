@@ -382,17 +382,21 @@ class SeriesIntelligenceAgent:
                 ]
                 author_owned_titles |= {discovery_engine.core_title_key(book.title) for book in other_books if book.title}
 
-            # The broad author-bibliography fallback (used only when a
-            # targeted series+author search finds nothing) risks pulling in
-            # this author's unrelated other work, so only allow it when this
-            # is the only series tracked for them in the library.
-            author_is_unambiguous = len(other_series_by_author) == 0
+            # The broad author-bibliography fallback can trigger even when
+            # this author has other tracked series -- rather than disabling
+            # the whole pass just because other series exist,
+            # discover_candidates_for_series itself drops any fallback hit
+            # explicitly tagged as belonging to one of those other series
+            # (see other_known_series_names / _is_cross_series_contamination
+            # there) while still allowing it to surface anything new for
+            # *this* series.
+            other_known_series_names = {other.name for other in other_series_by_author if other.name}
 
             discovery = discovery_engine.discover_candidates_for_series(
                 series.name,
                 series_author,
                 exclude_title_keys=author_owned_titles,
-                allow_author_fallback=author_is_unambiguous,
+                other_known_series_names=other_known_series_names,
                 progress_callback=progress_callback,
                 highest_owned_book_number=highest_owned_book_number,
             )

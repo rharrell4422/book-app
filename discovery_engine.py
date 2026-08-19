@@ -2212,12 +2212,119 @@ def _finalize_candidates(unified_candidates: list["UnifiedCandidate"]) -> list["
     return finalized
 
 
+# Gates the author-bibliography fallback in discover_candidates_for_series --
+# replaces the old binary "only if the targeted pass found absolutely
+# nothing" trigger. An empty targeted pass still triggers it (0.0 scores on
+# both signals below, well under either threshold) but so does a targeted
+# pass that found *something*, just not enough of it or not confidently
+# enough -- e.g. a series where only book 1 of a known 5 turned up, or
+# every hit came from a single low-trust source with no ISBN. Deliberately
+# less aggressive than _needs_llm_reconciliation's own thresholds (0.8/0.5):
+# broadening the search author-wide is a bigger, costlier escalation than an
+# LLM reconciliation pass over data already in hand, so it's reserved for
+# cases that look more seriously incomplete/unreliable, not just messy.
+FALLBACK_SERIES_COMPLETENESS_THRESHOLD = 0.5
+FALLBACK_CONFIDENCE_THRESHOLD = 0.35
+
+
+def _series_completeness_and_confidence(
+    fused_candidates: list["UnifiedCandidate"],
+    series_name: str | None,
+    highest_owned_book_number: int | None,
+) -> tuple[float, float]:
+    """Cheap, discovery-side-only proxy for "did the targeted pass give us a
+    complete, confident picture of this series" -- feeds
+    _should_trigger_author_fallback. Deliberately simpler than
+    _reconstruct_series_skeleton's own completeness math (that one also has
+    the caller's full owned_books list to work with, and is used to decide
+    which *specific* volumes to search for -- this only has
+    highest_owned_book_number on hand, and only needs a rough signal to
+    decide whether broadening the search author-wide is worth it at all).
+    """
+    if not fused_candidates:
+        return 0.0, 0.0
+
+    known_numbers: set[int] = set()
+    if highest_owned_book_number:
+        known_numbers.add(int(highest_owned_book_number))
+    for candidate in fused_candidates:
+        number = _resolve_candidate_number(candidate, series_name)
+        if number is not None and float(number).is_integer():
+            known_numbers.add(int(number))
+
+    expected_total = max(known_numbers) if known_numbers else 0
+    series_completeness = (len(known_numbers) / expected_total) if expected_total > 0 else 1.0
+    avg_confidence = sum(candidate.confidence_score for candidate in fused_candidates) / len(fused_candidates)
+    return series_completeness, avg_confidence
+
+
+def _should_trigger_author_fallback(
+    fused_candidates: list["UnifiedCandidate"],
+    series_name: str | None,
+    highest_owned_book_number: int | None,
+) -> bool:
+    series_completeness, avg_confidence = _series_completeness_and_confidence(
+        fused_candidates, series_name, highest_owned_book_number
+    )
+    triggered = (
+        series_completeness < FALLBACK_SERIES_COMPLETENESS_THRESHOLD or avg_confidence < FALLBACK_CONFIDENCE_THRESHOLD
+    )
+    if triggered:
+        _log(
+            f"Author-fallback triggered: series completeness {series_completeness:.0%}, "
+            f"avg confidence {avg_confidence:.0%}"
+        )
+    return triggered
+
+
+def _is_cross_series_contamination(
+    raw: dict, target_series_name: str | None, other_known_series_names: set[str] | None
+) -> bool:
+    """True only when a fallback candidate is EXPLICITLY tagged -- by its
+    own series_name_hint, whether from Hardcover's structured field, the
+    web-search LLM pass, or _filter_and_merge's own title-text fallback --
+    as belonging to one of this author's OTHER tracked series, rather than
+    the one actually being checked. A candidate with no series_name_hint at
+    all is never excluded here: "unless EXPLICIT cross-series contamination
+    is detected" means an absence of information is not itself evidence of
+    contamination -- see normalize_series_branding_name's own docstring for
+    why exact-ish rather than substring matching is used (a real, distinct
+    sub-series/rebrand must not be treated as the same series just because
+    it shares the base series' name).
+    """
+    if not other_known_series_names:
+        return False
+    hint = normalize_series_branding_name(str(raw.get("series_name_hint") or ""))
+    if not hint:
+        return False
+    if target_series_name and hint == normalize_series_branding_name(target_series_name):
+        return False
+    return hint in {normalize_series_branding_name(name) for name in other_known_series_names if name}
+
+
+def _filter_cross_series_contamination(
+    fetch_results: dict, target_series_name: str | None, other_known_series_names: set[str] | None
+) -> dict:
+    if not other_known_series_names:
+        return fetch_results
+    filtered = dict(fetch_results)
+    for provider in ("google", "openlibrary", "hardcover", "web"):
+        filtered[provider] = [
+            raw
+            for raw in (fetch_results.get(provider) or [])
+            if not _is_cross_series_contamination(raw, target_series_name, other_known_series_names)
+        ]
+    return filtered
+
+
 def discover_candidates_for_series(
     series_name: str,
     author: str,
     *,
     exclude_title_keys: set[str] | None = None,
     allow_author_fallback: bool = True,
+    other_known_series_names: set[str] | None = None,
+    enable_fallback_web_search: bool = False,
     progress_callback=None,
     highest_owned_book_number: int | None = None,
 ) -> dict:
@@ -2228,11 +2335,31 @@ def discover_candidates_for_series(
     the series (via title/description text), rather than trying to infer
     series membership purely from title patterns.
 
-    Fallback pass (only if the primary pass finds nothing, and only when
-    the caller says it's safe -- i.e. this author has no other tracked
-    series in the library): a plain author-bibliography sweep, so a brand
-    new release whose indexed text doesn't yet mention the series name can
-    still surface.
+    Fallback pass: a plain author-bibliography sweep, so a brand new release
+    whose indexed text doesn't yet mention the series name can still
+    surface. Triggered by _should_trigger_author_fallback -- the targeted
+    pass looking seriously incomplete or low-confidence, not just literally
+    empty -- rather than the old "only if the targeted pass found nothing at
+    all" rule (still covered, as the most extreme case of "incomplete").
+    allow_author_fallback remains a hard, caller-controlled kill switch
+    (e.g. discover_series_by_name deliberately always sets it False --
+    it's already running the targeted search on demand specifically to fill
+    in one series, so a broad author sweep on top would be redundant).
+
+    Having other tracked series by this author no longer disables the
+    fallback pass outright -- pass their names as other_known_series_names
+    and any fallback hit EXPLICITLY tagged as one of those (not simply
+    unlabeled) is dropped before it ever reaches fusion; see
+    _is_cross_series_contamination. The fallback's own results are additive
+    to the targeted pass's, not a replacement for them, since the targeted
+    pass may well have already found real, legitimate matches even while
+    still triggering fallback for being incomplete.
+
+    The fallback pass has never queried web search, since Brave+LLM
+    structuring on a bare author-wide sweep (no series name to scope
+    against) is a noisier, costlier signal than the catalog APIs already
+    provide there -- enable_fallback_web_search opts into it anyway for a
+    caller that wants the extra coverage.
     """
     exclude_title_keys = exclude_title_keys or set()
     series_name = str(series_name or "").strip()
@@ -2343,14 +2470,16 @@ def discover_candidates_for_series(
     final_fused_candidates = fused_candidates
 
     used_author_fallback = False
-    if not combined and allow_author_fallback:
+    if allow_author_fallback and _should_trigger_author_fallback(fused_candidates, series_name, highest_owned_book_number):
         used_author_fallback = True
         if progress_callback:
             progress_callback({"current_pass": f"Broadening search to all books by {author}"})
 
-        # No web search on this fallback pass (never has been) -- pass
-        # enable_web_search=False rather than omitting web entirely so the
-        # helper's return shape stays consistent regardless of caller.
+        # Web search stays off by default on this fallback pass -- Brave+LLM
+        # structuring on a bare author-wide sweep (no series name to scope
+        # against) is a noisier, costlier signal than the catalog APIs
+        # already provide here -- but a caller can opt in via
+        # enable_fallback_web_search.
         fallback_results = _fetch_all_providers_parallel(
             query_author,
             None,
@@ -2358,8 +2487,15 @@ def discover_candidates_for_series(
             None,
             author=author,
             openlibrary_query=f'author:"{query_author}"',
-            enable_web_search=False,
+            web_search_queries=[f"{query_author} new books"],
+            enable_web_search=enable_fallback_web_search,
         )
+        # Explicit cross-series contamination -- a fallback hit tagged with
+        # one of this author's OTHER tracked series' names -- is dropped
+        # before fusion ever sees it, rather than disabling the whole pass
+        # just because other series exist (see this function's docstring
+        # and _is_cross_series_contamination).
+        fallback_results = _filter_cross_series_contamination(fallback_results, series_name, other_known_series_names)
         fallback_failures = fallback_results["_failures"]
 
         google_fallback = fallback_results["google"]
@@ -2380,18 +2516,36 @@ def discover_candidates_for_series(
         elif hardcover_fallback or os.environ.get("HARDCOVER_API_KEY", "").strip():
             any_provider_succeeded = True
 
+        if enable_fallback_web_search:
+            web_fallback = fallback_results["web"]
+            if os.environ.get("BRAVE_SEARCH_API_KEY", "").strip() and os.environ.get("ANTHROPIC_API_KEY", "").strip():
+                if "web" in fallback_failures:
+                    provider_failures.append({"provider": "web_search_fallback", "error": str(fallback_failures["web"])})
+                else:
+                    any_provider_succeeded = True
+
         fused_fallback_candidates = _fuse_and_score_candidates(fallback_results, author, series_name)
         if _needs_llm_reconciliation(fused_fallback_candidates, series_name):
             fused_fallback_candidates = _reconcile_candidates_with_llm(fused_fallback_candidates, series_name)
         fused_fallback_candidates = _finalize_candidates(fused_fallback_candidates)
-        combined = _filter_and_merge(
+        # Additive, not a replacement: the targeted pass above may have
+        # already found real matches even while still triggering fallback
+        # for looking incomplete, so the targeted pass's own title keys are
+        # excluded here too -- the fallback only ever contributes *new*
+        # candidates the targeted pass didn't already surface, each still
+        # correctly tagged confidence="author_fallback" (weaker trust than
+        # "targeted" -- series_agent.py's belongs_to_series leans on that
+        # distinction) rather than the two passes' results being conflated.
+        already_found_title_keys = {core_title_key(str(candidate.get("title") or "")) for candidate in combined}
+        fallback_combined = _filter_and_merge(
             [_unified_candidate_to_raw_dict(candidate) for candidate in fused_fallback_candidates],
             author,
-            exclude_title_keys,
+            exclude_title_keys | already_found_title_keys,
             confidence="author_fallback",
             series_name=series_name,
         )
-        final_fused_candidates = fused_fallback_candidates
+        combined = combined + fallback_combined
+        final_fused_candidates = fused_candidates + fused_fallback_candidates
 
     # "All providers failed" should mean we got no usable data at all (every
     # call raised), not just that filtering left zero new candidates -- a
