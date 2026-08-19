@@ -207,6 +207,63 @@ def normalize_series_branding_name(name: str | None) -> str:
     return re.sub(r"\s+", " ", stripped).strip()
 
 
+# Local duplicates of agents/series_agent.py's _token_set/_token_overlap_ratio
+# rather than importing them -- series_agent.py imports this module, not the
+# other way around, so importing back would be circular. Same semantics
+# (normalize_text + split; overlap divided by the SMALLER set's size, not
+# the union, so a short series name isn't unfairly penalized just for
+# having fewer tokens than a longer, more descriptive variant).
+def _token_set(value: str | None) -> set[str]:
+    return {token for token in normalize_text(value).split() if token}
+
+
+def _token_overlap_ratio(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / max(1, min(len(left), len(right)))
+
+
+def _series_names_compatible(hint: str | None, target: str | None) -> bool:
+    """True if `hint` and `target` plausibly name the same series, just
+    branded/worded differently across providers (e.g. Hardcover's bare
+    "Jonathan Hunt" vs. Google Books' "Jonathan Hunt Thriller Series") --
+    as opposed to two genuinely different series that happen to share some
+    text. Used anywhere a hint needs to be checked against a series
+    identity, whether that's the target series being searched for
+    (_is_cross_series_contamination, the Phase 2 scoring penalty) or another
+    hint from the same candidate's own source_provenance
+    (_candidate_has_provenance_disagreement).
+
+    normalize_series_branding_name handles the common case (a generic
+    suffix word like "Series"/"Universe" added or dropped). Token
+    subset/overlap on top of that handles the harder case above, where the
+    two names aren't a pure suffix difference -- one is just a shorter or
+    more/less descriptive rendering of the other. Requiring at least 2
+    overlapping tokens (not just a high ratio) guards against two short,
+    unrelated series names being called "compatible" purely because they
+    happen to share one common word (e.g. "Jonathan Hunt" vs. a
+    hypothetical unrelated "Hunt for Red October" would otherwise clear a
+    plain >=0.5 ratio on the single shared word "hunt" alone).
+    """
+    normalized_hint = normalize_series_branding_name(str(hint or ""))
+    normalized_target = normalize_series_branding_name(str(target or ""))
+    if not normalized_hint or not normalized_target:
+        return False
+    if normalized_hint == normalized_target:
+        return True
+
+    hint_tokens = _token_set(normalized_hint)
+    target_tokens = _token_set(normalized_target)
+    overlap = hint_tokens & target_tokens
+    if len(overlap) < 2:
+        return False
+
+    if hint_tokens <= target_tokens or target_tokens <= hint_tokens:
+        return True
+
+    return _token_overlap_ratio(hint_tokens, target_tokens) >= 0.5
+
+
 def looks_like_series_index_entry(
     title: str, series_name: str | None, isbn13: str | None, has_number_hint: bool
 ) -> bool:
@@ -1370,21 +1427,25 @@ def _fuse_and_score_candidates(
         # belongs to the target series (see _is_cross_series_contamination,
         # which hard-excludes explicit mismatches only on the fallback
         # pass -- this applies more broadly, as a soft penalty, to every
-        # fused candidate regardless of which pass produced it).
-        provenance_series_names = {
-            normalize_series_branding_name(str(member.get("series_name_hint") or ""))
+        # fused candidate regardless of which pass produced it). Uses
+        # _series_names_compatible rather than strict equality so a
+        # differently-branded-but-real hint for this same series (e.g.
+        # Hardcover's bare "Jonathan Hunt" against a target tracked as
+        # "Jonathan Hunt Thriller Series") isn't penalized as a mismatch.
+        raw_provenance_series_names = [
+            str(member.get("series_name_hint") or "")
             for member in members
             if member.get("series_name_hint")
-        }
-        provenance_series_names.discard("")
-        if len(provenance_series_names) > 1:
+        ]
+        if any(
+            not _series_names_compatible(a, b)
+            for i, a in enumerate(raw_provenance_series_names)
+            for b in raw_provenance_series_names[i + 1 :]
+        ):
             confidence -= 0.1
-        normalized_merged_series_name = (
-            normalize_series_branding_name(str(merged_series_name_hint)) if merged_series_name_hint else ""
-        )
-        if not normalized_merged_series_name:
+        if not merged_series_name_hint:
             confidence -= 0.05
-        elif series_name and normalized_merged_series_name != normalize_series_branding_name(series_name):
+        elif series_name and not _series_names_compatible(merged_series_name_hint, series_name):
             confidence -= 0.1
         confidence_score = round(min(max(confidence, 0.0), 1.0), 4)
 
@@ -1433,7 +1494,7 @@ def _fuse_and_score_candidates(
             UnifiedCandidate(
                 title=str(primary.get("title") or "").strip(),
                 authors=merged_authors,
-                series_name=series_name or (str(merged_series_name_hint).strip() if merged_series_name_hint else None),
+                series_name=(str(merged_series_name_hint).strip() if merged_series_name_hint else None) or series_name,
                 series_number=series_number_value,
                 isbn13=merged_isbn13,
                 edition_type="unknown",
@@ -1681,14 +1742,21 @@ def _candidate_has_provenance_disagreement(candidate: "UnifiedCandidate") -> boo
     # source tagging a candidate under a different Wagner thriller series
     # than another) is just as real a fusion conflict as disagreeing on
     # number/ISBN, and the same "first non-null wins" backfill can't
-    # adjudicate it either.
-    series_names = {
-        normalize_series_branding_name(str(member.get("series_name_hint") or ""))
+    # adjudicate it either. Compared via _series_names_compatible rather
+    # than strict equality, so two members merely branding the SAME series
+    # differently (e.g. "Jonathan Hunt" vs. "Jonathan Hunt Thriller
+    # Series") don't register as a disagreement -- only genuinely
+    # different series names do.
+    series_names = [
+        str(member.get("series_name_hint") or "")
         for member in candidate.source_provenance
         if member.get("series_name_hint")
-    }
-    series_names.discard("")
-    return len(series_names) > 1
+    ]
+    return any(
+        not _series_names_compatible(a, b)
+        for i, a in enumerate(series_names)
+        for b in series_names[i + 1 :]
+    )
 
 
 def _needs_llm_reconciliation(unified_candidates: list["UnifiedCandidate"], series_name: str | None) -> bool:
@@ -2353,11 +2421,14 @@ def _is_cross_series_contamination(
     as belonging to a DIFFERENT series than the one actually being checked.
     A candidate with no series_name_hint at all is never excluded here:
     "unless EXPLICIT cross-series contamination is detected" means an
-    absence of information is not itself evidence of contamination -- see
-    normalize_series_branding_name's own docstring for why exact-ish rather
-    than substring matching is used (a real, distinct sub-series/rebrand
-    must not be treated as the same series just because it shares the base
-    series' name).
+    absence of information is not itself evidence of contamination.
+    Compatibility is judged via _series_names_compatible rather than exact
+    text equality, so a real, differently-branded hint for the SAME series
+    (e.g. Hardcover's bare "Jonathan Hunt" against a target tracked as
+    "Jonathan Hunt Thriller Series") isn't misread as contamination -- but
+    a real, distinct sub-series/rebrand with only superficial overlap still
+    is (see _series_names_compatible's own docstring for the token-overlap
+    guard that keeps this narrow).
 
     other_known_series_names is accepted for call-site compatibility but no
     longer gates or narrows this check (regression: an author tracked under
@@ -2365,14 +2436,13 @@ def _is_cross_series_contamination(
     Series" -- had contamination detection effectively disabled entirely,
     since there were no "other tracked series" to compare against, even
     though the hint on a contaminating candidate was plainly a different
-    series). Any explicit, non-matching series_name_hint is contamination
+    series). Any explicit, incompatible series_name_hint is contamination
     regardless of whether the user happens to track that other series too.
     """
-    hint = normalize_series_branding_name(str(raw.get("series_name_hint") or ""))
+    hint = str(raw.get("series_name_hint") or "").strip()
     if not hint:
         return False
-    target = normalize_series_branding_name(target_series_name) if target_series_name else ""
-    if target and hint == target:
+    if _series_names_compatible(hint, target_series_name):
         return False
     return True
 
