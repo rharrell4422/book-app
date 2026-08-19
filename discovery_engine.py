@@ -264,6 +264,83 @@ def _series_names_compatible(hint: str | None, target: str | None) -> bool:
     return _token_overlap_ratio(hint_tokens, target_tokens) >= 0.5
 
 
+# Words that add no real distinguishing content to a title beyond restating
+# "this is part of the series" -- a title that's just the series name plus
+# some of these (e.g. "Jonathan Hunt Thriller Series Book 6") is exactly as
+# much a non-book stub as the bare series name alone, just with extra filler
+# stapled on. Deliberately does NOT include genre/descriptive words -- those
+# are exactly the kind of real (if generic) content _title_is_series_variant
+# must NOT treat as filler, or it would wrongly reject genuinely-titled books
+# that happen to lead with the full series name (a common indie-catalog
+# convention -- see _TITLE_SERIES_MARKER_PATTERN/_DASH_SERIES_MARKER_PATTERN
+# elsewhere in this file for the same convention in reverse).
+_TITLE_VARIANT_FILLER_TOKENS = {
+    "a", "an", "the",
+    "book", "books", "novel", "novella", "novellas", "novels",
+    "vol", "vols", "volume", "volumes", "part", "parts", "no", "number", "numbers",
+}
+
+
+def _title_is_series_variant(
+    title: str, series_name: str | None, isbn13: str | None, has_structured_number_hint: bool
+) -> bool:
+    """True if `title` is effectively just the series name -- an exact
+    match, or a trivial variant of it ("A <Series> Thriller", "<Series>
+    Book 6", "<Series> Novel") -- rather than a real, distinctly-titled
+    book. Complements looks_like_series_index_entry: that function catches
+    the bare, unadorned series name; this one catches the same underlying
+    non-book stub with a little filler text stapled on, which slips past
+    looks_like_series_index_entry's exact-form comparison (regression:
+    "Check Now" on George Wagner's "Jonathan Hunt Thriller Series" admitted
+    a candidate titled "A Jonathan Hunt Thriller" -- no ISBN, no real
+    subtitle, nothing but the series' own name and a genre word -- as if it
+    were a new, distinctly-titled book).
+
+    has_structured_number_hint must come from a provider's own structured
+    field (e.g. Hardcover's series_number_hint), NOT a number inferred from
+    this same title's own text -- a "Book 6" parsed out of the very title
+    being checked here isn't independent evidence of a real book, since
+    that's exactly the filler text this function exists to see through. A
+    real book's title-independent ISBN or structured series position is
+    real corroborating evidence and should still short-circuit this (same
+    guard looks_like_series_index_entry itself uses), so a legitimate,
+    exactly-eponymous book 1 (e.g. "Mistborn" for "Mistborn", cataloged
+    with an ISBN) is never caught here.
+    """
+    if isbn13 or has_structured_number_hint:
+        return False
+    normalized_title = normalize_series_branding_name(str(title or ""))
+    normalized_series = normalize_series_branding_name(str(series_name or ""))
+    if not normalized_title or not normalized_series:
+        return False
+    if normalized_title == normalized_series:
+        return True
+
+    title_tokens = _token_set(normalized_title)
+    series_tokens = _token_set(normalized_series)
+    overlap = title_tokens & series_tokens
+    if len(overlap) < 2:
+        return False
+
+    # Tokens the title has beyond the series name itself -- if every one of
+    # those is just generic filler (an article, "book"/"novel", a bare
+    # number), the title carries no real distinguishing content at all and
+    # is just as much a stub as an exact match. A title with even one real
+    # word beyond the series name (a genuine subtitle, however short) is a
+    # real, distinctly-titled book and must NOT be excluded here -- so this
+    # is the sole determinant, not a secondary check alongside a raw
+    # overlap-ratio threshold: a plain ratio would also flag a real title
+    # that happens to fully restate the series name up front (e.g.
+    # "<Series>: <Real Subtitle>"), since restating the whole series name
+    # trivially maximizes overlap regardless of how substantial the rest of
+    # the title is.
+    unique_title_tokens = title_tokens - series_tokens
+    meaningful_unique_tokens = {
+        token for token in unique_title_tokens if token not in _TITLE_VARIANT_FILLER_TOKENS and not token.isdigit()
+    }
+    return not meaningful_unique_tokens
+
+
 def looks_like_series_index_entry(
     title: str, series_name: str | None, isbn13: str | None, has_number_hint: bool
 ) -> bool:
@@ -1118,7 +1195,10 @@ def _filter_and_merge(
         # fallback above) so the same stub-listing check still applies
         # per-candidate.
         effective_series_name = series_name or series_name_hint
-        if looks_like_series_index_entry(title, effective_series_name, isbn13, has_number_hint):
+        has_structured_number_hint = bool(raw.get("series_number_hint"))
+        if looks_like_series_index_entry(
+            title, effective_series_name, isbn13, has_number_hint
+        ) or _title_is_series_variant(title, effective_series_name, isbn13, has_structured_number_hint):
             continue
 
         title_key = core_title_key(title)
@@ -2974,12 +3054,20 @@ def discover_candidates_for_author(
         combined = [
             c
             for c in combined
-            if not looks_like_series_index_entry(
-                str(c.get("title") or ""),
-                c.get("series_name_hint"),
-                str(c.get("isbn13") or "").strip(),
-                bool(c.get("series_number_hint"))
-                or bool(infer_number_from_title(str(c.get("title") or ""), c.get("series_name_hint"))),
+            if not (
+                looks_like_series_index_entry(
+                    str(c.get("title") or ""),
+                    c.get("series_name_hint"),
+                    str(c.get("isbn13") or "").strip(),
+                    bool(c.get("series_number_hint"))
+                    or bool(infer_number_from_title(str(c.get("title") or ""), c.get("series_name_hint"))),
+                )
+                or _title_is_series_variant(
+                    str(c.get("title") or ""),
+                    c.get("series_name_hint"),
+                    str(c.get("isbn13") or "").strip(),
+                    bool(c.get("series_number_hint")),
+                )
             )
         ]
 
