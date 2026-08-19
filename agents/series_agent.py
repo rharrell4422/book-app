@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import date
 
 from sqlalchemy.orm import Session
 
+import delta_engine
 import discovery_engine
 import intelligence
-from models import Book, Series
+from models import Book, Series, SeriesSkeleton
 from services.discovery_logging import log_discovery_summary
 
 
@@ -403,6 +405,35 @@ class SeriesIntelligenceAgent:
             candidates = discovery["candidates"]
             provider_failures = discovery["provider_failures"]
             all_providers_failed = discovery["all_providers_failed"]
+
+            # Phase 2 of agentic discovery, SHADOW MODE ONLY: computes a
+            # deterministic delta between the Phase 1 SeriesSkeleton
+            # baseline and this run's PRE-_filter_and_merge candidates
+            # (discovery["unified_candidates"] -- see delta_engine's own
+            # docstring for why pre-filter, not the post-filter
+            # `candidates` above), and logs it. Nothing downstream reads
+            # `series_delta`; it cannot change `candidates`,
+            # `provider_failures`, or anything persisted by this run.
+            try:
+                skeleton_row = (
+                    db.query(SeriesSkeleton).filter(SeriesSkeleton.series_id == series_id).first()
+                )
+                skeleton_entries = skeleton_row.skeleton_json if skeleton_row else []
+                unified_candidate_dicts = [
+                    candidate.model_dump() for candidate in discovery.get("unified_candidates", [])
+                ]
+                series_delta = delta_engine.compute_series_delta(
+                    series_id,
+                    skeleton_entries,
+                    unified_candidate_dicts,
+                    series_name=series.name,
+                )
+                logger.info("series_delta: %s", json.dumps(series_delta, default=str))
+            except Exception:
+                # Shadow-mode diagnostics must never be able to fail a real
+                # Check Now run -- log and move on exactly like any other
+                # best-effort telemetry would.
+                logger.exception("series_delta computation failed for series_id=%s", series_id)
 
             # Missing-volume detection: a series can own/find books 1-4 and
             # 6-9 but nothing for 5 -- that's not book 5 ranking low in the
