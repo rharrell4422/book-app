@@ -10,6 +10,7 @@ from bootstrap import (
     run_migrations,
 )
 from routers import admin, auth, books, imports, profiles, series
+from services.skeleton_store import backfill_all_skeletons
 
 # Bring the DB schema up to date (see bootstrap.run_migrations) before
 # anything else touches it.
@@ -23,6 +24,10 @@ async def lifespan(app: FastAPI):
     # needs to run against a live DB session each time the app starts.
     await asyncio.to_thread(clear_stale_ghost_flags_on_read_books)
     await asyncio.to_thread(backfill_series_state)
+    # Phase 1 of agentic discovery: keeps series_skeleton in sync with the
+    # library on every boot. Purely additive -- nothing reads this table
+    # yet, so this cannot change any existing behavior.
+    await asyncio.to_thread(backfill_all_skeletons)
     yield
 
 

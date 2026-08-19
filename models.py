@@ -240,3 +240,42 @@ class Book(Base):
     @property
     def series_name(self):
         return self.series.name if self.series else None
+
+
+class SeriesSkeleton(Base):
+    """Durable "memory" of a series' book lineup, decoupled from any single
+    Check Now run -- the piece the old discovery pipeline never had (its
+    only durable state was the summary fields on Series itself, like
+    missing_books/last_checked, not a per-book record with confidence or
+    provenance). Phase 1 only: this table is deterministically backfilled
+    from existing Book rows (see services/skeleton_store.py) with zero LLM
+    involvement and no behavior change anywhere else yet.
+
+    skeleton_json entries already carry confidence/status/sources fields
+    that Phase 1 only ever sets to "confirmed"/"high"/a "library" source,
+    ahead of when later phases (delta checks, agentic Tier 2 discovery)
+    actually need them -- reshaping this JSON structure once real rows
+    exist would otherwise require migrating every row's content, not just
+    adding a column.
+
+    One row per series (series_id is the primary key) since there's
+    exactly one skeleton per series -- no separate surrogate id needed.
+    """
+
+    __tablename__ = "series_skeleton"
+
+    series_id = Column(Integer, ForeignKey("series.id"), primary_key=True)
+
+    # List of dicts, one per known book number:
+    #   book_number, title, status ("confirmed" | "unconfirmed" | "upcoming"),
+    #   confidence ("high" | "medium" | "low"), release_date (ISO string or
+    #   None), edition_hints, sources ([{provider, url, fetched_at}]),
+    #   first_seen_at, last_confirmed_at (both ISO strings).
+    skeleton_json = Column(JSON, nullable=False, default=list)
+
+    schema_version = Column(Integer, nullable=False, default=1)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    series = relationship("Series")
