@@ -35,6 +35,13 @@ import httpx
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
+# Reused, not reimplemented -- these are the same edition-title-normalization
+# and edition-priority-ranking heuristics services/series_check_engine.py
+# already uses for its DB-write-path edition collapse (see
+# _finalize_candidates), so a "which edition wins" decision means the same
+# thing on both the discovery side and the persistence side.
+from services.identity import _edition_priority, _normalize_title_for_identity
+
 # Loaded here (rather than relying on the entry point having done it first)
 # so this module reads the right API key regardless of import order.
 load_dotenv()
@@ -1979,6 +1986,232 @@ def _reconcile_candidates_with_llm(
     return reconciled + unified_candidates[len(candidates):]
 
 
+# Complements _normalize_title_for_identity (services/identity.py), which
+# *strips* these same bracketed/trailing format qualifiers when comparing
+# titles for identity -- this is the extractive counterpart, used only to
+# rank same-book candidates by _edition_priority once _finalize_candidates
+# has already decided two of them are the same underlying book. Order
+# matters: the more specific "mass market paperback" is checked before the
+# more general "paperback" it contains.
+_EDITION_TITLE_MARKERS: tuple[tuple[str, str], ...] = (
+    (r"\b(?:audible(?:\s+audio)?|audio\s*cd|audiobook)\b", "audio"),
+    (r"\bkindle(?:\s+edition)?\b", "ebook"),
+    (r"\bmass\s+market\s+paperback\b", "paperback"),
+    (r"\bpaperback\b", "paperback"),
+    (r"\bhardcover\b", "hardcover"),
+)
+
+
+def _infer_edition_type_from_title(title: str | None) -> str:
+    text = str(title or "").lower()
+    for pattern, edition in _EDITION_TITLE_MARKERS:
+        if re.search(pattern, text):
+            return edition
+    return "unknown"
+
+
+def _resolved_edition_type(candidate: "UnifiedCandidate") -> str:
+    if candidate.edition_type and candidate.edition_type not in ("unknown", "bundle"):
+        return candidate.edition_type
+    return _infer_edition_type_from_title(candidate.title)
+
+
+def _same_underlying_book(a: "UnifiedCandidate", b: "UnifiedCandidate") -> bool:
+    """True if a and b are plausibly two different editions of the exact
+    same real book, rather than two different books.
+
+    Plain identity-key fusion (_fuse_and_score_candidates) already grouped
+    strictly by isbn13 -> title_key -> normalized title, so a and b (two
+    already-distinct UnifiedCandidates) got here precisely *because*
+    neither their ISBNs nor their exact title text matched. This is a
+    looser second check using _normalize_title_for_identity (services/
+    identity.py), which strips format/edition qualifiers -- "(Kindle
+    Edition)", "(Audible Audio)", "SIGNED", etc. -- that a plain exact-title
+    match doesn't, so "Iron Flame" and "Iron Flame (Audible Audio Edition)"
+    normalize to the same identity even though fusion's own stricter key
+    kept them apart.
+
+    A mismatched series_number (when BOTH sides actually have one) blocks
+    the match regardless of title -- two genuinely different volumes can
+    share a generic normalized title, and a real number disagreement is a
+    stronger signal than a title-text coincidence. When only one (or
+    neither) side has a resolved number, that can't rule anything out, so
+    the title match alone decides.
+    """
+    normalized_a = _normalize_title_for_identity(a.title)
+    normalized_b = _normalize_title_for_identity(b.title)
+    if not normalized_a or normalized_a != normalized_b:
+        return False
+    if a.series_number is not None and b.series_number is not None and a.series_number != b.series_number:
+        return False
+    return True
+
+
+def _edition_strength(candidate: "UnifiedCandidate") -> tuple[int, float, float]:
+    return (
+        _edition_priority(_resolved_edition_type(candidate)),
+        candidate.metadata_completeness_score,
+        candidate.confidence_score,
+    )
+
+
+def _strictly_better_metadata(a: "UnifiedCandidate", b: "UnifiedCandidate") -> bool:
+    """True if a's metadata is unambiguously better than b's: at least as
+    good on every one of edition priority / metadata completeness /
+    confidence, and strictly better on at least one. This is genuine Pareto
+    dominance, not a simple tuple/lexicographic comparison -- lexicographic
+    ordering would let a single-dimension edge (e.g. a slightly higher
+    edition priority) declare a winner even while b is clearly better on
+    every other measure, which is exactly the "different, not better"
+    situation _finalize_candidates is supposed to leave alone. Only when a
+    is at least tied everywhere and ahead somewhere does one edition count
+    as "strictly better metadata" rather than merely a different edition.
+    """
+    a_values = _edition_strength(a)
+    b_values = _edition_strength(b)
+    return all(x >= y for x, y in zip(a_values, b_values)) and any(x > y for x, y in zip(a_values, b_values))
+
+
+def _collapse_edition_group(ranked_group: list["UnifiedCandidate"]) -> "UnifiedCandidate":
+    """Merges a group of same-underlying-book candidates (see
+    _same_underlying_book) that _finalize_candidates has already confirmed
+    has one unambiguous best edition (ranked_group[0], by _edition_strength)
+    into a single UnifiedCandidate -- the winning edition's own fields take
+    priority, backfilled with whichever field a losing edition has that the
+    winner lacks, exactly the same "never lose information just because a
+    row scored lower overall" philosophy series_check_engine.py's own
+    _merge_loser_fields_into_keeper already applies on the DB-write side.
+    """
+    keeper, losers = ranked_group[0], ranked_group[1:]
+
+    title = keeper.title
+    authors = keeper.authors or next((loser.authors for loser in losers if loser.authors), [])
+    series_name = keeper.series_name or next((loser.series_name for loser in losers if loser.series_name), None)
+    series_number = (
+        keeper.series_number
+        if keeper.series_number is not None
+        else next((loser.series_number for loser in losers if loser.series_number is not None), None)
+    )
+    isbn13 = keeper.isbn13 or next((loser.isbn13 for loser in losers if loser.isbn13), None)
+    published_date = keeper.published_date or next((loser.published_date for loser in losers if loser.published_date), None)
+    upcoming_hint = (
+        keeper.upcoming_hint
+        if keeper.upcoming_hint is not None
+        else next((loser.upcoming_hint for loser in losers if loser.upcoming_hint is not None), None)
+    )
+
+    provenance: list[dict] = [dict(item) for item in keeper.source_provenance]
+    for loser in losers:
+        provenance.extend(dict(item) for item in loser.source_provenance)
+    if not provenance:
+        provenance = [{}]
+    provenance[0] = {
+        **provenance[0],
+        "authors": authors,
+        "isbn13": isbn13,
+        "published_date": published_date,
+        "series_name_hint": series_name,
+        "series_number_hint": series_number,
+    }
+
+    unique_sources = list(dict.fromkeys(str(item.get("source") or "unknown") for item in provenance))
+    confidence_score = round(
+        min(max(member.confidence_score for member in ranked_group) + (0.1 if len(unique_sources) > 1 else 0.0), 1.0), 4
+    )
+    completeness = _reconciled_completeness_score(
+        title, authors, series_name, series_number, isbn13, published_date, provenance[0].get("description")
+    )
+
+    return UnifiedCandidate(
+        title=title,
+        authors=list(authors or []),
+        series_name=series_name,
+        series_number=series_number,
+        isbn13=isbn13,
+        edition_type=_resolved_edition_type(keeper),
+        published_date=published_date,
+        source_provenance=provenance,
+        confidence_score=confidence_score,
+        metadata_completeness_score=max(completeness, max(member.metadata_completeness_score for member in ranked_group)),
+        upcoming_hint=upcoming_hint,
+    )
+
+
+def _finalize_candidates(unified_candidates: list["UnifiedCandidate"]) -> list["UnifiedCandidate"]:
+    """Final edition-aware pass over an already-fused (and, if
+    _needs_llm_reconciliation triggered it, already-reconciled) candidate
+    list, run immediately before the candidates are handed back to
+    series_agent.py.
+
+    Plain identity-key fusion (_fuse_and_score_candidates) groups strictly
+    by isbn13 -> title_key -> normalized title, so two different editions of
+    the exact same book -- a hardcover with its own ISBN and a completely
+    different-ISBN audiobook, say "Iron Flame" and "Iron Flame (Audible
+    Audio Edition)" -- survive fusion as two SEPARATE UnifiedCandidates,
+    since neither their ISBNs nor their exact titles match. Left alone, the
+    same real, already-discovered book could be reported as two different
+    "new" candidates.
+
+    Multiple editions are deliberately kept apart until this point --
+    _fuse_and_score_candidates and _reconcile_candidates_with_llm both
+    still see them as distinct, so their own scoring (confidence,
+    completeness) is computed per-edition, not prematurely averaged
+    together. Here, candidates are grouped a second, looser time by
+    _same_underlying_book, and a group is only ever collapsed into one
+    candidate when _edition_strength (edition priority, then metadata
+    completeness, then confidence) gives a single, unambiguous best edition
+    -- no tie at the top. If two editions in a group are genuinely
+    ambiguous (e.g. one has a better edition type but the other has richer
+    metadata), every edition in that group is kept as a separate candidate
+    rather than guessing which one the user would actually want --
+    "collapse only when one edition has strictly better metadata", not
+    merely a different one.
+
+    This is a separate, discovery-side concept from the DB-write-path
+    edition collapse in services/series_check_engine.py (which decides
+    keeper vs. loser against rows already *owned* in the library, during
+    persistence) and does not change that logic at all -- by the time a
+    candidate here reaches series_check_engine.py, it has already been
+    through this pass, so that logic still only ever needs to know how to
+    compare one incoming candidate against existing DB rows, exactly as
+    before.
+    """
+    groups: list[list[UnifiedCandidate]] = []
+    for candidate in unified_candidates:
+        for group in groups:
+            if any(_same_underlying_book(candidate, member) for member in group):
+                group.append(candidate)
+                break
+        else:
+            groups.append([candidate])
+
+    finalized: list[UnifiedCandidate] = []
+    for group in groups:
+        if len(group) == 1:
+            finalized.append(group[0])
+            continue
+
+        # A collapse requires one member to dominate every OTHER member of
+        # the group (see _strictly_better_metadata) -- not just outrank the
+        # group's own runner-up, since a mixed group of 3+ editions could
+        # have a clear #1-vs-#2 gap while still disagreeing with a #3 on
+        # some dimension.
+        winner = next(
+            (candidate for candidate in group if all(_strictly_better_metadata(candidate, other) for other in group if other is not candidate)),
+            None,
+        )
+        if winner is not None:
+            ranked_group = [winner] + [candidate for candidate in group if candidate is not winner]
+            finalized.append(_collapse_edition_group(ranked_group))
+        else:
+            # No single edition dominates every other -- genuinely
+            # ambiguous which one is "better", so keep every edition in
+            # the group separate rather than guessing.
+            finalized.extend(group)
+
+    return finalized
+
+
 def discover_candidates_for_series(
     series_name: str,
     author: str,
@@ -2091,6 +2324,11 @@ def discover_candidates_for_series(
     # same filtering every other candidate does.
     if _needs_llm_reconciliation(fused_candidates, series_name):
         fused_candidates = _reconcile_candidates_with_llm(fused_candidates, series_name)
+    # Edition-aware collapse -- see _finalize_candidates -- runs last,
+    # immediately before candidates are converted to the dict shape
+    # returned to series_agent.py, so it sees whatever fusion/reconciliation
+    # above already produced.
+    fused_candidates = _finalize_candidates(fused_candidates)
     combined = _filter_and_merge(
         [_unified_candidate_to_raw_dict(candidate) for candidate in fused_candidates],
         author,
@@ -2145,6 +2383,7 @@ def discover_candidates_for_series(
         fused_fallback_candidates = _fuse_and_score_candidates(fallback_results, author, series_name)
         if _needs_llm_reconciliation(fused_fallback_candidates, series_name):
             fused_fallback_candidates = _reconcile_candidates_with_llm(fused_fallback_candidates, series_name)
+        fused_fallback_candidates = _finalize_candidates(fused_fallback_candidates)
         combined = _filter_and_merge(
             [_unified_candidate_to_raw_dict(candidate) for candidate in fused_fallback_candidates],
             author,
@@ -2329,6 +2568,11 @@ def discover_candidates_for_author(
             any_provider_succeeded = True
 
     fused_candidates = _fuse_and_score_candidates(fetch_results, author, None)
+    # Edition-aware collapse -- see _finalize_candidates -- same as
+    # discover_candidates_for_series: keeps different-ISBN editions of the
+    # same real book (e.g. hardcover vs. audiobook) from being reported as
+    # two separate "new by this author" candidates.
+    fused_candidates = _finalize_candidates(fused_candidates)
     combined = _filter_and_merge(
         [_unified_candidate_to_raw_dict(candidate) for candidate in fused_candidates],
         author,
