@@ -295,6 +295,12 @@ def run_series_check_job_full(series_id: int) -> None:
                 if candidate_asin and candidate_asin in existing_by_asin:
                     matched_existing = existing_by_asin[candidate_asin]
                     dedupe_reason_code = "DEDUPE_UPDATE_BY_ASIN"
+                elif series_book_key and series_book_key in existing_by_series_book:
+                    matched_existing = existing_by_series_book[series_book_key]
+                    dedupe_reason_code = "DEDUPE_UPDATE_BY_SERIES_BOOK"
+                elif canonical_title_key and canonical_title_key in existing_by_canonical_title:
+                    matched_existing = existing_by_canonical_title[canonical_title_key]
+                    dedupe_reason_code = "DEDUPE_UPDATE_BY_TITLE"
 
                 identity_fingerprint = candidate_asin or series_book_key or canonical_title_key or _normalize_discovered_title(normalized_title)
                 if identity_fingerprint in seen_batch_identity_keys and matched_existing is None:

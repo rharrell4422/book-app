@@ -136,7 +136,7 @@ def _should_clear_ghost_flags(db_book: Book, payload: dict) -> bool:
 
 
 def create_book(db: Session, book, profile_id: str):
-    payload = _book_payload(book)
+    payload = _book_payload(book, infer_numbers=True)
     _validate_series_belongs_to_profile(db, payload.get("series_id"), profile_id)
     _validate_book_number_requires_series(payload)
     payload["profile_id"] = profile_id
