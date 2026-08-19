@@ -2401,9 +2401,12 @@ def discover_candidates_for_series(
     the series (via title/description text), rather than trying to infer
     series membership purely from title patterns.
 
-    Fallback pass: a plain author-bibliography sweep, so a brand new release
-    whose indexed text doesn't yet mention the series name can still
-    surface. Triggered by _should_trigger_author_fallback -- the targeted
+    Fallback pass: a second, series-scoped sweep (query text/OpenLibrary
+    query/web-search queries all built around "<series name> <author>", same
+    shape as the primary pass) rather than a bare author-bibliography sweep,
+    so a brand new release whose indexed text doesn't yet mention the series
+    name can still surface without pulling in this author's other, unrelated
+    series. Triggered by _should_trigger_author_fallback -- the targeted
     pass looking seriously incomplete or low-confidence, not just literally
     empty -- rather than the old "only if the targeted pass found nothing at
     all" rule (still covered, as the most extreme case of "incomplete").
@@ -2421,11 +2424,10 @@ def discover_candidates_for_series(
     pass may well have already found real, legitimate matches even while
     still triggering fallback for being incomplete.
 
-    The fallback pass has never queried web search, since Brave+LLM
-    structuring on a bare author-wide sweep (no series name to scope
-    against) is a noisier, costlier signal than the catalog APIs already
-    provide there -- enable_fallback_web_search opts into it anyway for a
-    caller that wants the extra coverage.
+    The fallback pass has never queried web search by default, since
+    Brave+LLM structuring here is a noisier, costlier signal than the
+    catalog APIs already provide -- enable_fallback_web_search opts into it
+    anyway for a caller that wants the extra coverage.
     """
     exclude_title_keys = exclude_title_keys or set()
     series_name = str(series_name or "").strip()
@@ -2541,19 +2543,29 @@ def discover_candidates_for_series(
         if progress_callback:
             progress_callback({"current_pass": f"Broadening search to all books by {author}"})
 
-        # Web search stays off by default on this fallback pass -- Brave+LLM
-        # structuring on a bare author-wide sweep (no series name to scope
-        # against) is a noisier, costlier signal than the catalog APIs
-        # already provide here -- but a caller can opt in via
-        # enable_fallback_web_search.
+        # Scoped by series_name, not a bare author sweep: a plain
+        # author-wide query has no way to tell this series' books apart from
+        # a prolific author's other, unrelated series (regression: falling
+        # back to plain "George Wagner" pulled in higher-numbered books from
+        # his other thriller series alongside the Jonathan Hunt books).
+        # Passing series_name through -- and building the OpenLibrary/
+        # web-search queries around it the same way the targeted (primary)
+        # pass already does -- keeps the fallback pass able to trigger on
+        # low completeness/confidence without it being author-wide in scope.
+        # Web search still stays off by default (enable_fallback_web_search
+        # opts in) since Brave+LLM structuring here is a noisier, costlier
+        # signal than the catalog APIs already provide.
         fallback_results = _fetch_all_providers_parallel(
             query_author,
-            None,
-            query_author,
-            None,
+            series_name,
+            f"{series_name} {query_author}",
+            highest_owned_book_number,
             author=author,
-            openlibrary_query=f'author:"{query_author}"',
-            web_search_queries=[f"{query_author} new books"],
+            openlibrary_query=f'"{series_name}" "{query_author}"',
+            web_search_queries=[
+                f"{series_name} {query_author} books",
+                f"{series_name} {query_author} series",
+            ],
             enable_web_search=enable_fallback_web_search,
         )
         # Explicit cross-series contamination -- a fallback hit tagged with

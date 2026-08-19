@@ -488,8 +488,21 @@ class SeriesIntelligenceAgent:
                     inferred_number and highest_owned_book_number and inferred_number > highest_owned_book_number
                 )
                 targeted_with_number = bool(came_from_targeted_search and inferred_number)
+                # continues_numbering alone is too weak a signal for a
+                # prolific multi-series author: a same-author book that
+                # simply has a higher inferred number than the highest owned
+                # volume says nothing about which of the author's several
+                # series it belongs to (regression: "Check Now" on George
+                # Wagner's "Jonathan Hunt Thriller Series" pulled in
+                # higher-numbered books from his other, unrelated thriller
+                # series purely because they continued the numbering).
+                # Requiring it to be corroborated by an actual textual tie to
+                # *this* series -- explicit or partial title match -- keeps
+                # continues_numbering useful for genuine continuations while
+                # closing that cross-series contamination path.
+                continues_numbering_valid = continues_numbering and (explicit_series_match or partial_match)
                 belongs_to_series = bool(
-                    targeted_with_number or explicit_series_match or partial_match or continues_numbering
+                    targeted_with_number or explicit_series_match or partial_match or continues_numbering_valid
                 )
 
                 # A self-identified "<Flagship Series> universe" tie-in novel
