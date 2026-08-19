@@ -38,6 +38,7 @@ function EditBookPageInner() {
     showLookupSummary,
     seriesLocked,
     updateForm,
+    onClassificationChange,
     onStatusChange,
     onToggleLookupSummary,
     handleFindDetails,
@@ -134,6 +135,7 @@ function EditBookPageInner() {
           fieldIdPrefix="edit-book"
           form={form}
           onFieldChange={updateForm}
+          onClassificationChange={onClassificationChange}
           onStatusChange={onStatusChange}
           seriesList={seriesList}
           lookingUpBook={lookingUpBook}

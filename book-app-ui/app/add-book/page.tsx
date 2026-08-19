@@ -58,6 +58,7 @@ function AddBookPageInner() {
     showLookupSummary,
     seriesLocked,
     updateAddBookForm,
+    onClassificationChange,
     onStatusChange,
     onToggleLookupSummary,
     handleFindDetails,
@@ -108,6 +109,7 @@ function AddBookPageInner() {
       <AddBookFormFields
         form={form}
         onFieldChange={updateAddBookForm}
+        onClassificationChange={onClassificationChange}
         onStatusChange={onStatusChange}
         seriesList={seriesList}
         lookingUpBook={lookingUpBook}

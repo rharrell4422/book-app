@@ -38,6 +38,7 @@ export function EditBookDialog({
     lookupResult,
     showLookupSummary,
     updateForm,
+    onClassificationChange,
     onStatusChange,
     onToggleLookupSummary,
     handleFindDetails,
@@ -68,6 +69,7 @@ export function EditBookDialog({
           fieldIdPrefix="edit-book"
           form={form}
           onFieldChange={updateForm}
+          onClassificationChange={onClassificationChange}
           onStatusChange={onStatusChange}
           seriesList={seriesList}
           lookingUpBook={lookingUpBook}

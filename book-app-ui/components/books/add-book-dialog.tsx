@@ -36,6 +36,7 @@ export function AddBookDialog({
     lookupResult,
     showLookupSummary,
     updateAddBookForm,
+    onClassificationChange,
     onStatusChange,
     onToggleLookupSummary,
     handleFindDetails,
@@ -65,6 +66,7 @@ export function AddBookDialog({
         <AddBookFormFields
           form={form}
           onFieldChange={updateAddBookForm}
+          onClassificationChange={onClassificationChange}
           onStatusChange={onStatusChange}
           seriesList={seriesList}
           lookingUpBook={lookingUpBook}

@@ -10,6 +10,7 @@ import {
   normalizeLookupMatchedTitle,
   type AddBookFormState,
   type AddBookSeriesOption,
+  type BookClassification,
   type LookupResultState,
 } from "@/components/books/add-book-form-fields";
 
@@ -24,6 +25,11 @@ export type AddBookFormInitialValues = Partial<AddBookFormState>;
 function lockedAddDefaults(initialValues?: AddBookFormInitialValues): AddBookFormState {
   return {
     ...EMPTY_ADD_BOOK_FORM,
+    // A locked add is always "part of this series" -- the toggle itself
+    // is hidden in this context (see AddBookFormFields), but the
+    // classification value still needs to be "series" so handleAddBook's
+    // effective-classification check below doesn't have to special-case it.
+    classification: "series",
     status: initialValues?.status ?? "upcoming",
     seriesName: initialValues?.seriesName ?? "",
     author: initialValues?.author ?? "",
@@ -91,6 +97,22 @@ export function useAddBookForm(options?: {
   function updateAddBookForm<K extends keyof AddBookFormState>(key: K, value: AddBookFormState[K]) {
     if (seriesLocked && key === "seriesName") return;
     setForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function onClassificationChange(classification: BookClassification) {
+    // Locked adds never show the toggle, so this shouldn't fire, but guard
+    // anyway rather than let a stray call flip a locked add to standalone.
+    if (seriesLocked) return;
+    setForm((prev) => ({
+      ...prev,
+      classification,
+      // "Hide and clear" -- switching to Standalone must blank the
+      // underlying values, not just stop rendering the inputs, otherwise a
+      // previously-filled seriesName/bookNumber would still ride along in
+      // the POST body after the toggle "hid" them.
+      seriesName: classification === "standalone" ? "" : prev.seriesName,
+      bookNumber: classification === "standalone" ? "" : prev.bookNumber,
+    }));
   }
 
   function resetAddBookForm() {
@@ -182,16 +204,30 @@ export function useAddBookForm(options?: {
       return;
     }
 
+    // Locked adds are always "series" (the toggle is hidden in that
+    // context); otherwise trust the toggle itself as the authoritative
+    // signal for whether this submission should end up with a series_id.
+    const effectiveClassification: BookClassification = seriesLocked ? "series" : form.classification;
     const parsedBookNumber = bookNumberText ? Number(bookNumberText) : null;
-    if (seriesLocked) {
+
+    if (effectiveClassification === "series") {
+      if (!seriesLocked && !seriesName) {
+        toast({
+          title: "Missing info",
+          description: "Series name is required for a book marked as part of a series.",
+        });
+        return;
+      }
       if (!Number.isFinite(parsedBookNumber) || parsedBookNumber === null || parsedBookNumber <= 0) {
         toast({
           title: "Invalid book number",
-          description: "Book number must be a positive number.",
+          description: "Book number is required and must be a positive number for a series book.",
         });
         return;
       }
     } else if (bookNumberText && !Number.isFinite(parsedBookNumber)) {
+      // Standalone clears bookNumber on toggle, so this is just a safety
+      // net against stale state rather than the normal path.
       toast({
         title: "Invalid book number",
         description: "Book number must be numeric when provided.",
@@ -204,36 +240,40 @@ export function useAddBookForm(options?: {
     try {
       let resolvedSeriesId: number | null = null;
 
-      if (seriesLocked) {
-        resolvedSeriesId = lockedSeriesId;
-      } else if (seriesName) {
-        const normalizedSeriesName = normalizeText(seriesName);
-        const normalizedAuthor = normalizeText(author);
-        const matchedSeries = seriesList.find((series) => {
-          if (normalizeText(series.name) !== normalizedSeriesName) return false;
+      // Standalone skips series create-or-match entirely -- series_id
+      // stays null, and no /series/ request is made on its behalf.
+      if (effectiveClassification === "series") {
+        if (seriesLocked) {
+          resolvedSeriesId = lockedSeriesId;
+        } else if (seriesName) {
+          const normalizedSeriesName = normalizeText(seriesName);
+          const normalizedAuthor = normalizeText(author);
+          const matchedSeries = seriesList.find((series) => {
+            if (normalizeText(series.name) !== normalizedSeriesName) return false;
 
-          const existingAuthor = normalizeText(series.author);
-          return !existingAuthor || !normalizedAuthor || existingAuthor === normalizedAuthor;
-        });
-
-        if (matchedSeries) {
-          resolvedSeriesId = Number(matchedSeries.id);
-        } else {
-          const createSeriesResponse = await fetchApiWithFallback("/series/", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              name: seriesName,
-              author,
-            }),
+            const existingAuthor = normalizeText(series.author);
+            return !existingAuthor || !normalizedAuthor || existingAuthor === normalizedAuthor;
           });
 
-          if (!createSeriesResponse.ok) {
-            throw new Error(`Failed to create series (${createSeriesResponse.status})`);
-          }
+          if (matchedSeries) {
+            resolvedSeriesId = Number(matchedSeries.id);
+          } else {
+            const createSeriesResponse = await fetchApiWithFallback("/series/", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                name: seriesName,
+                author,
+              }),
+            });
 
-          const createdSeries = await createSeriesResponse.json();
-          resolvedSeriesId = Number(createdSeries.id);
+            if (!createSeriesResponse.ok) {
+              throw new Error(`Failed to create series (${createSeriesResponse.status})`);
+            }
+
+            const createdSeries = await createSeriesResponse.json();
+            resolvedSeriesId = Number(createdSeries.id);
+          }
         }
       }
 
@@ -243,6 +283,10 @@ export function useAddBookForm(options?: {
         ? (form.readDate || new Date().toISOString().split("T")[0])
         : null;
       const releaseDate = readStatus !== "read" ? form.releaseDate.trim() : "";
+      // Belt-and-suspenders alongside onClassificationChange's clearing of
+      // bookNumber -- Standalone never sends a book number, matching the
+      // backend's own book_number-requires-series_id rejection.
+      const effectiveBookNumber = effectiveClassification === "series" ? parsedBookNumber : null;
 
       const createBookResponse = await fetchApiWithFallback("/books/", {
         method: "POST",
@@ -251,8 +295,8 @@ export function useAddBookForm(options?: {
           title,
           author,
           series_id: resolvedSeriesId,
-          series_order: parsedBookNumber,
-          book_number: parsedBookNumber,
+          series_order: effectiveBookNumber,
+          book_number: effectiveBookNumber,
           release_date: releaseDate || undefined,
           publication_date: form.publicationDate || undefined,
           read_date: readDate || undefined,
@@ -309,6 +353,7 @@ export function useAddBookForm(options?: {
     createdBookId,
     seriesLocked,
     updateAddBookForm,
+    onClassificationChange,
     resetAddBookForm,
     onStatusChange,
     onToggleLookupSummary: () => setShowLookupSummary((prev) => !prev),

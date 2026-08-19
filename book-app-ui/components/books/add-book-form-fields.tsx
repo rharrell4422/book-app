@@ -7,9 +7,18 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { BookStatus } from "@/lib/book-format";
 
+export type BookClassification = "standalone" | "series";
+
 export type AddBookFormState = {
   title: string;
   author: string;
+  // UI-only -- never sent to the API directly. Drives whether seriesName/
+  // bookNumber are shown+required or hidden+cleared; series_id itself
+  // (derived from seriesName via the existing create-or-match-series
+  // logic, or forced null for "standalone") stays the only thing actually
+  // persisted, so there's no second, separately-stored classification
+  // that could drift out of sync with it.
+  classification: BookClassification;
   seriesName: string;
   bookNumber: string;
   status: BookStatus;
@@ -19,9 +28,15 @@ export type AddBookFormState = {
   autoSummary: string;
 };
 
+// Add Book defaults to "series" since entering book #1 of a new series is
+// at least as common a starting point as adding a standalone book, and
+// this default only affects the initial toggle state -- Edit Book always
+// overrides it from the loaded book's own series_id (see formFromBook in
+// use-edit-book-form.ts).
 export const EMPTY_ADD_BOOK_FORM: AddBookFormState = {
   title: "",
   author: "",
+  classification: "series",
   seriesName: "",
   bookNumber: "",
   status: "unread",
@@ -58,6 +73,7 @@ export type AddBookSeriesOption = {
 export function AddBookFormFields({
   form,
   onFieldChange,
+  onClassificationChange,
   onStatusChange,
   seriesList,
   lookingUpBook,
@@ -70,6 +86,7 @@ export function AddBookFormFields({
 }: {
   form: AddBookFormState;
   onFieldChange: <K extends keyof AddBookFormState>(key: K, value: AddBookFormState[K]) => void;
+  onClassificationChange: (classification: BookClassification) => void;
   onStatusChange: (status: BookStatus) => void;
   seriesList: AddBookSeriesOption[];
   lookingUpBook: boolean;
@@ -80,6 +97,13 @@ export function AddBookFormFields({
   fieldIdPrefix?: string;
   seriesLocked?: boolean;
 }) {
+  // Locked contexts (adding/editing a book from inside a specific series'
+  // own page) always mean "this is a series book" -- the toggle would be
+  // redundant at best and misleading at worst (a form claiming
+  // "Standalone" while lockedSeriesId still forces a series_id under it),
+  // so it's hidden entirely and treated as forced-Series, matching how the
+  // series name field itself is already locked/read-only in that case.
+  const isSeriesMode = seriesLocked || form.classification === "series";
   return (
     <>
       <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
@@ -150,38 +174,66 @@ export function AddBookFormFields({
           ) : null}
         </div>
 
-        <div className="space-y-1">
-          <Label htmlFor={`${fieldIdPrefix}-series`}>Series name</Label>
-          <Input
-            id={`${fieldIdPrefix}-series`}
-            list={seriesLocked ? undefined : `${fieldIdPrefix}-series-options`}
-            value={form.seriesName}
-            onChange={(event) => onFieldChange("seriesName", event.target.value)}
-            placeholder="Optional series"
-            disabled={seriesLocked}
-            readOnly={seriesLocked}
-          />
-          {seriesLocked ? (
-            <p className="text-[11px] text-muted-foreground">Locked to this series.</p>
-          ) : null}
-          {seriesLocked ? null : (
-            <datalist id={`${fieldIdPrefix}-series-options`}>
-              {seriesList.map((series) => (
-                <option key={series.id} value={series.name} />
-              ))}
-            </datalist>
-          )}
-        </div>
+        {seriesLocked ? null : (
+          <div className="space-y-1 sm:col-span-2">
+            <Label>Is this a standalone book, or part of a series?</Label>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant={form.classification === "standalone" ? "secondary" : "outline"}
+                onClick={() => onClassificationChange("standalone")}
+              >
+                Standalone
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={form.classification === "series" ? "secondary" : "outline"}
+                onClick={() => onClassificationChange("series")}
+              >
+                Series
+              </Button>
+            </div>
+          </div>
+        )}
 
-        <div className="space-y-1">
-          <Label htmlFor={`${fieldIdPrefix}-number`}>Book number</Label>
-          <Input
-            id={`${fieldIdPrefix}-number`}
-            value={form.bookNumber}
-            onChange={(event) => onFieldChange("bookNumber", event.target.value)}
-            placeholder={seriesLocked ? "e.g. 28" : "Optional number"}
-          />
-        </div>
+        {isSeriesMode ? (
+          <>
+            <div className="space-y-1">
+              <Label htmlFor={`${fieldIdPrefix}-series`}>Series name{seriesLocked ? "" : " (required)"}</Label>
+              <Input
+                id={`${fieldIdPrefix}-series`}
+                list={seriesLocked ? undefined : `${fieldIdPrefix}-series-options`}
+                value={form.seriesName}
+                onChange={(event) => onFieldChange("seriesName", event.target.value)}
+                placeholder="Series name"
+                disabled={seriesLocked}
+                readOnly={seriesLocked}
+              />
+              {seriesLocked ? (
+                <p className="text-[11px] text-muted-foreground">Locked to this series.</p>
+              ) : null}
+              {seriesLocked ? null : (
+                <datalist id={`${fieldIdPrefix}-series-options`}>
+                  {seriesList.map((series) => (
+                    <option key={series.id} value={series.name} />
+                  ))}
+                </datalist>
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor={`${fieldIdPrefix}-number`}>Book number{seriesLocked ? "" : " (required)"}</Label>
+              <Input
+                id={`${fieldIdPrefix}-number`}
+                value={form.bookNumber}
+                onChange={(event) => onFieldChange("bookNumber", event.target.value)}
+                placeholder="e.g. 1"
+              />
+            </div>
+          </>
+        ) : null}
 
         <div className="space-y-1">
           <Label htmlFor={`${fieldIdPrefix}-status`}>Status</Label>

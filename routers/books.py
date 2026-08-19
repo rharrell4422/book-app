@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 import crud
 import schemas
 from agents.series_agent import discover_more_by_author, discover_series_by_name
-from crud.books import InvalidSeriesForProfileError
+from crud.books import BookNumberRequiresSeriesError, InvalidSeriesForProfileError
 from discovery_engine import generate_series_overview
 from intelligence import lookup_book_summary
 from routers.deps import enforce_access, get_current_profile_id, get_db
@@ -24,6 +24,8 @@ def create_book(book: schemas.BookBase, db: Session = Depends(get_db), profile_i
         return crud.create_book(db=db, book=book, profile_id=profile_id)
     except InvalidSeriesForProfileError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    except BookNumberRequiresSeriesError:
+        raise HTTPException(status_code=400, detail="Book number requires a series.")
 
 
 @router.get("/", response_model=List[schemas.BookResponse])
@@ -111,6 +113,8 @@ def put_book(
         updated = crud.update_book(db, book_id, book, profile_id)
     except InvalidSeriesForProfileError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    except BookNumberRequiresSeriesError:
+        raise HTTPException(status_code=400, detail="Book number requires a series.")
     if not updated:
         raise HTTPException(status_code=404, detail="Book not found")
     return updated
@@ -147,6 +151,8 @@ def patch_book(
         updated = crud.update_book(db, book_id, book, profile_id)
     except InvalidSeriesForProfileError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    except BookNumberRequiresSeriesError:
+        raise HTTPException(status_code=400, detail="Book number requires a series.")
     if not updated:
         raise HTTPException(status_code=404, detail="Book not found")
     return updated

@@ -7,6 +7,7 @@ import {
   normalizeLookupMatchedTitle,
   type AddBookFormState,
   type AddBookSeriesOption,
+  type BookClassification,
   type LookupResultState,
 } from "@/components/books/add-book-form-fields";
 import { useToast } from "@/components/ui/use-toast";
@@ -53,6 +54,11 @@ function formFromBook(book: BookRecord, seriesList: AddBookSeriesOption[]): AddB
   return {
     title: String(book.title || ""),
     author: String(book.author || ""),
+    // Initialize from the book's own series_id, per requirement -- not a
+    // fixed default like Add Book's -- so opening the edit form for an
+    // existing series book doesn't wrongly start on "Standalone" and hide
+    // fields that already hold real values.
+    classification: book.series_id ? "series" : "standalone",
     seriesName: String(book.series_name || seriesFromList?.name || ""),
     bookNumber: book.book_number !== null && book.book_number !== undefined ? String(book.book_number) : "",
     status: statusFromBook(book),
@@ -123,6 +129,10 @@ export function useEditBookForm(options: {
       if (seriesLocked) {
         const lockedSeries = series.find((item) => Number(item.id) === lockSeriesId);
         nextForm.seriesName = String(book.series_name || lockedSeries?.name || nextForm.seriesName);
+        // A locked edit is always "part of this series" -- the toggle
+        // itself is hidden in this context (see AddBookFormFields), same
+        // as the locked Add Book default.
+        nextForm.classification = "series";
       }
       setLoadedBook(book);
       setForm(nextForm);
@@ -149,6 +159,24 @@ export function useEditBookForm(options: {
   function updateForm<K extends keyof AddBookFormState>(key: K, value: AddBookFormState[K]) {
     if (seriesLocked && key === "seriesName") return;
     setForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function onClassificationChange(classification: BookClassification) {
+    // Locked edits never show the toggle, so this shouldn't fire, but
+    // guard anyway rather than let a stray call detach a locked edit from
+    // its series.
+    if (seriesLocked) return;
+    setForm((prev) => ({
+      ...prev,
+      classification,
+      // Same "hide and clear" rule as Add Book -- switching an existing
+      // series book to Standalone must blank seriesName/bookNumber so
+      // handleSave's series_id resolution (which is driven by whether
+      // seriesName is non-empty) actually detaches it, not just visually
+      // hides the fields while their old values still get submitted.
+      seriesName: classification === "standalone" ? "" : prev.seriesName,
+      bookNumber: classification === "standalone" ? "" : prev.bookNumber,
+    }));
   }
 
   function onStatusChange(nextStatus: BookStatus) {
@@ -236,8 +264,25 @@ export function useEditBookForm(options: {
       return;
     }
 
+    const effectiveClassification: BookClassification = seriesLocked ? "series" : form.classification;
     const parsedBookNumber = bookNumberText ? Number(bookNumberText) : null;
-    if (bookNumberText && !Number.isFinite(parsedBookNumber)) {
+
+    if (effectiveClassification === "series") {
+      if (!seriesLocked && !seriesName) {
+        toast({
+          title: "Missing info",
+          description: "Series name is required for a book marked as part of a series.",
+        });
+        return;
+      }
+      if (!Number.isFinite(parsedBookNumber) || parsedBookNumber === null || parsedBookNumber <= 0) {
+        toast({
+          title: "Invalid book number",
+          description: "Book number is required and must be a positive number for a series book.",
+        });
+        return;
+      }
+    } else if (bookNumberText && !Number.isFinite(parsedBookNumber)) {
       toast({
         title: "Invalid book number",
         description: "Book number must be numeric when provided.",
@@ -250,30 +295,37 @@ export function useEditBookForm(options: {
     try {
       let resolvedSeriesId: number | null = null;
 
-      if (seriesLocked) {
-        resolvedSeriesId = lockSeriesId;
-      } else if (seriesName) {
-        const normalizedSeriesName = normalizeText(seriesName);
-        const normalizedAuthor = normalizeText(author);
-        const matchedSeries = seriesList.find((series) => {
-          if (normalizeText(series.name) !== normalizedSeriesName) return false;
-          const existingAuthor = normalizeText(series.author);
-          return !existingAuthor || !normalizedAuthor || existingAuthor === normalizedAuthor;
-        });
-
-        if (matchedSeries) {
-          resolvedSeriesId = Number(matchedSeries.id);
-        } else {
-          const createSeriesResponse = await fetchApiWithFallback("/series/", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: seriesName, author }),
+      // Standalone detaches from any series entirely -- series_id resolves
+      // to null and no create-or-match request runs, even if this book was
+      // previously attached to a series (see recalculate_intelligence's
+      // handling of previous_series_id in crud/books.py.update_book, which
+      // already re-syncs the old series once its series_id changes away).
+      if (effectiveClassification === "series") {
+        if (seriesLocked) {
+          resolvedSeriesId = lockSeriesId;
+        } else if (seriesName) {
+          const normalizedSeriesName = normalizeText(seriesName);
+          const normalizedAuthor = normalizeText(author);
+          const matchedSeries = seriesList.find((series) => {
+            if (normalizeText(series.name) !== normalizedSeriesName) return false;
+            const existingAuthor = normalizeText(series.author);
+            return !existingAuthor || !normalizedAuthor || existingAuthor === normalizedAuthor;
           });
-          if (!createSeriesResponse.ok) {
-            throw new Error(`Failed to create series (${createSeriesResponse.status})`);
+
+          if (matchedSeries) {
+            resolvedSeriesId = Number(matchedSeries.id);
+          } else {
+            const createSeriesResponse = await fetchApiWithFallback("/series/", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name: seriesName, author }),
+            });
+            if (!createSeriesResponse.ok) {
+              throw new Error(`Failed to create series (${createSeriesResponse.status})`);
+            }
+            const createdSeries = await createSeriesResponse.json();
+            resolvedSeriesId = Number(createdSeries.id);
           }
-          const createdSeries = await createSeriesResponse.json();
-          resolvedSeriesId = Number(createdSeries.id);
         }
       }
 
@@ -294,6 +346,11 @@ export function useEditBookForm(options: {
           })
         : null;
 
+      // Belt-and-suspenders alongside onClassificationChange's clearing of
+      // bookNumber -- Standalone never sends a book number, matching the
+      // backend's own book_number-requires-series_id rejection.
+      const effectiveBookNumber = effectiveClassification === "series" ? parsedBookNumber : null;
+
       const response = await fetchApiWithFallback(`/books/${bookId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -301,8 +358,8 @@ export function useEditBookForm(options: {
           title,
           author,
           series_id: resolvedSeriesId,
-          series_order: parsedBookNumber,
-          book_number: parsedBookNumber,
+          series_order: effectiveBookNumber,
+          book_number: effectiveBookNumber,
           release_date: lockedDates ? lockedDates.release_date : (libraryReleaseDate || null),
           publication_date: form.publicationDate || null,
           read_date: lockedDates ? lockedDates.read_date : libraryReadDate,
@@ -352,6 +409,7 @@ export function useEditBookForm(options: {
     showLookupSummary,
     seriesLocked,
     updateForm,
+    onClassificationChange,
     onStatusChange,
     onToggleLookupSummary: () => setShowLookupSummary((prev) => !prev),
     handleFindDetails,

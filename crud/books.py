@@ -22,12 +22,44 @@ class InvalidSeriesForProfileError(ValueError):
     """
 
 
+class BookNumberRequiresSeriesError(ValueError):
+    """Raised when a create/update payload sets book_number without a
+    series_id. The Add/Edit Book UI's own Standalone/Series toggle (see
+    add-book-form-fields.tsx) already prevents this from the app itself by
+    clearing bookNumber whenever Standalone is selected -- this is the
+    server-side backstop for API misuse or any other/future client that
+    bypasses that form, since a book_number with no series_id is exactly
+    the orphaned state ("Book #1" that never got attached to a Series row,
+    so it silently landed in Standalone with no Check Now available) this
+    whole feature exists to prevent.
+    """
+
+
 def _validate_series_belongs_to_profile(db: Session, series_id: int | None, profile_id: str) -> None:
     if series_id is None:
         return
     exists = db.query(Series.id).filter(Series.id == series_id, Series.profile_id == profile_id).first()
     if not exists:
         raise InvalidSeriesForProfileError(f"Series {series_id} does not belong to profile '{profile_id}'")
+
+
+def _validate_book_number_requires_series(
+    payload: dict, *, existing_book_number: float | None = None, existing_series_id: int | None = None
+) -> None:
+    """Book number only means anything relative to a series -- a book_number
+    with no series_id is the exact orphaned state this whole feature exists
+    to prevent (see BookNumberRequiresSeriesError). Checks the *effective*
+    post-request value of each field, not just whatever this one payload
+    happens to touch: a PATCH that clears series_id without also touching
+    book_number should be rejected just as much as one that sets both at
+    once, so an untouched field (absent from payload, since callers build
+    it with exclude_unset=True on update) falls back to the row's current
+    value rather than being treated as None.
+    """
+    effective_book_number = payload["book_number"] if "book_number" in payload else existing_book_number
+    effective_series_id = payload["series_id"] if "series_id" in payload else existing_series_id
+    if effective_book_number is not None and effective_series_id is None:
+        raise BookNumberRequiresSeriesError("Book number requires a series.")
 
 
 def _backfill_series_author_if_missing(db: Session, series_id: int | None, book_author: str | None) -> None:
@@ -106,6 +138,7 @@ def _should_clear_ghost_flags(db_book: Book, payload: dict) -> bool:
 def create_book(db: Session, book, profile_id: str):
     payload = _book_payload(book)
     _validate_series_belongs_to_profile(db, payload.get("series_id"), profile_id)
+    _validate_book_number_requires_series(payload)
     payload["profile_id"] = profile_id
     db_book = Book(**payload)
     db.add(db_book)
@@ -158,6 +191,9 @@ def update_book(db: Session, book_id: int, book, profile_id: str):
     payload = _book_payload(book, exclude_unset=True, include_none=True)
     if "series_id" in payload:
         _validate_series_belongs_to_profile(db, payload.get("series_id"), profile_id)
+    _validate_book_number_requires_series(
+        payload, existing_book_number=db_book.book_number, existing_series_id=db_book.series_id
+    )
     if _should_clear_ghost_flags(db_book, payload):
         payload.setdefault("is_missing", False)
         payload.setdefault("is_upcoming_auto", False)
