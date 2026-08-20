@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { PencilIcon, SettingsIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -478,14 +478,47 @@ function MobileProfileSheet({ open, onOpenChange }: { open: boolean; onOpenChang
   );
 }
 
+/** Top-level desktop nav link (Library/Series) -- highlights when its section is active. */
+function TopNavLink({ href, label, active }: { href: string; label: string; active: boolean }) {
+  return (
+    <Link
+      href={href}
+      className={cn(
+        "rounded-md px-2 py-1 text-sm font-medium transition-colors",
+        active ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+      )}
+    >
+      {label}
+    </Link>
+  );
+}
+
+/** Secondary nav link (Standalone Books / Unfinished / Finished) -- only rendered next to its
+ * parent section once that section is active, so the bar stays compact everywhere else. */
+function TopNavSubLink({ href, label, active }: { href: string; label: string; active: boolean }) {
+  return (
+    <Link
+      href={href}
+      className={cn(
+        "rounded-md px-2 py-1 text-xs font-medium transition-colors",
+        active ? "text-foreground underline" : "text-muted-foreground/70 hover:text-foreground"
+      )}
+    >
+      {label}
+    </Link>
+  );
+}
+
 function TopBar() {
   const { role, logout } = useAuth();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   // The landing page ("/") is a deliberately dark, full-bleed hero (see
   // components/landing/) -- this app's one visual departure from its
   // otherwise light, grayscale theme. Rather than teach the landing page
   // to render behind/under the bar, the bar itself goes transparent and
   // overlays it there, purely a style change (no auth logic touched).
-  const isLanding = usePathname() === "/";
+  const isLanding = pathname === "/";
 
   if (role === "viewer") {
     return (
@@ -498,28 +531,64 @@ function TopBar() {
   }
 
   if (role === "owner") {
+    const libraryActive = pathname.startsWith("/books");
+    const standaloneActive = pathname.startsWith("/books/standalone");
+    const seriesActive = pathname.startsWith("/series");
+    const seriesView = seriesActive && searchParams.get("view") === "finished" ? "finished" : "ongoing";
+    const settingsActive = pathname.startsWith("/settings");
+
     return (
       <div
         className={cn(
           // Owner profile/share/sign-out controls move into the mobile
           // bottom nav's Profile tab (MobileProfileSheet) below md, so this
           // row -- sized for a mouse, not a thumb -- only renders on desktop.
-          "hidden items-center justify-end gap-2 md:flex",
+          "hidden items-center justify-between gap-2 md:flex",
           isLanding
             ? "absolute inset-x-0 top-0 z-10 px-4 py-3 text-white/80"
             : "border-b bg-muted/40 px-4 py-1.5"
         )}
       >
-        <ProfileSwitcher />
-        <ShareLinkButton />
-        <Link href="/settings">
-          <Button variant="ghost" size="icon-sm" aria-label="Settings" title="Settings">
-            <SettingsIcon />
+        {/* Persistent app-shell nav so no page (e.g. /settings) is ever a
+            dead end -- Library/Series stay reachable everywhere, and each
+            shows its own sub-views (Standalone / Unfinished vs Finished)
+            only once that section is the active one. Suppressed on the
+            landing hero, which is a deliberate one-off entry screen rather
+            than part of the regular app shell. */}
+        {isLanding ? (
+          <div />
+        ) : (
+          <nav className="flex flex-wrap items-center gap-1">
+            <TopNavLink href="/books" label="Library" active={libraryActive} />
+            {libraryActive ? (
+              <TopNavSubLink href="/books/standalone" label="Standalone Books" active={standaloneActive} />
+            ) : null}
+            <TopNavLink href="/series" label="Series" active={seriesActive} />
+            {seriesActive ? (
+              <>
+                <TopNavSubLink href="/series?view=ongoing" label="Unfinished" active={seriesView === "ongoing"} />
+                <TopNavSubLink href="/series?view=finished" label="Finished" active={seriesView === "finished"} />
+              </>
+            ) : null}
+          </nav>
+        )}
+        <div className="flex items-center gap-2">
+          <ProfileSwitcher />
+          <ShareLinkButton />
+          <Link href="/settings">
+            <Button
+              variant={settingsActive ? "secondary" : "ghost"}
+              size="icon-sm"
+              aria-label="Settings"
+              title="Settings"
+            >
+              <SettingsIcon />
+            </Button>
+          </Link>
+          <Button variant="ghost" size="sm" onClick={logout}>
+            Sign out
           </Button>
-        </Link>
-        <Button variant="ghost" size="sm" onClick={logout}>
-          Sign out
-        </Button>
+        </div>
       </div>
     );
   }

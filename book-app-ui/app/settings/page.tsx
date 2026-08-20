@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -172,9 +173,16 @@ export default function SettingsPage() {
 
   return (
     <div className="mx-auto max-w-2xl space-y-4 p-4">
-      <div>
-        <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Settings</p>
-        <h1 className="text-2xl font-bold">Auto Discovery</h1>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Settings</p>
+          <h1 className="text-2xl font-bold">Auto Discovery</h1>
+        </div>
+        <Link href="/books">
+          <Button variant="outline" size="sm">
+            Back to Library
+          </Button>
+        </Link>
       </div>
 
       <Card>
