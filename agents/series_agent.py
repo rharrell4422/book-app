@@ -479,6 +479,43 @@ class SeriesIntelligenceAgent:
                 author=series_author,
             )
             if skeleton["recovered_numbers"]:
+                # _filter_and_merge stamps every candidate it's given with
+                # ONE blanket confidence value -- fine for the original
+                # fetch passes (every raw hit there is genuinely new), but
+                # this re-merge feeds it skeleton["candidates"], which is
+                # discovery["unified_candidates"] (i.e. every candidate
+                # already found by the targeted/fallback passes above) PLUS
+                # whatever the missing-volume lookahead recovered. Passing
+                # a single "author_fallback"/"targeted" confidence here
+                # would downgrade candidates that already had a real,
+                # stronger-signal confidence from the original passes down
+                # to "author_fallback" purely because *some* recovery ran --
+                # which then silently fails belongs_to_series'
+                # targeted_with_number check below for a series whose book
+                # titles don't textually reference the series name at all
+                # (regression: Georgia Wagner's "Jonathan Hunt Thriller
+                # Series" -- author-fallback always triggers because
+                # providers under-index it, so real sequels like "Desert
+                # Protocol" and "The Levee Ghosts" lost their "targeted"
+                # confidence here, had no other way to clear the gate, and
+                # "Check Now" reported zero new books despite discovery
+                # correctly finding them). Snapshotting each already-found
+                # candidate's real confidence by identity before the
+                # re-merge, then restoring it after, keeps that signal
+                # intact for pre-existing candidates while still letting
+                # newly-recovered ones get the blanket default below.
+                original_confidence_by_key: dict[str, str] = {}
+                for original in candidates:
+                    original_confidence = original.get("confidence")
+                    if not original_confidence:
+                        continue
+                    original_isbn = str(original.get("isbn13") or "").strip()
+                    if original_isbn:
+                        original_confidence_by_key[f"isbn:{original_isbn}"] = original_confidence
+                    original_title_key = discovery_engine.core_title_key(str(original.get("title") or ""))
+                    if original_title_key:
+                        original_confidence_by_key[f"title:{original_title_key}"] = original_confidence
+
                 candidates = discovery_engine._filter_and_merge(
                     [discovery_engine._unified_candidate_to_raw_dict(candidate) for candidate in skeleton["candidates"]],
                     series_author,
@@ -486,6 +523,15 @@ class SeriesIntelligenceAgent:
                     confidence="author_fallback" if discovery["used_author_fallback"] else "targeted",
                     series_name=series.name,
                 )
+                for candidate in candidates:
+                    candidate_isbn = str(candidate.get("isbn13") or "").strip()
+                    candidate_title_key = discovery_engine.core_title_key(str(candidate.get("title") or ""))
+                    restored_confidence = (
+                        (original_confidence_by_key.get(f"isbn:{candidate_isbn}") if candidate_isbn else None)
+                        or (original_confidence_by_key.get(f"title:{candidate_title_key}") if candidate_title_key else None)
+                    )
+                    if restored_confidence:
+                        candidate["confidence"] = restored_confidence
                 # discover_candidates_for_series's own "candidates" already
                 # came back deterministically sorted/stripped (see
                 # finalize_discovery_output), but this re-merge builds a

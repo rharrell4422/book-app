@@ -1404,7 +1404,30 @@ def _filter_and_merge(
         merged.append(
             {
                 **raw,
-                "confidence": confidence,
+                # Preserve a candidate's own already-assigned confidence
+                # (present when `raw` came from re-merging previously-fused
+                # UnifiedCandidates, e.g. series_agent.py's missing-volume
+                # skeleton reconstruction -- see _unified_candidate_to_raw_dict)
+                # rather than unconditionally overwriting it with this call's
+                # single blanket `confidence` argument. Fresh provider hits
+                # (the normal targeted/fallback fetch passes) never carry a
+                # "confidence" key yet at this point, so they still get
+                # stamped with `confidence` exactly as before -- this only
+                # changes behavior for candidates that already have one.
+                # Without this, re-merging a series' full candidate set after
+                # skeleton recovery collapsed EVERY candidate's confidence
+                # (including originals from a clean "targeted" hit) down to
+                # a single "author_fallback" whenever fallback triggered at
+                # all, which silently defeated series_agent.py's
+                # targeted_with_number acceptance check for every candidate
+                # in a series whose titles don't textually reference the
+                # series name (regression: Georgia Wagner's "Jonathan Hunt
+                # Thriller Series" -- author-fallback always triggers because
+                # providers under-index it, so real sequels like "Desert
+                # Protocol" and "The Levee Ghosts" never had any other way to
+                # clear the gate and "Check Now" always reported zero new
+                # books despite discovery correctly finding them).
+                "confidence": raw.get("confidence") or confidence,
                 "series_name_hint": series_name_hint,
                 "series_total_hint": raw.get("series_total_hint"),
             }

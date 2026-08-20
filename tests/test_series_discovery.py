@@ -2280,6 +2280,100 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
             "Unmapped: (Cherry Blossom Girls Book 13)",
         )
 
+    def test_missing_volume_recovery_does_not_downgrade_an_already_targeted_candidates_confidence(self):
+        # Regression (live bug): when the missing-volume lookahead recovers
+        # ANY gap, series_agent re-merges discovery["unified_candidates"]
+        # (every candidate found so far) alongside the newly-recovered ones
+        # through _filter_and_merge with a single blanket confidence value
+        # based on used_author_fallback -- which used to silently downgrade
+        # an already-"targeted" candidate (found by the earlier, real
+        # targeted-search pass) to "author_fallback" too, purely because
+        # *some* recovery happened this run. For a series whose real books
+        # carry standalone titles with zero textual tie back to the series
+        # name (e.g. "Desert Protocol" for "Cherry Blossom Girls" -- modeled
+        # on the real live-bug case, Georgia Wagner's "Jonathan Hunt
+        # Thriller Series"), that confidence is the ONLY signal
+        # belongs_to_series' targeted_with_number check has to go on, so the
+        # downgrade meant "Check Now" always reported zero new books despite
+        # discovery correctly finding them.
+        existing_candidate = discovery_engine.UnifiedCandidate(
+            title="Desert Protocol",
+            authors=["Harmon Cooper"],
+            series_name="Cherry Blossom Girls",
+            series_number=7.0,
+            isbn13="9780000000007",
+            source_provenance=[
+                {
+                    "source": "hardcover",
+                    "source_id": "hc-7",
+                    "source_url": None,
+                    "language": "",
+                    "series_number_hint": 7,
+                    "confidence": "targeted",
+                    "upcoming_hint": False,
+                }
+            ],
+        )
+        recovered_candidate = discovery_engine.UnifiedCandidate(
+            title="The Levee Ghosts",
+            authors=["Harmon Cooper"],
+            series_name="Cherry Blossom Girls",
+            series_number=10.0,
+            isbn13="9780000000010",
+            source_provenance=[
+                {
+                    "source": "web_search",
+                    "source_id": "ws-10",
+                    "source_url": None,
+                    "language": "",
+                    "series_number_hint": 10,
+                    "upcoming_hint": False,
+                }
+            ],
+        )
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "Desert Protocol",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-01-01",
+                "isbn13": "9780000000007",
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 7,
+                "upcoming_hint": False,
+            }
+        ]
+        skeleton_result = {
+            "candidates": [existing_candidate, recovered_candidate],
+            "expected_total": 10,
+            "missing_numbers": [7, 10],
+            "recovered_numbers": [10],
+        }
+        with self._mock_discovery(
+            candidates, used_author_fallback=True, unified_candidates=[existing_candidate]
+        ), patch.object(discovery_engine, "_reconstruct_series_skeleton", return_value=skeleton_result):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        available_titles = {book["title"] for book in result["available_missing"]}
+        # The pre-existing "targeted" candidate must survive -- its title has
+        # no textual tie to "Cherry Blossom Girls" at all, so only a
+        # preserved "targeted" confidence (via targeted_with_number) can
+        # clear belongs_to_series for it. (Gets the series suffix appended
+        # since the raw title itself never references the series -- see
+        # _title_references_series/display_title in run_series_check.)
+        self.assertIn("Desert Protocol: (Cherry Blossom Girls Book 7)", available_titles)
+        # The brand-new recovered candidate never had a "targeted"
+        # confidence to preserve -- it correctly still needs real signal
+        # (title match or targeted_with_number) and is rejected, same as
+        # before this fix. This isn't the bug; it documents the fix is
+        # scoped to *preserving* real confidence, not granting it to
+        # everything the lookahead recovers.
+        self.assertNotIn("The Levee Ghosts: (Cherry Blossom Girls Book 10)", available_titles)
+
     def test_no_author_on_file_returns_empty_result_without_calling_apis(self):
         series = Series(name="No Author Series")
         self.db.add(series)
