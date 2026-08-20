@@ -93,6 +93,48 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
         self.assertIsNotNone(book)
         self.assertEqual(book.source_url, "https://www.amazon.com/dp/EXAMPLE8")
 
+    def test_new_book_gets_discovery_provenance_and_matching_canonical_title(self):
+        # Check Now has no user-entered title to preserve, so both title
+        # columns get the same resolved value, metadata_source is stamped
+        # "discovery" (verified by construction), and book_number_source is
+        # "provider" since the number came from canonical_metadata, never
+        # from a user typing it in.
+        self._run_job_with_mocked_discovery(
+            [
+                {
+                    "title": "Edge of Shadow",
+                    "author": "Some Author",
+                    "series_name": "The First Peacemaker",
+                    "book_number": 8,
+                    "source_url": None,
+                    "provider": "web_search",
+                    "publication_date": None,
+                    "expected_date": None,
+                    "status_hint": "available",
+                    "asin_or_id": "web_search:edge-of-shadow",
+                    "is_missing": True,
+                    "status": "available",
+                    "canonical_metadata": {
+                        "title_normalized": "Edge of Shadow",
+                        "series_name_normalized": "The First Peacemaker",
+                        "book_number_normalized": 8,
+                        "publish_date_normalized": None,
+                        "upcoming_date_normalized": None,
+                        "availability": "available",
+                        "edition_type": "unknown",
+                        "title_selector": None,
+                    },
+                }
+            ]
+        )
+
+        book = self.db.query(Book).filter(Book.series_id == self.series.id, Book.book_number == 8.0).first()
+        self.assertIsNotNone(book)
+        self.assertEqual(book.canonical_title, "Edge of Shadow")
+        self.assertEqual(book.title, book.canonical_title)
+        self.assertEqual(book.metadata_source, "discovery")
+        self.assertEqual(book.book_number_source, "provider")
+
     def test_new_book_inherits_series_profile_id_not_default(self):
         # Regression test: Book.profile_id defaults to "robbie" when not set
         # explicitly (see models.py). A newly discovered book must inherit

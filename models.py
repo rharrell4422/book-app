@@ -169,6 +169,15 @@ class Book(Base):
 
     # Core identity
     title = Column(String, nullable=False)
+    # Provider-resolved title, written only by FIND binding, discovery
+    # persistence, or bulk re-resolution -- never by direct user input. NULL
+    # means unresolved. `title` itself stays the user's original entry
+    # forever (including marketing suffixes/series parentheticals), so a
+    # wrong FIND match is always recoverable by re-resolving rather than by
+    # the user re-typing from memory. Display/identity-matching code should
+    # coalesce to canonical_title, falling back to title -- see
+    # book_metadata_utils.py and services/identity.py.
+    canonical_title = Column(String, nullable=True)
     author = Column(String, nullable=False)
     subtitle = Column(String, nullable=True)
     series_id = Column(Integer, ForeignKey("series.id"), nullable=True)
@@ -176,6 +185,34 @@ class Book(Base):
     series_total_books = Column(Integer, nullable=True)
     is_series_finished = Column(Boolean, default=False)
     book_number = Column(Float, nullable=True)  # supports 0.5, etc.
+    # Where title/author/isbn13 came from -- "user" (typed manually, FIND
+    # declined/unavailable), "provider" (FIND resolved + bound), "import"
+    # (spreadsheet), "discovery" (Check Now), or NULL (legacy row, unknown
+    # origin). A row is "verified" iff this is "provider" or "discovery" --
+    # deliberately derived rather than a separate stored boolean, so the two
+    # can never drift out of sync. Governs title/author/isbn13 as a group
+    # (not per-field) because a single FIND call guarantees those three came
+    # from the same underlying volume -- see services/identity.py's group
+    # integrity discussion.
+    metadata_source = Column(String, nullable=True)
+    # Where book_number came from -- "user", "provider" (a structured hint
+    # from FIND/Check Now), "title_inferred" (parsed from title text), or
+    # NULL. Separate from metadata_source because the number's origin is
+    # genuinely independent of the volume identity's origin -- a user can
+    # type book_number for a title FIND resolved, or vice versa.
+    book_number_source = Column(String, nullable=True)
+    # True only when this row's metadata_source="provider" bind was made
+    # against a low-confidence FIND candidate -- i.e. it's provider-sourced
+    # (verified, not down-weighted, not excluded from discovery) but should
+    # be re-checked once provider catalogs fill in further. Never set for
+    # metadata_source in (discovery, user, import, NULL): discovery is
+    # already provider-sourced by construction and exempt from FIND
+    # confidence entirely, and the other three are already reachable via the
+    # "unverified" branch of any bulk re-resolution query. Cleared back to
+    # False whenever bulk re-resolution finds a confident replacement match
+    # or a fresh manual FIND bind supersedes it -- see services/
+    # metadata_provenance.py.
+    needs_reresolution = Column(Boolean, nullable=True)
 
     # Publishing
     format = Column(String, nullable=True)
@@ -240,6 +277,16 @@ class Book(Base):
     @property
     def series_name(self):
         return self.series.name if self.series else None
+
+    @property
+    def display_title(self):
+        """canonical_title when present, falling back to the user's
+        original title -- see canonical_title's own docstring above.
+        Read-only convenience for server-side code; the API response
+        already exposes both raw columns (see schemas.BookBase) so a
+        frontend can apply this same fallback itself where needed."""
+        canonical = str(self.canonical_title or "").strip()
+        return canonical or self.title
 
 
 class SeriesSkeleton(Base):

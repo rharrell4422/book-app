@@ -1,9 +1,11 @@
 import unittest
+from types import SimpleNamespace
 
 from services.identity import (
     _canonical_title_identity_key,
     _normalized_book_number_value,
     _series_book_identity_key,
+    owned_title_for_identity,
 )
 
 
@@ -76,6 +78,39 @@ class CanonicalTitleIdentityKeyTest(unittest.TestCase):
         self.assertNotEqual(
             _canonical_title_identity_key("The Signed Confession"),
             _canonical_title_identity_key("The Confession"),
+        )
+
+
+class OwnedTitleForIdentityTest(unittest.TestCase):
+    """Regression coverage for the two-column title model's identity
+    coalescing rule (see project design chat, §3.3): identity/discovery
+    matching against an *existing* owned book must key off canonical_title
+    when present, falling back to title -- otherwise a resolved title (e.g.
+    a corrected "Volume 4" -> "Book 4") would stay keyed off whatever the
+    user originally typed and never get recognized under its resolved
+    identity.
+    """
+
+    def test_falls_back_to_title_when_canonical_title_is_none(self):
+        book = SimpleNamespace(title="1% Lifesteal Volume 4", canonical_title=None)
+        self.assertEqual(owned_title_for_identity(book), "1% Lifesteal Volume 4")
+
+    def test_prefers_canonical_title_when_present(self):
+        book = SimpleNamespace(title="1% Lifesteal Volume 4", canonical_title="1% Lifesteal Book 4")
+        self.assertEqual(owned_title_for_identity(book), "1% Lifesteal Book 4")
+
+    def test_blank_canonical_title_falls_back_to_title(self):
+        book = SimpleNamespace(title="1% Lifesteal Volume 4", canonical_title="   ")
+        self.assertEqual(owned_title_for_identity(book), "1% Lifesteal Volume 4")
+
+    def test_title_never_read_from_canonical_title_side(self):
+        # Confirms the coalesced value actually changes downstream identity
+        # keys, not just that the function returns something plausible.
+        raw = SimpleNamespace(title="1% Lifesteal Volume 4", canonical_title=None)
+        resolved = SimpleNamespace(title="1% Lifesteal Volume 4", canonical_title="1% Lifesteal Book 4")
+        self.assertNotEqual(
+            _canonical_title_identity_key(owned_title_for_identity(raw)),
+            _canonical_title_identity_key(owned_title_for_identity(resolved)),
         )
 
 

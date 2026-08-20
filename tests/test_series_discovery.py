@@ -140,6 +140,67 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
             2,
         )
 
+    def test_infer_number_from_title_preserves_fractional_positions(self):
+        # Regression coverage for the Phase 4 number-inference unification
+        # (see project design chat): this used to truncate a companion/
+        # novella's fractional position to its integer part, colliding its
+        # identity with the numbered entry beside it (see
+        # services/identity.py's fractional-collision docstring). Now
+        # preserved as a genuine float for "#N.N", "book N.N", "volume N.N"
+        # and "vol N.N" forms.
+        self.assertEqual(discovery_engine.infer_number_from_title("Threshing Day (Empyrean Book 3.5)"), 3.5)
+        self.assertEqual(discovery_engine.infer_number_from_title("Ignite - Legacy #0.7"), 0.7)
+        self.assertEqual(discovery_engine.infer_number_from_title("Some Title Volume 2.5"), 2.5)
+        self.assertEqual(discovery_engine.infer_number_from_title("Some Title Vol. 2.5"), 2.5)
+
+    def test_infer_number_from_title_still_returns_whole_numbers_for_plain_titles(self):
+        # A whole-number match must come back as a value that compares
+        # equal to (and formats identically to) a plain int -- core_title_key
+        # depends on this not silently growing a ".0" suffix.
+        result = discovery_engine.infer_number_from_title("Cherry Blossom Girls Book 7")
+        self.assertEqual(result, 7)
+        self.assertEqual(int(result), 7)
+
+    def test_infer_number_from_title_fractional_form_survives_a_colon_before_the_number(self):
+        # "Book: 3.5" -- normalize_text would collapse the colon to a space
+        # exactly like "Book 3.5", but the naive fix of matching the
+        # fractional pattern against *raw* text (skipping normalize_text
+        # entirely) would break on exactly this input. Covers
+        # _normalize_number_context's decimal-preserving normalization pass.
+        self.assertEqual(discovery_engine.infer_number_from_title("Some Series Book: 3.5"), 3.5)
+
+    def test_core_title_key_stays_byte_identical_for_a_representative_whole_number_corpus(self):
+        # Pins core_title_key's exact output for a representative corpus of
+        # whole-number titles from this suite's own regression history, so
+        # a future change to infer_number_from_title can't silently alter a
+        # discovery matching key that this function's docstring explicitly
+        # promises to keep stable.
+        expectations = {
+            "1% Lifesteal (Volume 4): A LitRPG: (1% Lifesteal Book 4)": "1 lifesteal 4",
+            # No ":"/","/"("/" - " separator to truncate the core segment on,
+            # so the "book 7" phrase survives inside normalized_core *and*
+            # the folded-in number gets appended again -- a pre-existing
+            # quirk of this function unrelated to number-inference
+            # unification, pinned here as-is rather than "fixed", since
+            # fixing it is out of scope for this regression guard.
+            "Cherry Blossom Girls Book 7": "cherry blossom girls book 7 7",
+            "Webs of Power, The Grand Game, Book 9: A Dark Fantasy LitRPG": "webs of power 9",
+            "The Mad God, The Grand Game, Book 10: A Dark Fantasy LitRPG": "mad god 10",
+            "Fourth Wing": "fourth wing",
+        }
+        for title, expected_key in expectations.items():
+            self.assertEqual(discovery_engine.core_title_key(title), expected_key)
+
+    def test_core_title_key_truncates_a_fractional_title_to_its_integer_part(self):
+        # core_title_key intentionally does NOT gain fractional precision
+        # even though infer_number_from_title now supports it -- see both
+        # functions' docstrings for why (discovery matching key stability;
+        # the fractional-collision fix lives at the persistence identity
+        # layer instead, in services/identity.py).
+        key = discovery_engine.core_title_key("Threshing Day (Empyrean Book 3.5)")
+        self.assertTrue(key.endswith(" 3"))
+        self.assertNotIn(".", key)
+
     def test_looks_like_non_new_release_filters_bundles_and_editions(self):
         self.assertTrue(discovery_engine.looks_like_non_new_release("Cherry Blossom Girls Books 1-3 Box Set"))
         self.assertTrue(discovery_engine.looks_like_non_new_release("Cherry Blossom Girls: French Edition"))

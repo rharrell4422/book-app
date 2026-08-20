@@ -54,6 +54,46 @@ export type LookupResultState = {
   matched_author: string | null;
 };
 
+// Mirrors services/find_engine.py's candidate shape -- see that module's
+// docstring for the confidence-tier definitions (HIGH/MEDIUM/LOW).
+export type FindConfidence = "high" | "medium" | "low";
+
+export type FindCandidate = {
+  candidate_id: string;
+  title: string | null;
+  author: string | null;
+  authors: string[];
+  isbn13: string | null;
+  description: string | null;
+  source_url: string | null;
+  published_date: string | null;
+  providers: string[];
+  confidence: FindConfidence;
+  signals: {
+    author_match: boolean;
+    isbn_present: boolean;
+    strong_title_match: boolean;
+  };
+};
+
+export type FindResultState = {
+  query: { title: string; author: string | null; book_number: number | null; series_name: string | null };
+  candidates: FindCandidate[];
+  provider_failures: { provider: string; error: string }[];
+};
+
+export const FIND_CONFIDENCE_LABEL: Record<FindConfidence, string> = {
+  high: "High confidence",
+  medium: "Medium confidence",
+  low: "Low confidence",
+};
+
+export const FIND_CONFIDENCE_BADGE_CLASS: Record<FindConfidence, string> = {
+  high: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300",
+  medium: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300",
+  low: "bg-muted text-muted-foreground",
+};
+
 export function normalizeLookupMatchedTitle(value: string | null | undefined) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -81,6 +121,10 @@ export function AddBookFormFields({
   showLookupSummary,
   onToggleLookupSummary,
   onFindDetails,
+  findResult,
+  selectedCandidateId,
+  onSelectCandidate,
+  onDeclineCandidates,
   fieldIdPrefix = "add-book",
   seriesLocked = false,
 }: {
@@ -94,6 +138,10 @@ export function AddBookFormFields({
   showLookupSummary: boolean;
   onToggleLookupSummary: () => void;
   onFindDetails: () => void;
+  findResult?: FindResultState | null;
+  selectedCandidateId?: string | null;
+  onSelectCandidate?: (candidate: FindCandidate) => void;
+  onDeclineCandidates?: () => void;
   fieldIdPrefix?: string;
   seriesLocked?: boolean;
 }) {
@@ -111,7 +159,10 @@ export function AddBookFormFields({
           <CircleHelpIcon className="mt-0.5 h-4 w-4 shrink-0" />
           <div>
             <p className="font-medium text-foreground">Find details helper</p>
-            <p>Minimum for search: book title. Best results: book title plus author.</p>
+            <p>
+              Minimum for search: book title. Best results: book title plus author.
+              {onSelectCandidate ? " We'll show you matches to confirm -- nothing is added automatically." : ""}
+            </p>
           </div>
         </div>
       </div>
@@ -141,7 +192,15 @@ export function AddBookFormFields({
           <Button type="button" variant="secondary" onClick={onFindDetails} disabled={lookingUpBook}>
             {lookingUpBook ? "Finding..." : "Find details"}
           </Button>
-          {lookupResult?.found ? (
+          {onSelectCandidate ? (
+            // Add Book's FIND-backed path (see use-add-book-form.ts):
+            // candidates are rendered below as an explicit pick list, never
+            // auto-applied -- selectedCandidateId is used there to show
+            // which one (if any) is currently bound to the form.
+            !findResult && selectedCandidateId ? (
+              <span className="text-xs text-muted-foreground">Match applied below.</span>
+            ) : null
+          ) : lookupResult?.found ? (
             <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
               <span>
                 Matched {normalizeLookupMatchedTitle(lookupResult.matched_title) || "title"}
@@ -173,6 +232,59 @@ export function AddBookFormFields({
             <span className="text-xs text-muted-foreground">No external match found. Manual add still works.</span>
           ) : null}
         </div>
+
+        {onSelectCandidate && findResult ? (
+          <div className="sm:col-span-2 space-y-2 rounded-md border p-2">
+            {findResult.candidates.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                No matches found. You can dismiss this and add the book manually.
+              </p>
+            ) : (
+              <>
+                <p className="text-xs font-medium text-foreground">
+                  Choose a match, or dismiss to keep what you typed:
+                </p>
+                <ul className="space-y-2">
+                  {findResult.candidates.map((candidate) => (
+                    <li
+                      key={candidate.candidate_id}
+                      className="flex flex-wrap items-start justify-between gap-2 rounded-md border bg-background px-2.5 py-2"
+                    >
+                      <div className="min-w-0 space-y-0.5">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-sm font-medium text-foreground">
+                            {normalizeLookupMatchedTitle(candidate.title) || "Untitled"}
+                          </span>
+                          <span
+                            className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${FIND_CONFIDENCE_BADGE_CLASS[candidate.confidence]}`}
+                          >
+                            {FIND_CONFIDENCE_LABEL[candidate.confidence]}
+                          </span>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          {candidate.author ? `by ${candidate.author}` : "Author unknown"}
+                          {candidate.isbn13 ? ` · ISBN ${candidate.isbn13}` : ""}
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={selectedCandidateId === candidate.candidate_id ? "secondary" : "outline"}
+                        className="h-7 shrink-0 px-2 text-[11px]"
+                        onClick={() => onSelectCandidate(candidate)}
+                      >
+                        {selectedCandidateId === candidate.candidate_id ? "Applied" : "Use this match"}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-[11px]" onClick={onDeclineCandidates}>
+              Dismiss
+            </Button>
+          </div>
+        ) : null}
 
         {seriesLocked ? null : (
           <div className="space-y-1 sm:col-span-2">

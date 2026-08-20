@@ -26,6 +26,7 @@ from services.identity import (
     _canonical_title_identity_key,
     _edition_priority,
     _normalize_discovered_title,
+    owned_title_for_identity,
     _series_book_identity_key,
 )
 
@@ -251,7 +252,7 @@ def run_series_check_job_full(series_id: int) -> None:
             if series_book_key and series_book_key not in existing_by_series_book:
                 existing_by_series_book[series_book_key] = existing
 
-            canonical_title_key = _canonical_title_identity_key(existing.title)
+            canonical_title_key = _canonical_title_identity_key(owned_title_for_identity(existing))
             if canonical_title_key and canonical_title_key not in existing_by_canonical_title:
                 existing_by_canonical_title[canonical_title_key] = existing
 
@@ -336,6 +337,16 @@ def run_series_check_job_full(series_id: int) -> None:
                     logger.info("Classification result: EXISTING")
 
                     matched_existing.title = normalized_title or matched_existing.title
+                    # Check Now is exempt from FIND and already provider-
+                    # sourced by construction (see the Add Book metadata
+                    # intake design) -- a confirmed match refresh is exactly
+                    # the "system enrichment" case allowed to move
+                    # metadata_source to "discovery" even if the row was
+                    # previously "user"/"provider", and to update
+                    # canonical_title even though it's otherwise never
+                    # user-editable.
+                    matched_existing.canonical_title = normalized_title or matched_existing.canonical_title
+                    matched_existing.metadata_source = "discovery"
                     matched_existing.author = normalized_author or matched_existing.author
                     if candidate_asin:
                         matched_existing.asin = candidate_asin
@@ -394,6 +405,14 @@ def run_series_check_job_full(series_id: int) -> None:
                     # series' total_books/upcoming flags with a "phantom" book.
                     profile_id=db_series.profile_id,
                     title=normalized_title,
+                    # Check Now has no user-entered title to preserve, so
+                    # both title columns get the same resolved value (see
+                    # the Add Book metadata intake design's two-column title
+                    # model) -- unlike a FIND bind, there's nothing here
+                    # that needs protecting from being overwritten.
+                    canonical_title=normalized_title,
+                    metadata_source="discovery",
+                    book_number_source="provider" if book_number is not None else None,
                     author=normalized_author,
                     series_id=series_id,
                     book_number=book_number,
@@ -423,7 +442,7 @@ def run_series_check_job_full(series_id: int) -> None:
                 inserted_series_book_key = _series_book_identity_key(db_series.name, db_book.book_number)
                 if inserted_series_book_key:
                     existing_by_series_book[inserted_series_book_key] = db_book
-                inserted_title_key = _canonical_title_identity_key(db_book.title)
+                inserted_title_key = _canonical_title_identity_key(owned_title_for_identity(db_book))
                 if inserted_title_key:
                     existing_by_canonical_title[inserted_title_key] = db_book
 
@@ -468,7 +487,7 @@ def run_series_check_job_full(series_id: int) -> None:
                 if not key:
                     key = _series_book_identity_key(existing.series_name or db_series.name, existing.book_number) or ""
                 if not key:
-                    key = _canonical_title_identity_key(existing.title) or ""
+                    key = _canonical_title_identity_key(owned_title_for_identity(existing)) or ""
                 if not key:
                     continue
 

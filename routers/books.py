@@ -10,6 +10,8 @@ from crud.books import BookNumberRequiresSeriesError, InvalidSeriesForProfileErr
 from discovery_engine import generate_series_overview
 from intelligence import lookup_book_summary
 from routers.deps import enforce_access, get_current_profile_id, get_db
+from services.bulk_reresolution import bulk_reresolve, count_eligible_books
+from services.find_engine import find_book_candidates
 
 router = APIRouter(prefix="/books", tags=["books"], dependencies=[Depends(enforce_access)])
 
@@ -59,8 +61,32 @@ def read_books_by_series(series_id: int, db: Session = Depends(get_db), profile_
 
 
 @router.get("/lookup")
-def lookup_book(title: str, author: str | None = None):
-    return lookup_book_summary(title, author)
+def lookup_book(title: str, author: str | None = None, book_number: float | None = None, series_name: str | None = None):
+    # book_number/series_name were previously accepted by lookup_book_summary
+    # itself (and used internally -- see the auto-summary refresh below,
+    # which already passes them) but silently dropped by this public route,
+    # which only ever forwarded title/author. Without book_number, a lookup
+    # for "book 1" of a series whose title text is ambiguous with a later
+    # volume could return that later volume's summary instead -- see
+    # lookup_book_summary's own docstring for the disambiguation this
+    # enables once a caller actually supplies it.
+    return lookup_book_summary(title, author, book_number, series_name)
+
+
+# FIND: multi-provider metadata search for the Add Book workflow's Resolve/
+# Select states (see services/find_engine.py). Unlike /lookup above (which
+# returns a single best-effort summary match, historically auto-applied to
+# the form with no user confirmation), this returns every grouped candidate
+# ranked by confidence tier so the UI can present a real choice -- see the
+# project design chat's consolidated Add Book specification.
+@router.get("/find")
+def find_book(
+    title: str,
+    author: str | None = None,
+    book_number: float | None = None,
+    series_name: str | None = None,
+):
+    return find_book_candidates(title, author, book_number, series_name)
 
 
 # "More by this author" -- synchronous and lightweight by design (one query
@@ -95,6 +121,28 @@ def series_overview(request: schemas.SeriesOverviewRequest):
         request.series_name, request.author, [book.model_dump() for book in request.books]
     )
     return {"overview": overview}
+
+
+# Phase 7 (bulk re-resolution -- see services/bulk_reresolution.py):
+# lets the UI show a badge/count without spending any FIND calls.
+@router.get("/reresolution_queue_count")
+def reresolution_queue_count(db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
+    return {"count": count_eligible_books(db, profile_id)}
+
+
+# Owner-only (enforced by enforce_access above, since this is a POST):
+# re-runs FIND for up to `limit` never-verified or low-confidence rows and
+# applies any confident match found. Capped and synchronous by design --
+# see services/bulk_reresolution.py's module docstring -- so a caller with
+# a large backlog just calls this repeatedly (e.g. a "Re-run" button) until
+# the response's "remaining" count stops shrinking.
+@router.post("/bulk_reresolve")
+def bulk_reresolve_endpoint(
+    limit: int = 25, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)
+):
+    if limit < 1:
+        raise HTTPException(status_code=422, detail="limit must be >= 1")
+    return bulk_reresolve(db, profile_id, limit=limit)
 
 
 @router.get("/{book_id}", response_model=schemas.BookResponse)

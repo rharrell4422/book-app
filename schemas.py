@@ -33,11 +33,37 @@ class ProfileUpdate(BaseModel):
 
 class BookBase(BaseModel):
     title: str
+    # Provider-resolved title (Add Book FIND bind, Check Now, bulk
+    # re-resolution). NULL means unresolved. `title` above always stays the
+    # user's original entry -- see models.Book.canonical_title.
+    canonical_title: Optional[str] = None
     author: str
     subtitle: Optional[str] = None
     series_id: Optional[int] = None
     series_order: Optional[float] = None
     book_number: Optional[float] = None
+    # System-managed provenance, like is_missing/is_upcoming_auto below --
+    # settable here for the same reason those are (internal write paths use
+    # this same schema), not intended for a client to set directly on a
+    # normal Add/Edit Book request. On the create path, crud.create_book
+    # instead *derives* metadata_source/needs_reresolution itself from
+    # find_confidence below (see services/metadata_provenance.py) and
+    # ignores/overwrites whatever a client sent for these two directly --
+    # they stay client-settable at the schema level only because internal
+    # write paths (bulk re-resolution, tests) construct BookBase/BookUpdate
+    # objects programmatically rather than via a second, parallel schema.
+    metadata_source: Optional[str] = None
+    book_number_source: Optional[str] = None
+    needs_reresolution: Optional[bool] = None
+    # Transient create-only signal, not a Book column (dropped by
+    # crud._book_payload's BOOK_COLUMN_KEYS filter) -- the FIND confidence
+    # tier ("high"/"medium"/"low") of the candidate the client just bound,
+    # or omitted/None when the user declined every candidate / typed the
+    # book in by hand. crud.create_book consumes this to compute
+    # metadata_source/needs_reresolution via services/metadata_provenance.py
+    # rather than trusting a client-supplied metadata_source="provider"
+    # claim directly.
+    find_confidence: Optional[str] = None
     publication_date: Optional[date] = None
     publisher: Optional[str] = None
     edition: Optional[str] = None
@@ -105,11 +131,15 @@ class BookListItem(BaseModel):
 
 class BookUpdate(BaseModel):
     title: Optional[str] = None
+    canonical_title: Optional[str] = None
     author: Optional[str] = None
     subtitle: Optional[str] = None
     series_id: Optional[int] = None
     series_order: Optional[float] = None
     book_number: Optional[float] = None
+    metadata_source: Optional[str] = None
+    book_number_source: Optional[str] = None
+    needs_reresolution: Optional[bool] = None
     publication_date: Optional[date] = None
     publisher: Optional[str] = None
     edition: Optional[str] = None

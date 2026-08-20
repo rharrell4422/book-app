@@ -1788,7 +1788,12 @@ export default function SeriesDetailPage() {
           lockedSeriesId={Number(series.id)}
           initialValues={{
             seriesName: series.name,
-            author: String(series.author || "").trim() || "Unknown author",
+            // No "Unknown author" placeholder -- `series.author` here
+            // already comes from GET /series/:id, which falls back to one
+            // of the series' own books' authors before returning empty (see
+            // crud/series.py). If it's still blank, require the user to
+            // type one instead of writing a placeholder value.
+            author: String(series.author || "").trim(),
             status: "upcoming",
           }}
           onSuccess={async (createdBook) => {

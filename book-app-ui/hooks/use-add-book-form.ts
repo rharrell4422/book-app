@@ -11,8 +11,26 @@ import {
   type AddBookFormState,
   type AddBookSeriesOption,
   type BookClassification,
+  type FindCandidate,
+  type FindResultState,
   type LookupResultState,
 } from "@/components/books/add-book-form-fields";
+
+// What a confirmed FIND selection contributes to the eventual POST /books/
+// body -- see services/metadata_provenance.py's provenance_for_find_bind,
+// which this mirrors on the frontend side. Cleared (see updateAddBookForm)
+// the moment the user edits title/author away from what was applied, so a
+// stale "provider verified" stamp can never ride along with hand-edited
+// data.
+type SelectedFindCandidate = {
+  candidateId: string;
+  confidence: "high" | "medium" | "low";
+  canonicalTitle: string | null;
+  isbn13: string | null;
+  sourceUrl: string | null;
+  appliedTitle: string;
+  appliedAuthor: string;
+};
 
 export type CreatedBook = {
   id: number;
@@ -58,6 +76,8 @@ export function useAddBookForm(options?: {
   const [lookingUpBook, setLookingUpBook] = useState(false);
   const [showLookupSummary, setShowLookupSummary] = useState(false);
   const [lookupResult, setLookupResult] = useState<LookupResultState | null>(null);
+  const [findResult, setFindResult] = useState<FindResultState | null>(null);
+  const [selectedCandidate, setSelectedCandidate] = useState<SelectedFindCandidate | null>(null);
   const [createdBookId, setCreatedBookId] = useState<number | null>(null);
 
   const fetchSeriesList = useCallback(async () => {
@@ -96,6 +116,19 @@ export function useAddBookForm(options?: {
 
   function updateAddBookForm<K extends keyof AddBookFormState>(key: K, value: AddBookFormState[K]) {
     if (seriesLocked && key === "seriesName") return;
+    // A confirmed FIND selection stamps metadata_source="provider" on
+    // submit (see handleAddBook) -- that claim stops being true the moment
+    // the user hand-edits title/author away from what was actually applied,
+    // so drop the binding rather than let a stale "provider verified" stamp
+    // ride along with edited data.
+    if ((key === "title" || key === "author") && selectedCandidate) {
+      const nextValue = String(value ?? "").trim();
+      const stillMatches =
+        key === "title" ? nextValue === selectedCandidate.appliedTitle : nextValue === selectedCandidate.appliedAuthor;
+      if (!stillMatches) {
+        setSelectedCandidate(null);
+      }
+    }
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
@@ -119,6 +152,8 @@ export function useAddBookForm(options?: {
     setForm(seriesLocked ? lockedAddDefaults(initialValues) : EMPTY_ADD_BOOK_FORM);
     setLookupResult(null);
     setShowLookupSummary(false);
+    setFindResult(null);
+    setSelectedCandidate(null);
   }
 
   function onStatusChange(nextStatus: BookStatus) {
@@ -133,6 +168,8 @@ export function useAddBookForm(options?: {
   async function handleFindDetails() {
     const title = form.title.trim();
     const author = form.author.trim();
+    const seriesName = form.seriesName.trim();
+    const bookNumberText = form.bookNumber.trim();
 
     if (!title) {
       toast({
@@ -143,6 +180,8 @@ export function useAddBookForm(options?: {
     }
 
     setLookingUpBook(true);
+    setFindResult(null);
+    setSelectedCandidate(null);
 
     try {
       const params = new URLSearchParams();
@@ -150,16 +189,25 @@ export function useAddBookForm(options?: {
       if (author) {
         params.set("author", author);
       }
-
-      const response = await fetchApiWithFallback(`/books/lookup?${params.toString()}`);
-      if (!response.ok) {
-        throw new Error(`Lookup failed (${response.status})`);
+      // Forwarding book_number/series_name lets FIND (and the summary
+      // lookup it's layered over) disambiguate same-titled results from a
+      // different volume -- see routers/books.py's /find and /lookup.
+      if (bookNumberText && Number.isFinite(Number(bookNumberText))) {
+        params.set("book_number", bookNumberText);
+      }
+      if (seriesName) {
+        params.set("series_name", seriesName);
       }
 
-      const data: LookupResultState = await response.json();
-      setLookupResult(data);
+      const response = await fetchApiWithFallback(`/books/find?${params.toString()}`);
+      if (!response.ok) {
+        throw new Error(`Find failed (${response.status})`);
+      }
 
-      if (!data.found) {
+      const data: FindResultState = await response.json();
+      setFindResult(data);
+
+      if (!data.candidates.length) {
         toast({
           title: "No details found",
           description: "No match was found. You can still add the book manually.",
@@ -167,32 +215,62 @@ export function useAddBookForm(options?: {
         return;
       }
 
-      setForm((prev) => ({
-        ...prev,
-        title: normalizeLookupMatchedTitle(data.matched_title) || prev.title,
-        author: data.matched_author?.trim() || prev.author,
-        autoSummary: data.summary || prev.autoSummary,
-      }));
-      setShowLookupSummary(false);
-
       toast({
-        title: "Details found",
-        description: "Matched title and author were applied to the form.",
+        title: "Matches found",
+        description: "Review the matches below and pick one, or dismiss to keep what you typed.",
       });
     } catch (error) {
-      console.error("Error looking up book:", error);
+      console.error("Error finding book details:", error);
       toast({
-        title: "Lookup error",
-        description: error instanceof Error ? error.message : "Unable to look up book details.",
+        title: "Find error",
+        description: error instanceof Error ? error.message : "Unable to find book details.",
       });
     } finally {
       setLookingUpBook(false);
     }
   }
 
+  function applyFindCandidate(candidate: FindCandidate) {
+    // Fills gaps only -- never overwrites text the user already typed, and
+    // never touches form.title itself (the user's own entry is preserved
+    // forever; the candidate's title becomes canonical_title instead, sent
+    // alongside title on submit -- see models.Book.canonical_title and
+    // handleAddBook below).
+    setForm((prev) => ({
+      ...prev,
+      title: prev.title.trim() || normalizeLookupMatchedTitle(candidate.title) || prev.title,
+      author: prev.author.trim() || candidate.author?.trim() || prev.author,
+      autoSummary: candidate.description || prev.autoSummary,
+    }));
+    setSelectedCandidate({
+      candidateId: candidate.candidate_id,
+      confidence: candidate.confidence,
+      canonicalTitle: normalizeLookupMatchedTitle(candidate.title) || null,
+      isbn13: candidate.isbn13,
+      sourceUrl: candidate.source_url,
+      appliedTitle: (form.title.trim() || normalizeLookupMatchedTitle(candidate.title) || "").trim(),
+      appliedAuthor: (form.author.trim() || candidate.author?.trim() || "").trim(),
+    });
+    setFindResult(null);
+    setShowLookupSummary(Boolean(candidate.description));
+  }
+
+  function declineFindCandidates() {
+    // Explicitly "keep what I typed" -- clears the picker without touching
+    // the form at all, so nothing the user already entered is disturbed.
+    setFindResult(null);
+  }
+
   async function handleAddBook() {
     const title = form.title.trim();
-    const author = form.author.trim() || (seriesLocked ? "Unknown author" : "");
+    // No placeholder fallback here -- an authorless locked series should
+    // force the user to supply one (see the Missing-info check right below),
+    // not silently write a value like "Unknown author" that normalizes to a
+    // non-empty token and can poison cross-series author matching. The
+    // series-locked add flow prefills this field from the series' own
+    // resolved author (see lockedSeries in add-book/page.tsx and
+    // AddBookDialog's initialValues) whenever that's actually known.
+    const author = form.author.trim();
     const seriesName = form.seriesName.trim();
     const bookNumberText = form.bookNumber.trim();
 
@@ -288,14 +366,36 @@ export function useAddBookForm(options?: {
       // backend's own book_number-requires-series_id rejection.
       const effectiveBookNumber = effectiveClassification === "series" ? parsedBookNumber : null;
 
+      // A FIND selection only counts as still-bound if the form's title/
+      // author still match what was actually applied -- updateAddBookForm
+      // already clears selectedCandidate the moment either drifts, but this
+      // is a second, cheap belt-and-suspenders check right at submit time.
+      const boundCandidate =
+        selectedCandidate && selectedCandidate.appliedTitle === title && selectedCandidate.appliedAuthor === author
+          ? selectedCandidate
+          : null;
+
       const createBookResponse = await fetchApiWithFallback("/books/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title,
+          canonical_title: boundCandidate?.canonicalTitle || undefined,
+          // metadata_source/needs_reresolution are derived server-side from
+          // this alone (see crud.create_book / services/
+          // metadata_provenance.py) -- the frontend never sends those two
+          // directly, so it can't misrepresent a hand-typed entry as
+          // provider-verified.
+          find_confidence: boundCandidate?.confidence || undefined,
+          isbn13: boundCandidate?.isbn13 || undefined,
+          source_url: boundCandidate?.sourceUrl || undefined,
           author,
           series_id: resolvedSeriesId,
           series_order: effectiveBookNumber,
+          // book_number_source is intentionally omitted here -- crud.
+          // create_book's own _book_payload already stamps "user" whenever
+          // book_number is present in the request (see crud/books.py), so
+          // there's no need to duplicate that rule on the frontend too.
           book_number: effectiveBookNumber,
           release_date: releaseDate || undefined,
           publication_date: form.publicationDate || undefined,
@@ -349,6 +449,8 @@ export function useAddBookForm(options?: {
     saving,
     lookingUpBook,
     lookupResult,
+    findResult,
+    selectedCandidateId: selectedCandidate?.candidateId ?? null,
     showLookupSummary,
     createdBookId,
     seriesLocked,
@@ -358,6 +460,8 @@ export function useAddBookForm(options?: {
     onStatusChange,
     onToggleLookupSummary: () => setShowLookupSummary((prev) => !prev),
     handleFindDetails,
+    applyFindCandidate,
+    declineFindCandidates,
     handleAddBook,
   };
 }

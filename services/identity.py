@@ -42,6 +42,38 @@ def _authors_match_exact(series_author: str | None, candidate_author: str | None
     return series_norm == candidate_norm
 
 
+# Placeholder author values that write paths have historically substituted
+# for a genuinely missing author (e.g. "Unknown author" prefilled on the Add
+# Book form for an authorless locked series -- see use-add-book-form.ts's
+# history). Listed in their *normalized* form since that's what callers
+# should compare against, not their raw display spelling.
+#
+# Normalization makes these placeholders more dangerous than an empty
+# string, not less: _normalize_author_for_identity strips the literal word
+# "author" as a role descriptor, so "Unknown author" and "Unknown" both
+# collapse to the same non-empty token "unknown" -- which then compares
+# equal to any *other* placeholder-tainted row. Two otherwise-unrelated
+# series can end up looking like the same author's work (see
+# _authors_match_exact above, which returns False for a genuinely empty
+# value but would return True for two placeholder values), silently fusing
+# their identities in every author-keyed lookup (known-sibling-series sets,
+# the author-wide tracked-series map, discovery's author-match gate).
+_PLACEHOLDER_AUTHOR_DENYLIST = {"unknown", "n a", "none", "various"}
+
+
+def is_placeholder_author(value: str | None) -> bool:
+    """True if `value` normalizes to one of the placeholder author values
+    above. Callers adopting a value into Series.author/Book.author from a
+    fallback or backfill path (never from direct user input, which is free
+    to contain any string) should check this and treat a placeholder the
+    same as an empty value -- i.e. don't adopt it, leave the field NULL/
+    empty instead so it stays visibly unresolved rather than looking like
+    real data.
+    """
+    normalized = _normalize_author_for_identity(value)
+    return bool(normalized) and normalized in _PLACEHOLDER_AUTHOR_DENYLIST
+
+
 def _normalize_series_name_for_identity(value: str | None) -> str:
     text = _normalize_identity_text(value)
     text = re.sub(r"\b(series|book series)\b", "", text).strip()
@@ -112,6 +144,24 @@ def _series_book_identity_key(series_name: str | None, book_number) -> str | Non
 def _canonical_title_identity_key(title: str | None) -> str | None:
     normalized_title = _normalize_title_for_identity(title)
     return normalized_title or None
+
+
+def owned_title_for_identity(book: "models.Book") -> str:
+    """The title to use for identity/discovery matching against an existing
+    owned book -- Book.canonical_title (provider-resolved) when present,
+    falling back to Book.title (the user's original entry). Every existing
+    row has canonical_title=NULL today, so this is a no-op until FIND
+    binding/Check Now/bulk re-resolution start populating it -- callers that
+    build title-key exclusion sets or dedupe against *existing* rows should
+    use this instead of reading `.title` directly, so a resolved title
+    (e.g. a corrected "Volume 4" -> "Book 4") is recognized under its
+    canonical identity rather than staying keyed off whatever the user
+    originally typed. Never used for the *incoming candidate* side of a
+    comparison -- a fresh FIND/discovery result has no canonical_title of
+    its own yet; that's exactly what Bind assigns.
+    """
+    canonical = str(getattr(book, "canonical_title", None) or "").strip()
+    return canonical or str(getattr(book, "title", None) or "")
 
 
 def _edition_priority(value: str | None) -> int:

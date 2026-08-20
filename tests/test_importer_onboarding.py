@@ -111,6 +111,59 @@ class RunImportPartialFailureTest(unittest.TestCase):
         self.assertEqual(result["imported_count"] + result["failed_count"], 3)
 
 
+class CreateOrUpdateBookProvenanceTest(unittest.TestCase):
+    """Regression coverage for the Phase 3/4 provenance + number-inference
+    wiring added to importer.create_or_update_book (see project design
+    chat): every imported row is stamped metadata_source="import", and a
+    blank Book# spreadsheet cell falls back to the same title-text
+    extractor Check Now/Add Book use rather than staying unset just because
+    the row came in through the importer.
+    """
+
+    def setUp(self):
+        self.engine, self.SessionLocal = _new_in_memory_session_factory()
+        self.db = self.SessionLocal()
+
+    def tearDown(self):
+        self.db.close()
+        Base.metadata.drop_all(bind=self.engine)
+        self.engine.dispose()
+
+    def test_row_is_stamped_import_metadata_source(self):
+        from importer.importer import create_or_update_book
+
+        book, _decision = create_or_update_book(
+            self.db,
+            {"title": "Some Book", "author": "Some Author", "series_name": "Some Series", "book_number": 3},
+            profile_id="robbie",
+        )
+        self.assertEqual(book.metadata_source, "import")
+        self.assertIsNone(book.canonical_title)
+        self.assertEqual(book.book_number_source, "user")
+
+    def test_blank_book_number_falls_back_to_title_inference(self):
+        from importer.importer import create_or_update_book
+
+        book, _decision = create_or_update_book(
+            self.db,
+            {"title": "Cherry Blossom Girls Book 7", "author": "Some Author", "series_name": "Cherry Blossom Girls"},
+            profile_id="robbie",
+        )
+        self.assertEqual(book.book_number, 7.0)
+        self.assertEqual(book.book_number_source, "title_inferred")
+
+    def test_explicit_blank_and_uninferable_title_leaves_number_source_unset(self):
+        from importer.importer import create_or_update_book
+
+        book, _decision = create_or_update_book(
+            self.db,
+            {"title": "An Unnumbered Standalone", "author": "Some Author"},
+            profile_id="robbie",
+        )
+        self.assertIsNone(book.book_number)
+        self.assertIsNone(book.book_number_source)
+
+
 class RunImportScopedIntelligenceTest(unittest.TestCase):
     """recompute_series_intelligence used to sweep every series across
     every profile after each import; it should now only touch the

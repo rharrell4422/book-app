@@ -1,11 +1,13 @@
 import models
-import re
 
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
+import discovery_engine
 from models import Book, Series
 from intelligence import recalculate_intelligence
+from services.identity import is_placeholder_author
+from services.metadata_provenance import provenance_for_declined_or_manual_entry, provenance_for_find_bind
 
 
 BOOK_COLUMN_KEYS = {column.key for column in Book.__table__.columns}
@@ -67,9 +69,15 @@ def _backfill_series_author_if_missing(db: Session, series_id: int | None, book_
     has no author on file yet, adopt the author of a book being added/edited
     on it rather than leaving discovery permanently unable to run for that
     series.
+
+    Refuses to adopt a placeholder value (e.g. "Unknown author", "N/A") --
+    see is_placeholder_author's docstring for why normalization makes those
+    more dangerous than an empty value rather than less. This guard only
+    covers adoption into Series.author; it never rejects the book create/
+    update itself, keeping the change scoped to this one field.
     """
     author = str(book_author or "").strip()
-    if not series_id or not author:
+    if not series_id or not author or is_placeholder_author(author):
         return
 
     series = db.query(Series).filter(Series.id == series_id).first()
@@ -78,22 +86,28 @@ def _backfill_series_author_if_missing(db: Session, series_id: int | None, book_
         db.commit()
 
 
-def _infer_series_numbers_from_title(title: str | None) -> tuple[float | None, int | None]:
-    if not title:
+def _infer_series_numbers_from_title(title: str | None, series_name: str | None = None) -> tuple[float | None, int | None]:
+    """Delegates to discovery_engine.infer_number_from_title -- the same
+    extractor Check Now and confidence/intelligence scoring already use --
+    instead of a second, narrower pattern set. This used to only recognize
+    a literal "book N" marker; it now also recognizes "#N", "volume N",
+    "vol N", spelled-out numbers ("Book Four"), and (when series_name is
+    known) a bare "<series name> N" positional form, exactly like discovery
+    already does for the same title text. Fractional positions (e.g.
+    "Book 3.5") are preserved rather than truncated -- see that function's
+    own docstring.
+    """
+    book_number = discovery_engine.infer_number_from_title(title, series_name)
+    if book_number is None:
         return None, None
-
-    match = re.search(r"\bbook\s+(\d+(?:\.\d+)?)\b", str(title), flags=re.IGNORECASE)
-    if not match:
-        return None, None
-
-    book_number = float(match.group(1))
-    series_order = int(book_number) if book_number.is_integer() else None
+    series_order = int(book_number) if float(book_number).is_integer() else None
     return book_number, series_order
 
 
 def _book_payload(
     data_obj,
     *,
+    db: Session | None = None,
     exclude_unset: bool = False,
     include_none: bool = False,
     infer_numbers: bool = False,
@@ -109,9 +123,22 @@ def _book_payload(
         payload["title"] = str(payload.get("title") or "").strip()
 
     if infer_numbers:
-        inferred_book_number, inferred_series_order = _infer_series_numbers_from_title(payload.get("title"))
+        had_explicit_book_number = payload.get("book_number") is not None
+        series_name = None
+        series_id = payload.get("series_id")
+        if db is not None and series_id:
+            series_row = db.query(Series.name).filter(Series.id == series_id).first()
+            series_name = series_row[0] if series_row else None
+
+        inferred_book_number, inferred_series_order = _infer_series_numbers_from_title(payload.get("title"), series_name)
         if payload.get("book_number") is None and inferred_book_number is not None:
             payload["book_number"] = inferred_book_number
+            # Provenance for §Phase 3 -- only stamped when this call actually
+            # filled in a value the caller didn't already supply/tag itself.
+            if not payload.get("book_number_source"):
+                payload["book_number_source"] = "title_inferred"
+        elif had_explicit_book_number and not payload.get("book_number_source"):
+            payload["book_number_source"] = "user"
         if payload.get("series_order") is None and inferred_series_order is not None:
             payload["series_order"] = inferred_series_order
 
@@ -136,7 +163,17 @@ def _should_clear_ghost_flags(db_book: Book, payload: dict) -> bool:
 
 
 def create_book(db: Session, book, profile_id: str):
-    payload = _book_payload(book, infer_numbers=True)
+    payload = _book_payload(book, db=db, infer_numbers=True)
+    # metadata_source/needs_reresolution are always server-derived here from
+    # find_confidence (a transient, non-column field -- see schemas.BookBase's
+    # docstring), never trusted directly from the request body, even though
+    # the schema happens to also expose those two as raw settable fields for
+    # other, non-API write paths. This is the one and only place a
+    # POST /books/ request's metadata_source can come from.
+    find_confidence = getattr(book, "find_confidence", None)
+    payload.update(
+        provenance_for_find_bind(find_confidence) if find_confidence else provenance_for_declined_or_manual_entry()
+    )
     _validate_series_belongs_to_profile(db, payload.get("series_id"), profile_id)
     _validate_book_number_requires_series(payload)
     payload["profile_id"] = profile_id

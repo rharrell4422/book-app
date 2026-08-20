@@ -13,6 +13,7 @@ import discovery_engine
 import intelligence
 from models import Book, Series, SeriesSkeleton
 from services.discovery_logging import log_discovery_summary
+from services.identity import owned_title_for_identity
 
 
 logger = logging.getLogger(__name__)
@@ -150,7 +151,7 @@ def _partial_series_match(title: str, series_name: str) -> bool:
 def _build_known_title_number_keys(books: list[Book]) -> set[str]:
     keys: set[str] = set()
     for book in books:
-        title_key = discovery_engine.core_title_key(book.title)
+        title_key = discovery_engine.core_title_key(owned_title_for_identity(book))
         number = _normalize_identity_number(book.book_number)
         if title_key and number:
             keys.add(f"{title_key}|{number}")
@@ -162,7 +163,7 @@ def _build_series_identity_sets(books: list[Book]) -> tuple[set[str], set[str], 
     known_series_numbers: set[str] = set()
     bare_title_counts: dict[str, int] = {}
     for book in books:
-        title_key = discovery_engine.core_title_key(book.title)
+        title_key = discovery_engine.core_title_key(owned_title_for_identity(book))
         number = _normalize_identity_number(book.book_number)
         if title_key:
             known_series_titles.add(title_key)
@@ -180,7 +181,7 @@ def _build_series_identity_sets(books: list[Book]) -> tuple[set[str], set[str], 
         for covered in intelligence.extract_omnibus_ranges(getattr(book, "subtitle", None)):
             known_series_numbers.add(_normalize_identity_number(covered))
 
-        bare_key = discovery_engine.bare_title_key(book.title)
+        bare_key = discovery_engine.bare_title_key(owned_title_for_identity(book))
         if bare_key:
             bare_title_counts[bare_key] = bare_title_counts.get(bare_key, 0) + 1
 
@@ -376,14 +377,20 @@ class SeriesIntelligenceAgent:
                 .all()
                 if other.id != series_id and _authors_match_exact(series_author, other.author)
             ]
-            author_owned_titles = {discovery_engine.core_title_key(book.title) for book in active_series_books if book.title}
+            author_owned_titles = {
+                discovery_engine.core_title_key(owned_title_for_identity(book))
+                for book in active_series_books
+                if book.title
+            }
             for other in other_series_by_author:
                 other_books = [
                     book
                     for book in db.query(Book).filter(Book.series_id == other.id).all()
                     if (book.record_status or "") != "deleted"
                 ]
-                author_owned_titles |= {discovery_engine.core_title_key(book.title) for book in other_books if book.title}
+                author_owned_titles |= {
+                    discovery_engine.core_title_key(owned_title_for_identity(book)) for book in other_books if book.title
+                }
 
             # The broad author-bibliography fallback can trigger even when
             # this author has other tracked series -- rather than disabling
@@ -951,10 +958,10 @@ def _owned_book_indexes(db: Session, author: str, profile_id: str = "robbie") ->
     # that text (see core_title_key) -- unlike a bare numeric position,
     # two unrelated series both happening to use identical title wording
     # is effectively impossible.
-    known_title_keys = {discovery_engine.core_title_key(book.title) for book in owned_books if book.title}
+    known_title_keys = {discovery_engine.core_title_key(owned_title_for_identity(book)) for book in owned_books if book.title}
     bare_title_counts: dict[str, int] = {}
     for book in owned_books:
-        bare_key = discovery_engine.bare_title_key(book.title)
+        bare_key = discovery_engine.bare_title_key(owned_title_for_identity(book))
         if bare_key:
             bare_title_counts[bare_key] = bare_title_counts.get(bare_key, 0) + 1
     # Only trusted when unique across this author's whole catalog -- a

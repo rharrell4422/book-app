@@ -35,9 +35,16 @@ function AddBookPageInner() {
         if (!response.ok || cancelled) return;
         const data = await response.json();
         if (cancelled) return;
+        // No "Unknown author" placeholder fallback -- GET /series/:id already
+        // resolves this to one of the series' own books' authors when the
+        // series row itself has none (see crud/series.py's series_author
+        // computation). If it's still empty here, the series genuinely has
+        // no author signal anywhere, and the form should require the user
+        // to type one rather than writing a placeholder that would poison
+        // cross-series author matching (see services/identity.py).
         setLockedSeries({
           name: String(data?.name || ""),
-          author: String(data?.author || "").trim() || "Unknown author",
+          author: String(data?.author || "").trim(),
         });
       } catch (error) {
         console.error("Error loading series for add book:", error);
@@ -55,6 +62,8 @@ function AddBookPageInner() {
     saving,
     lookingUpBook,
     lookupResult,
+    findResult,
+    selectedCandidateId,
     showLookupSummary,
     seriesLocked,
     updateAddBookForm,
@@ -62,6 +71,8 @@ function AddBookPageInner() {
     onStatusChange,
     onToggleLookupSummary,
     handleFindDetails,
+    applyFindCandidate,
+    declineFindCandidates,
     handleAddBook,
   } = useAddBookForm({
     enabled: deviceClass !== "desktop" && canEdit,
@@ -114,6 +125,10 @@ function AddBookPageInner() {
         seriesList={seriesList}
         lookingUpBook={lookingUpBook}
         lookupResult={lookupResult}
+        findResult={findResult}
+        selectedCandidateId={selectedCandidateId}
+        onSelectCandidate={applyFindCandidate}
+        onDeclineCandidates={declineFindCandidates}
         showLookupSummary={showLookupSummary}
         onToggleLookupSummary={onToggleLookupSummary}
         onFindDetails={handleFindDetails}

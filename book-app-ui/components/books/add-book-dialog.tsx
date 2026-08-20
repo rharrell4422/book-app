@@ -34,12 +34,16 @@ export function AddBookDialog({
     saving,
     lookingUpBook,
     lookupResult,
+    findResult,
+    selectedCandidateId,
     showLookupSummary,
     updateAddBookForm,
     onClassificationChange,
     onStatusChange,
     onToggleLookupSummary,
     handleFindDetails,
+    applyFindCandidate,
+    declineFindCandidates,
     handleAddBook,
   } = useAddBookForm({
     enabled: open,
@@ -71,6 +75,10 @@ export function AddBookDialog({
           seriesList={seriesList}
           lookingUpBook={lookingUpBook}
           lookupResult={lookupResult}
+          findResult={findResult}
+          selectedCandidateId={selectedCandidateId}
+          onSelectCandidate={applyFindCandidate}
+          onDeclineCandidates={declineFindCandidates}
           showLookupSummary={showLookupSummary}
           onToggleLookupSummary={onToggleLookupSummary}
           onFindDetails={handleFindDetails}

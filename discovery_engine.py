@@ -586,7 +586,16 @@ def core_title_key(title: str | None) -> str:
     normalized_core = _strip_leading_article(normalize_text(_title_core_segment(raw)))
     number = infer_number_from_title(raw)
     if number:
-        return f"{normalized_core} {number}"
+        # Truncated to its integer part regardless of whether it's whole
+        # or fractional, matching exactly what the old integer-only
+        # implementation always did, so this key stays completely
+        # unchanged now that infer_number_from_title can return a genuinely
+        # fractional value (e.g. 3.5 for "Book 3.5") -- the
+        # fractional-collision problem that preserves against is handled
+        # at the persistence identity layer instead, not here. See
+        # services/identity.py's _normalized_book_number_value /
+        # _series_book_identity_key.
+        return f"{normalized_core} {int(number)}"
     return normalized_core
 
 
@@ -615,46 +624,95 @@ _WORD_NUMBERS = {
 }
 
 
-def infer_number_from_title(title: str | None, series_name: str | None = None) -> int | None:
+def _normalize_number_context(value: str | None) -> str:
+    """Like normalize_text, but protects a decimal point sitting between two
+    digits (e.g. the ".5" in "Book 3.5") before stripping punctuation, so a
+    fractional book-number pattern matched against the result can still see
+    it. Every other punctuation character (colons, parens, hyphens, etc.)
+    collapses to a space exactly as normalize_text already does -- this is
+    strictly a superset, not a behavior change, for any title with no
+    digit.digit sequence at all.
+    """
+    text = str(value or "").lower()
+    text = re.sub(r"(?<=\d)\.(?=\d)", "\uE000", text)
+    text = re.sub(r"[^a-z0-9\uE000\s]", " ", text)
+    text = text.replace("\uE000", ".")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _parse_positive_number(raw_value: str | None) -> float | None:
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def infer_number_from_title(title: str | None, series_name: str | None = None) -> float | None:
+    """Returns the inferred series position for `title`, preferring (in
+    order): a "#N" marker, a "book/volume/vol N" marker, a spelled-out
+    "book/volume/vol <word>" marker, then (if `series_name` is given) a bare
+    "<series name> N" prefix or mid-title occurrence.
+
+    Fractional positions (e.g. "Book 3.5" for a companion/novella slotted
+    between two numbered entries) are preserved as a float rather than
+    truncated to their integer part -- see services/identity.py's
+    _normalized_book_number_value docstring for why truncating a genuinely
+    fractional position is dangerous (it collapses a companion book's
+    identity onto the numbered entry beside it). Fractional support only
+    extends to the "#"/"book"/"volume"/"vol" keyword patterns below; the
+    bare "<series name> N" positional patterns remain integer-only exactly
+    as before, since a fractional position is essentially never expressed
+    that way in practice.
+
+    core_title_key (below) intentionally truncates this back to its integer
+    part before folding it into a discovery matching key -- that key needs
+    to stay stable across whole-number titles regardless of this function's
+    own precision, and the fractional-collision problem this preserves
+    against belongs at the persistence identity layer, not the discovery
+    matching key. See that function's own note.
+    """
     # Checked against the raw (non-normalized) title first: normalize_text
     # strips punctuation like "#", so a "#7"-style pattern could never
     # actually match once run against the already-normalized text below.
-    hash_match = re.search(r"#\s*(\d+)\b", str(title or ""))
+    hash_match = re.search(r"#\s*(\d+(?:\.\d+)?)\b", str(title or ""))
     if hash_match:
-        try:
-            value = int(hash_match.group(1))
-        except ValueError:
-            value = 0
-        if value > 0:
+        value = _parse_positive_number(hash_match.group(1))
+        if value is not None:
             return value
+
+    # A separately (lightly) normalized pass that preserves a digit.digit
+    # decimal point -- see _normalize_number_context -- so "Book 3.5" isn't
+    # silently truncated to "Book 3" the way plain normalize_text would
+    # force it to be (it strips "." unconditionally).
+    number_context = _normalize_number_context(title)
+    if number_context:
+        keyword_patterns = (
+            r"\bbook\s*(\d+(?:\.\d+)?)\b",
+            r"\bvolume\s*(\d+(?:\.\d+)?)\b",
+            r"\bvol\.?\s*(\d+(?:\.\d+)?)\b",
+        )
+        for pattern in keyword_patterns:
+            match = re.search(pattern, number_context)
+            if not match:
+                continue
+            value = _parse_positive_number(match.group(1))
+            if value is not None:
+                return value
 
     cleaned = normalize_text(title)
     if not cleaned:
         return None
-    patterns = (
-        r"\bbook\s*(\d+)\b",
-        r"\bvolume\s*(\d+)\b",
-        r"\bvol\.?\s*(\d+)\b",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, cleaned)
-        if not match:
-            continue
-        try:
-            value = int(match.group(1))
-        except ValueError:
-            continue
-        if value > 0:
-            return value
 
     # Some listings spell the number out ("Book One", "Volume Two") instead
-    # of using a digit -- same intent, different formatting.
+    # of using a digit -- same intent, different formatting. No fractional
+    # form exists for a spelled-out number.
     word_pattern = r"\b(?:book|volume|vol\.?)\s+(" + "|".join(_WORD_NUMBERS) + r")\b"
     word_match = re.search(word_pattern, cleaned)
     if word_match:
         value = _WORD_NUMBERS.get(word_match.group(1))
         if value:
-            return value
+            return float(value)
 
     # Many rapid-release indie/LitRPG series just number titles as
     # "<Series Name> <N>" with no "book"/"vol"/"#" keyword at all (e.g.
@@ -670,7 +728,7 @@ def infer_number_from_title(title: str | None, series_name: str | None = None) -
             except ValueError:
                 value = 0
             if value > 0:
-                return value
+                return float(value)
 
     # Same bare "<Series Name> <N>" pattern, but appearing anywhere in the
     # title rather than only as a strict prefix -- e.g. a reprint listing
@@ -684,7 +742,7 @@ def infer_number_from_title(title: str | None, series_name: str | None = None) -
             except ValueError:
                 value = 0
             if value > 0:
-                return value
+                return float(value)
     return None
 
 

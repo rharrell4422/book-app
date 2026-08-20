@@ -14,6 +14,8 @@ try:
     from database import SessionLocal
     from models import Series, Book
     from intelligence import recalculate_intelligence
+    from services.identity import is_placeholder_author
+    import discovery_engine
 except Exception as e:
     print("\n\n🔥 IMPORTER MODULE FAILED DURING IMPORT 🔥")
     traceback.print_exc()
@@ -519,6 +521,19 @@ def get_or_create_series(
 def create_or_update_book(db: Session, book_data: Dict[str, Any], profile_id: str) -> tuple[Book, Dict[str, Any]]:
     series_name = book_data.get("series_name")
     book_number_value = _to_float(book_data.get("book_number"))
+    # The spreadsheet's own Book# column occupies the "user" tier of the
+    # priority chain (it's a value the user's own export/tool put there) --
+    # when it's blank, fall back to the same title-text extractor Check Now
+    # and Add Book use (see discovery_engine.infer_number_from_title /
+    # crud.books._infer_series_numbers_from_title) rather than leaving an
+    # inferable number unset just because this row happened to come through
+    # the importer instead of the Add Book form.
+    book_number_source = "user" if book_number_value is not None else None
+    if book_number_value is None:
+        inferred_book_number = discovery_engine.infer_number_from_title(book_data.get("title"), series_name)
+        if inferred_book_number is not None:
+            book_number_value = inferred_book_number
+            book_number_source = "title_inferred"
     series_total_books = _to_int(book_data.get("series_total_books") or book_data.get("series_total"))
     raw_series_finished_flag = book_data.get("series_finished")
     if raw_series_finished_flag is None and "is_series_finished" in book_data:
@@ -540,9 +555,12 @@ def create_or_update_book(db: Session, book_data: Dict[str, Any], profile_id: st
         if series:
             # Discovery searches by Series.author, so backfill it from the
             # imported row rather than leaving discovery permanently unable
-            # to run for series that were created without one.
+            # to run for series that were created without one. Same
+            # placeholder guard as crud.books._backfill_series_author_if_missing
+            # -- a spreadsheet cell of "Unknown"/"N/A"/etc. is exactly as
+            # dangerous to adopt here as the Add Book form's old fallback was.
             import_author = str(book_data.get("author") or "").strip()
-            if import_author and not str(series.author or "").strip():
+            if import_author and not str(series.author or "").strip() and not is_placeholder_author(import_author):
                 series.author = import_author
                 db.commit()
                 db.refresh(series)
@@ -561,6 +579,12 @@ def create_or_update_book(db: Session, book_data: Dict[str, Any], profile_id: st
     db_book = Book(
         profile_id=profile_id,
         title=book_data.get("title"),
+        # canonical_title stays unset here -- import is analogous to direct
+        # user input (a bulk version of it), not a provider-verification
+        # event, so it doesn't get to claim a "resolved" title the way a
+        # FIND bind or Check Now match does. Bulk re-resolution is exactly
+        # the mechanism meant to fill this in later for imported rows.
+        metadata_source="import",
         author=book_data.get("author"),
         subtitle=book_data.get("subtitle"),
         format=book_data.get("format"),
@@ -571,6 +595,7 @@ def create_or_update_book(db: Session, book_data: Dict[str, Any], profile_id: st
         series_total_books=series_total_books,
         is_series_finished=series_finished_flag,
         book_number=book_number_value,
+        book_number_source=book_number_source,
         is_read=book_data.get("is_read"),
         read_date=book_data.get("date_read"),
         rating=_to_int(book_data.get("rating")),
