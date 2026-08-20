@@ -128,6 +128,14 @@ def _build_candidate(key: str, group: dict, *, query_title_variants: list[str], 
                 all_authors.append(candidate_author)
                 author_provider_by_name[candidate_author] = provider
     primary_author = all_authors[0] if all_authors else None
+    # The single "author" field applied to the Add Book form (and, from
+    # there, straight onto Series.author) must carry every co-author, not
+    # just the first -- joined with "; " to match this app's existing
+    # multi-author convention (e.g. "J.N Chaney; Terry Maggert" already in
+    # the library). Dropping co-authors here would leave Series.author
+    # permanently incomplete for every co-authored series a user resolves
+    # through FIND.
+    display_author = "; ".join(all_authors) if all_authors else None
 
     author_match = _query_author_matches_any(query_author, all_authors)
     isbn_present = bool(isbn_value)
@@ -154,7 +162,7 @@ def _build_candidate(key: str, group: dict, *, query_title_variants: list[str], 
     return {
         "candidate_id": key,
         "title": title_value,
-        "author": primary_author,
+        "author": display_author,
         "authors": all_authors,
         "isbn13": isbn_value,
         "description": description_value,

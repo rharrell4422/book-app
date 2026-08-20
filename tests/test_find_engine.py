@@ -176,6 +176,21 @@ class FindBookCandidatesTest(unittest.TestCase):
         # even though it doesn't equal the raw query string.
         self.assertTrue(candidate["signals"]["strong_title_match"])
 
+    def test_candidate_author_field_includes_every_co_author(self):
+        # Regression: the "author" field applied straight onto the Add Book
+        # form (and from there onto Series.author) used to be just
+        # all_authors[0], silently dropping every co-author beyond the
+        # first for a co-authored series.
+        hit = _hit(
+            "hardcover", "The Jericho Siege", ["Georgia Wagner", "Scott Cook"], isbn13="9798242213814"
+        )
+        with _patched_providers(hardcover=[hit]):
+            result = find_book_candidates("The Jericho Siege", author="Georgia Wagner")
+
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["author"], "Georgia Wagner; Scott Cook")
+        self.assertEqual(candidate["authors"], ["Georgia Wagner", "Scott Cook"])
+
     def test_failures_from_multiple_title_variants_collapse_to_one_entry_per_provider(self):
         # A title with a core variant (so two google_books tasks run) whose
         # provider fails on both should surface as one failure entry, not
