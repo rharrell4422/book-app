@@ -280,6 +280,34 @@ _TITLE_VARIANT_FILLER_TOKENS = {
     "vol", "vols", "volume", "volumes", "part", "parts", "no", "number", "numbers",
 }
 
+# Bare genre-category nouns that self-published/indie catalog listings
+# routinely tack onto a series name as a back-cover tagline -- "A <Series>
+# Thriller", "A <Series> Mystery", "A <Series> Romance" -- rather than as
+# any part of a real, individually-titled book (regression: "Check Now" on
+# Georgia Wagner's "Jonathan Hunt Thriller Series" admitted a candidate
+# titled exactly "A Jonathan Hunt Thriller" -- no ISBN, no real subtitle,
+# just the series name plus this exact tagline idiom -- as a new book,
+# because "thriller" isn't _TITLE_VARIANT_FILLER_TOKENS' kind of filler and
+# the tracked series name itself didn't happen to already contain the word
+# "Thriller" to cancel it out). Unlike _TITLE_VARIANT_FILLER_TOKENS, these
+# are ONLY treated as filler when the title's single remaining token beyond
+# the series name is one of these -- two or more such tokens (or one of
+# these alongside any other real word) is left alone as likely-genuine,
+# more substantial descriptive content, not this narrow one-word tagline
+# idiom.
+_SOLO_GENRE_TAGLINE_TOKENS = {
+    "thriller", "thrillers",
+    "mystery", "mysteries",
+    "romance", "romances",
+    "saga", "sagas",
+    "epic", "epics",
+    "adventure", "adventures",
+    "drama", "dramas",
+    "chronicle", "chronicles",
+    "tale", "tales",
+    "story", "stories",
+}
+
 
 def _title_is_series_variant(
     title: str, series_name: str | None, isbn13: str | None, structured_number_hint
@@ -291,10 +319,17 @@ def _title_is_series_variant(
     the bare, unadorned series name; this one catches the same underlying
     non-book stub with a little filler text stapled on, which slips past
     looks_like_series_index_entry's exact-form comparison (regression:
-    "Check Now" on George Wagner's "Jonathan Hunt Thriller Series" admitted
+    "Check Now" on Georgia Wagner's "Jonathan Hunt Thriller Series" admitted
     a candidate titled "A Jonathan Hunt Thriller" -- no ISBN, no real
     subtitle, nothing but the series' own name and a genre word -- as if it
-    were a new, distinctly-titled book).
+    were a new, distinctly-titled book. This recurred even after an initial
+    fix, because that fix only cancelled the genre word out when it was
+    already part of the *tracked series name's own text* -- if the series
+    is tracked under a shorter name that doesn't itself contain "Thriller",
+    the word survived as if it were real content. See
+    _SOLO_GENRE_TAGLINE_TOKENS: a single bare genre-category word is now
+    filler in its own right, independent of how the series name happens to
+    be spelled).
 
     structured_number_hint must come from a provider's own structured field
     (e.g. Hardcover's series_number_hint), NOT a number inferred from this
@@ -362,6 +397,12 @@ def _title_is_series_variant(
     meaningful_unique_tokens = {
         token for token in unique_title_tokens if token not in _TITLE_VARIANT_FILLER_TOKENS and not token.isdigit()
     }
+    # A single bare genre tagline word (see _SOLO_GENRE_TAGLINE_TOKENS) is
+    # filler too, but ONLY when it's the one and only meaningful token left --
+    # any second real word alongside it means there's genuine descriptive
+    # content here, not just the series-name-plus-tagline idiom.
+    if len(meaningful_unique_tokens) == 1 and meaningful_unique_tokens <= _SOLO_GENRE_TAGLINE_TOKENS:
+        return True
     return not meaningful_unique_tokens
 
 

@@ -267,6 +267,55 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
             )
         )
 
+    def test_title_is_series_variant_rejects_bare_genre_tagline_regardless_of_series_wording(self):
+        # Regression (live bug): "Check Now" on Georgia Wagner's "Jonathan
+        # Hunt Thriller Series" admitted "A Jonathan Hunt Thriller" -- no
+        # ISBN, no real subtitle -- as a new book. An earlier fix only
+        # caught this when the tracked series name itself already
+        # contained "Thriller" (so the word cancelled out against the
+        # series name); it recurred once the series was tracked under the
+        # shorter name "Jonathan Hunt", where "thriller" no longer overlaps
+        # the series name and was treated as real, distinguishing content.
+        self.assertTrue(
+            discovery_engine._title_is_series_variant(
+                "A Jonathan Hunt Thriller", "Jonathan Hunt", isbn13=None, structured_number_hint=None
+            )
+        )
+        # Still caught under the longer tracked name too (already worked,
+        # must keep working).
+        self.assertTrue(
+            discovery_engine._title_is_series_variant(
+                "A Jonathan Hunt Thriller", "Jonathan Hunt Thriller Series", isbn13=None, structured_number_hint=None
+            )
+        )
+        # Other bare genre taglines follow the same idiom.
+        self.assertTrue(
+            discovery_engine._title_is_series_variant(
+                "A Jonathan Hunt Mystery", "Jonathan Hunt", isbn13=None, structured_number_hint=None
+            )
+        )
+        # An ISBN is still strong enough evidence on its own to short-circuit
+        # this entirely, tagline or not.
+        self.assertFalse(
+            discovery_engine._title_is_series_variant(
+                "A Jonathan Hunt Thriller", "Jonathan Hunt", isbn13="9781234567897", structured_number_hint=None
+            )
+        )
+        # A genre word alongside genuine additional content is left alone --
+        # only a *lone* bare genre word is treated as filler.
+        self.assertFalse(
+            discovery_engine._title_is_series_variant(
+                "A Jonathan Hunt Thriller: The Reckoning", "Jonathan Hunt", isbn13=None, structured_number_hint=None
+            )
+        )
+        # A real, distinctly-titled book unrelated to the tagline idiom is
+        # never caught just because it shares the series name.
+        self.assertFalse(
+            discovery_engine._title_is_series_variant(
+                "The Jericho Siege", "Jonathan Hunt", isbn13=None, structured_number_hint=None
+            )
+        )
+
     def test_normalize_series_branding_name_strips_generic_words(self):
         # Regression (live bug): an author-wide discovery pass guessed
         # series name "Duchy of Terra Universe" for a book already owned
