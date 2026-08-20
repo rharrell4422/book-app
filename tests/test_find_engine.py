@@ -144,6 +144,53 @@ class FindBookCandidatesTest(unittest.TestCase):
         candidate = result["candidates"][0]
         self.assertTrue(candidate["signals"]["author_match"])
 
+    def test_raw_ku_style_title_with_series_suffix_still_finds_the_core_title(self):
+        # Regression: a user pasting the full Amazon/KU listing title
+        # verbatim -- "Core Title: subtitle Book N (Series Name)" -- used to
+        # return zero candidates from every provider, because the only
+        # query ever tried was the raw string itself (Google's intitle: is
+        # an exact-phrase match, so a catalog listing titled just "The
+        # Jericho Siege" can never match the full raw string). The fallback
+        # "core title" variant must still surface it.
+        raw_title = "The Jericho Siege: A Jonathan Hunt Thriller Book 1 (Jonathan Hunt Thriller Series)"
+        hit = _hit(
+            "google_books",
+            "The Jericho Siege",
+            ["Georgia Wagner", "Scott Cook"],
+            isbn13="9798242213814",
+            description="A Jonathan Hunt thriller.",
+        )
+
+        def fake_google_books(query, *a, **k):
+            return [hit] if query == 'intitle:"The Jericho Siege"' else []
+
+        with patch.object(discovery_engine, "_fetch_google_books", side_effect=fake_google_books), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_hardcover", return_value=[]):
+            result = find_book_candidates(raw_title)
+
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["title"], "The Jericho Siege")
+        # Title match should be recognized against the stripped core variant
+        # even though it doesn't equal the raw query string.
+        self.assertTrue(candidate["signals"]["strong_title_match"])
+
+    def test_failures_from_multiple_title_variants_collapse_to_one_entry_per_provider(self):
+        # A title with a core variant (so two google_books tasks run) whose
+        # provider fails on both should surface as one failure entry, not
+        # two, in the response.
+        raw_title = "Some Title: A Thriller Book 1 (Some Series)"
+        with patch.object(
+            discovery_engine, "_fetch_google_books", side_effect=RuntimeError("boom")
+        ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]), patch.object(
+            discovery_engine, "_fetch_hardcover", return_value=[]
+        ):
+            result = find_book_candidates(raw_title)
+
+        self.assertEqual(len(result["provider_failures"]), 1)
+        self.assertEqual(result["provider_failures"][0]["provider"], "google_books")
+
 
 if __name__ == "__main__":
     unittest.main()

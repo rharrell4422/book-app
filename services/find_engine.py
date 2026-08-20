@@ -80,6 +80,26 @@ def _query_author_matches_any(query_author: str | None, candidate_authors: list[
     return any(_authors_match_exact(query_author, candidate_author) for candidate_author in candidate_authors)
 
 
+def _title_query_variants(raw_title: str) -> list[str]:
+    """Users commonly paste in the full Amazon/KU listing title verbatim,
+    e.g. "The Jericho Siege: A Jonathan Hunt Thriller Book 1 (Jonathan Hunt
+    Thriller Series)" -- but catalog providers store just the core title
+    ("The Jericho Siege"). Google Books' intitle: filter is an exact-phrase
+    match (not relevance-ranked), so querying with the full raw string
+    reliably returns zero hits for this extremely common title shape (see
+    discovery_engine.core_title_key's docstring for the same pattern).
+    Always try the raw title first (correct, and cheap, for the titles that
+    really are just a short bare title already) plus this stripped-down
+    core segment as a fallback variant, rather than only ever trying one or
+    the other.
+    """
+    variants = [raw_title]
+    core = discovery_engine._title_core_segment(raw_title).strip()  # noqa: SLF001
+    if core and core.lower() != raw_title.strip().lower():
+        variants.append(core)
+    return variants
+
+
 def _pick_field(hits_by_provider: dict[str, dict], field: str) -> tuple[object | None, str | None]:
     for provider in _FIELD_PROVIDER_PRIORITY:
         hit = hits_by_provider.get(provider)
@@ -88,7 +108,7 @@ def _pick_field(hits_by_provider: dict[str, dict], field: str) -> tuple[object |
     return None, None
 
 
-def _build_candidate(key: str, group: dict, *, query_title: str, query_author: str | None) -> dict:
+def _build_candidate(key: str, group: dict, *, query_title_variants: list[str], query_author: str | None) -> dict:
     hits_by_provider = group["hits_by_provider"]
 
     title_value, title_provider = _pick_field(hits_by_provider, "title")
@@ -111,9 +131,17 @@ def _build_candidate(key: str, group: dict, *, query_title: str, query_author: s
 
     author_match = _query_author_matches_any(query_author, all_authors)
     isbn_present = bool(isbn_value)
-    strong_title_match = bool(
-        title_value and _canonical_title_identity_key(title_value) == _canonical_title_identity_key(query_title)
-    )
+    # Matched against every title variant we queried with (raw string plus
+    # the stripped-core fallback -- see _title_query_variants), not just the
+    # raw one: a user-pasted KU/Amazon title's boilerplate suffix ("Book 1
+    # (Series Name)") is exactly what the core variant already strips for
+    # querying, so a candidate that matches on the core variant is just as
+    # much a "strong" match as one that happens to equal the raw string.
+    query_title_keys = {
+        key for variant in query_title_variants if (key := _canonical_title_identity_key(variant))
+    }
+    candidate_title_key = _canonical_title_identity_key(title_value) if title_value else None
+    strong_title_match = bool(candidate_title_key and candidate_title_key in query_title_keys)
 
     signal_count = sum([author_match, isbn_present, strong_title_match])
     if author_match and isbn_present and strong_title_match:
@@ -177,29 +205,44 @@ def find_book_candidates(
             "provider_failures": [],
         }
 
-    google_query = f'intitle:"{clean_title}"' + (f' inauthor:"{clean_author}"' if clean_author else "")
-    plain_query_parts = [clean_title]
-    if series_name and series_name.strip():
-        plain_query_parts.append(series_name.strip())
-    if clean_author:
-        plain_query_parts.append(clean_author)
-    plain_query = " ".join(plain_query_parts)
+    title_variants = _title_query_variants(clean_title)
 
-    fetchers = {
-        "google_books": (discovery_engine._fetch_google_books, (google_query,)),  # noqa: SLF001
-        "openlibrary": (discovery_engine._fetch_openlibrary, (plain_query,)),  # noqa: SLF001
-        "hardcover": (discovery_engine._fetch_hardcover, (plain_query,)),  # noqa: SLF001
-    }
+    def plain_query_for(title_variant: str) -> str:
+        parts = [title_variant]
+        if series_name and series_name.strip():
+            parts.append(series_name.strip())
+        if clean_author:
+            parts.append(clean_author)
+        return " ".join(parts)
+
+    # One task per (provider, title variant) rather than one task per
+    # provider -- Google's intitle: exact-phrase match in particular needs
+    # both the raw and the stripped-core variant tried, since only one of
+    # them will actually match a given listing (see _title_query_variants).
+    # OpenLibrary/Hardcover's relevance-ranked search doesn't strictly need
+    # the split, but trying both is harmless and keeps this uniform across
+    # providers rather than special-casing Google alone.
+    tasks: list[tuple[str, object, tuple]] = []
+    for variant in title_variants:
+        google_query = f'intitle:"{variant}"' + (f' inauthor:"{clean_author}"' if clean_author else "")
+        tasks.append(("google_books", discovery_engine._fetch_google_books, (google_query,)))  # noqa: SLF001
+        tasks.append(("openlibrary", discovery_engine._fetch_openlibrary, (plain_query_for(variant),)))  # noqa: SLF001
+        tasks.append(("hardcover", discovery_engine._fetch_hardcover, (plain_query_for(variant),)))  # noqa: SLF001
 
     raw_hits: dict[str, list[dict]] = {provider: [] for provider in _PROVIDERS}
-    provider_failures: list[dict] = []
-    with ThreadPoolExecutor(max_workers=len(fetchers)) as executor:
-        future_to_provider = {executor.submit(fn, *args): provider for provider, (fn, args) in fetchers.items()}
-        for future, provider in future_to_provider.items():
+    failed_providers: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        future_to_provider = [(executor.submit(fn, *args), provider) for provider, fn, args in tasks]
+        for future, provider in future_to_provider:
             try:
-                raw_hits[provider] = future.result() or []
-            except Exception as exc:  # one provider's failure shouldn't sink the others
-                provider_failures.append({"provider": provider, "error": str(exc)[:300]})
+                raw_hits[provider].extend(future.result() or [])
+            except Exception as exc:  # one provider/variant's failure shouldn't sink the others
+                # Keyed by provider (last error wins) so a provider that fails
+                # on both the raw and core title variants -- e.g. an auth
+                # error that'll fail identically either way -- still surfaces
+                # as one entry, not one per variant.
+                failed_providers[provider] = str(exc)[:300]
+    provider_failures = [{"provider": provider, "error": error} for provider, error in failed_providers.items()]
 
     groups: dict[str, dict] = {}
     group_order: list[str] = []
@@ -217,7 +260,8 @@ def find_book_candidates(
             group["hits_by_provider"][provider] = hit
 
     candidates = [
-        _build_candidate(key, groups[key], query_title=clean_title, query_author=clean_author) for key in group_order
+        _build_candidate(key, groups[key], query_title_variants=title_variants, query_author=clean_author)
+        for key in group_order
     ]
     candidates.sort(key=lambda c: (-_CONFIDENCE_RANK[c["confidence"]], -len(c["providers"])))
 
