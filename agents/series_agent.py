@@ -7,6 +7,7 @@ from datetime import date
 
 from sqlalchemy.orm import Session
 
+import confidence_engine
 import delta_engine
 import discovery_engine
 import intelligence
@@ -406,14 +407,16 @@ class SeriesIntelligenceAgent:
             provider_failures = discovery["provider_failures"]
             all_providers_failed = discovery["all_providers_failed"]
 
-            # Phase 2 of agentic discovery, SHADOW MODE ONLY: computes a
+            # Phase 2 + 3 of agentic discovery, SHADOW MODE ONLY: computes a
             # deterministic delta between the Phase 1 SeriesSkeleton
             # baseline and this run's PRE-_filter_and_merge candidates
             # (discovery["unified_candidates"] -- see delta_engine's own
             # docstring for why pre-filter, not the post-filter
-            # `candidates` above), and logs it. Nothing downstream reads
-            # `series_delta`; it cannot change `candidates`,
-            # `provider_failures`, or anything persisted by this run.
+            # `candidates` above), then a deterministic confidence score
+            # per candidate on top of that delta, and logs both. Nothing
+            # downstream reads `series_delta`/`series_confidence`; neither
+            # can change `candidates`, `provider_failures`, or anything
+            # persisted by this run.
             try:
                 skeleton_row = (
                     db.query(SeriesSkeleton).filter(SeriesSkeleton.series_id == series_id).first()
@@ -429,11 +432,21 @@ class SeriesIntelligenceAgent:
                     series_name=series.name,
                 )
                 logger.info("series_delta: %s", json.dumps(series_delta, default=str))
+
+                series_confidence = confidence_engine.compute_confidence(
+                    series_id,
+                    skeleton_entries,
+                    unified_candidate_dicts,
+                    series_delta,
+                    series_name=series.name,
+                    series_author=series_author,
+                )
+                logger.info("series_confidence: %s", json.dumps(series_confidence, default=str))
             except Exception:
                 # Shadow-mode diagnostics must never be able to fail a real
                 # Check Now run -- log and move on exactly like any other
                 # best-effort telemetry would.
-                logger.exception("series_delta computation failed for series_id=%s", series_id)
+                logger.exception("series_delta/series_confidence computation failed for series_id=%s", series_id)
 
             # Missing-volume detection: a series can own/find books 1-4 and
             # 6-9 but nothing for 5 -- that's not book 5 ranking low in the
