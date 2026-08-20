@@ -29,6 +29,7 @@ from services.identity import (
     owned_title_for_identity,
     _series_book_identity_key,
 )
+from services.notifications import create_new_book_notification
 
 logger = logging.getLogger(__name__)
 
@@ -336,6 +337,18 @@ def run_series_check_job_full(series_id: int) -> None:
                 if matched_existing is not None:
                     logger.info("Classification result: EXISTING")
 
+                    # Captured before this candidate's status overwrites
+                    # read_status/is_upcoming_auto below -- this is the only
+                    # way to tell "was upcoming, now available" (a
+                    # notification trigger, per the Auto Discovery MVP
+                    # spec's §3) from "was already available" (not a
+                    # trigger) once the fields are updated.
+                    was_upcoming_before_update = (
+                        str(matched_existing.read_status or "").strip().lower() == "upcoming"
+                        or bool(matched_existing.is_upcoming_auto)
+                        or bool(matched_existing.is_upcoming_final)
+                    )
+
                     matched_existing.title = normalized_title or matched_existing.title
                     # Check Now is exempt from FIND and already provider-
                     # sourced by construction (see the Add Book metadata
@@ -389,6 +402,11 @@ def run_series_check_job_full(series_id: int) -> None:
                     matched_existing.record_status = "active"
                     db.flush()
                     db_changed = True
+
+                    if was_upcoming_before_update and status != "upcoming":
+                        create_new_book_notification(db, matched_existing)
+                        db.flush()
+
                     continue
 
                 db_book = models.Book(
@@ -436,6 +454,15 @@ def run_series_check_job_full(series_id: int) -> None:
                 db.add(db_book)
                 db.flush()
                 db_changed = True
+
+                # Trigger per the Auto Discovery MVP spec's §3: a brand-new
+                # *available* book. A brand-new *upcoming* book is
+                # intentionally not a trigger (dropped scope, same section)
+                # -- it'll notify later, if/when a subsequent check flips it
+                # to available via the matched_existing branch above.
+                if status != "upcoming":
+                    create_new_book_notification(db, db_book)
+                    db.flush()
 
                 if db_book.asin:
                     existing_by_asin[str(db_book.asin).strip().upper()] = db_book

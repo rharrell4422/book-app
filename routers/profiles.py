@@ -19,6 +19,7 @@ def _to_profile_response(profile: models.Profile, book_count: int) -> schemas.Pr
         created_at=profile.created_at,
         book_count=book_count,
         has_data=book_count > 0,
+        last_full_discovery_run_at=profile.last_full_discovery_run_at,
     )
 
 

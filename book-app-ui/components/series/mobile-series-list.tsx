@@ -4,6 +4,7 @@ import Link from "next/link";
 import { BookOpenIcon, Clock3Icon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { DiscoveryHealthBadge, type DiscoveryHealth } from "@/components/series/discovery-health-badge";
 
 export type MobileSeriesRow = {
   id: number;
@@ -13,6 +14,8 @@ export type MobileSeriesRow = {
   next_upcoming_book_number?: number | null;
   total_books?: number | null;
   last_checked?: string | null;
+  discovery_health?: DiscoveryHealth | null;
+  is_finished?: boolean;
 };
 
 export type MobileSeriesCheckState = {
@@ -66,6 +69,9 @@ export function MobileSeriesList({
         <li key={series.id} className="rounded-lg border bg-card/80 p-3">
           <div className="flex items-center gap-1">
             <p className="min-w-0 flex-1 truncate text-sm font-semibold leading-tight">{series.name}</p>
+            {!series.is_finished ? (
+              <DiscoveryHealthBadge health={series.discovery_health} lastChecked={series.last_checked} />
+            ) : null}
             {hasNewAvailableBooks ? (
               <BookOpenIcon className="h-3.5 w-3.5 shrink-0 text-sky-600" aria-label="New available book(s) found" />
             ) : null}

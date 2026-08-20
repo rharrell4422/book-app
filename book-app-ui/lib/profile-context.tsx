@@ -13,6 +13,7 @@ export type Profile = {
   is_default: boolean;
   book_count: number;
   has_data: boolean;
+  last_full_discovery_run_at?: string | null;
 };
 
 type ProfileContextValue = {

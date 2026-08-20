@@ -17,6 +17,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { MobileSeriesList } from "@/components/series/mobile-series-list";
+import { DiscoveryHealthBadge, type DiscoveryHealth } from "@/components/series/discovery-health-badge";
 import { useIsMobile } from "@/hooks/use-mobile";
 
 type SeriesRow = {
@@ -31,6 +32,7 @@ type SeriesRow = {
   books_tracked?: number;
   last_checked?: string | null;
   updated_at?: string | null;
+  discovery_health?: DiscoveryHealth | null;
   has_new_available_books?: boolean;
   has_new_upcoming_books?: boolean;
   has_unread_books?: boolean;
@@ -60,6 +62,8 @@ type SeriesApiRow = {
   next_upcoming_book_number?: number | null;
   total_books?: number | null;
   updated_at?: string | null;
+  last_checked?: string | null;
+  discovery_health?: DiscoveryHealth | null;
   has_new_available_books?: boolean;
   has_new_upcoming_books?: boolean;
   has_unread_books?: boolean;
@@ -643,7 +647,15 @@ export default function SeriesPage() {
           next_upcoming_book_number: item.next_upcoming_book_number ?? null,
           total_books: item.total_books ?? null,
           books_tracked: booksTracked,
-          last_checked: item.updated_at ?? null,
+          // Discovery Health Indicator spec (§1): this used to fall back to
+          // updated_at, which bumps on *any* row edit (marking read, rating,
+          // etc.) -- not just a Check Now sweep -- so it silently
+          // misrepresented discovery staleness. last_checked is the real
+          // column Check Now actually stamps; discovery_health is the
+          // backend's own derived healthy/stale/very_stale/never_checked
+          // state for it (see models.Series.discovery_health).
+          last_checked: item.last_checked ?? null,
+          discovery_health: (item.discovery_health as DiscoveryHealth | null | undefined) ?? null,
           updated_at: item.updated_at ?? null,
           has_new_available_books: seriesState.has_new_available_books,
           has_new_upcoming_books: seriesState.has_new_upcoming_books,
@@ -1062,6 +1074,9 @@ export default function SeriesPage() {
                 <TableCell className="truncate" title={s.name}>
                   <div className="flex items-center gap-1 truncate">
                     <span className="truncate">{s.name}</span>
+                    {!s.is_finished ? (
+                      <DiscoveryHealthBadge health={s.discovery_health} lastChecked={s.last_checked} />
+                    ) : null}
                     {getSeriesState(s).has_new_available_books ? (
                       <BookOpenIcon className="h-3.5 w-3.5 shrink-0 text-sky-600" aria-label="New available book(s) found" />
                     ) : null}

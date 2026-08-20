@@ -14,6 +14,11 @@ class ProfileResponse(BaseModel):
     created_at: datetime
     book_count: int = 0
     has_data: bool = False
+    # Auto Discovery MVP cooldown stamp (§4) -- surfaced here (rather than
+    # requiring a dedicated endpoint) so the /settings page can show the
+    # cooldown timer on load without having to fake-start a run just to
+    # read it back from POST /discovery/auto_run_mvp's "cooldown" response.
+    last_full_discovery_run_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -207,6 +212,12 @@ class SeriesBase(BaseModel):
     unread_count: Optional[int] = None
     title_normalization_mode_override: Optional[str] = None
     series_state: Optional[SeriesState] = None
+    # Discovery Health Indicator (Auto Discovery MVP spec, §1). last_checked
+    # is the real Series column; discovery_health is derived from it (see
+    # models.Series.discovery_health) -- exposed here so the frontend badge
+    # doesn't have to duplicate the healthy/stale/very_stale thresholds.
+    last_checked: Optional[date] = None
+    discovery_health: Optional[str] = None
 
 
 class SeriesResponse(SeriesBase):
@@ -234,6 +245,8 @@ class SeriesListItem(BaseModel):
     has_unread_books: Optional[bool] = None
     has_upcoming_books: Optional[bool] = None
     is_caught_up: Optional[bool] = None
+    last_checked: Optional[date] = None
+    discovery_health: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -261,6 +274,8 @@ class SeriesDetailResponse(BaseModel):
     unread_count: int = 0
     title_normalization_mode_override: str | None = None
     series_state: SeriesState | None = None
+    last_checked: date | None = None
+    discovery_health: str | None = None
 
     created_at: datetime
     updated_at: datetime
@@ -313,3 +328,50 @@ class SeriesOverviewRequest(BaseModel):
     # than re-fetched, so this endpoint costs exactly one LLM call and no
     # extra catalog API requests.
     books: list[SeriesOverviewBookInput]
+
+
+# ------------------------------------------------------------
+# Notifications ("New Books Added to Library" popup -- Auto Discovery
+# MVP spec, §3)
+# ------------------------------------------------------------
+
+
+class NotificationItem(BaseModel):
+    id: int
+    kind: str
+    book_id: int | None = None
+    book_title: str | None = None
+    series_id: int | None = None
+    series_name: str | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class NotificationDismissResponse(BaseModel):
+    dismissed_count: int
+
+
+# ------------------------------------------------------------
+# Auto Discovery MVP button (§4)
+# ------------------------------------------------------------
+
+
+class AutoDiscoveryRunResponse(BaseModel):
+    status: Literal["started", "running", "cooldown"]
+    job_id: str | None = None
+    total: int | None = None
+    completed: int | None = None
+    remaining_seconds: int | None = None
+    message: str | None = None
+
+
+class AutoDiscoveryStatusResponse(BaseModel):
+    status: Literal["idle", "running", "completed", "interrupted"]
+    job_id: str | None = None
+    total: int | None = None
+    completed: int | None = None
+    updated_at: str | None = None
+    results: list[dict] | None = None
+    new_books_found: int | None = None
+    message: str | None = None

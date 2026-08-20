@@ -9,7 +9,7 @@ from bootstrap import (
     clear_stale_ghost_flags_on_read_books,
     run_migrations,
 )
-from routers import admin, auth, books, imports, profiles, series
+from routers import admin, auth, books, discovery, imports, notifications, profiles, series
 from services.skeleton_store import backfill_all_skeletons
 
 # Bring the DB schema up to date (see bootstrap.run_migrations) before
@@ -60,3 +60,5 @@ app.include_router(profiles.router)
 app.include_router(series.router)
 app.include_router(books.router)
 app.include_router(imports.router)
+app.include_router(discovery.router)
+app.include_router(notifications.router)

@@ -13,6 +13,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.sqlite import JSON
 from sqlalchemy.orm import relationship
 from database import Base
+from services.discovery_health import compute_discovery_health
 
 
 class User(Base):
@@ -53,6 +54,12 @@ class Profile(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     is_default = Column(Boolean, default=False)
     owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    # Stamped only on successful completion of a Full Auto Discovery sweep
+    # (services/auto_discovery.py) -- i.e. the sweep finished iterating every
+    # eligible series, even if individual series checks hit provider/LLM
+    # errors along the way. Never stamped at job start, so an
+    # interrupted/crashed sweep doesn't accidentally burn the cooldown.
+    last_full_discovery_run_at = Column(DateTime, nullable=True)
 
 
 class Series(Base):
@@ -147,6 +154,20 @@ class Series(Base):
             "has_upcoming_books": bool(self.has_upcoming_books),
             "is_caught_up": bool(self.is_caught_up),
         }
+
+    @property
+    def discovery_health(self):
+        """Derived badge state for `last_checked` -- "never_checked",
+        "healthy", "stale", or "very_stale" (see services/discovery_health.py
+        for the actual thresholds). A real @property rather than a stored
+        column, like series_state above, so it can never drift out of sync
+        with last_checked/is_finished; consumed automatically by any
+        response schema with from_attributes=True (e.g. SeriesListItem) via
+        plain attribute access. Finished series should be greyed out/
+        suppressed in the UI regardless of what this returns -- see the
+        Discovery Health Indicator spec, §1.
+        """
+        return compute_discovery_health(self.last_checked, bool(self.is_finished))
 
     @property
     def read_count(self):
@@ -326,3 +347,26 @@ class SeriesSkeleton(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     series = relationship("Series")
+
+
+class Notification(Base):
+    """Minimal "New Books Added to Library" notification (Auto Discovery MVP
+    spec, §3). Deliberately not a full inbox -- one row per triggering
+    event (new available book created, or an upcoming->available
+    transition), created by the same low-level persistence path that both
+    manual Check Now and the batch Full Auto Discovery sweep share (see
+    services/series_check_engine.py), so neither path needs its own copy of
+    this logic. `dismissed_at` is set in bulk (dismiss-all), not
+    per-notification, matching the "single modal, manual dismiss" UX in the
+    spec.
+    """
+
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    profile_id = Column(String, ForeignKey("profiles.id"), nullable=False, index=True)
+    book_id = Column(Integer, ForeignKey("books.id"), nullable=True)
+    series_id = Column(Integer, ForeignKey("series.id"), nullable=True)
+    kind = Column(String, nullable=False, default="new_book")
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    dismissed_at = Column(DateTime, nullable=True)

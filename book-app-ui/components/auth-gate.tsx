@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { PencilIcon } from "lucide-react";
+import { PencilIcon, SettingsIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -24,6 +25,7 @@ import { fetchApiWithFallback } from "@/lib/api-client";
 import { setNotifyListener } from "@/lib/notify";
 import { OnboardingImport } from "@/components/onboarding/onboarding-import";
 import { BottomNav } from "@/components/mobile/bottom-nav";
+import { NewBooksNotificationModal } from "@/components/notifications/new-books-modal";
 import { cn } from "@/lib/utils";
 
 function NotifyBridge() {
@@ -459,6 +461,11 @@ function MobileProfileSheet({ open, onOpenChange }: { open: boolean; onOpenChang
           </div>
           <DialogFooter className="flex-col gap-2 sm:flex-col">
             <ShareLinkButton />
+            <Link href="/settings" onClick={() => onOpenChange(false)}>
+              <Button variant="outline" size="sm" className="w-full">
+                Settings
+              </Button>
+            </Link>
             <Button variant="outline" size="sm" onClick={logout}>
               Sign out
             </Button>
@@ -505,6 +512,11 @@ function TopBar() {
       >
         <ProfileSwitcher />
         <ShareLinkButton />
+        <Link href="/settings">
+          <Button variant="ghost" size="icon-sm" aria-label="Settings" title="Settings">
+            <SettingsIcon />
+          </Button>
+        </Link>
         <Button variant="ghost" size="sm" onClick={logout}>
           Sign out
         </Button>
@@ -556,6 +568,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     <div className="flex min-h-full flex-col">
       <NotifyBridge />
       <TopBar />
+      {role === "owner" && !needsOnboarding ? <NewBooksNotificationModal /> : null}
       {/* Keyed on the active profile so switching libraries fully remounts
           the page tree -- there's no query-cache layer in this app (every
           page just does useEffect(() => fetch..., []) on mount), so a full
