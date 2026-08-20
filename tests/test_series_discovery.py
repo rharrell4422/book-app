@@ -1227,6 +1227,101 @@ class HardcoverProviderTest(unittest.TestCase):
         self.assertIsNone(results[0]["series_name_hint"])
 
 
+class BackfillMissingPublicationDatesTest(unittest.TestCase):
+    """Regression coverage for backfill_missing_publication_dates -- live
+    bug: web-search-only candidates with no published_date at all default
+    to "Upcoming" via classify_upcoming's conservative fallback even when
+    they're real, already-released books (Georgia Wagner's "Jonathan Hunt
+    Thriller Series" -- every sequel this surfaced came back with no
+    published_date, and all but one showed up as Upcoming despite being
+    already out).
+    """
+
+    def setUp(self):
+        patcher = patch.object(discovery_engine.os.environ, "get", side_effect=lambda key, default="": (
+            "test-key" if key == "HARDCOVER_API_KEY" else default
+        ))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_backfills_a_real_date_via_isbn_lookup(self):
+        candidates = [
+            {"title": "The Levee Ghosts", "authors": ["Georgia Wagner"], "isbn13": "9798242217126", "published_date": ""}
+        ]
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[
+                {"title": "The Levee Ghosts", "authors": ["Georgia Wagner", "Scott Cook"], "isbn13": "9798242217126", "published_date": "2026-01-01"}
+            ],
+        ):
+            discovery_engine.backfill_missing_publication_dates(candidates, "Georgia Wagner; Scott Cook")
+
+        self.assertEqual(candidates[0]["published_date"], "2026-01-01")
+
+    def test_backfills_via_title_lookup_when_isbn_is_unknown(self):
+        candidates = [{"title": "Desert Protocol", "authors": ["Georgia Wagner"], "isbn13": None, "published_date": ""}]
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[
+                {"title": "Desert Protocol", "authors": ["Georgia Wagner", "Scott Cook"], "isbn13": "9798242216228", "published_date": "2026-01-01"}
+            ],
+        ):
+            discovery_engine.backfill_missing_publication_dates(candidates, "Georgia Wagner; Scott Cook")
+
+        self.assertEqual(candidates[0]["published_date"], "2026-01-01")
+        # The now-confirmed ISBN is also worth keeping, since the candidate
+        # never had one before this lookup found it.
+        self.assertEqual(candidates[0]["isbn13"], "9798242216228")
+
+    def test_rejects_a_same_titled_hit_by_an_unrelated_author(self):
+        # Regression (live bug): a bare title lookup for "The Winter Siege"
+        # returned a real, unrelated historical-fiction book by a completely
+        # different author with the same generic title.
+        candidates = [{"title": "The Winter Siege", "authors": ["Georgia Wagner"], "isbn13": None, "published_date": ""}]
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[
+                {"title": "The Winter Siege", "authors": ["Ariana Franklin", "Samantha Norman"], "isbn13": "9780593070611", "published_date": "2014-10-09"}
+            ],
+        ):
+            discovery_engine.backfill_missing_publication_dates(candidates, "Georgia Wagner; Scott Cook")
+
+        self.assertEqual(candidates[0]["published_date"], "")
+
+    def test_never_overwrites_an_already_known_date(self):
+        candidates = [
+            {"title": "Desert Protocol", "authors": ["Georgia Wagner"], "isbn13": None, "published_date": "2026-01-01"}
+        ]
+        with patch.object(discovery_engine, "_fetch_hardcover") as mock_fetch:
+            discovery_engine.backfill_missing_publication_dates(candidates, "Georgia Wagner; Scott Cook")
+
+        mock_fetch.assert_not_called()
+        self.assertEqual(candidates[0]["published_date"], "2026-01-01")
+
+    def test_stops_after_the_lookup_cap_is_reached(self):
+        candidates = [
+            {"title": f"Book {n}", "authors": ["Georgia Wagner"], "isbn13": None, "published_date": ""}
+            for n in range(discovery_engine.MAX_PUBLICATION_DATE_BACKFILL_LOOKUPS + 3)
+        ]
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]) as mock_fetch:
+            discovery_engine.backfill_missing_publication_dates(candidates, "Georgia Wagner; Scott Cook")
+
+        self.assertEqual(mock_fetch.call_count, discovery_engine.MAX_PUBLICATION_DATE_BACKFILL_LOOKUPS)
+
+    def test_no_op_without_a_hardcover_api_key(self):
+        candidates = [{"title": "Desert Protocol", "authors": ["Georgia Wagner"], "isbn13": None, "published_date": ""}]
+        with patch.object(discovery_engine.os.environ, "get", return_value=""), patch.object(
+            discovery_engine, "_fetch_hardcover"
+        ) as mock_fetch:
+            discovery_engine.backfill_missing_publication_dates(candidates, "Georgia Wagner; Scott Cook")
+
+        mock_fetch.assert_not_called()
+        self.assertEqual(candidates[0]["published_date"], "")
+
+
 class WebSearchProviderTest(unittest.TestCase):
     """Tests the Brave Search + Claude web-search discovery provider, with
     the HTTP call to Brave and the Anthropic client both mocked out so this

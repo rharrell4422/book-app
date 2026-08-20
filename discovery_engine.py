@@ -990,6 +990,86 @@ def _fetch_hardcover(query: str, max_results: int = 25) -> list[dict]:
     return results
 
 
+# Bounds how many extra, dedicated Hardcover lookups
+# backfill_missing_publication_dates will issue in one call -- an unusually
+# large batch of undated candidates (e.g. a big author-fallback sweep)
+# shouldn't turn into a dozen-plus extra live API calls on top of everything
+# else a Check Now run already does. Anything beyond the cap is left with
+# no published_date, still covered by classify_upcoming's existing
+# conservative "unconfirmed" default.
+MAX_PUBLICATION_DATE_BACKFILL_LOOKUPS = 8
+
+
+def backfill_missing_publication_dates(candidates: list[dict], author: str) -> None:
+    """Fills in a real published_date for candidates that don't have one,
+    by issuing a dedicated Hardcover lookup per candidate (by ISBN when
+    known, else by title) -- mutates each candidate dict in place, and only
+    ever fills a blank date, never overwrites a real one.
+
+    Candidates with no published_date at all are almost always ones the
+    Brave+LLM web-search pass surfaced without a confirmed date in its
+    result snippets -- classify_upcoming's own conservative default then
+    treats those as "not confirmed available yet" (see its docstring),
+    which is often wrong for an already-released indie/KU title that Brave
+    just didn't happen to state a date for. The same real book is frequently
+    already in Hardcover's structured catalog with a real release date --
+    it just didn't get chosen as this fused candidate's representative hit
+    because the broader "<series> <author>" search that ran earlier either
+    didn't surface it prominently enough, or Hardcover's own search index
+    doesn't have this specific title tagged under the series at all (see the
+    live regression this was written for: Georgia Wagner's "Jonathan Hunt
+    Thriller Series" -- Hardcover's series-scoped search never surfaced
+    several already-released titles, but a direct ISBN/title lookup for
+    each one did, immediately, with a real past release date).
+
+    A bare title lookup can collide with a same-titled, unrelated real book
+    by a different author (regression while building this: "The Desert
+    Reckoning" and "The Winter Siege" are both real, unrelated non-Wagner
+    books already in Hardcover's catalog) -- guarded against by requiring
+    the hit's own title to resolve to the same core_title_key AND its
+    author(s) to match via _author_matches before trusting its date. An
+    ISBN lookup is trusted on ISBN equality alone since ISBNs don't collide.
+    """
+    if not os.environ.get("HARDCOVER_API_KEY", "").strip():
+        return
+
+    lookups_done = 0
+    for raw in candidates:
+        if lookups_done >= MAX_PUBLICATION_DATE_BACKFILL_LOOKUPS:
+            break
+        if str(raw.get("published_date") or "").strip():
+            continue
+        title = str(raw.get("title") or "").strip()
+        if not title:
+            continue
+
+        isbn13 = str(raw.get("isbn13") or "").strip()
+        try:
+            hits = _fetch_hardcover(isbn13 or title)
+        except Exception:
+            continue
+        lookups_done += 1
+
+        title_key = core_title_key(title)
+        for hit in hits:
+            if isbn13:
+                if str(hit.get("isbn13") or "").strip() != isbn13:
+                    continue
+            elif core_title_key(str(hit.get("title") or "")) != title_key:
+                continue
+            if not _author_matches(hit.get("authors") or [], author):
+                continue
+            hit_date = str(hit.get("published_date") or "").strip()
+            if not hit_date:
+                continue
+            raw["published_date"] = hit_date
+            if not isbn13:
+                hit_isbn13 = str(hit.get("isbn13") or "").strip()
+                if hit_isbn13:
+                    raw["isbn13"] = hit_isbn13
+            break
+
+
 def _fetch_brave_web_search(query: str, count: int = WEB_SEARCH_MAX_RESULTS) -> list[dict]:
     api_key = os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()
     if not api_key:

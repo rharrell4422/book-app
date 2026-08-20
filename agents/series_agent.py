@@ -562,6 +562,26 @@ class SeriesIntelligenceAgent:
                 # fields belongs_to_series below was never meant to see.
                 candidates = discovery_engine.finalize_discovery_output(candidates)
 
+            # A candidate with no published_date at all defaults to
+            # "unconfirmed"/upcoming below (see classify_upcoming) even when
+            # it's a real, already-released book -- Brave's web-search
+            # snippets frequently just don't state a date, especially for
+            # under-indexed indie/KU titles (regression: every Jonathan Hunt
+            # sequel this run found came back this way, and all but one
+            # showed up as "Upcoming" despite being already published).
+            # Filling in a real date via a dedicated Hardcover lookup, when
+            # one exists, lets a genuinely-released book land in
+            # available_missing instead of upcoming_books -- see
+            # backfill_missing_publication_dates's own docstring for why a
+            # bare title lookup alone isn't trusted, and
+            # MAX_PUBLICATION_DATE_BACKFILL_LOOKUPS for why this can't runaway
+            # into unbounded extra API calls on top of everything else this
+            # run already did.
+            try:
+                discovery_engine.backfill_missing_publication_dates(candidates, series_author)
+            except Exception:
+                logger.exception("publication-date backfill failed for series_id=%s", series_id)
+
             _console_log(
                 f"Candidates found: {len(candidates)} (author_fallback_used={discovery['used_author_fallback']}, "
                 f"missing_volumes={skeleton['missing_numbers']}, recovered={skeleton['recovered_numbers']})"
