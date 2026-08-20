@@ -1161,7 +1161,7 @@ class WebSearchProviderTest(unittest.TestCase):
                 return refinement_raw
             return raw_results
 
-        def fake_structure(series_name, author, results):
+        def fake_structure(series_name, author, results, **kwargs):
             if results == refinement_raw:
                 return refinement_structured
             return first_pass_structured

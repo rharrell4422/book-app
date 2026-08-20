@@ -936,7 +936,49 @@ Respond with ONLY a JSON array (no prose, no markdown code fences). Each element
 If none of the results are genuine matches, respond with exactly: []"""
 
 
-def _structure_web_results_with_llm(series_name: str | None, author: str, raw_results: list[dict]) -> list[dict]:
+def _to_int_or_none(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_drop_diagnostic(
+    stage: str,
+    candidate_identity: dict | None,
+    reason: str,
+    diagnostics_list: list[dict] | None,
+) -> None:
+    """Phase 3.5 of agentic discovery, PURE SHADOW MODE: records that a
+    candidate/provider result was silently dropped and why, at points that
+    previously discarded it with no trace at all (a JSON parse failure
+    voiding the whole web provider, a cross-series contamination filter, an
+    LLM reconciliation exclusion, or series_agent.py's own already-known
+    suppression). A no-op whenever diagnostics_list is None, so every
+    existing caller that doesn't pass one stays completely unaffected --
+    this can only ever add entries to a list a caller explicitly opted
+    into, never change what gets accepted/rejected.
+    """
+    if diagnostics_list is None:
+        return
+    diagnostics_list.append(
+        {
+            "stage": stage,
+            "candidate_identity": candidate_identity,
+            "reason": reason,
+        }
+    )
+
+
+def _structure_web_results_with_llm(
+    series_name: str | None,
+    author: str,
+    raw_results: list[dict],
+    *,
+    diagnostics: list[dict] | None = None,
+) -> list[dict]:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key or not raw_results:
         return []
@@ -991,6 +1033,12 @@ def _structure_web_results_with_llm(series_name: str | None, author: str, raw_re
     try:
         parsed = json.loads(text)
     except (json.JSONDecodeError, ValueError):
+        _record_drop_diagnostic(
+            "web_structuring",
+            {"title": None, "isbn13": None, "series_number": None},
+            "json_parse_failure",
+            diagnostics,
+        )
         return []
     return parsed if isinstance(parsed, list) else []
 
@@ -1093,7 +1141,13 @@ def _refine_undated_web_search_result(result: dict, series_name: str, author: st
     return result
 
 
-def _fetch_web_search(queries: list[str], series_name: str | None, author: str) -> list[dict]:
+def _fetch_web_search(
+    queries: list[str],
+    series_name: str | None,
+    author: str,
+    *,
+    diagnostics: list[dict] | None = None,
+) -> list[dict]:
     raw_results: list[dict] = []
     seen_urls: set[str] = set()
     query_errors: list[Exception] = []
@@ -1114,7 +1168,7 @@ def _fetch_web_search(queries: list[str], series_name: str | None, author: str) 
             raise query_errors[0]
         return []
 
-    structured = _structure_web_results_with_llm(series_name, author, raw_results)
+    structured = _structure_web_results_with_llm(series_name, author, raw_results, diagnostics=diagnostics)
 
     results: list[dict] = []
     for item in structured:
@@ -1253,6 +1307,7 @@ def _fetch_all_providers_parallel(
     openlibrary_query: str | None = None,
     web_search_queries: list[str] | None = None,
     enable_web_search: bool = True,
+    diagnostics: list[dict] | None = None,
 ) -> dict:
     """Fetch Google Books, OpenLibrary, Hardcover, and (optionally) the
     Brave+LLM web-search provider concurrently instead of one after another.
@@ -1312,18 +1367,20 @@ def _fetch_all_providers_parallel(
     )
 
     tasks: dict[str, tuple] = {
-        "google": (_fetch_google_books, (google_query,)),
-        "openlibrary": (_fetch_openlibrary, (resolved_openlibrary_query,)),
-        "hardcover": (_fetch_hardcover, (hardcover_query,)),
+        "google": (_fetch_google_books, (google_query,), {}),
+        "openlibrary": (_fetch_openlibrary, (resolved_openlibrary_query,), {}),
+        "hardcover": (_fetch_hardcover, (hardcover_query,), {}),
     }
     if run_web_search:
-        tasks["web"] = (_fetch_web_search, (resolved_web_queries, series_name, author))
+        tasks["web"] = (_fetch_web_search, (resolved_web_queries, series_name, author), {"diagnostics": diagnostics})
 
     results: dict[str, list[dict]] = {"google": [], "openlibrary": [], "hardcover": [], "web": []}
     failures: dict[str, Exception] = {}
 
     with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-        future_to_provider = {executor.submit(func, *args): provider for provider, (func, args) in tasks.items()}
+        future_to_provider = {
+            executor.submit(func, *args, **kwargs): provider for provider, (func, args, kwargs) in tasks.items()
+        }
         for future, provider in future_to_provider.items():
             try:
                 results[provider] = future.result()
@@ -2098,6 +2155,8 @@ Respond with ONLY a JSON object (no prose, no markdown code fences) of this exac
 def _reconcile_candidates_with_llm(
     unified_candidates: list["UnifiedCandidate"],
     series_name: str | None,
+    *,
+    diagnostics: list[dict] | None = None,
 ) -> list["UnifiedCandidate"]:
     """Single conditional LLM pass over an already-fused candidate set for
     one series -- normalizes series names/book numbers, merges candidates
@@ -2215,6 +2274,18 @@ def _reconcile_candidates_with_llm(
         return unified_candidates
     if excluded_indices:
         _log(f"LLM reconciliation excluded {len(excluded_indices)} candidate(s) as belonging to a different series")
+        for index in excluded_indices:
+            excluded_candidate = candidates[index]
+            _record_drop_diagnostic(
+                "llm_reconciliation",
+                {
+                    "title": excluded_candidate.title,
+                    "isbn13": excluded_candidate.isbn13,
+                    "series_number": _to_int_or_none(excluded_candidate.series_number),
+                },
+                "excluded_by_llm",
+                diagnostics,
+            )
 
     if seen_indices | excluded_indices != all_indices:
         return unified_candidates
@@ -2551,15 +2622,30 @@ def _is_cross_series_contamination(
 
 
 def _filter_cross_series_contamination(
-    fetch_results: dict, target_series_name: str | None, other_known_series_names: set[str] | None
+    fetch_results: dict,
+    target_series_name: str | None,
+    other_known_series_names: set[str] | None,
+    *,
+    diagnostics: list[dict] | None = None,
 ) -> dict:
     filtered = dict(fetch_results)
     for provider in ("google", "openlibrary", "hardcover", "web"):
-        filtered[provider] = [
-            raw
-            for raw in (fetch_results.get(provider) or [])
-            if not _is_cross_series_contamination(raw, target_series_name, other_known_series_names)
-        ]
+        kept: list[dict] = []
+        for raw in fetch_results.get(provider) or []:
+            if _is_cross_series_contamination(raw, target_series_name, other_known_series_names):
+                _record_drop_diagnostic(
+                    "cross_series_filter",
+                    {
+                        "title": raw.get("title"),
+                        "isbn13": raw.get("isbn13"),
+                        "series_number": _to_int_or_none(raw.get("series_number_hint")),
+                    },
+                    "series_name_mismatch",
+                    diagnostics,
+                )
+                continue
+            kept.append(raw)
+        filtered[provider] = kept
     return filtered
 
 
@@ -2679,6 +2765,11 @@ def discover_candidates_for_series(
     series_name = str(series_name or "").strip()
     author = str(author or "").strip()
     provider_failures: list[dict] = []
+    # Phase 3.5 of agentic discovery, PURE SHADOW MODE: structured record of
+    # every point below that silently drops a raw result/candidate with no
+    # other trace (see _record_drop_diagnostic). Purely additive -- nothing
+    # here changes which candidates get filtered/merged/returned.
+    discovery_drop_diagnostics: list[dict] = []
 
     if not author:
         return {
@@ -2687,6 +2778,7 @@ def discover_candidates_for_series(
             "provider_failures": [],
             "all_providers_failed": False,
             "used_author_fallback": False,
+            "drop_diagnostics": [],
         }
 
     if progress_callback:
@@ -2713,6 +2805,7 @@ def discover_candidates_for_series(
         targeted_query_text,
         highest_owned_book_number,
         author=author,
+        diagnostics=discovery_drop_diagnostics,
     )
     failures = fetch_results["_failures"]
 
@@ -2764,7 +2857,9 @@ def discover_candidates_for_series(
     # normalized/merged candidate it produces still goes through the exact
     # same filtering every other candidate does.
     if _needs_llm_reconciliation(fused_candidates, series_name):
-        fused_candidates = _reconcile_candidates_with_llm(fused_candidates, series_name)
+        fused_candidates = _reconcile_candidates_with_llm(
+            fused_candidates, series_name, diagnostics=discovery_drop_diagnostics
+        )
     # Edition-aware collapse -- see _finalize_candidates -- runs last,
     # immediately before candidates are converted to the dict shape
     # returned to series_agent.py, so it sees whatever fusion/reconciliation
@@ -2813,13 +2908,16 @@ def discover_candidates_for_series(
                 f"{series_name} {query_author} series",
             ],
             enable_web_search=enable_fallback_web_search,
+            diagnostics=discovery_drop_diagnostics,
         )
         # Explicit cross-series contamination -- a fallback hit tagged with
         # one of this author's OTHER tracked series' names -- is dropped
         # before fusion ever sees it, rather than disabling the whole pass
         # just because other series exist (see this function's docstring
         # and _is_cross_series_contamination).
-        fallback_results = _filter_cross_series_contamination(fallback_results, series_name, other_known_series_names)
+        fallback_results = _filter_cross_series_contamination(
+            fallback_results, series_name, other_known_series_names, diagnostics=discovery_drop_diagnostics
+        )
         fallback_failures = fallback_results["_failures"]
 
         google_fallback = fallback_results["google"]
@@ -2850,7 +2948,9 @@ def discover_candidates_for_series(
 
         fused_fallback_candidates = _fuse_and_score_candidates(fallback_results, author, series_name)
         if _needs_llm_reconciliation(fused_fallback_candidates, series_name):
-            fused_fallback_candidates = _reconcile_candidates_with_llm(fused_fallback_candidates, series_name)
+            fused_fallback_candidates = _reconcile_candidates_with_llm(
+                fused_fallback_candidates, series_name, diagnostics=discovery_drop_diagnostics
+            )
         fused_fallback_candidates = _finalize_candidates(fused_fallback_candidates)
         # Additive, not a replacement: the targeted pass above may have
         # already found real matches even while still triggering fallback
@@ -2897,6 +2997,10 @@ def discover_candidates_for_series(
         "provider_failures": provider_failures,
         "all_providers_failed": all_providers_failed,
         "used_author_fallback": used_author_fallback,
+        # Phase 3.5, PURE SHADOW MODE -- see _record_drop_diagnostic. Logged
+        # only (series_agent.py merges this with its own agent_drop_diagnostics);
+        # nothing here changes "candidates" above.
+        "drop_diagnostics": discovery_drop_diagnostics,
     }
 
 

@@ -494,10 +494,63 @@ class SeriesIntelligenceAgent:
                 f"missing_volumes={skeleton['missing_numbers']}, recovered={skeleton['recovered_numbers']})"
             )
 
+            # Phase 3.5 of agentic discovery, PURE SHADOW MODE: reads
+            # Hardcover's series_total_hint (already backfilled into each
+            # fused candidate's own source_provenance[0] during fusion -- see
+            # discovery_engine._fuse_and_score_candidates -- rather than a
+            # top-level UnifiedCandidate field) to estimate how many books the
+            # series actually has, and which of 1..external_expected_total are
+            # neither owned nor discovered. Deliberately computed AFTER, and
+            # entirely separate from, the live _reconstruct_series_skeleton
+            # call above -- expected_total/missing_numbers there (and
+            # therefore the live lookahead queries and `candidates` itself)
+            # are completely untouched by anything below. known_numbers uses
+            # skeleton["candidates"] (post-recovery) rather than
+            # discovery["unified_candidates"] so a number the *existing*
+            # narrow lookahead already recovered this same run isn't
+            # miscounted as still missing.
+            external_expected_total: int | None = None
+            external_missing_numbers: list[int] = []
+            try:
+                external_total_hints = [
+                    (candidate.model_dump().get("source_provenance") or [{}])[0].get("series_total_hint")
+                    for candidate in discovery.get("unified_candidates", [])
+                ]
+                resolved_total_hints = [
+                    discovery_engine._to_int_or_none(hint) for hint in external_total_hints if hint is not None
+                ]
+                external_expected_total = max(resolved_total_hints) if resolved_total_hints else None
+
+                known_numbers: set[int] = set()
+                for book in active_series_books:
+                    number = discovery_engine._to_int_or_none(book.book_number)
+                    if number is not None:
+                        known_numbers.add(number)
+                for candidate in skeleton["candidates"]:
+                    number = discovery_engine._to_int_or_none(candidate.model_dump().get("series_number"))
+                    if number is not None:
+                        known_numbers.add(number)
+
+                if external_expected_total is not None:
+                    external_missing_numbers = sorted(set(range(1, external_expected_total + 1)) - known_numbers)
+            except Exception:
+                external_expected_total = None
+                external_missing_numbers = []
+                logger.exception(
+                    "Phase 3.5 external-series-reality computation failed for series_id=%s", series_id
+                )
+
             today = date.today()
             available_missing: list[dict] = []
             upcoming_books: list[dict] = []
             candidate_diagnostics: list[dict] = []
+            # Phase 3.5 of agentic discovery, PURE SHADOW MODE: captures the
+            # one silent-drop point that lives in this function rather than
+            # discovery_engine.py (a real Book N suppressed here because it's
+            # already known) -- merged with discovery["drop_diagnostics"]
+            # into one consolidated log entry below. See
+            # discovery_engine._record_drop_diagnostic.
+            agent_drop_diagnostics: list[dict] = []
 
             for raw in candidates:
                 title = str(raw.get("title") or "").strip()
@@ -606,6 +659,16 @@ class SeriesIntelligenceAgent:
                     known_bare_titles=known_bare_titles,
                 )
                 if already_known:
+                    discovery_engine._record_drop_diagnostic(
+                        "already_known",
+                        {
+                            "title": title,
+                            "isbn13": isbn13 or None,
+                            "series_number": discovery_engine._to_int_or_none(inferred_number),
+                        },
+                        "suppressed_as_known",
+                        agent_drop_diagnostics,
+                    )
                     continue
 
                 # Different providers can return the same real book under
@@ -656,6 +719,30 @@ class SeriesIntelligenceAgent:
                     upcoming_books.append(canonical)
                 else:
                     available_missing.append(canonical)
+
+            # Phase 3.5 of agentic discovery, PURE SHADOW MODE: one
+            # consolidated log entry combining the external-series-reality
+            # fields computed above with every drop diagnostic recorded this
+            # run, across both discovery_engine.py (discovery_drop_diagnostics,
+            # merged into discovery["drop_diagnostics"]) and this function's
+            # own already-known suppression (agent_drop_diagnostics). Purely
+            # diagnostic -- nothing above or below this reads any of it.
+            try:
+                all_drop_diagnostics = discovery.get("drop_diagnostics", []) + agent_drop_diagnostics
+                logger.info(
+                    "series_external_reality: %s",
+                    json.dumps(
+                        {
+                            "series_id": series_id,
+                            "external_expected_total": external_expected_total,
+                            "external_missing_numbers": external_missing_numbers,
+                            "drop_diagnostics": all_drop_diagnostics,
+                        },
+                        default=str,
+                    ),
+                )
+            except Exception:
+                logger.exception("Phase 3.5 external-reality/drop-diagnostics logging failed for series_id=%s", series_id)
 
             found = bool(available_missing or upcoming_books)
             series.has_new_books = found
