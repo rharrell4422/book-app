@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import unittest
 from datetime import date
@@ -324,6 +325,146 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
         self.assertIsNone(discovery_engine.infer_series_hint_from_title_text("Refuge"))
         self.assertIsNone(discovery_engine.infer_series_hint_from_title_text("Exile: A Space Opera"))
         self.assertIsNone(discovery_engine.infer_series_hint_from_title_text(None))
+
+    # --- Phase 4 pure helpers (shadow-mode diagnostics) ---
+
+    def test_integral_or_none_rejects_fractional_without_truncating(self):
+        # The whole reason this exists next to _to_int_or_none: a 3.5
+        # novella must not be counted as volume 3.
+        self.assertEqual(discovery_engine._to_int_or_none(3.5), 3)
+        self.assertIsNone(discovery_engine._integral_or_none(3.5))
+
+    def test_integral_or_none_accepts_integral_values_of_every_type(self):
+        for value, expected in [(3, 3), (3.0, 3), ("3", 3), ("3.0", 3), (0, 0), (-2, -2)]:
+            with self.subTest(value=value):
+                self.assertEqual(discovery_engine._integral_or_none(value), expected)
+
+    def test_integral_or_none_returns_none_for_unusable_values(self):
+        for value in [None, "", "Book Seven", [], {}, float("nan"), float("inf")]:
+            with self.subTest(value=value):
+                self.assertIsNone(discovery_engine._integral_or_none(value))
+
+    def test_external_missing_vs_owned_subtracts_only_owned_books(self):
+        owned = [{"book_number": float(n)} for n in [1, 2, 3, 4, 5, 6, 8, 9]]
+        self.assertEqual(
+            discovery_engine.compute_external_missing_vs_owned(10, owned),
+            [7, 10],
+        )
+
+    def test_external_missing_vs_owned_ignores_null_and_fractional_numbers(self):
+        owned = [{"book_number": 1.0}, {"book_number": None}, {"book_number": 2.5}]
+        self.assertEqual(discovery_engine.compute_external_missing_vs_owned(3, owned), [2, 3])
+
+    def test_external_missing_vs_owned_returns_empty_without_a_usable_total(self):
+        owned = [{"book_number": 1.0}]
+        self.assertEqual(discovery_engine.compute_external_missing_vs_owned(None, owned), [])
+        self.assertEqual(discovery_engine.compute_external_missing_vs_owned(0, owned), [])
+        self.assertEqual(discovery_engine.compute_external_missing_vs_owned(-3, owned), [])
+
+    def test_external_gap_ratio_is_none_without_a_usable_total(self):
+        # None, not 0.0 -- "no external data" must stay distinguishable
+        # from "owns every volume".
+        self.assertIsNone(discovery_engine.compute_external_gap_ratio(None, []))
+        self.assertIsNone(discovery_engine.compute_external_gap_ratio(0, []))
+
+    def test_external_gap_ratio_rounds_to_four_places(self):
+        self.assertEqual(discovery_engine.compute_external_gap_ratio(3, [2]), 0.3333)
+        self.assertEqual(discovery_engine.compute_external_gap_ratio(10, [7, 10]), 0.2)
+        self.assertEqual(discovery_engine.compute_external_gap_ratio(10, []), 0.0)
+
+    def test_owned_number_coverage_counts_only_integral_numbers(self):
+        owned = [{"book_number": 1.0}, {"book_number": None}, {"book_number": 2.5}, {"book_number": 3}]
+        self.assertEqual(
+            discovery_engine.compute_owned_number_coverage(owned),
+            {"owned_books_total": 4, "owned_books_with_numbers": 2},
+        )
+
+    def test_inferred_number_prefers_the_hint_then_falls_back_to_the_title(self):
+        self.assertEqual(
+            discovery_engine.compute_inferred_number(
+                {"title": "Cherry Blossom Girls 4", "series_number_hint": 7}, "Cherry Blossom Girls"
+            ),
+            7,
+        )
+        # The bare "<Series Name> <N>" pattern only resolves when the series
+        # name is passed through.
+        self.assertEqual(
+            discovery_engine.compute_inferred_number({"title": "Cherry Blossom Girls 4"}, "Cherry Blossom Girls"),
+            4,
+        )
+        self.assertIsNone(discovery_engine.compute_inferred_number({"title": "Unmapped"}, "Cherry Blossom Girls"))
+
+    def test_new_volume_flags_marks_only_unowned_expected_numbers(self):
+        candidates = [
+            {"title": "Book 7", "series_number_hint": 7, "isbn13": "9780000000007"},
+            {"title": "Book 2", "series_number_hint": 2},
+            {"title": "Novella", "series_number_hint": 3.5},
+            {"title": "Unmapped"},
+        ]
+        flags = discovery_engine.compute_new_volume_flags(
+            candidates, "Cherry Blossom Girls", [7, 10], belongs_indices={0, 1, 2}, known_indices={1}
+        )
+
+        self.assertEqual([flag["is_new_volume"] for flag in flags], [True, False, False, False])
+        self.assertEqual([flag["belongs_to_series"] for flag in flags], [True, True, True, False])
+        self.assertEqual([flag["suppressed_as_known"] for flag in flags], [False, True, False, False])
+        self.assertEqual(flags[0]["isbn13"], "9780000000007")
+        self.assertIsNone(flags[1]["isbn13"])
+        # The fractional number survives verbatim even though it can never
+        # be flagged as a new volume.
+        self.assertEqual(flags[2]["series_number"], 3.5)
+        self.assertIsNone(flags[3]["series_number"])
+
+    def test_drop_explanations_flatten_nested_and_missing_identities(self):
+        diagnostics = [
+            {
+                "stage": "cross_series_filter",
+                "reason": "series_name_mismatch",
+                "candidate_identity": {"title": "Other Series 1", "isbn13": "9780000000001", "series_number": 1},
+            },
+            {"stage": "web_structuring", "reason": "json_parse_failure", "candidate_identity": None},
+            {"stage": "mystery_stage", "reason": "mystery_reason", "candidate_identity": {}},
+        ]
+        explained = discovery_engine.compute_drop_explanations(diagnostics)
+        first, second, third = explained["drop_explanations"]
+
+        self.assertEqual(first["title"], "Other Series 1")
+        self.assertEqual(first["isbn13"], "9780000000001")
+        self.assertEqual(first["series_number"], 1)
+        self.assertEqual(
+            first["explanation"], "Candidate dropped because its series name did not match the target series."
+        )
+        self.assertIsNone(second["title"])
+        self.assertEqual(
+            second["explanation"],
+            "Provider returned unstructured or invalid JSON; the entire structuring pass was discarded.",
+        )
+        self.assertEqual(third["explanation"], "Candidate dropped for an unclassified reason.")
+
+    def test_drop_explanations_cap_the_list_but_not_the_counts(self):
+        diagnostics = [
+            {"stage": "already_known", "reason": "suppressed_as_known", "candidate_identity": {"title": f"Book {n}"}}
+            for n in range(discovery_engine.MAX_DROP_EXPLANATIONS + 5)
+        ]
+        diagnostics.append({"stage": "llm_reconciliation", "reason": "excluded_by_llm", "candidate_identity": None})
+        explained = discovery_engine.compute_drop_explanations(diagnostics)
+
+        self.assertEqual(len(explained["drop_explanations"]), discovery_engine.MAX_DROP_EXPLANATIONS)
+        self.assertEqual(explained["drop_explanations_total"], discovery_engine.MAX_DROP_EXPLANATIONS + 6)
+        self.assertEqual(
+            explained["drop_explanation_counts"],
+            {
+                "already_known:suppressed_as_known": discovery_engine.MAX_DROP_EXPLANATIONS + 5,
+                "llm_reconciliation:excluded_by_llm": 1,
+            },
+        )
+        self.assertEqual(explained["drop_explanations"][0]["title"], "Book 0")
+
+    def test_drop_explanations_handle_an_empty_diagnostic_list(self):
+        self.assertEqual(
+            discovery_engine.compute_drop_explanations([]),
+            {"drop_explanations": [], "drop_explanations_total": 0, "drop_explanation_counts": {}},
+        )
 
 
 def _mock_anthropic_client(response_text):
@@ -2042,6 +2183,253 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         mock_discover.assert_not_called()
         self.assertEqual(result["reason"], "series-missing-author")
         self.assertFalse(result["found"])
+
+
+class Phase4DiagnosticsTest(unittest.TestCase):
+    """Phase 4 shadow-mode diagnostics, end to end through
+    run_series_check: new_volume_flags, external_gap_ratio and
+    drop_explanations reach the series_external_reality log entry, and
+    nothing about them reaches the returned result.
+
+    A plain sibling of SeriesCheckIntegrationTest rather than a subclass,
+    so the parent's suite doesn't get re-run against this fixture -- the
+    owned-books fixture (1-6, 8, 9) is duplicated deliberately.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=cls.engine)
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        Base.metadata.drop_all(bind=cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        # Any test module that imports `main` runs Alembic on import, and
+        # Alembic's fileConfig() disables every logger that already exists
+        # -- including this one, which assertLogs cannot see through. So
+        # whether these tests pass would otherwise depend on which other
+        # files pytest happened to collect alongside them.
+        agent_logger = logging.getLogger("agents.series_agent")
+        was_disabled = agent_logger.disabled
+        agent_logger.disabled = False
+        self.addCleanup(setattr, agent_logger, "disabled", was_disabled)
+
+        self.db = self.SessionLocal()
+        series = Series(name="Cherry Blossom Girls", author="Harmon Cooper")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+        self.series = series
+
+        for number in [1, 2, 3, 4, 5, 6, 8, 9]:
+            self.db.add(
+                Book(
+                    title=f"Cherry Blossom Girls Book {number}",
+                    author="Harmon Cooper",
+                    series_id=series.id,
+                    series_order=number,
+                    book_number=float(number),
+                    record_status="active",
+                    is_read=False,
+                )
+            )
+        self.db.commit()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _mock_discovery(self, candidates, **overrides):
+        result = {
+            "candidates": candidates,
+            "provider_failures": [],
+            "all_providers_failed": False,
+            "used_author_fallback": False,
+        }
+        result.update(overrides)
+        return patch("discovery_engine.discover_candidates_for_series", return_value=result)
+
+    @staticmethod
+    def _raw_candidate(number, title=None, **overrides):
+        candidate = {
+            "source": "hardcover",
+            "source_id": f"hc-{number}",
+            "title": title or f"Cherry Blossom Girls Book {number}",
+            "authors": ["Harmon Cooper"],
+            "published_date": "2024-02-20",
+            "isbn13": None,
+            "source_url": None,
+            "language": "",
+            "confidence": "targeted",
+            "series_number_hint": number,
+            "upcoming_hint": False,
+        }
+        candidate.update(overrides)
+        return candidate
+
+    @staticmethod
+    def _unified_candidate(number, total_hint):
+        # series_number lives at the top level (Phase 3.5 reads it off the
+        # model) while the total hint lives in source_provenance[0], which
+        # is where external_expected_total is derived from.
+        return discovery_engine.UnifiedCandidate(
+            title=f"Cherry Blossom Girls Book {number}",
+            authors=["Harmon Cooper"],
+            series_name="Cherry Blossom Girls",
+            series_number=float(number),
+            source_provenance=[{"source": "hardcover", "series_total_hint": total_hint}],
+        )
+
+    def _run_and_capture(self, candidates, **overrides):
+        """Runs a check with the web-search providers disabled (so the
+        result never depends on ambient API keys) and returns the parsed
+        series_external_reality payload alongside the result.
+        """
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""}), self._mock_discovery(
+            candidates, **overrides
+        ), self.assertLogs("agents.series_agent", level="INFO") as captured:
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        payloads = [
+            json.loads(record.getMessage().split("series_external_reality: ", 1)[1])
+            for record in captured.records
+            if "series_external_reality: " in record.getMessage()
+        ]
+        self.assertEqual(len(payloads), 1)
+        return result, payloads[0]
+
+    def test_new_volume_flag_is_true_for_an_externally_expected_unowned_number(self):
+        # External total of 10 against owned 1-6, 8, 9: volumes 7 and 10
+        # are the externally-expected gaps, and the candidate fills 7.
+        result, payload = self._run_and_capture(
+            [self._raw_candidate(7)],
+            unified_candidates=[self._unified_candidate(7, 10)],
+        )
+
+        self.assertEqual(payload["external_expected_total"], 10)
+        self.assertEqual(payload["external_total_hint_count"], 1)
+        self.assertEqual(payload["external_missing_vs_owned"], [7, 10])
+        # Phase 3.5's own list subtracts the discovered candidate too,
+        # which is exactly why is_new_volume can't be derived from it.
+        self.assertEqual(payload["external_missing_numbers"], [10])
+        self.assertEqual(payload["external_gap_ratio"], 0.2)
+        self.assertEqual(payload["owned_books_total"], 8)
+        self.assertEqual(payload["owned_books_with_numbers"], 8)
+
+        self.assertEqual(len(payload["new_volume_flags"]), 1)
+        flag = payload["new_volume_flags"][0]
+        self.assertTrue(flag["is_new_volume"])
+        self.assertTrue(flag["belongs_to_series"])
+        self.assertFalse(flag["suppressed_as_known"])
+        self.assertEqual(flag["series_number"], 7)
+
+        # Shadow mode: the live result is exactly what it was before
+        # Phase 4, and carries none of its fields.
+        self.assertTrue(result["found"])
+        self.assertEqual(len(result["available_missing"]), 1)
+        for field in ["new_volume_flags", "external_gap_ratio", "drop_explanations", "external_missing_vs_owned"]:
+            self.assertNotIn(field, result)
+
+    def test_new_volume_flag_is_false_for_an_already_owned_number(self):
+        result, payload = self._run_and_capture(
+            [self._raw_candidate(6)],
+            unified_candidates=[self._unified_candidate(6, 10)],
+        )
+
+        flag = payload["new_volume_flags"][0]
+        self.assertFalse(flag["is_new_volume"])
+        # Owned book 6 exists, so the candidate is suppressed as known --
+        # and Phase 4 still records that it was scanned.
+        self.assertTrue(flag["belongs_to_series"])
+        self.assertTrue(flag["suppressed_as_known"])
+        self.assertEqual(result["available_missing"], [])
+
+    def test_diagnostics_degrade_to_none_without_any_external_total(self):
+        _, payload = self._run_and_capture(
+            [self._raw_candidate(7)],
+            unified_candidates=[self._unified_candidate(7, None)],
+        )
+
+        self.assertIsNone(payload["external_expected_total"])
+        self.assertEqual(payload["external_total_hint_count"], 0)
+        self.assertEqual(payload["external_missing_vs_owned"], [])
+        self.assertIsNone(payload["external_gap_ratio"])
+        self.assertFalse(payload["new_volume_flags"][0]["is_new_volume"])
+
+    def test_suppressed_known_candidate_produces_a_readable_drop_explanation(self):
+        _, payload = self._run_and_capture(
+            [self._raw_candidate(6)],
+            unified_candidates=[self._unified_candidate(6, 10)],
+        )
+
+        explanations = payload["drop_explanations"]
+        self.assertEqual(payload["drop_explanations_total"], len(explanations))
+        self.assertEqual(payload["drop_explanation_counts"]["already_known:suppressed_as_known"], 1)
+        suppressed = [entry for entry in explanations if entry["reason"] == "suppressed_as_known"]
+        self.assertEqual(len(suppressed), 1)
+        self.assertEqual(suppressed[0]["title"], "Cherry Blossom Girls Book 6")
+        self.assertEqual(suppressed[0]["series_number"], 6)
+        self.assertEqual(
+            suppressed[0]["explanation"], "Candidate suppressed because it matches an already-owned book."
+        )
+        # Superseded by drop_explanations, which carries every one of its
+        # fields plus the explanation text.
+        self.assertNotIn("drop_diagnostics", payload)
+
+    def test_a_failing_drop_explanation_helper_does_not_disturb_the_other_fields(self):
+        with patch.object(discovery_engine, "compute_drop_explanations", side_effect=RuntimeError("boom")):
+            result, payload = self._run_and_capture(
+                [self._raw_candidate(7)],
+                unified_candidates=[self._unified_candidate(7, 10)],
+            )
+
+        self.assertEqual(payload["drop_explanations"], [])
+        self.assertEqual(payload["drop_explanations_total"], 0)
+        self.assertEqual(payload["drop_explanation_counts"], {})
+        # Isolated: the new-volume group is unaffected.
+        self.assertEqual(payload["external_gap_ratio"], 0.2)
+        self.assertTrue(payload["new_volume_flags"][0]["is_new_volume"])
+        self.assertTrue(result["found"])
+
+    def test_a_failing_gap_helper_blanks_its_whole_dependent_group(self):
+        # external_missing_vs_owned feeds both the ratio and the flags, so
+        # they have to fail with it -- logging 0.0/false off its empty
+        # fallback would read as "series complete, nothing new".
+        with patch.object(discovery_engine, "compute_external_missing_vs_owned", side_effect=RuntimeError("boom")):
+            result, payload = self._run_and_capture(
+                [self._raw_candidate(7)],
+                unified_candidates=[self._unified_candidate(7, 10)],
+            )
+
+        self.assertEqual(payload["external_missing_vs_owned"], [])
+        self.assertIsNone(payload["external_gap_ratio"])
+        self.assertEqual(payload["new_volume_flags"], [])
+        # Drop explanations are computed separately and still run.
+        self.assertEqual(payload["drop_explanations_total"], len(payload["drop_explanations"]))
+        # Still pure shadow mode: the live result is untouched by any of it.
+        self.assertTrue(result["found"])
+        self.assertEqual(len(result["available_missing"]), 1)
+        self.assertEqual(result["available_missing"][0]["series_number"], 7)
+
+    def test_phase_4_does_not_change_the_live_result(self):
+        candidates = [self._raw_candidate(7), self._raw_candidate(6)]
+        unified = [self._unified_candidate(7, 10), self._unified_candidate(6, 10)]
+
+        result, payload = self._run_and_capture(candidates, unified_candidates=unified)
+
+        # Baseline: the same run with every Phase 4 helper raising must
+        # produce a byte-identical result.
+        with patch.object(discovery_engine, "compute_external_missing_vs_owned", side_effect=RuntimeError("boom")), (
+            patch.object(discovery_engine, "compute_owned_number_coverage", side_effect=RuntimeError("boom"))
+        ), patch.object(discovery_engine, "compute_drop_explanations", side_effect=RuntimeError("boom")):
+            baseline, _ = self._run_and_capture(candidates, unified_candidates=unified)
+
+        self.assertEqual(result, baseline)
+        self.assertEqual(len(payload["new_volume_flags"]), 2)
 
 
 class DiscoverMoreByAuthorTest(unittest.TestCase):

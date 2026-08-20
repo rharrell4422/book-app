@@ -511,6 +511,14 @@ class SeriesIntelligenceAgent:
             # miscounted as still missing.
             external_expected_total: int | None = None
             external_missing_numbers: list[int] = []
+            # Phase 4 reads this to tell "no provider ever gave us a series
+            # total" apart from "the total says the series is complete" --
+            # both otherwise show up as an empty external_missing_vs_owned.
+            # Declared here, alongside the two fields it's derived from,
+            # rather than with the rest of the Phase 4 initializers below:
+            # those run *after* this block, so re-zeroing it there would
+            # throw away the value assigned inside this try.
+            external_total_hint_count = 0
             try:
                 external_total_hints = [
                     (candidate.model_dump().get("source_provenance") or [{}])[0].get("series_total_hint")
@@ -519,6 +527,7 @@ class SeriesIntelligenceAgent:
                 resolved_total_hints = [
                     discovery_engine._to_int_or_none(hint) for hint in external_total_hints if hint is not None
                 ]
+                external_total_hint_count = len(resolved_total_hints)
                 external_expected_total = max(resolved_total_hints) if resolved_total_hints else None
 
                 known_numbers: set[int] = set()
@@ -551,8 +560,19 @@ class SeriesIntelligenceAgent:
             # into one consolidated log entry below. See
             # discovery_engine._record_drop_diagnostic.
             agent_drop_diagnostics: list[dict] = []
+            # Phase 4 of agentic discovery, PURE SHADOW MODE: positional
+            # record of which candidates cleared each of this loop's two
+            # gates, consumed after the loop by
+            # discovery_engine.compute_new_volume_flags. Captured here
+            # rather than recomputed because belongs_to_series is only
+            # final after the universe-tie-in/compilation downgrades below,
+            # and already_known is only evaluated for candidates that got
+            # that far. Two set.add calls -- nothing else in this loop
+            # changes.
+            belongs_indices: set[int] = set()
+            known_indices: set[int] = set()
 
-            for raw in candidates:
+            for index, raw in enumerate(candidates):
                 title = str(raw.get("title") or "").strip()
                 title_key = discovery_engine.core_title_key(title)
                 # Hardcover's search index tags each hit with its actual
@@ -642,6 +662,8 @@ class SeriesIntelligenceAgent:
                         "accepted": belongs_to_series,
                     }
                 )
+                if belongs_to_series:
+                    belongs_indices.add(index)
 
                 if not belongs_to_series:
                     continue
@@ -659,6 +681,7 @@ class SeriesIntelligenceAgent:
                     known_bare_titles=known_bare_titles,
                 )
                 if already_known:
+                    known_indices.add(index)
                     discovery_engine._record_drop_diagnostic(
                         "already_known",
                         {
@@ -729,14 +752,94 @@ class SeriesIntelligenceAgent:
             # diagnostic -- nothing above or below this reads any of it.
             try:
                 all_drop_diagnostics = discovery.get("drop_diagnostics", []) + agent_drop_diagnostics
+
+                # Phase 4 of agentic discovery, PURE SHADOW MODE: three
+                # diagnostics derived from the Phase 3.5 fields above and
+                # the loop's index sets -- which candidates fill an
+                # externally-expected gap the library doesn't own, how
+                # incomplete the library looks against the external total,
+                # and a readable explanation per drop. Computed after every
+                # accept/reject decision has already been made and read by
+                # nothing but the log line below: `result`, `added_books`,
+                # the skeleton and the delta are all untouched.
+                external_missing_vs_owned: list[int] = []
+                external_gap_ratio: float | None = None
+                new_volume_flags: list[dict] = []
+                owned_books_total: int | None = None
+                owned_books_with_numbers: int | None = None
+                drop_explanations: list[dict] = []
+                drop_explanations_total = 0
+                drop_explanation_counts: dict[str, int] = {}
+
+                # Grouped rather than split three ways: the two below it
+                # both consume external_missing_vs_owned, so letting them
+                # run on its [] fallback would log a confident
+                # external_gap_ratio of 0.0 and is_new_volume: false for
+                # every candidate -- i.e. "series is complete, nothing new"
+                # -- when the truth is that the computation failed. Failing
+                # all three together keeps the ratio None and the flags
+                # empty, which reads as "no data".
+                try:
+                    external_missing_vs_owned = discovery_engine.compute_external_missing_vs_owned(
+                        external_expected_total, owned_books_for_skeleton
+                    )
+                    external_gap_ratio = discovery_engine.compute_external_gap_ratio(
+                        external_expected_total, external_missing_vs_owned
+                    )
+                    new_volume_flags = discovery_engine.compute_new_volume_flags(
+                        candidates,
+                        series.name,
+                        external_missing_vs_owned,
+                        belongs_indices,
+                        known_indices,
+                    )
+                except Exception:
+                    external_missing_vs_owned = []
+                    external_gap_ratio = None
+                    new_volume_flags = []
+                    logger.exception("Phase 4 new-volume/gap-ratio computation failed for series_id=%s", series_id)
+
+                try:
+                    coverage = discovery_engine.compute_owned_number_coverage(owned_books_for_skeleton)
+                    owned_books_total = coverage["owned_books_total"]
+                    owned_books_with_numbers = coverage["owned_books_with_numbers"]
+                except Exception:
+                    owned_books_total = None
+                    owned_books_with_numbers = None
+                    logger.exception("Phase 4 owned-number-coverage computation failed for series_id=%s", series_id)
+
+                try:
+                    explained = discovery_engine.compute_drop_explanations(all_drop_diagnostics)
+                    drop_explanations = explained["drop_explanations"]
+                    drop_explanations_total = explained["drop_explanations_total"]
+                    drop_explanation_counts = explained["drop_explanation_counts"]
+                except Exception:
+                    drop_explanations = []
+                    drop_explanations_total = 0
+                    drop_explanation_counts = {}
+                    logger.exception("Phase 4 drop-explanation computation failed for series_id=%s", series_id)
+
                 logger.info(
                     "series_external_reality: %s",
                     json.dumps(
                         {
                             "series_id": series_id,
                             "external_expected_total": external_expected_total,
+                            "external_total_hint_count": external_total_hint_count,
                             "external_missing_numbers": external_missing_numbers,
-                            "drop_diagnostics": all_drop_diagnostics,
+                            "external_missing_vs_owned": external_missing_vs_owned,
+                            "external_gap_ratio": external_gap_ratio,
+                            "owned_books_total": owned_books_total,
+                            "owned_books_with_numbers": owned_books_with_numbers,
+                            "new_volume_flags": new_volume_flags,
+                            # Phase 4 supersedes the raw drop_diagnostics
+                            # list this entry used to carry: every field of
+                            # it survives inside drop_explanations, plus the
+                            # explanation text, so logging both would just
+                            # double the payload.
+                            "drop_explanations": drop_explanations,
+                            "drop_explanations_total": drop_explanations_total,
+                            "drop_explanation_counts": drop_explanation_counts,
                         },
                         default=str,
                     ),
