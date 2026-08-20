@@ -2331,6 +2331,28 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
                 }
             ],
         )
+        # A stray same-author hit with no prior confidence, a number that is
+        # NOT one the lookahead specifically recovered, and no textual tie to
+        # the series -- must stay rejected. Confirms the fix is scoped to
+        # candidates the lookahead actually searched for, not a blanket
+        # "any unconfirmed candidate near a gap is fine" loosening.
+        stray_candidate = discovery_engine.UnifiedCandidate(
+            title="Unrelated Standalone Thriller",
+            authors=["Harmon Cooper"],
+            series_name="Cherry Blossom Girls",
+            series_number=11.0,
+            isbn13="9780000000011",
+            source_provenance=[
+                {
+                    "source": "hardcover",
+                    "source_id": "hc-11",
+                    "source_url": None,
+                    "language": "",
+                    "series_number_hint": 11,
+                    "upcoming_hint": False,
+                }
+            ],
+        )
         candidates = [
             {
                 "source": "hardcover",
@@ -2347,9 +2369,9 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
             }
         ]
         skeleton_result = {
-            "candidates": [existing_candidate, recovered_candidate],
-            "expected_total": 10,
-            "missing_numbers": [7, 10],
+            "candidates": [existing_candidate, recovered_candidate, stray_candidate],
+            "expected_total": 11,
+            "missing_numbers": [7, 10, 11],
             "recovered_numbers": [10],
         }
         with self._mock_discovery(
@@ -2359,20 +2381,29 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
             result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
 
         available_titles = {book["title"] for book in result["available_missing"]}
+        upcoming_titles = {book["title"] for book in result["upcoming_books"]}
+        all_titles = available_titles | upcoming_titles
         # The pre-existing "targeted" candidate must survive -- its title has
         # no textual tie to "Cherry Blossom Girls" at all, so only a
         # preserved "targeted" confidence (via targeted_with_number) can
         # clear belongs_to_series for it. (Gets the series suffix appended
         # since the raw title itself never references the series -- see
         # _title_references_series/display_title in run_series_check.)
-        self.assertIn("Desert Protocol: (Cherry Blossom Girls Book 7)", available_titles)
+        self.assertIn("Desert Protocol: (Cherry Blossom Girls Book 7)", all_titles)
         # The brand-new recovered candidate never had a "targeted"
-        # confidence to preserve -- it correctly still needs real signal
-        # (title match or targeted_with_number) and is rejected, same as
-        # before this fix. This isn't the bug; it documents the fix is
-        # scoped to *preserving* real confidence, not granting it to
-        # everything the lookahead recovers.
-        self.assertNotIn("The Levee Ghosts: (Cherry Blossom Girls Book 10)", available_titles)
+        # confidence to preserve, but its number (10) IS one the
+        # missing-volume lookahead specifically searched for -- that
+        # narrow, number-specific query is at least as trustworthy as the
+        # plain targeted pass, so it's tagged "missing_volume_recovery" and
+        # accepted the same way, rather than falling back to the weaker
+        # "author_fallback" default and being rejected for lacking any
+        # textual tie to the series name.
+        self.assertIn("The Levee Ghosts: (Cherry Blossom Girls Book 10)", all_titles)
+        # The stray hit's number was never actually recovered by the
+        # lookahead, so it gets no special trust -- still correctly
+        # rejected for lacking both a strong confidence and any textual
+        # tie to the series.
+        self.assertNotIn("Unrelated Standalone Thriller: (Cherry Blossom Girls Book 11)", all_titles)
 
     def test_no_author_on_file_returns_empty_result_without_calling_apis(self):
         series = Series(name="No Author Series")

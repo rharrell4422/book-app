@@ -523,6 +523,7 @@ class SeriesIntelligenceAgent:
                     confidence="author_fallback" if discovery["used_author_fallback"] else "targeted",
                     series_name=series.name,
                 )
+                recovered_numbers_set = set(skeleton["recovered_numbers"])
                 for candidate in candidates:
                     candidate_isbn = str(candidate.get("isbn13") or "").strip()
                     candidate_title_key = discovery_engine.core_title_key(str(candidate.get("title") or ""))
@@ -532,6 +533,25 @@ class SeriesIntelligenceAgent:
                     )
                     if restored_confidence:
                         candidate["confidence"] = restored_confidence
+                        continue
+                    # A candidate with no prior confidence to restore is one
+                    # the missing-volume lookahead itself surfaced this run
+                    # (the ONLY other way to land in skeleton["candidates"]).
+                    # That lookahead already queried for this exact,
+                    # specific number ("<series> <author> book <N>") -- a
+                    # narrower, more targeted query than even the regular
+                    # targeted pass's plain "<series> <author>" -- so it
+                    # deserves at least the same trust, not the broader
+                    # same-author "author_fallback" sweep's weaker one.
+                    # Tagged distinctly (not "targeted" outright) so it's
+                    # still visible in diagnostics/logs which candidates
+                    # came from which pass.
+                    candidate_number = candidate.get("series_number_hint") or discovery_engine.infer_number_from_title(
+                        str(candidate.get("title") or ""), series.name
+                    )
+                    resolved_candidate_number = _normalize_identity_number(candidate_number) if candidate_number else ""
+                    if resolved_candidate_number and int(float(resolved_candidate_number)) in recovered_numbers_set:
+                        candidate["confidence"] = "missing_volume_recovery"
                 # discover_candidates_for_series's own "candidates" already
                 # came back deterministically sorted/stripped (see
                 # finalize_discovery_output), but this re-merge builds a
@@ -651,7 +671,12 @@ class SeriesIntelligenceAgent:
                 # "Book N" pattern in the title itself) -- a same-author hit
                 # with no number and no textual series reference is too weak
                 # a signal on its own to add to the library as a new book.
-                came_from_targeted_search = raw.get("confidence") == "targeted"
+                # "missing_volume_recovery" (see the skeleton re-merge above)
+                # is trusted the same way: it's tagged only when the
+                # candidate came from a lookahead query built for that
+                # exact missing number, which is at least as specific as
+                # the plain targeted pass's "<series> <author>" query.
+                came_from_targeted_search = raw.get("confidence") in ("targeted", "missing_volume_recovery")
                 explicit_series_match = _title_pattern_match(title, series.name, known_series_titles)
                 partial_match = _partial_series_match(title, series.name)
                 continues_numbering = bool(
