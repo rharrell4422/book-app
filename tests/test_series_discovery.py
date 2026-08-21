@@ -1502,7 +1502,7 @@ class WebSearchProviderTest(unittest.TestCase):
             }
         ]
 
-        def fake_brave(query):
+        def fake_brave(query, **kwargs):
             if "release date" in query:
                 return refinement_raw
             return raw_results
@@ -1542,7 +1542,7 @@ class WebSearchProviderTest(unittest.TestCase):
         ]
         captured_queries = []
 
-        def fake_brave(query):
+        def fake_brave(query, **kwargs):
             captured_queries.append(query)
             if "release date" in query:
                 return []
@@ -1610,7 +1610,7 @@ class WebSearchProviderTest(unittest.TestCase):
 
         call_count = {"n": 0}
 
-        def fake_brave(query):
+        def fake_brave(query, **kwargs):
             if "release date" in query:
                 call_count["n"] += 1
                 raise RuntimeError("boom")
@@ -1644,7 +1644,7 @@ class WebSearchProviderTest(unittest.TestCase):
         # generic query and can legitimately return overlapping pages --
         # those should be merged into one deduped raw-result list (by URL)
         # before the single LLM structuring call, not passed through twice.
-        def fake_brave(query):
+        def fake_brave(query, **kwargs):
             if query == "generic":
                 return [
                     {"title": "Series Book 1", "description": "d", "url": "https://example.com/1"},
@@ -1664,7 +1664,7 @@ class WebSearchProviderTest(unittest.TestCase):
         self.assertEqual({r["url"] for r in passed_raw_results}, {"https://example.com/1", "https://example.com/9"})
 
     def test_fetch_web_search_tolerates_one_query_failing_if_another_succeeds(self):
-        def fake_brave(query):
+        def fake_brave(query, **kwargs):
             if query == "bad":
                 raise RuntimeError("rate limited")
             return [{"title": "Found It", "description": "d", "url": "https://example.com/ok"}]

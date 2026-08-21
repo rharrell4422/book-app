@@ -21,6 +21,7 @@ from database import SessionLocal
 from intelligence import recalculate_intelligence, recalculate_series_state_for_series
 from agents.series_agent import SeriesIntelligenceAgent
 from services.discovery_logging import _console_log, log_discovery_summary
+from services.discovery_telemetry import DiscoveryTelemetry
 from services.identity import (
     _authors_match_exact,
     _canonical_title_identity_key,
@@ -194,8 +195,14 @@ def run_series_check_job_full(series_id: int) -> None:
                 "asin_fetch_failed": progress.get("asin_fetch_failed", existing.get("asin_fetch_failed", 0)),
             }
 
+        # Per-job, in-memory only -- created fresh for this one Check Now
+        # run, discarded when the job ends (see discovery_catchup_
+        # architecture_spec.md's caching/instrumentation sections). Timing
+        # data flows back out via result["telemetry"] and into the debug
+        # summary below; it does not change discovery/persistence behavior.
+        telemetry = DiscoveryTelemetry()
         executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(series_agent.run_series_check, db, series_id, update_progress, False)
+        future = executor.submit(series_agent.run_series_check, db, series_id, update_progress, False, telemetry)
         try:
             result = future.result(timeout=SERIES_CHECK_HARD_TIMEOUT_SECONDS)
         except FutureTimeoutError:
@@ -210,6 +217,13 @@ def run_series_check_job_full(series_id: int) -> None:
                 "provider_failures": [],
                 "all_providers_failed": False,
                 "timed_out": True,
+                # The discovery thread itself is NOT stopped by
+                # cancel_futures=True below (Python can't preempt an
+                # already-running thread) -- it keeps mutating this same
+                # telemetry object in the background even after we've given
+                # up waiting, so this snapshot only reflects what had been
+                # recorded at the moment of timeout, not the eventual total.
+                "telemetry": telemetry.summary(),
             }
         finally:
             executor.shutdown(wait=False, cancel_futures=True)

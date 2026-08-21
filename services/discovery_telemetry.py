@@ -1,0 +1,124 @@
+"""Per-job instrumentation for a single Check Now run -- pass-level timing,
+Brave/LLM call counts, and LLM token usage.
+
+Built to answer one concrete question empirically instead of by estimate:
+how long does one discovery round actually take, and where does that time
+go, for a long/under-indexed series (the case that motivated the multi-round
+catch-up loop and its cache design)? See discovery_catchup_architecture_spec.md.
+
+Threading note: `_fetch_all_providers_parallel` runs Google Books/
+OpenLibrary/Hardcover/web-search concurrently across worker threads, but
+only the "web" task ever touches a DiscoveryTelemetry instance (the other
+three providers make no Brave/LLM calls), and passes are otherwise strictly
+sequential within one `run_series_check` call (targeted -> author-fallback
+-> reconciliation -> missing-volume). So a single shared `_current_pass`
+label, guarded by a lock, is safe: no two passes are ever actually mid-flight
+on Brave/LLM at the same wall-clock moment, despite the object being shared
+across threads.
+
+Every parameter that touches this module elsewhere is optional and defaults
+to None, matching the existing `diagnostics` parameter convention already
+used throughout discovery_engine.py -- a caller that doesn't pass a
+DiscoveryTelemetry instance pays no cost and changes no behavior.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from contextlib import contextmanager
+
+
+class DiscoveryTelemetry:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._current_pass = "unlabeled"
+        self.passes: list[dict] = []
+        self.brave_calls: list[dict] = []
+        self.llm_calls: list[dict] = []
+
+    @contextmanager
+    def pass_scope(self, name: str):
+        with self._lock:
+            previous = self._current_pass
+            self._current_pass = name
+        started = time.monotonic()
+        started_wall = time.time()
+        try:
+            yield
+        finally:
+            duration = time.monotonic() - started
+            with self._lock:
+                self.passes.append(
+                    {
+                        "pass": name,
+                        "started_at": started_wall,
+                        "duration_s": round(duration, 3),
+                    }
+                )
+                self._current_pass = previous
+
+    def record_brave_call(self, *, query: str, duration_s: float) -> None:
+        with self._lock:
+            self.brave_calls.append(
+                {"pass": self._current_pass, "query": query, "duration_s": round(duration_s, 3)}
+            )
+
+    def record_llm_call(self, *, duration_s: float, tokens_in: int = 0, tokens_out: int = 0) -> None:
+        with self._lock:
+            self.llm_calls.append(
+                {
+                    "pass": self._current_pass,
+                    "duration_s": round(duration_s, 3),
+                    "tokens_in": int(tokens_in or 0),
+                    "tokens_out": int(tokens_out or 0),
+                }
+            )
+
+    def summary(self) -> dict:
+        with self._lock:
+            passes = list(self.passes)
+            brave_calls = list(self.brave_calls)
+            llm_calls = list(self.llm_calls)
+
+        by_pass: dict[str, dict] = {}
+
+        def _bucket(name: str) -> dict:
+            return by_pass.setdefault(
+                name,
+                {"pass_duration_s": 0.0, "brave_calls": 0, "brave_duration_s": 0.0, "llm_calls": 0, "llm_duration_s": 0.0, "tokens_in": 0, "tokens_out": 0},
+            )
+
+        for entry in passes:
+            bucket = _bucket(entry["pass"])
+            bucket["pass_duration_s"] = round(bucket["pass_duration_s"] + entry["duration_s"], 3)
+        for call in brave_calls:
+            bucket = _bucket(call["pass"])
+            bucket["brave_calls"] += 1
+            bucket["brave_duration_s"] = round(bucket["brave_duration_s"] + call["duration_s"], 3)
+        for call in llm_calls:
+            bucket = _bucket(call["pass"])
+            bucket["llm_calls"] += 1
+            bucket["llm_duration_s"] = round(bucket["llm_duration_s"] + call["duration_s"], 3)
+            bucket["tokens_in"] += call["tokens_in"]
+            bucket["tokens_out"] += call["tokens_out"]
+
+        return {
+            "by_pass": by_pass,
+            "total_brave_calls": len(brave_calls),
+            "total_llm_calls": len(llm_calls),
+            "total_tokens_in": sum(c["tokens_in"] for c in llm_calls),
+            "total_tokens_out": sum(c["tokens_out"] for c in llm_calls),
+        }
+
+
+@contextmanager
+def maybe_pass_scope(telemetry: "DiscoveryTelemetry | None", name: str):
+    """No-op passthrough when telemetry is None, so call sites don't need
+    an `if telemetry:` guard around every pass boundary.
+    """
+    if telemetry is None:
+        yield
+    else:
+        with telemetry.pass_scope(name):
+            yield

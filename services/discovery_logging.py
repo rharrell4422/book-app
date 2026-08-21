@@ -92,6 +92,25 @@ def log_discovery_summary(*, result: dict, terminal_error: str | None = None) ->
 
     _console_log(f"--- validated_candidates={len(validated_candidates)} ---")
 
+    telemetry = result.get("telemetry")
+    if telemetry:
+        _console_log(
+            "--- telemetry: "
+            f"total_brave_calls={telemetry.get('total_brave_calls', 0)} "
+            f"total_llm_calls={telemetry.get('total_llm_calls', 0)} "
+            f"total_tokens_in={telemetry.get('total_tokens_in', 0)} "
+            f"total_tokens_out={telemetry.get('total_tokens_out', 0)} ---"
+        )
+        by_pass = telemetry.get("by_pass") or {}
+        for pass_name, stats in by_pass.items():
+            _console_log(
+                f"  PASS {pass_name}: "
+                f"duration={stats.get('pass_duration_s', 0)}s "
+                f"brave_calls={stats.get('brave_calls', 0)} (brave_time={stats.get('brave_duration_s', 0)}s) "
+                f"llm_calls={stats.get('llm_calls', 0)} (llm_time={stats.get('llm_duration_s', 0)}s) "
+                f"tokens_in={stats.get('tokens_in', 0)} tokens_out={stats.get('tokens_out', 0)}"
+            )
+
     _console_log(f"--- missing_books (found, not yet owned) = {len(missing_books)} ---")
     for book in missing_books[:15]:
         # The terminal-error fallback path (series_check_engine's outer except

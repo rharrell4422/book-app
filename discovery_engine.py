@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
@@ -41,6 +42,7 @@ from pydantic import BaseModel, Field
 # _finalize_candidates), so a "which edition wins" decision means the same
 # thing on both the discovery side and the persistence side.
 from services.identity import _edition_priority, _normalize_title_for_identity
+from services.discovery_telemetry import DiscoveryTelemetry, maybe_pass_scope
 
 # Loaded here (rather than relying on the entry point having done it first)
 # so this module reads the right API key regardless of import order.
@@ -1070,15 +1072,22 @@ def backfill_missing_publication_dates(candidates: list[dict], author: str) -> N
             break
 
 
-def _fetch_brave_web_search(query: str, count: int = WEB_SEARCH_MAX_RESULTS) -> list[dict]:
+def _fetch_brave_web_search(
+    query: str, count: int = WEB_SEARCH_MAX_RESULTS, *, telemetry: "DiscoveryTelemetry | None" = None
+) -> list[dict]:
     api_key = os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()
     if not api_key:
         return []
 
     headers = {**REQUEST_HEADERS, "Accept": "application/json", "X-Subscription-Token": api_key}
     params = {"q": query, "count": count}
-    response = httpx.get(BRAVE_SEARCH_ENDPOINT, params=params, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
-    response.raise_for_status()
+    started = time.monotonic()
+    try:
+        response = httpx.get(BRAVE_SEARCH_ENDPOINT, params=params, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+        response.raise_for_status()
+    finally:
+        if telemetry is not None:
+            telemetry.record_brave_call(query=query, duration_s=time.monotonic() - started)
 
     hits = ((response.json() or {}).get("web") or {}).get("results") or []
     results: list[dict] = []
@@ -1173,6 +1182,7 @@ def _structure_web_results_with_llm(
     raw_results: list[dict],
     *,
     diagnostics: list[dict] | None = None,
+    telemetry: "DiscoveryTelemetry | None" = None,
 ) -> list[dict]:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key or not raw_results:
@@ -1210,12 +1220,23 @@ def _structure_web_results_with_llm(
     )
 
     client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}],
-        timeout=WEB_SEARCH_TIMEOUT_SECONDS,
-    )
+    started = time.monotonic()
+    response = None
+    try:
+        response = client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=WEB_SEARCH_TIMEOUT_SECONDS,
+        )
+    finally:
+        if telemetry is not None:
+            usage = getattr(response, "usage", None)
+            telemetry.record_llm_call(
+                duration_s=time.monotonic() - started,
+                tokens_in=getattr(usage, "input_tokens", 0) or 0,
+                tokens_out=getattr(usage, "output_tokens", 0) or 0,
+            )
     text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text").strip()
 
     # The prompt asks for raw JSON, but strip markdown fences defensively in
@@ -1291,7 +1312,9 @@ def generate_series_overview(series_name: str, author: str, books: list[dict]) -
     return text or None
 
 
-def _refine_undated_web_search_result(result: dict, series_name: str, author: str) -> dict:
+def _refine_undated_web_search_result(
+    result: dict, series_name: str, author: str, *, telemetry: "DiscoveryTelemetry | None" = None
+) -> dict:
     """Best-effort second look for a candidate the first pass couldn't date:
     re-searches specifically for "<title> release date" and re-runs the same
     LLM structuring on those results. If a date turns up, the downstream
@@ -1312,14 +1335,14 @@ def _refine_undated_web_search_result(result: dict, series_name: str, author: st
         # signals, not exact-phrase requirements) reliably surfaced the
         # actual author's release-announcement blog post instead.
         query = " ".join(part for part in (title, series_name, author, "release date") if part)
-        raw = _fetch_brave_web_search(query)
+        raw = _fetch_brave_web_search(query, telemetry=telemetry)
     except Exception:
         return result
     if not raw:
         return result
 
     try:
-        structured = _structure_web_results_with_llm(series_name, author, raw)
+        structured = _structure_web_results_with_llm(series_name, author, raw, telemetry=telemetry)
     except Exception:
         return result
 
@@ -1342,28 +1365,33 @@ def _fetch_web_search(
     author: str,
     *,
     diagnostics: list[dict] | None = None,
+    telemetry: "DiscoveryTelemetry | None" = None,
+    pass_label: str = "web_search",
 ) -> list[dict]:
     raw_results: list[dict] = []
     seen_urls: set[str] = set()
     query_errors: list[Exception] = []
-    for query in queries:
-        try:
-            items = _fetch_brave_web_search(query)
-        except Exception as exc:  # one query's transient failure shouldn't sink the others
-            query_errors.append(exc)
-            continue
-        for item in items:
-            if item["url"] in seen_urls:
+    with maybe_pass_scope(telemetry, pass_label):
+        for query in queries:
+            try:
+                items = _fetch_brave_web_search(query, telemetry=telemetry)
+            except Exception as exc:  # one query's transient failure shouldn't sink the others
+                query_errors.append(exc)
                 continue
-            seen_urls.add(item["url"])
-            raw_results.append(item)
+            for item in items:
+                if item["url"] in seen_urls:
+                    continue
+                seen_urls.add(item["url"])
+                raw_results.append(item)
 
-    if not raw_results:
-        if query_errors and len(query_errors) == len(queries):
-            raise query_errors[0]
-        return []
+        if not raw_results:
+            if query_errors and len(query_errors) == len(queries):
+                raise query_errors[0]
+            return []
 
-    structured = _structure_web_results_with_llm(series_name, author, raw_results, diagnostics=diagnostics)
+        structured = _structure_web_results_with_llm(
+            series_name, author, raw_results, diagnostics=diagnostics, telemetry=telemetry
+        )
 
     results: list[dict] = []
     for item in structured:
@@ -1419,13 +1447,14 @@ def _fetch_web_search(
         )
 
     refinements_used = 0
-    for index, entry in enumerate(results):
-        if entry.get("published_date"):
-            continue
-        if refinements_used >= WEB_SEARCH_DATE_REFINEMENT_MAX:
-            break
-        refinements_used += 1
-        results[index] = _refine_undated_web_search_result(entry, series_name, author)
+    with maybe_pass_scope(telemetry, f"{pass_label}_refinement"):
+        for index, entry in enumerate(results):
+            if entry.get("published_date"):
+                continue
+            if refinements_used >= WEB_SEARCH_DATE_REFINEMENT_MAX:
+                break
+            refinements_used += 1
+            results[index] = _refine_undated_web_search_result(entry, series_name, author, telemetry=telemetry)
 
     return results
 
@@ -1526,6 +1555,8 @@ def _fetch_all_providers_parallel(
     web_search_queries: list[str] | None = None,
     enable_web_search: bool = True,
     diagnostics: list[dict] | None = None,
+    telemetry: "DiscoveryTelemetry | None" = None,
+    pass_label: str = "targeted",
 ) -> dict:
     """Fetch Google Books, OpenLibrary, Hardcover, and (optionally) the
     Brave+LLM web-search provider concurrently instead of one after another.
@@ -1590,7 +1621,11 @@ def _fetch_all_providers_parallel(
         "hardcover": (_fetch_hardcover, (hardcover_query,), {}),
     }
     if run_web_search:
-        tasks["web"] = (_fetch_web_search, (resolved_web_queries, series_name, author), {"diagnostics": diagnostics})
+        tasks["web"] = (
+            _fetch_web_search,
+            (resolved_web_queries, series_name, author),
+            {"diagnostics": diagnostics, "telemetry": telemetry, "pass_label": pass_label},
+        )
 
     results: dict[str, list[dict]] = {"google": [], "openlibrary": [], "hardcover": [], "web": []}
     failures: dict[str, Exception] = {}
@@ -1952,6 +1987,7 @@ def _reconstruct_series_skeleton(
     *,
     series_name: str | None = None,
     author: str | None = None,
+    telemetry: "DiscoveryTelemetry | None" = None,
 ) -> dict:
     """Infers how many volumes a series is expected to have -- the highest
     integer book number seen anywhere, across owned_books' book_number,
@@ -2038,7 +2074,9 @@ def _reconstruct_series_skeleton(
     lookahead_queries = [f'"{resolved_series_name}" {resolved_author} book {number}' for number in targeted_missing]
 
     try:
-        lookahead_raw = _fetch_web_search(lookahead_queries, resolved_series_name, resolved_author)
+        lookahead_raw = _fetch_web_search(
+            lookahead_queries, resolved_series_name, resolved_author, telemetry=telemetry, pass_label="missing_volume"
+        )
     except Exception as exc:  # a lookahead failure should never sink the candidates already found
         _log(f"missing-volume lookahead failed: {exc}")
         return _result(missing_numbers, [], unified_candidates)
@@ -2375,6 +2413,7 @@ def _reconcile_candidates_with_llm(
     series_name: str | None,
     *,
     diagnostics: list[dict] | None = None,
+    telemetry: "DiscoveryTelemetry | None" = None,
 ) -> list["UnifiedCandidate"]:
     """Single conditional LLM pass over an already-fused candidate set for
     one series -- normalizes series names/book numbers, merges candidates
@@ -2418,17 +2457,28 @@ def _reconcile_candidates_with_llm(
         max_index=len(candidates) - 1,
     )
 
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=3000,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=WEB_SEARCH_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:  # a reconciliation failure should never sink the candidates fusion already found
-        _log(f"LLM reconciliation call failed: {exc}")
-        return unified_candidates
+    with maybe_pass_scope(telemetry, "reconciliation"):
+        started = time.monotonic()
+        response = None
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+            response = client.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=3000,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=WEB_SEARCH_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # a reconciliation failure should never sink the candidates fusion already found
+            _log(f"LLM reconciliation call failed: {exc}")
+            return unified_candidates
+        finally:
+            if telemetry is not None:
+                usage = getattr(response, "usage", None)
+                telemetry.record_llm_call(
+                    duration_s=time.monotonic() - started,
+                    tokens_in=getattr(usage, "input_tokens", 0) or 0,
+                    tokens_out=getattr(usage, "output_tokens", 0) or 0,
+                )
 
     text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text").strip()
     if text.startswith("```"):
@@ -2943,6 +2993,7 @@ def discover_candidates_for_series(
     enable_fallback_web_search: bool = False,
     progress_callback=None,
     highest_owned_book_number: int | None = None,
+    telemetry: "DiscoveryTelemetry | None" = None,
 ) -> dict:
     """Find candidate books for a specific series by a specific author.
 
@@ -3024,6 +3075,8 @@ def discover_candidates_for_series(
         highest_owned_book_number,
         author=author,
         diagnostics=discovery_drop_diagnostics,
+        telemetry=telemetry,
+        pass_label="targeted",
     )
     failures = fetch_results["_failures"]
 
@@ -3076,7 +3129,7 @@ def discover_candidates_for_series(
     # same filtering every other candidate does.
     if _needs_llm_reconciliation(fused_candidates, series_name):
         fused_candidates = _reconcile_candidates_with_llm(
-            fused_candidates, series_name, diagnostics=discovery_drop_diagnostics
+            fused_candidates, series_name, diagnostics=discovery_drop_diagnostics, telemetry=telemetry
         )
     # Edition-aware collapse -- see _finalize_candidates -- runs last,
     # immediately before candidates are converted to the dict shape
@@ -3127,6 +3180,8 @@ def discover_candidates_for_series(
             ],
             enable_web_search=enable_fallback_web_search,
             diagnostics=discovery_drop_diagnostics,
+            telemetry=telemetry,
+            pass_label="author_fallback",
         )
         # Explicit cross-series contamination -- a fallback hit tagged with
         # one of this author's OTHER tracked series' names -- is dropped
@@ -3167,7 +3222,7 @@ def discover_candidates_for_series(
         fused_fallback_candidates = _fuse_and_score_candidates(fallback_results, author, series_name)
         if _needs_llm_reconciliation(fused_fallback_candidates, series_name):
             fused_fallback_candidates = _reconcile_candidates_with_llm(
-                fused_fallback_candidates, series_name, diagnostics=discovery_drop_diagnostics
+                fused_fallback_candidates, series_name, diagnostics=discovery_drop_diagnostics, telemetry=telemetry
             )
         fused_fallback_candidates = _finalize_candidates(fused_fallback_candidates)
         # Additive, not a replacement: the targeted pass above may have
