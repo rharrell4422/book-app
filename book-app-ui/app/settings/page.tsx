@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
 import { fetchApiWithFallback } from "@/lib/api-client";
+import { refreshNotificationsBadgeCount } from "@/lib/notifications-badge";
 import { useProfile } from "@/lib/profile-context";
 
 const AUTO_DISCOVERY_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
@@ -136,6 +137,9 @@ export default function SettingsPage() {
             ? `Checked ${status.total ?? 0} series and found ${discoveryDeltaCount} new book${discoveryDeltaCount === 1 ? "" : "s"}.`
             : `Checked ${status.total ?? 0} series. No new books this time.`,
       });
+      if (discoveryDeltaCount > 0) {
+        refreshNotificationsBadgeCount();
+      }
       await refreshProfiles();
     } else if (status.status === "interrupted") {
       toast({

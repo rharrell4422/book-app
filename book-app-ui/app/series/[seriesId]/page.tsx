@@ -6,6 +6,7 @@ import { AlertTriangleIcon } from "lucide-react";
 import { BookActionIcon } from "@/components/books/book-action-icon";
 import { publishBookStatusUpdate, subscribeBookStatusUpdates } from "@/lib/book-status-sync";
 import { scheduleSeriesCheckReset } from "@/lib/series-check-progress";
+import { refreshNotificationsBadgeCount } from "@/lib/notifications-badge";
 import { fetchApiWithFallback } from "@/lib/api-client";
 import {
   Table,
@@ -1147,6 +1148,9 @@ export default function SeriesDetailPage() {
 
       await refreshSeriesFromApi();
       flashAddedMessage(message);
+      if (discoveryDeltaCount > 0) {
+        refreshNotificationsBadgeCount();
+      }
       setSeriesCheckStillChecking(false);
 
       const terminalStatusSignal =

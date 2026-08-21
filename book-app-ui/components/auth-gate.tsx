@@ -23,6 +23,7 @@ import { useAuth } from "@/lib/auth-context";
 import { useProfile } from "@/lib/profile-context";
 import { fetchApiWithFallback } from "@/lib/api-client";
 import { setNotifyListener } from "@/lib/notify";
+import { useUnseenNotificationCount } from "@/lib/notifications-badge";
 import { OnboardingImport } from "@/components/onboarding/onboarding-import";
 import { BottomNav } from "@/components/mobile/bottom-nav";
 import { cn } from "@/lib/utils";
@@ -414,6 +415,7 @@ function ProfileSwitcher() {
 function MobileProfileSheet({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const { logout } = useAuth();
   const { profileId, profiles, setProfileId } = useProfile();
+  const unseenNotificationCount = useUnseenNotificationCount(true);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
 
@@ -463,6 +465,11 @@ function MobileProfileSheet({ open, onOpenChange }: { open: boolean; onOpenChang
             <Link href="/notifications" onClick={() => onOpenChange(false)}>
               <Button variant="outline" size="sm" className="w-full">
                 Notifications
+                {unseenNotificationCount > 0 ? (
+                  <span className="ml-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-medium leading-none text-destructive-foreground">
+                    {unseenNotificationCount > 9 ? "9+" : unseenNotificationCount}
+                  </span>
+                ) : null}
               </Button>
             </Link>
             <Link href="/settings" onClick={() => onOpenChange(false)}>
@@ -517,6 +524,7 @@ function TopBar() {
   const { role, logout } = useAuth();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const unseenNotificationCount = useUnseenNotificationCount(role === "owner");
   // The landing page ("/") is a deliberately dark, full-bleed hero (see
   // components/landing/) -- this app's one visual departure from its
   // otherwise light, grayscale theme. Rather than teach the landing page
@@ -579,15 +587,22 @@ function TopBar() {
         <div className="flex items-center gap-2">
           <ProfileSwitcher />
           <ShareLinkButton />
-          <Link href="/notifications">
+          <Link href="/notifications" className="relative">
             <Button
               variant={pathname.startsWith("/notifications") ? "secondary" : "ghost"}
               size="icon-sm"
-              aria-label="Notifications"
+              aria-label={
+                unseenNotificationCount > 0 ? `Notifications (${unseenNotificationCount} unread)` : "Notifications"
+              }
               title="Notifications"
             >
               <BellIcon />
             </Button>
+            {unseenNotificationCount > 0 ? (
+              <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-medium leading-none text-destructive-foreground">
+                {unseenNotificationCount > 9 ? "9+" : unseenNotificationCount}
+              </span>
+            ) : null}
           </Link>
           <Link href="/settings">
             <Button

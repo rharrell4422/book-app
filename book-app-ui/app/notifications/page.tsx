@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useToast } from "@/components/ui/use-toast";
 import { fetchApiWithFallback } from "@/lib/api-client";
+import { refreshNotificationsBadgeCount } from "@/lib/notifications-badge";
 
 type NotificationItem = {
   id: number;
@@ -66,6 +67,7 @@ export default function NotificationsPage() {
     try {
       await fetchApiWithFallback(`/notifications/${id}/dismiss`, { method: "POST" });
       setItems((current) => (current ? current.filter((item) => item.id !== id) : current));
+      refreshNotificationsBadgeCount();
     } catch {
       toast({
         title: "Couldn't dismiss notification",
@@ -81,6 +83,7 @@ export default function NotificationsPage() {
     try {
       await fetchApiWithFallback("/notifications/dismiss", { method: "POST" });
       setItems([]);
+      refreshNotificationsBadgeCount();
     } catch {
       toast({
         title: "Couldn't dismiss all notifications",
