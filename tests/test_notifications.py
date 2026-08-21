@@ -1,7 +1,8 @@
-"""Minimal "New Books Added to Library" notification system (Auto Discovery
-MVP spec, §3): the services/notifications.py CRUD helpers, the persistence
-hooks inside services/series_check_engine.py that create them, and the
-GET/POST router endpoints.
+"""Durable series-level discovery notifications (see the "Durable
+Series-Level Discovery Notifications" design chat's finalized spec): the
+services/notifications.py CRUD helpers, the aggregation hook inside
+services/series_check_engine.py's run_series_check_job_full that creates
+one row per series per run, and the GET/POST router endpoints.
 """
 
 import unittest
@@ -18,8 +19,10 @@ import services.series_check_engine as series_check_engine
 from database import Base
 from routers.deps import create_owner_token
 from services.notifications import (
-    create_new_book_notification,
+    SERIES_DISCOVERY_DELTA_KIND,
+    create_series_discovery_notification,
     dismiss_all_notifications,
+    dismiss_notification,
     get_undismissed_notifications,
 )
 
@@ -42,33 +45,82 @@ class NotificationCrudTest(unittest.TestCase):
     def tearDown(self):
         self.db.rollback()
         self.db.query(models.Notification).delete()
-        self.db.query(models.Book).delete()
         self.db.query(models.Series).delete()
         self.db.commit()
         self.db.close()
 
-    def _make_book(self, profile_id="robbie", **overrides):
-        defaults = dict(profile_id=profile_id, title="Some Book", author="Some Author")
-        defaults.update(overrides)
-        book = models.Book(**defaults)
-        self.db.add(book)
+    def _make_series(self, profile_id="robbie", name="The First Peacemaker"):
+        series = models.Series(name=name, author="Some Author", profile_id=profile_id)
+        self.db.add(series)
         self.db.commit()
-        self.db.refresh(book)
-        return book
+        self.db.refresh(series)
+        return series
 
     def test_create_and_fetch_undismissed(self):
-        book = self._make_book()
-        create_new_book_notification(self.db, book)
+        series = self._make_series()
+        create_series_discovery_notification(
+            self.db, profile_id="robbie", series_id=series.id, series_name=series.name, count_new_books=3
+        )
         self.db.commit()
 
         unseen = get_undismissed_notifications(self.db, "robbie")
         self.assertEqual(len(unseen), 1)
-        self.assertEqual(unseen[0].book_id, book.id)
-        self.assertEqual(unseen[0].kind, "new_book")
+        self.assertEqual(unseen[0].series_id, series.id)
+        self.assertEqual(unseen[0].series_name, series.name)
+        self.assertEqual(unseen[0].count_new_books, 3)
+        self.assertEqual(unseen[0].kind, SERIES_DISCOVERY_DELTA_KIND)
+
+    def test_legacy_kind_rows_are_excluded_from_unseen(self):
+        # Pre-migration per-book rows (kind="new_book") must never surface
+        # in the new series-level view, even if one were somehow still
+        # undismissed -- the read path filters by kind, not just
+        # dismissed_at, as defense-in-depth alongside the migration's
+        # backfill (see alembic/versions/cc28c2fb7b4b_...).
+        series = self._make_series()
+        legacy = models.Notification(profile_id="robbie", series_id=series.id, kind="new_book")
+        self.db.add(legacy)
+        self.db.commit()
+
+        self.assertEqual(get_undismissed_notifications(self.db, "robbie"), [])
+
+    def test_dismiss_one_leaves_others_undismissed(self):
+        series = self._make_series()
+        first = create_series_discovery_notification(
+            self.db, profile_id="robbie", series_id=series.id, series_name=series.name, count_new_books=1
+        )
+        second = create_series_discovery_notification(
+            self.db, profile_id="robbie", series_id=series.id, series_name=series.name, count_new_books=2
+        )
+        self.db.commit()
+
+        dismissed = dismiss_notification(self.db, "robbie", first.id)
+        self.assertTrue(dismissed)
+
+        unseen = get_undismissed_notifications(self.db, "robbie")
+        self.assertEqual([item.id for item in unseen], [second.id])
+
+    def test_dismiss_one_is_a_noop_for_missing_or_foreign_row(self):
+        series = self._make_series()
+        mine = create_series_discovery_notification(
+            self.db, profile_id="robbie", series_id=series.id, series_name=series.name, count_new_books=1
+        )
+        other_series = self._make_series(profile_id="other", name="Other Series")
+        theirs = create_series_discovery_notification(
+            self.db, profile_id="other", series_id=other_series.id, series_name=other_series.name, count_new_books=1
+        )
+        self.db.commit()
+
+        self.assertFalse(dismiss_notification(self.db, "robbie", theirs.id))
+        self.assertFalse(dismiss_notification(self.db, "robbie", 999999))
+        self.assertEqual(len(get_undismissed_notifications(self.db, "robbie")), 1)
+        self.assertEqual(len(get_undismissed_notifications(self.db, "other")), 1)
+        self.assertEqual(get_undismissed_notifications(self.db, "robbie")[0].id, mine.id)
 
     def test_dismiss_all_clears_the_list(self):
-        book = self._make_book()
-        create_new_book_notification(self.db, book)
+        series = self._make_series()
+        create_series_discovery_notification(
+            self.db, profile_id="robbie", series_id=series.id, series_name=series.name, count_new_books=1
+        )
         self.db.commit()
 
         dismissed_count = dismiss_all_notifications(self.db, "robbie")
@@ -76,10 +128,14 @@ class NotificationCrudTest(unittest.TestCase):
         self.assertEqual(get_undismissed_notifications(self.db, "robbie"), [])
 
     def test_notifications_are_profile_scoped(self):
-        robbie_book = self._make_book(profile_id="robbie")
-        other_book = self._make_book(profile_id="other")
-        create_new_book_notification(self.db, robbie_book)
-        create_new_book_notification(self.db, other_book)
+        robbie_series = self._make_series(profile_id="robbie")
+        other_series = self._make_series(profile_id="other", name="Other Series")
+        create_series_discovery_notification(
+            self.db, profile_id="robbie", series_id=robbie_series.id, series_name=robbie_series.name, count_new_books=1
+        )
+        create_series_discovery_notification(
+            self.db, profile_id="other", series_id=other_series.id, series_name=other_series.name, count_new_books=1
+        )
         self.db.commit()
 
         self.assertEqual(len(get_undismissed_notifications(self.db, "robbie")), 1)
@@ -91,8 +147,10 @@ class NotificationCrudTest(unittest.TestCase):
 
 
 class SeriesCheckNotificationHooksTest(unittest.TestCase):
-    """Confirms the two trigger points wired into run_series_check_job_full
-    fire exactly when the spec says they should, and not otherwise.
+    """Confirms run_series_check_job_full writes exactly one aggregated
+    notification per series per run, counting new available inserts plus
+    upcoming->available transitions -- never per-book, never for a
+    brand-new upcoming insert, never for a no-op refresh.
     """
 
     @classmethod
@@ -130,11 +188,13 @@ class SeriesCheckNotificationHooksTest(unittest.TestCase):
             series_check_engine.run_series_check_job_full(self.series.id)
 
     def _candidate(self, **overrides):
+        title = overrides.get("title", "Edge of Shadow")
+        book_number = overrides.get("book_number", 8)
         defaults = dict(
-            title="Edge of Shadow",
+            title=title,
             author="Some Author",
             series_name="The First Peacemaker",
-            book_number=8,
+            book_number=book_number,
             source_url=None,
             provider="web_search",
             publication_date=None,
@@ -143,10 +203,15 @@ class SeriesCheckNotificationHooksTest(unittest.TestCase):
             asin_or_id="web_search:edge-of-shadow",
             is_missing=True,
             status="available",
+            # title_normalized/book_number_normalized are read preferentially
+            # over the top-level title/book_number by series_check_engine's
+            # persistence loop -- these must track whatever this candidate's
+            # overrides say, or two distinctly-titled test candidates would
+            # both resolve to the same identity.
             canonical_metadata={
-                "title_normalized": "Edge of Shadow",
+                "title_normalized": title,
                 "series_name_normalized": "The First Peacemaker",
-                "book_number_normalized": 8,
+                "book_number_normalized": book_number,
                 "publish_date_normalized": None,
                 "upcoming_date_normalized": None,
                 "availability": "available",
@@ -164,19 +229,32 @@ class SeriesCheckNotificationHooksTest(unittest.TestCase):
         # so an earlier test's notifications can't leak into this count.
         return self.db.query(models.Notification).filter(models.Notification.series_id == self.series.id).all()
 
-    def test_new_available_book_creates_a_notification(self):
+    def test_new_available_book_creates_one_aggregated_notification(self):
         self._run_job_with_mocked_discovery([self._candidate(status_hint="available", status="available")])
 
         notifications = self._notifications_for_this_series()
         self.assertEqual(len(notifications), 1)
-        self.assertEqual(notifications[0].kind, "new_book")
+        self.assertEqual(notifications[0].kind, "series_discovery_delta")
+        self.assertEqual(notifications[0].count_new_books, 1)
+        self.assertEqual(notifications[0].series_name, self.series.name)
+        self.assertIsNone(notifications[0].book_id)
 
-        book = self.db.query(models.Book).filter(models.Book.series_id == self.series.id).first()
-        self.assertEqual(notifications[0].book_id, book.id)
+    def test_multiple_new_books_in_one_run_create_a_single_row_with_the_total_count(self):
+        self._run_job_with_mocked_discovery(
+            [
+                self._candidate(title="Edge of Shadow", book_number=8, asin_or_id="web_search:edge-of-shadow"),
+                self._candidate(title="Edge of Dawn", book_number=9, asin_or_id="web_search:edge-of-dawn"),
+            ]
+        )
+
+        notifications = self._notifications_for_this_series()
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(notifications[0].count_new_books, 2)
 
     def test_new_upcoming_book_does_not_create_a_notification(self):
-        # Dropped trigger, per the spec's final decisions (§B) -- a brand
-        # new upcoming book is not itself a notification event.
+        # A brand-new *upcoming* insert is intentionally not a trigger --
+        # it'll count later, if/when a subsequent check flips it to
+        # available (the transition branch below).
         self._run_job_with_mocked_discovery(
             [self._candidate(status_hint="upcoming", status="upcoming", expected_date="2027-01-01")]
         )
@@ -204,9 +282,37 @@ class SeriesCheckNotificationHooksTest(unittest.TestCase):
         self.assertEqual(existing.read_status, "available")
         notifications = self._notifications_for_this_series()
         self.assertEqual(len(notifications), 1)
-        self.assertEqual(notifications[0].book_id, existing.id)
+        self.assertEqual(notifications[0].count_new_books, 1)
+        self.assertIsNone(notifications[0].book_id)
 
-    def test_already_available_book_refresh_does_not_create_a_duplicate_notification(self):
+    def test_new_insert_and_transition_in_the_same_run_are_summed_into_one_row(self):
+        existing = models.Book(
+            title="Edge of Shadow",
+            author="Some Author",
+            series_id=self.series.id,
+            book_number=8.0,
+            series_order=8,
+            record_status="active",
+            is_read=False,
+            read_status="upcoming",
+            is_upcoming_auto=True,
+            asin="WEB_SEARCH:EDGE-OF-SHADOW",
+        )
+        self.db.add(existing)
+        self.db.commit()
+
+        self._run_job_with_mocked_discovery(
+            [
+                self._candidate(status_hint="available", status="available", book_number=8, asin_or_id="web_search:edge-of-shadow"),
+                self._candidate(title="Edge of Dawn", book_number=9, asin_or_id="web_search:edge-of-dawn"),
+            ]
+        )
+
+        notifications = self._notifications_for_this_series()
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(notifications[0].count_new_books, 2)
+
+    def test_already_available_book_refresh_does_not_create_a_notification(self):
         existing = models.Book(
             title="Edge of Shadow",
             author="Some Author",
@@ -226,10 +332,23 @@ class SeriesCheckNotificationHooksTest(unittest.TestCase):
 
         self.assertEqual(self._notifications_for_this_series(), [])
 
+    def test_completion_response_carries_the_same_discovery_delta_count(self):
+        self._run_job_with_mocked_discovery(
+            [
+                self._candidate(title="Edge of Shadow", book_number=8, asin_or_id="web_search:edge-of-shadow"),
+                self._candidate(title="Edge of Dawn", book_number=9, asin_or_id="web_search:edge-of-dawn"),
+            ]
+        )
+
+        notifications = self._notifications_for_this_series()
+        completion = (series_check_engine.series_check_jobs.get(self.series.id) or {}).get("completion") or {}
+        self.assertEqual(completion.get("discovery_delta_count"), 2)
+        self.assertEqual(notifications[0].count_new_books, completion.get("discovery_delta_count"))
+
 
 class NotificationEndpointTest(unittest.TestCase):
     """Router-level wiring only -- exercised against the real app's DB
-    session dependency for the GET (a read), with the mutating POST mocked
+    session dependency for the GET (a read), with the mutating POSTs mocked
     at the service layer, same pattern as BulkReresolveEndpointAuthTest.
     """
 
@@ -241,8 +360,12 @@ class NotificationEndpointTest(unittest.TestCase):
         response = self.client.get("/notifications/unseen")
         self.assertEqual(response.status_code, 401)
 
-    def test_dismiss_requires_owner_auth(self):
+    def test_dismiss_all_requires_owner_auth(self):
         response = self.client.post("/notifications/dismiss")
+        self.assertEqual(response.status_code, 403)
+
+    def test_dismiss_one_requires_owner_auth(self):
+        response = self.client.post("/notifications/1/dismiss")
         self.assertEqual(response.status_code, 403)
 
     def test_unseen_returns_a_list_when_authenticated(self):
@@ -251,12 +374,24 @@ class NotificationEndpointTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), [])
 
-    def test_dismiss_returns_the_dismissed_count(self):
+    def test_dismiss_all_returns_the_dismissed_count(self):
         with patch("routers.notifications.dismiss_all_notifications", return_value=4) as mock_dismiss:
             response = self.client.post("/notifications/dismiss", headers={"Authorization": f"Bearer {self.token}"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["dismissed_count"], 4)
         mock_dismiss.assert_called_once()
+
+    def test_dismiss_one_returns_success_when_found(self):
+        with patch("routers.notifications.dismiss_notification", return_value=True) as mock_dismiss:
+            response = self.client.post("/notifications/42/dismiss", headers={"Authorization": f"Bearer {self.token}"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["dismissed_count"], 1)
+        mock_dismiss.assert_called_once()
+
+    def test_dismiss_one_returns_404_when_not_found(self):
+        with patch("routers.notifications.dismiss_notification", return_value=False):
+            response = self.client.post("/notifications/999999/dismiss", headers={"Authorization": f"Bearer {self.token}"})
+        self.assertEqual(response.status_code, 404)
 
 
 if __name__ == "__main__":

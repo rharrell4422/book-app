@@ -27,6 +27,7 @@ type AutoDiscoverySeriesResult = {
   series_name: string;
   outcome: "checked" | "skipped_already_running";
   new_books_found?: number;
+  discovery_delta_count?: number;
 };
 
 type AutoDiscoveryStatusResponse = {
@@ -37,6 +38,11 @@ type AutoDiscoveryStatusResponse = {
   updated_at?: string | null;
   results?: AutoDiscoverySeriesResult[] | null;
   new_books_found?: number | null;
+  // Job-level total across every series swept this run (new inserts +
+  // upcoming->available transitions) -- the same number each series'
+  // durable notification row uses, so this popup's count and the
+  // Notifications view can never disagree. See services/auto_discovery.py.
+  discovery_delta_count?: number | null;
   message?: string | null;
 };
 
@@ -116,12 +122,18 @@ export default function SettingsPage() {
     }
 
     if (status.status === "completed") {
-      const newBooksFound = status.new_books_found ?? 0;
+      // Ephemeral popup: session-only, driven directly by this response --
+      // never a query against the notifications table. Multi-series
+      // aggregate wording (no single series to name), using the same
+      // discovery_delta_count each swept series' durable notification row
+      // was written with, so this toast and the Notifications view can
+      // never disagree.
+      const discoveryDeltaCount = status.discovery_delta_count ?? 0;
       toast({
         title: "Full Auto Discovery complete",
         description:
-          newBooksFound > 0
-            ? `Checked ${status.total ?? 0} series and found ${newBooksFound} new book${newBooksFound === 1 ? "" : "s"}.`
+          discoveryDeltaCount > 0
+            ? `Checked ${status.total ?? 0} series and found ${discoveryDeltaCount} new book${discoveryDeltaCount === 1 ? "" : "s"}.`
             : `Checked ${status.total ?? 0} series. No new books this time.`,
       });
       await refreshProfiles();
@@ -215,8 +227,8 @@ export default function SettingsPage() {
               ) : jobStatus.status === "completed" ? (
                 <div className="flex flex-col gap-1">
                   <p className="font-medium">
-                    Checked {jobStatus.total ?? 0} series -- found {jobStatus.new_books_found ?? 0} new book
-                    {jobStatus.new_books_found === 1 ? "" : "s"}.
+                    Checked {jobStatus.total ?? 0} series -- found {jobStatus.discovery_delta_count ?? 0} new book
+                    {jobStatus.discovery_delta_count === 1 ? "" : "s"}.
                   </p>
                   {jobStatus.message ? <p className="text-xs text-destructive">{jobStatus.message}</p> : null}
                 </div>

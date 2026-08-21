@@ -105,6 +105,7 @@ def run_full_auto_discovery_job(profile_id: str, job_id: str, series_ids: list[i
     try:
         results: list[dict] = []
         new_books_found = 0
+        discovery_delta_count = 0
 
         for index, series_id in enumerate(series_ids):
             series = db.query(models.Series).filter(models.Series.id == series_id).first()
@@ -114,22 +115,36 @@ def run_full_auto_discovery_job(profile_id: str, job_id: str, series_ids: list[i
             # clicked manual "Check Now" on at the same moment.
             existing_series_job = series_check_jobs.get(series_id)
             if existing_series_job and existing_series_job.get("status") == "running":
+                # A series that was never actually checked in this run has
+                # no real count to report -- deliberately omitted here
+                # rather than computed, mirroring new_books_found's existing
+                # omission for this same branch.
                 results.append({"series_id": series_id, "series_name": series_name, "outcome": "skipped_already_running"})
             else:
                 run_series_check_job_full(series_id)
                 completion = (series_check_jobs.get(series_id) or {}).get("completion") or {}
                 found = completion.get("new_books") or []
                 new_books_found += len(found)
+                series_discovery_delta_count = int(completion.get("discovery_delta_count") or 0)
+                discovery_delta_count += series_discovery_delta_count
                 results.append(
                     {
                         "series_id": series_id,
                         "series_name": series_name,
                         "outcome": "checked",
                         "new_books_found": len(found),
+                        "discovery_delta_count": series_discovery_delta_count,
                     }
                 )
 
-            _update_job(profile_id, job_id=job_id, status="running", completed=index + 1, results=results)
+            _update_job(
+                profile_id,
+                job_id=job_id,
+                status="running",
+                completed=index + 1,
+                results=results,
+                discovery_delta_count=discovery_delta_count,
+            )
 
         profile = db.query(models.Profile).filter(models.Profile.id == profile_id).first()
         if profile:
@@ -143,6 +158,7 @@ def run_full_auto_discovery_job(profile_id: str, job_id: str, series_ids: list[i
             completed=len(series_ids),
             results=results,
             new_books_found=new_books_found,
+            discovery_delta_count=discovery_delta_count,
         )
     except Exception as exc:  # noqa: BLE001 -- report, don't crash the worker thread silently
         logger.exception("Full Auto Discovery batch job failed for profile %s", profile_id)

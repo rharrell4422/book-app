@@ -29,7 +29,7 @@ from services.identity import (
     owned_title_for_identity,
     _series_book_identity_key,
 )
-from services.notifications import create_new_book_notification
+from services.notifications import create_series_discovery_notification
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +261,14 @@ def run_series_check_job_full(series_id: int) -> None:
         discovered_candidates = result.get("added_books") or []
         seen_batch_identity_keys: set[str] = set()
         db_changed = False
+        # Durable series-level discovery notification (see services/
+        # notifications.py) counts both brand-new inserts (persisted_new_
+        # books below) and upcoming->available transitions on existing
+        # rows -- this counter only tracks the latter, since the former is
+        # already `len(persisted_new_books)`. One aggregated row is
+        # written after this loop, not per-book as the old kind="new_book"
+        # rows were.
+        transitioned_to_available_count = 0
 
         try:
             for candidate in discovered_candidates:
@@ -404,8 +412,7 @@ def run_series_check_job_full(series_id: int) -> None:
                     db_changed = True
 
                     if was_upcoming_before_update and status != "upcoming":
-                        create_new_book_notification(db, matched_existing)
-                        db.flush()
+                        transitioned_to_available_count += 1
 
                     continue
 
@@ -455,15 +462,6 @@ def run_series_check_job_full(series_id: int) -> None:
                 db.flush()
                 db_changed = True
 
-                # Trigger per the Auto Discovery MVP spec's §3: a brand-new
-                # *available* book. A brand-new *upcoming* book is
-                # intentionally not a trigger (dropped scope, same section)
-                # -- it'll notify later, if/when a subsequent check flips it
-                # to available via the matched_existing branch above.
-                if status != "upcoming":
-                    create_new_book_notification(db, db_book)
-                    db.flush()
-
                 if db_book.asin:
                     existing_by_asin[str(db_book.asin).strip().upper()] = db_book
                 inserted_series_book_key = _series_book_identity_key(db_series.name, db_book.book_number)
@@ -488,6 +486,28 @@ def run_series_check_job_full(series_id: int) -> None:
                         "library_position": "top",
                     }
                 )
+
+            # Durable series-level discovery notification (see services/
+            # notifications.py) -- one aggregated row for this series' run,
+            # not one per book. Counts brand-new *available* inserts (a
+            # brand-new *upcoming* insert is intentionally not counted,
+            # same as the old per-book trigger it replaces -- it'll count
+            # later, if/when a subsequent check flips it to available via
+            # transitioned_to_available_count above) plus upcoming-
+            # >available transitions on existing rows.
+            new_available_insert_count = sum(
+                1 for book in persisted_new_books if book.get("status") != "upcoming"
+            )
+            discovery_delta_count = new_available_insert_count + transitioned_to_available_count
+            if discovery_delta_count > 0:
+                create_series_discovery_notification(
+                    db,
+                    profile_id=db_series.profile_id,
+                    series_id=series_id,
+                    series_name=db_series.name,
+                    count_new_books=discovery_delta_count,
+                )
+                db.flush()
 
             # NOTE: this used to also delete any existing not-yet-read "ghost"
             # book that this run's candidate set didn't happen to re-surface
@@ -611,6 +631,14 @@ def run_series_check_job_full(series_id: int) -> None:
 
         result["added_books"] = persisted_new_books
         result["added_count"] = len(persisted_new_books)
+        # See the durable-notification block above -- new inserts (excluding
+        # upcoming-only ones) plus upcoming->available transitions. Kept as
+        # a distinct field rather than folding into added_count/added_books,
+        # which already have an established "fresh inserts only" meaning
+        # relied on elsewhere (e.g. services/discovery_logging.py's debug
+        # summary). This is what both the ephemeral popup and the durable
+        # notification row use, so the two numbers can never disagree.
+        result["discovery_delta_count"] = discovery_delta_count
 
         rebuild_snapshot = recalculate_intelligence(db, series_id, scan_result=result if isinstance(result, dict) else None)
         if isinstance(result, dict) and rebuild_snapshot:
@@ -668,6 +696,7 @@ def run_series_check_job_full(series_id: int) -> None:
             "validated_candidates": result.get("validated_candidates") or [],
             "found_books": persisted_new_books,
             "no_new_books": response_status != "success",
+            "discovery_delta_count": discovery_delta_count,
             "discovery_engine": result.get("discovery_engine") or "new_book_checker",
             "asin_discovery": result.get("asin_discovery") or {
                 "discovered": 0,
@@ -749,6 +778,7 @@ def run_series_check_job_full(series_id: int) -> None:
                 "validated_candidates": [],
                 "found_books": [],
                 "no_new_books": True,
+                "discovery_delta_count": 0,
                 "reason": "check-now-error",
                 "discovery_engine": "agent_v2",
                 "asin_discovery": {

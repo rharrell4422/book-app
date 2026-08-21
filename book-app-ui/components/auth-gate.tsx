@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
-import { PencilIcon, SettingsIcon } from "lucide-react";
+import { BellIcon, PencilIcon, SettingsIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -25,7 +25,6 @@ import { fetchApiWithFallback } from "@/lib/api-client";
 import { setNotifyListener } from "@/lib/notify";
 import { OnboardingImport } from "@/components/onboarding/onboarding-import";
 import { BottomNav } from "@/components/mobile/bottom-nav";
-import { NewBooksNotificationModal } from "@/components/notifications/new-books-modal";
 import { cn } from "@/lib/utils";
 
 function NotifyBridge() {
@@ -461,6 +460,11 @@ function MobileProfileSheet({ open, onOpenChange }: { open: boolean; onOpenChang
           </div>
           <DialogFooter className="flex-col gap-2 sm:flex-col">
             <ShareLinkButton />
+            <Link href="/notifications" onClick={() => onOpenChange(false)}>
+              <Button variant="outline" size="sm" className="w-full">
+                Notifications
+              </Button>
+            </Link>
             <Link href="/settings" onClick={() => onOpenChange(false)}>
               <Button variant="outline" size="sm" className="w-full">
                 Settings
@@ -575,6 +579,16 @@ function TopBar() {
         <div className="flex items-center gap-2">
           <ProfileSwitcher />
           <ShareLinkButton />
+          <Link href="/notifications">
+            <Button
+              variant={pathname.startsWith("/notifications") ? "secondary" : "ghost"}
+              size="icon-sm"
+              aria-label="Notifications"
+              title="Notifications"
+            >
+              <BellIcon />
+            </Button>
+          </Link>
           <Link href="/settings">
             <Button
               variant={settingsActive ? "secondary" : "ghost"}
@@ -637,7 +651,6 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     <div className="flex min-h-full flex-col">
       <NotifyBridge />
       <TopBar />
-      {role === "owner" && !needsOnboarding ? <NewBooksNotificationModal /> : null}
       {/* Keyed on the active profile so switching libraries fully remounts
           the page tree -- there's no query-cache layer in this app (every
           page just does useEffect(() => fetch..., []) on mount), so a full

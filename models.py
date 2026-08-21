@@ -350,15 +350,21 @@ class SeriesSkeleton(Base):
 
 
 class Notification(Base):
-    """Minimal "New Books Added to Library" notification (Auto Discovery MVP
-    spec, §3). Deliberately not a full inbox -- one row per triggering
-    event (new available book created, or an upcoming->available
-    transition), created by the same low-level persistence path that both
-    manual Check Now and the batch Full Auto Discovery sweep share (see
-    services/series_check_engine.py), so neither path needs its own copy of
-    this logic. `dismissed_at` is set in bulk (dismiss-all), not
-    per-notification, matching the "single modal, manual dismiss" UX in the
-    spec.
+    """Durable series-level discovery notification (see the "Durable
+    Series-Level Discovery Notifications" design chat's finalized spec).
+
+    Originally a per-book table (one row per triggering event, kind=
+    "new_book") for the old DB-driven popup. That popup is retired --
+    notifications are now aggregated one row per series per discovery run
+    (kind="series_discovery_delta"), written once at the end of
+    services/series_check_engine.py's run_series_check_job_full after
+    counting that run's brand-new inserts plus upcoming->available
+    transitions for the series being checked. `count_new_books` and
+    `series_name` are only populated for that new kind; legacy "new_book"
+    rows (retired via migration d... -- see its dismissed_at backfill) are
+    filtered out of the durable Notifications view by kind, not deleted.
+    `dismissed_at` supports both a per-row dismiss (the Notifications view)
+    and a bulk dismiss-all, unlike the old single-modal-only bulk dismiss.
     """
 
     __tablename__ = "notifications"
@@ -368,5 +374,10 @@ class Notification(Base):
     book_id = Column(Integer, ForeignKey("books.id"), nullable=True)
     series_id = Column(Integer, ForeignKey("series.id"), nullable=True)
     kind = Column(String, nullable=False, default="new_book")
+    # Nullable at the DB level so legacy "new_book" rows (which never had
+    # these) remain valid -- application code guarantees both are always
+    # populated for any row written with kind="series_discovery_delta".
+    count_new_books = Column(Integer, nullable=True)
+    series_name = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     dismissed_at = Column(DateTime, nullable=True)

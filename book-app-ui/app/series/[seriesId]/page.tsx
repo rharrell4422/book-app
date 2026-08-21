@@ -111,6 +111,11 @@ type SeriesCheckStatusPayload = {
   no_new_books?: boolean;
   message?: string;
   new_books?: Array<Record<string, unknown>>;
+  // New inserts (excluding upcoming-only ones) plus upcoming->available
+  // transitions for this run -- the same number the durable per-series
+  // notification row gets, so the ephemeral popup and the Notifications
+  // view can never disagree. See services/series_check_engine.py.
+  discovery_delta_count?: number;
   counters?: {
     total_books?: number;
     unread_books?: number;
@@ -1126,8 +1131,16 @@ export default function SeriesDetailPage() {
         : Array.isArray(data.missing_books)
           ? data.missing_books
           : [];
+      const discoveryDeltaCount = Number(statusPayload.discovery_delta_count ?? 0);
+      // Ephemeral popup: session-only, driven directly by this response --
+      // never a query against the notifications table. Single-series
+      // template, since Check Now always operates on exactly one series;
+      // the durable per-series notification (written server-side in the
+      // same run) uses this identical count, so the two can never disagree.
       const message = statusPayload.status === "success"
-        ? "NEW BOOKS found and added to library."
+        ? discoveryDeltaCount > 0
+          ? `${discoveryDeltaCount} new book${discoveryDeltaCount === 1 ? "" : "s"} added to ${series.name}.`
+          : "NEW BOOKS found and added to library."
         : statusPayload.status === "no_new_books"
           ? "NO NEW BOOKS FOUND."
           : statusPayload.message || (missingList.length > 0 ? `Missing books: ${missingList.join(", ")}.` : "NO NEW BOOKS FOUND.");

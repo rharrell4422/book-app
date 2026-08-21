@@ -331,18 +331,19 @@ class SeriesOverviewRequest(BaseModel):
 
 
 # ------------------------------------------------------------
-# Notifications ("New Books Added to Library" popup -- Auto Discovery
-# MVP spec, §3)
+# Notifications (durable series-level discovery notifications -- see the
+# "Durable Series-Level Discovery Notifications" design chat's finalized
+# spec). One row per series per discovery run; the old per-book
+# "New Books Added to Library" popup shape (book_id/book_title/kind) has
+# been retired.
 # ------------------------------------------------------------
 
 
 class NotificationItem(BaseModel):
     id: int
-    kind: str
-    book_id: int | None = None
-    book_title: str | None = None
     series_id: int | None = None
     series_name: str | None = None
+    count_new_books: int
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -374,4 +375,10 @@ class AutoDiscoveryStatusResponse(BaseModel):
     updated_at: str | None = None
     results: list[dict] | None = None
     new_books_found: int | None = None
+    # Job-level total of discovery_delta_count across every series checked
+    # in this sweep (new inserts + upcoming->available transitions) -- the
+    # count the ephemeral popup and the durable per-series notifications
+    # both derive from, so the two can never disagree. See services/
+    # auto_discovery.py and services/series_check_engine.py.
+    discovery_delta_count: int | None = None
     message: str | None = None
