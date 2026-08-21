@@ -12,6 +12,7 @@ import delta_engine
 import discovery_engine
 import intelligence
 from models import Book, Series, SeriesSkeleton
+from services.discovery_cache import DiscoveryCache
 from services.discovery_logging import log_discovery_summary
 from services.discovery_telemetry import DiscoveryTelemetry
 from services.identity import owned_title_for_identity
@@ -328,6 +329,7 @@ class SeriesIntelligenceAgent:
         progress_callback=None,
         emit_summary: bool = True,
         telemetry: "DiscoveryTelemetry | None" = None,
+        cache: "DiscoveryCache | None" = None,
     ) -> dict:
         series = db.query(Series).filter(Series.id == series_id).first()
         if not series:
@@ -412,6 +414,7 @@ class SeriesIntelligenceAgent:
                 progress_callback=progress_callback,
                 highest_owned_book_number=highest_owned_book_number,
                 telemetry=telemetry,
+                cache=cache,
             )
             candidates = discovery["candidates"]
             provider_failures = discovery["provider_failures"]
@@ -481,6 +484,7 @@ class SeriesIntelligenceAgent:
                 series_name=series.name,
                 author=series_author,
                 telemetry=telemetry,
+                cache=cache,
             )
             if skeleton["recovered_numbers"]:
                 # _filter_and_merge stamps every candidate it's given with
@@ -997,6 +1001,7 @@ class SeriesIntelligenceAgent:
                 "discovery_engine": "official_api_v1",
                 "agent_pipeline": True,
                 "telemetry": telemetry.summary() if telemetry is not None else None,
+                "cache": cache.summary() if cache is not None else None,
             }
             if emit_summary:
                 log_discovery_summary(result=result)

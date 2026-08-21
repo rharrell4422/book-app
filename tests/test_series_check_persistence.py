@@ -412,5 +412,146 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
         self.assertEqual(len(deleted), 1)
 
 
+class SeriesCheckPrecheckTest(unittest.TestCase):
+    """Tests the catalog-only pre-check short-circuit (architecture spec
+    #7.2/#7.3) at the job level -- a series checked within the staleness
+    window skips the full discovery loop entirely when the pre-check finds
+    nothing new, and falls through to the normal loop when it does.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=cls.engine)
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        Base.metadata.drop_all(bind=cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        self.db = self.SessionLocal()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _make_series(self, *, last_checked, book_number=1.0):
+        series = Series(name="Jonathan Hunt", author="Georgia Wagner", last_checked=last_checked)
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+        self.db.add(
+            Book(
+                title="The Jericho Siege",
+                author="Georgia Wagner",
+                series_id=series.id,
+                book_number=book_number,
+                record_status="active",
+                read_status="available",
+            )
+        )
+        self.db.commit()
+        return series
+
+    def test_recently_checked_series_short_circuits_when_precheck_finds_nothing(self):
+        from datetime import date
+
+        series = self._make_series(last_checked=date.today())
+
+        with patch.object(series_check_engine, "SessionLocal", self.SessionLocal), patch.object(
+            library_sync, "SessionLocal", self.SessionLocal
+        ), patch.object(
+            series_check_engine.discovery_engine, "precheck_for_new_volumes", return_value=False
+        ) as mock_precheck, patch.object(
+            series_check_engine.series_agent, "run_series_check"
+        ) as mock_run_series_check:
+            series_check_engine.run_series_check_job_full(series.id)
+
+        mock_precheck.assert_called_once()
+        mock_run_series_check.assert_not_called()
+
+        job = series_check_engine.series_check_jobs[series.id]
+        self.assertTrue(job["result"]["idle_check"])
+        self.assertEqual(job["result"]["rounds_run"], 0)
+        self.assertEqual(job["completion"]["status"], "no_new_books")
+
+    def test_recently_checked_series_falls_through_to_full_loop_when_precheck_finds_something(self):
+        from datetime import date
+
+        series = self._make_series(last_checked=date.today())
+        mocked_result = {
+            "series_id": series.id,
+            "added_books": [],
+            "provider_failures": [],
+            "all_providers_failed": False,
+        }
+
+        with patch.object(series_check_engine, "SessionLocal", self.SessionLocal), patch.object(
+            library_sync, "SessionLocal", self.SessionLocal
+        ), patch.object(
+            series_check_engine.discovery_engine, "precheck_for_new_volumes", return_value=True
+        ) as mock_precheck, patch.object(
+            series_check_engine.series_agent, "run_series_check", return_value=mocked_result
+        ) as mock_run_series_check:
+            series_check_engine.run_series_check_job_full(series.id)
+
+        mock_precheck.assert_called_once()
+        mock_run_series_check.assert_called()
+
+        job = series_check_engine.series_check_jobs[series.id]
+        self.assertFalse(job["result"]["idle_check"])
+        self.assertGreaterEqual(job["result"]["rounds_run"], 1)
+
+    def test_series_with_no_check_history_always_runs_full_loop(self):
+        series = self._make_series(last_checked=None)
+        mocked_result = {
+            "series_id": series.id,
+            "added_books": [],
+            "provider_failures": [],
+            "all_providers_failed": False,
+        }
+
+        with patch.object(series_check_engine, "SessionLocal", self.SessionLocal), patch.object(
+            library_sync, "SessionLocal", self.SessionLocal
+        ), patch.object(
+            series_check_engine.discovery_engine, "precheck_for_new_volumes"
+        ) as mock_precheck, patch.object(
+            series_check_engine.series_agent, "run_series_check", return_value=mocked_result
+        ) as mock_run_series_check:
+            series_check_engine.run_series_check_job_full(series.id)
+
+        mock_precheck.assert_not_called()
+        mock_run_series_check.assert_called()
+
+        job = series_check_engine.series_check_jobs[series.id]
+        self.assertFalse(job["result"]["idle_check"])
+
+    def test_staleness_window_boundary_beyond_threshold_runs_full_loop(self):
+        from datetime import date, timedelta
+
+        series = self._make_series(
+            last_checked=date.today() - timedelta(days=series_check_engine.SERIES_CHECK_PRECHECK_STALENESS_DAYS + 1)
+        )
+        mocked_result = {
+            "series_id": series.id,
+            "added_books": [],
+            "provider_failures": [],
+            "all_providers_failed": False,
+        }
+
+        with patch.object(series_check_engine, "SessionLocal", self.SessionLocal), patch.object(
+            library_sync, "SessionLocal", self.SessionLocal
+        ), patch.object(
+            series_check_engine.discovery_engine, "precheck_for_new_volumes"
+        ) as mock_precheck, patch.object(
+            series_check_engine.series_agent, "run_series_check", return_value=mocked_result
+        ) as mock_run_series_check:
+            series_check_engine.run_series_check_job_full(series.id)
+
+        mock_precheck.assert_not_called()
+        mock_run_series_check.assert_called()
+
+
 if __name__ == "__main__":
     unittest.main()

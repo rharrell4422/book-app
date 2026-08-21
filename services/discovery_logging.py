@@ -76,6 +76,8 @@ def log_discovery_summary(*, result: dict, terminal_error: str | None = None) ->
     _console_log("===== CHECK NOW DEBUG SUMMARY START =====")
     _console_log(f"series_id={result.get('series_id')} series_name={result.get('series_name')}")
     _console_log(f"status={result.get('status')} found={bool(result.get('found'))} added_count={int(result.get('added_count') or 0)}")
+    if result.get("idle_check"):
+        _console_log("idle_check=True (short-circuited via catalog-only pre-check -- see architecture spec #7.2/#7.3, rounds_run=0)")
     _console_log(f"all_providers_failed={bool(result.get('all_providers_failed'))} provider_failures={len(provider_failures)}")
     _console_log(
         "asin_discovery: "
@@ -110,6 +112,17 @@ def log_discovery_summary(*, result: dict, terminal_error: str | None = None) ->
                 f"llm_calls={stats.get('llm_calls', 0)} (llm_time={stats.get('llm_duration_s', 0)}s) "
                 f"tokens_in={stats.get('tokens_in', 0)} tokens_out={stats.get('tokens_out', 0)}"
             )
+
+    cache = result.get("cache")
+    if cache:
+        _console_log(
+            "--- cache (Layer A+B, per-job, spec #2.4/#7.1): "
+            f"provider_fetch_entries={cache.get('provider_fetch_entries', 0)} "
+            f"provider_fetch_hits={cache.get('provider_fetch_hits', 0)} "
+            f"llm_verdict_entries={cache.get('llm_verdict_entries', 0)} "
+            f"(accepted={cache.get('llm_verdict_accepted', 0)} rejected={cache.get('llm_verdict_rejected', 0)}) "
+            f"llm_verdict_hits={cache.get('llm_verdict_hits', 0)} ---"
+        )
 
     _console_log(f"--- missing_books (found, not yet owned) = {len(missing_books)} ---")
     for book in missing_books[:15]:

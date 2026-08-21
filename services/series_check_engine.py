@@ -15,6 +15,7 @@ from datetime import date, datetime
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+import discovery_engine
 import models
 import library_sync
 from book_metadata_utils import parse_publication_date
@@ -22,6 +23,7 @@ from database import SessionLocal
 from intelligence import recalculate_intelligence, recalculate_series_state_for_series
 from agents.series_agent import SeriesIntelligenceAgent
 from services.discovery_logging import _console_log, log_discovery_summary
+from services.discovery_cache import DiscoveryCache
 from services.discovery_telemetry import DiscoveryTelemetry
 from services.identity import (
     _authors_match_exact,
@@ -46,6 +48,14 @@ SERIES_CHECK_HARD_TIMEOUT_SECONDS = 300
 # a 3rd confirming "nothing further" -- 4 would only add cost with no
 # observed benefit.
 SERIES_CHECK_MAX_ROUNDS = 3
+# Gates the cheap catalog-only pre-check (discovery_catchup_architecture_
+# spec.md #7.2): a series last fully checked within this many days skips
+# straight to a Google Books/OpenLibrary/Hardcover-only fetch (zero Brave,
+# zero LLM calls) before committing to the full multi-round loop. Chosen to
+# sit safely below services/auto_discovery.py's AUTO_DISCOVERY_COOLDOWN
+# (7 days) so it never fires on the primary recurring sweep cadence -- only
+# on genuinely redundant close-together re-checks.
+SERIES_CHECK_PRECHECK_STALENESS_DAYS = 3
 
 
 def _parse_candidate_date(value: str | None) -> date | None:
@@ -208,6 +218,11 @@ def run_series_check_job_full(series_id: int) -> None:
         # job, not reset each round (see discovery_catchup_architecture_
         # spec.md #2.5).
         telemetry = DiscoveryTelemetry()
+        # Also per-job/in-memory/shared-across-rounds, and always active
+        # (no policy gate -- see spec #7.1): dedupes provider fetches and
+        # LLM verdicts that repeat identically across rounds/passes within
+        # this one job. Discarded along with `telemetry` when the job ends.
+        discovery_cache = DiscoveryCache()
         job_started_at = time.monotonic()
 
         # ---- Bounded multi-round catch-up loop (architecture spec #2.2) ----
@@ -229,9 +244,56 @@ def run_series_check_job_full(series_id: int) -> None:
         any_all_providers_failed = False
         rounds_run = 0
         timed_out = False
+        idle_check = False
         last_result: dict = {}
 
-        for _round_num in range(1, SERIES_CHECK_MAX_ROUNDS + 1):
+        # ---- Cheap pre-check for a recently-checked series (architecture
+        # spec #7.2) ----
+        # A series checked within the last SERIES_CHECK_PRECHECK_STALENESS_
+        # DAYS days gets one catalog-only (zero Brave, zero LLM) fetch
+        # before committing to the full multi-round loop -- if nothing
+        # shows up numbered beyond what's already known (owned, upcoming,
+        # or a tracked interior gap), skip the full loop entirely. A
+        # series with no check history at all (last_checked is None -- the
+        # very first Check Now click right after adding it) always runs
+        # the full loop; there's no prior baseline to compare against.
+        run_full_loop = True
+        if db_series and db_series.last_checked is not None:
+            days_since_checked = (date.today() - db_series.last_checked).days
+            if 0 <= days_since_checked <= SERIES_CHECK_PRECHECK_STALENESS_DAYS:
+                known_active_books = (
+                    db.query(models.Book)
+                    .filter(models.Book.series_id == series_id)
+                    .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
+                    .all()
+                )
+                known_numbers = [float(b.book_number) for b in known_active_books if b.book_number is not None]
+                known_numbers += [float(v) for v in (db_series.missing_books or []) if v is not None]
+                ceiling = max(known_numbers) if known_numbers else 0.0
+
+                found_something_new = discovery_engine.precheck_for_new_volumes(
+                    db_series.name, db_series.author, ceiling, telemetry=telemetry
+                )
+                # Note: precheck_for_new_volumes deliberately does not take
+                # `discovery_cache` -- it's a single, un-cacheable catalog
+                # fetch (there's no second round within this same job to
+                # reuse it against), and its own results shouldn't seed the
+                # full loop's cache for a *different* purpose (confirming
+                # "nothing new" vs. exhaustively enumerating candidates).
+                if not found_something_new:
+                    run_full_loop = False
+                    idle_check = True
+                    last_result = {
+                        "series_id": series_id,
+                        "added_books": [],
+                        "found": False,
+                        "discovery_engine": "precheck",
+                        "status": "no_hits",
+                        "provider_failures": [],
+                        "all_providers_failed": False,
+                    }
+
+        for _round_num in range(1, SERIES_CHECK_MAX_ROUNDS + 1) if run_full_loop else []:
             # The shared timeout bounds *scheduling of new rounds for the
             # whole job*, not each round individually -- prevents a naive
             # worst case of SERIES_CHECK_MAX_ROUNDS x
@@ -247,7 +309,9 @@ def run_series_check_job_full(series_id: int) -> None:
                 break
 
             executor = ThreadPoolExecutor(max_workers=1)
-            future = executor.submit(series_agent.run_series_check, db, series_id, update_progress, False, telemetry)
+            future = executor.submit(
+                series_agent.run_series_check, db, series_id, update_progress, False, telemetry, discovery_cache
+            )
             try:
                 result = future.result(timeout=remaining_budget)
             except FutureTimeoutError:
@@ -729,7 +793,12 @@ def run_series_check_job_full(series_id: int) -> None:
         result["all_providers_failed"] = any_all_providers_failed
         result["rounds_run"] = rounds_run
         result["timed_out"] = timed_out
+        # See architecture spec #7.3 -- distinguishes "confirmed nothing
+        # new via the cheap catalog-only pre-check" (rounds_run stays 0)
+        # from "ran the full loop and it happened to find nothing".
+        result["idle_check"] = idle_check
         result["telemetry"] = telemetry.summary()
+        result["cache"] = discovery_cache.summary()
 
         db_series = db.query(models.Series).filter(models.Series.id == series_id).first()
         if not db_series:
@@ -804,6 +873,7 @@ def run_series_check_job_full(series_id: int) -> None:
             "discovery_delta_count": total_discovery_delta_count,
             "discovery_engine": result.get("discovery_engine") or "new_book_checker",
             "rounds_run": rounds_run,
+            "idle_check": idle_check,
             "asin_discovery": result.get("asin_discovery") or {
                 "discovered": 0,
                 "processed": 0,

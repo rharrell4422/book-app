@@ -13,6 +13,7 @@ import discovery_engine
 from agents.series_agent import SeriesIntelligenceAgent, discover_more_by_author, discover_series_by_name
 from database import Base
 from models import Book, Series
+from services.discovery_cache import DiscoveryCache
 
 
 class DiscoveryEngineHelperTest(unittest.TestCase):
@@ -645,6 +646,90 @@ class GenerateSeriesOverviewTest(unittest.TestCase):
 
         self.assertIn("Book one premise text.", captured["prompt"])
         self.assertNotIn("Untitled Draft", captured["prompt"])
+
+
+class PrecheckForNewVolumesTest(unittest.TestCase):
+    """Tests discovery_engine.precheck_for_new_volumes -- the catalog-only
+    (no Brave, no LLM) short-circuit check described in
+    discovery_catchup_architecture_spec.md #7.2.
+    """
+
+    def setUp(self):
+        self._env_patch = patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+
+    def test_returns_false_when_no_hardcover_hit_exceeds_ceiling(self):
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[
+                {
+                    "source": "hardcover",
+                    "authors": ["Georgia Wagner"],
+                    "title": "The Jericho Siege",
+                    "series_number_hint": 1,
+                }
+            ],
+        ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ):
+            found = discovery_engine.precheck_for_new_volumes("Jonathan Hunt", "Georgia Wagner", ceiling=18.0)
+
+        self.assertFalse(found)
+
+    def test_returns_true_when_a_hardcover_hit_exceeds_ceiling(self):
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[
+                {
+                    "source": "hardcover",
+                    "authors": ["Georgia Wagner"],
+                    "title": "The Next Hunt",
+                    "series_number_hint": 19,
+                }
+            ],
+        ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ):
+            found = discovery_engine.precheck_for_new_volumes("Jonathan Hunt", "Georgia Wagner", ceiling=18.0)
+
+        self.assertTrue(found)
+
+    def test_ignores_hits_from_a_non_matching_author(self):
+        # A same-titled hit by an unrelated author must not trigger a full
+        # loop just because its series_number_hint happens to be high.
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[
+                {
+                    "source": "hardcover",
+                    "authors": ["Some Other Author"],
+                    "title": "Unrelated Book",
+                    "series_number_hint": 99,
+                }
+            ],
+        ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ):
+            found = discovery_engine.precheck_for_new_volumes("Jonathan Hunt", "Georgia Wagner", ceiling=18.0)
+
+        self.assertFalse(found)
+
+    def test_never_issues_a_brave_or_llm_call(self):
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
+            discovery_engine, "_fetch_google_books", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]), patch.object(
+            discovery_engine, "_fetch_brave_web_search"
+        ) as mock_brave, patch.object(discovery_engine, "_structure_web_results_with_llm") as mock_llm:
+            discovery_engine.precheck_for_new_volumes("Jonathan Hunt", "Georgia Wagner", ceiling=18.0)
+
+        mock_brave.assert_not_called()
+        mock_llm.assert_not_called()
 
 
 class DiscoverCandidatesForSeriesTest(unittest.TestCase):
@@ -1592,10 +1677,16 @@ class WebSearchProviderTest(unittest.TestCase):
         # Bound the extra cost: only the first WEB_SEARCH_DATE_REFINEMENT_MAX
         # undated candidates get a second look, and a refinement query
         # blowing up must not take down the whole discovery run.
-        raw_results = [{"title": "Generic listing", "description": "snippet, no date", "url": "https://example.com/x"}]
+        # Five distinct raw results/URLs (not the same URL five times) --
+        # the Layer B LLM-verdict cache is URL-keyed, so a fixture reusing
+        # one URL for all five would collapse down to a single verdict.
+        raw_results = [
+            {"title": f"Generic listing {n}", "description": "snippet, no date", "url": f"https://example.com/{n}"}
+            for n in range(5)
+        ]
         structured = [
             {
-                "result_index": 0,
+                "result_index": n,
                 "title": f"Book {n}",
                 "book_number": n,
                 "author_names": ["Some Author"],
@@ -1605,8 +1696,6 @@ class WebSearchProviderTest(unittest.TestCase):
             }
             for n in range(5)
         ]
-        # Each item maps to the same lone raw result via result_index -- that's fine,
-        # this test is only exercising the refinement-cap/error-tolerance behavior.
 
         call_count = {"n": 0}
 
@@ -1793,6 +1882,189 @@ class WebSearchProviderTest(unittest.TestCase):
             discovery_engine.discover_candidates_for_series("The First Peacemaker", "Some Author")
 
         mock_web_search.assert_not_called()
+
+
+class DiscoveryCacheTest(unittest.TestCase):
+    """Tests the two-layer per-job cache (services/discovery_cache.py,
+    architecture spec #2.4/#7.1) as it's exercised through
+    _fetch_all_providers_parallel and _fetch_web_search.
+    """
+
+    def setUp(self):
+        self._env_patch = patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+
+    def test_repeated_catalog_query_across_rounds_hits_cache_not_network(self):
+        # Exercises _fetch_all_providers_parallel directly (rather than the
+        # full discover_candidates_for_series) so this only tests Layer A
+        # provider-fetch caching in isolation, not fallback-trigger logic.
+        cache = DiscoveryCache()
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]) as mock_hardcover, patch.object(
+            discovery_engine, "_fetch_google_books", return_value=[]
+        ) as mock_google, patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]) as mock_openlibrary:
+            for _round in range(2):
+                discovery_engine._fetch_all_providers_parallel(
+                    "Some Author",
+                    "The First Peacemaker",
+                    "The First Peacemaker Some Author",
+                    None,
+                    author="Some Author",
+                    enable_web_search=False,
+                    cache=cache,
+                )
+
+        # Round 2's identical query text is a cache hit -- each provider is
+        # called exactly once across both "rounds".
+        mock_hardcover.assert_called_once()
+        mock_google.assert_called_once()
+        mock_openlibrary.assert_called_once()
+        self.assertEqual(cache.summary()["provider_fetch_hits"], 3)
+
+    def test_cache_is_scoped_per_provider_not_shared_across_providers(self):
+        cache = DiscoveryCache()
+        cache.set_provider_fetch("hardcover", "same text", [{"title": "from hardcover"}])
+        self.assertIs(cache.get_provider_fetch("google", "same text"), discovery_engine.CACHE_MISS)
+
+    def test_llm_verdict_cache_avoids_resending_same_url_across_rounds(self):
+        cache = DiscoveryCache()
+        raw_results = [{"title": "Listing", "description": "snippet", "url": "https://example.com/1"}]
+        structured = [
+            {
+                "result_index": 0,
+                "title": "Book One",
+                "book_number": 1,
+                "author_names": ["Some Author"],
+                "published_date": "2024-01-01",
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+        ]
+
+        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        ) as mock_llm:
+            first = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
+            second = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
+
+        # The LLM is only ever sent this URL once -- round two's identical
+        # URL is served entirely from the Layer B verdict cache.
+        mock_llm.assert_called_once()
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(second[0]["title"], "Book One")
+        self.assertEqual(cache.summary()["llm_verdict_hits"], 1)
+
+    def test_llm_verdict_negative_sentinel_prevents_resending_rejected_url(self):
+        # A URL the LLM structured nothing useful for (no result_index match,
+        # i.e. implicitly excluded) must be remembered as "checked, nothing
+        # here" -- not re-sent to the LLM on the next round.
+        cache = DiscoveryCache()
+        raw_results = [{"title": "Junk listing", "description": "snippet", "url": "https://example.com/junk"}]
+
+        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=[]
+        ) as mock_llm:
+            discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
+            discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
+
+        mock_llm.assert_called_once()
+        self.assertEqual(cache.summary()["llm_verdict_rejected"], 1)
+
+    def test_llm_verdict_cache_is_scoped_by_series_name_not_bare_url(self):
+        # Same URL surfacing under two different series-scoped searches
+        # (e.g. a cross-series-contamination edge case) must not leak one
+        # series' cached verdict into the other's results.
+        cache = DiscoveryCache()
+        raw_results = [{"title": "Ambiguous listing", "description": "snippet", "url": "https://example.com/shared"}]
+        structured = [
+            {
+                "result_index": 0,
+                "title": "Book For Series A",
+                "book_number": 1,
+                "author_names": ["Some Author"],
+                "published_date": "2024-01-01",
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+        ]
+
+        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        ) as mock_llm:
+            discovery_engine._fetch_web_search(["query"], "Series A", "Some Author", cache=cache)
+            discovery_engine._fetch_web_search(["query"], "Series B", "Some Author", cache=cache)
+
+        self.assertEqual(mock_llm.call_count, 2)
+
+    def test_mixed_cached_and_fresh_urls_preserve_original_raw_order(self):
+        # Reassembly must follow raw_results' own order, not "fresh then
+        # cached" or vice versa.
+        cache = DiscoveryCache()
+        cache.set_llm_verdict(
+            "series",
+            "some series",
+            "https://example.com/cached",
+            {
+                "title": "Cached Book",
+                "book_number": 1,
+                "author_names": ["Some Author"],
+                "published_date": "2024-01-01",
+                "is_upcoming": False,
+                "isbn13": None,
+            },
+        )
+        raw_results = [
+            {"title": "Cached listing", "description": "snippet", "url": "https://example.com/cached"},
+            {"title": "Fresh listing", "description": "snippet", "url": "https://example.com/fresh"},
+        ]
+        fresh_structured = [
+            {
+                "result_index": 0,  # index into uncached_raw, i.e. the "fresh" entry only
+                "title": "Fresh Book",
+                "book_number": 2,
+                "author_names": ["Some Author"],
+                "published_date": "2024-02-01",
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+        ]
+
+        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=fresh_structured
+        ) as mock_llm:
+            results = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
+
+        # Only the uncached ("Fresh listing") entry is sent to the LLM.
+        self.assertEqual(len(mock_llm.call_args[0][2]), 1)
+        self.assertEqual(mock_llm.call_args[0][2][0]["url"], "https://example.com/fresh")
+        # Output order follows raw_results (cached entry first).
+        self.assertEqual([r["title"] for r in results], ["Cached Book", "Fresh Book"])
+
+    def test_reconciliation_is_never_cached(self):
+        # _reconcile_candidates_with_llm stays permanently excluded from
+        # caching (architecture spec #7.1) -- it must be called fresh every
+        # time it's triggered, even across otherwise-cached rounds.
+        cache = DiscoveryCache()
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
+            discovery_engine, "_fetch_google_books", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]), patch.object(
+            discovery_engine, "_needs_llm_reconciliation", return_value=True
+        ), patch.object(
+            discovery_engine, "_reconcile_candidates_with_llm", side_effect=lambda candidates, *a, **k: candidates
+        ) as mock_reconcile:
+            discovery_engine.discover_candidates_for_series(
+                "The First Peacemaker", "Some Author", cache=cache, allow_author_fallback=False
+            )
+            discovery_engine.discover_candidates_for_series(
+                "The First Peacemaker", "Some Author", cache=cache, allow_author_fallback=False
+            )
+
+        self.assertEqual(mock_reconcile.call_count, 2)
+        for call in mock_reconcile.call_args_list:
+            self.assertNotIn("cache", call.kwargs)
 
 
 class SeriesCheckIntegrationTest(unittest.TestCase):

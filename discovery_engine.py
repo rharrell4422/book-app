@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field
 # thing on both the discovery side and the persistence side.
 from services.identity import _edition_priority, _normalize_title_for_identity
 from services.discovery_telemetry import DiscoveryTelemetry, maybe_pass_scope
+from services.discovery_cache import DiscoveryCache, CACHE_MISS, _normalize_query_text
 
 # Loaded here (rather than relying on the entry point having done it first)
 # so this module reads the right API key regardless of import order.
@@ -1374,6 +1375,8 @@ def _fetch_web_search(
     *,
     diagnostics: list[dict] | None = None,
     telemetry: "DiscoveryTelemetry | None" = None,
+    cache: "DiscoveryCache | None" = None,
+    scope_type: str = "series",
     pass_label: str = "web_search",
 ) -> list[dict]:
     raw_results: list[dict] = []
@@ -1381,11 +1384,17 @@ def _fetch_web_search(
     query_errors: list[Exception] = []
     with maybe_pass_scope(telemetry, pass_label):
         for query in queries:
-            try:
-                items = _fetch_brave_web_search(query, telemetry=telemetry)
-            except Exception as exc:  # one query's transient failure shouldn't sink the others
-                query_errors.append(exc)
-                continue
+            cache_hit = cache.get_provider_fetch("brave", query) if cache is not None else CACHE_MISS
+            if cache_hit is not CACHE_MISS:
+                items = cache_hit
+            else:
+                try:
+                    items = _fetch_brave_web_search(query, telemetry=telemetry)
+                except Exception as exc:  # one query's transient failure shouldn't sink the others
+                    query_errors.append(exc)
+                    continue
+                if cache is not None:
+                    cache.set_provider_fetch("brave", query, items)
             for item in items:
                 if item["url"] in seen_urls:
                     continue
@@ -1397,19 +1406,64 @@ def _fetch_web_search(
                 raise query_errors[0]
             return []
 
-        structured = _structure_web_results_with_llm(
-            series_name, author, raw_results, diagnostics=diagnostics, telemetry=telemetry
+        # Layer B LLM-verdict cache (see services/discovery_cache.py):
+        # split raw_results into what's already been sent to the LLM this
+        # job (cached_by_url, accepted-or-None-for-rejected) vs. what still
+        # needs a fresh call (uncached_raw). result_index from the LLM is
+        # resolved against uncached_raw -- the exact subset actually sent --
+        # then immediately converted to a URL-keyed map so nothing
+        # downstream relies on positional indices into raw_results at all.
+        series_name_key = _normalize_query_text(series_name) if series_name else ""
+        cached_by_url: dict[str, dict | None] = {}
+        uncached_raw: list[dict] = []
+        for item in raw_results:
+            if cache is None:
+                uncached_raw.append(item)
+                continue
+            verdict = cache.get_llm_verdict(scope_type, series_name_key, item["url"])
+            if verdict is CACHE_MISS:
+                uncached_raw.append(item)
+            else:
+                cached_by_url[item["url"]] = verdict
+
+        fresh_structured = (
+            _structure_web_results_with_llm(series_name, author, uncached_raw, diagnostics=diagnostics, telemetry=telemetry)
+            if uncached_raw
+            else []
         )
 
-    results: list[dict] = []
-    for item in structured:
-        if not isinstance(item, dict):
-            continue
-        try:
-            source = raw_results[int(item.get("result_index"))]
-        except (TypeError, ValueError, IndexError):
-            continue
+        fresh_by_url: dict[str, dict] = {}
+        accepted_urls: set[str] = set()
+        for item in fresh_structured:
+            if not isinstance(item, dict):
+                continue
+            try:
+                source = uncached_raw[int(item.get("result_index"))]
+            except (TypeError, ValueError, IndexError):
+                continue
+            fresh_by_url[source["url"]] = item
+            accepted_urls.add(source["url"])
+            if cache is not None:
+                cache.set_llm_verdict(scope_type, series_name_key, source["url"], item)
 
+        if cache is not None:
+            for item in uncached_raw:
+                if item["url"] not in accepted_urls:
+                    # Negative sentinel: this URL was checked and excluded --
+                    # never re-sent to the LLM again within this job.
+                    cache.set_llm_verdict(scope_type, series_name_key, item["url"], None)
+
+        # Reassemble in raw_results' original order (cached-accepted +
+        # fresh-accepted), never "fresh then cached" -- keeps
+        # _first_present_field-style precedence logic identical whether a
+        # given item came from cache or a fresh LLM call this round.
+        verdict_by_url = {**{u: v for u, v in cached_by_url.items() if v is not None}, **fresh_by_url}
+        structured_with_source = [
+            (verdict_by_url[source["url"]], source) for source in raw_results if source["url"] in verdict_by_url
+        ]
+
+    results: list[dict] = []
+    for item, source in structured_with_source:
         title = str(item.get("title") or "").strip()
         if not title:
             continue
@@ -1564,6 +1618,7 @@ def _fetch_all_providers_parallel(
     enable_web_search: bool = True,
     diagnostics: list[dict] | None = None,
     telemetry: "DiscoveryTelemetry | None" = None,
+    cache: "DiscoveryCache | None" = None,
     pass_label: str = "targeted",
 ) -> dict:
     """Fetch Google Books, OpenLibrary, Hardcover, and (optionally) the
@@ -1623,30 +1678,54 @@ def _fetch_all_providers_parallel(
         and os.environ.get("ANTHROPIC_API_KEY", "").strip()
     )
 
-    tasks: dict[str, tuple] = {
-        "google": (_fetch_google_books, (google_query,), {}),
-        "openlibrary": (_fetch_openlibrary, (resolved_openlibrary_query,), {}),
-        "hardcover": (_fetch_hardcover, (hardcover_query,), {}),
+    # Layer A provider-fetch cache (see services/discovery_cache.py):
+    # Google/OpenLibrary/Hardcover's query text here doesn't depend on
+    # highest_owned_book_number at all, so it's byte-identical on every
+    # round of the same job -- a live measurement (discovery_catchup_
+    # architecture_spec.md #6) showed this exact repeated call being paid
+    # fresh on every round. A cache hit short-circuits the fetch entirely
+    # (that provider is left out of `tasks` below and never submitted to
+    # the executor).
+    catalog_queries = {
+        "google": google_query,
+        "openlibrary": resolved_openlibrary_query,
+        "hardcover": hardcover_query,
     }
+    results: dict[str, list[dict]] = {"google": [], "openlibrary": [], "hardcover": [], "web": []}
+    failures: dict[str, Exception] = {}
+
+    tasks: dict[str, tuple] = {}
+    catalog_fetchers = {
+        "google": _fetch_google_books,
+        "openlibrary": _fetch_openlibrary,
+        "hardcover": _fetch_hardcover,
+    }
+    for provider, query in catalog_queries.items():
+        cache_hit = cache.get_provider_fetch(provider, query) if cache is not None else CACHE_MISS
+        if cache_hit is not CACHE_MISS:
+            results[provider] = cache_hit
+        else:
+            tasks[provider] = (catalog_fetchers[provider], (query,), {})
+
     if run_web_search:
         tasks["web"] = (
             _fetch_web_search,
             (resolved_web_queries, series_name, author),
-            {"diagnostics": diagnostics, "telemetry": telemetry, "pass_label": pass_label},
+            {"diagnostics": diagnostics, "telemetry": telemetry, "cache": cache, "pass_label": pass_label},
         )
 
-    results: dict[str, list[dict]] = {"google": [], "openlibrary": [], "hardcover": [], "web": []}
-    failures: dict[str, Exception] = {}
-
-    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-        future_to_provider = {
-            executor.submit(func, *args, **kwargs): provider for provider, (func, args, kwargs) in tasks.items()
-        }
-        for future, provider in future_to_provider.items():
-            try:
-                results[provider] = future.result()
-            except Exception as exc:  # one provider's failure shouldn't sink the others
-                failures[provider] = exc
+    if tasks:
+        with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+            future_to_provider = {
+                executor.submit(func, *args, **kwargs): provider for provider, (func, args, kwargs) in tasks.items()
+            }
+            for future, provider in future_to_provider.items():
+                try:
+                    results[provider] = future.result()
+                    if cache is not None and provider in catalog_queries:
+                        cache.set_provider_fetch(provider, catalog_queries[provider], results[provider])
+                except Exception as exc:  # one provider's failure shouldn't sink the others
+                    failures[provider] = exc
 
     results["_failures"] = failures
     return results
@@ -1996,6 +2075,7 @@ def _reconstruct_series_skeleton(
     series_name: str | None = None,
     author: str | None = None,
     telemetry: "DiscoveryTelemetry | None" = None,
+    cache: "DiscoveryCache | None" = None,
 ) -> dict:
     """Infers how many volumes a series is expected to have -- the highest
     integer book number seen anywhere, across owned_books' book_number,
@@ -2083,7 +2163,12 @@ def _reconstruct_series_skeleton(
 
     try:
         lookahead_raw = _fetch_web_search(
-            lookahead_queries, resolved_series_name, resolved_author, telemetry=telemetry, pass_label="missing_volume"
+            lookahead_queries,
+            resolved_series_name,
+            resolved_author,
+            telemetry=telemetry,
+            cache=cache,
+            pass_label="missing_volume",
         )
     except Exception as exc:  # a lookahead failure should never sink the candidates already found
         _log(f"missing-volume lookahead failed: {exc}")
@@ -2991,6 +3076,56 @@ def finalize_discovery_output(candidates: list[dict]) -> list[dict]:
     ]
 
 
+def precheck_for_new_volumes(
+    series_name: str,
+    author: str,
+    ceiling: float,
+    *,
+    telemetry: "DiscoveryTelemetry | None" = None,
+) -> bool:
+    """Cheap "is there anything new" check for a series that was recently
+    fully checked (see discovery_catchup_architecture_spec.md #7.2) --
+    catalog-only (Google Books + OpenLibrary + Hardcover), zero Brave
+    calls, zero LLM calls. Returns True if the full multi-round loop
+    should run, False if it's safe to short-circuit.
+
+    Only Hardcover's raw results carry a structured numeric series
+    position (`series_number_hint` -- see _fetch_hardcover); Google Books
+    and OpenLibrary's raw results don't expose one at all, so this can
+    only ever confirm "yes, something new" via Hardcover. This is an
+    accepted, documented gap (see the spec section above): a false
+    "nothing new" here just means the next check that isn't gated by the
+    3-day staleness window (never later than the 7-day auto-discovery
+    sweep) still catches it -- not a permanent miss.
+    """
+    query_author = primary_author_name(author)
+    targeted_query_text = f"{series_name} {query_author}".strip()
+    with maybe_pass_scope(telemetry, "precheck"):
+        fetch_results = _fetch_all_providers_parallel(
+            query_author,
+            series_name,
+            targeted_query_text,
+            None,
+            author=author,
+            enable_web_search=False,
+            telemetry=telemetry,
+            pass_label="precheck",
+        )
+
+    for hit in fetch_results.get("hardcover") or []:
+        if not _author_matches(hit.get("authors") or [], author):
+            continue
+        number = hit.get("series_number_hint")
+        if number is None:
+            continue
+        try:
+            if float(number) > ceiling:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def discover_candidates_for_series(
     series_name: str,
     author: str,
@@ -3002,6 +3137,7 @@ def discover_candidates_for_series(
     progress_callback=None,
     highest_owned_book_number: int | None = None,
     telemetry: "DiscoveryTelemetry | None" = None,
+    cache: "DiscoveryCache | None" = None,
 ) -> dict:
     """Find candidate books for a specific series by a specific author.
 
@@ -3084,6 +3220,7 @@ def discover_candidates_for_series(
         author=author,
         diagnostics=discovery_drop_diagnostics,
         telemetry=telemetry,
+        cache=cache,
         pass_label="targeted",
     )
     failures = fetch_results["_failures"]
@@ -3189,6 +3326,7 @@ def discover_candidates_for_series(
             enable_web_search=enable_fallback_web_search,
             diagnostics=discovery_drop_diagnostics,
             telemetry=telemetry,
+            cache=cache,
             pass_label="author_fallback",
         )
         # Explicit cross-series contamination -- a fallback hit tagged with
