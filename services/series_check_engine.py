@@ -8,6 +8,7 @@ intelligence, and tracks job progress/status for the polling endpoints.
 
 import logging
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import date, datetime
 
@@ -38,6 +39,13 @@ series_agent = SeriesIntelligenceAgent()
 series_check_jobs: dict[int, dict] = {}
 SERIES_CHECK_TIMEOUT_SECONDS = 300
 SERIES_CHECK_HARD_TIMEOUT_SECONDS = 300
+# Bounds the internal catch-up loop below, not a single discovery call --
+# see discovery_catchup_architecture_spec.md #2.2/#4. Empirically validated
+# against a real long/under-indexed series (Jonathan Hunt, 18 volumes from a
+# single starting book): full reconstruction completed within 2 rounds, with
+# a 3rd confirming "nothing further" -- 4 would only add cost with no
+# observed benefit.
+SERIES_CHECK_MAX_ROUNDS = 3
 
 
 def _parse_candidate_date(value: str | None) -> date | None:
@@ -195,464 +203,547 @@ def run_series_check_job_full(series_id: int) -> None:
                 "asin_fetch_failed": progress.get("asin_fetch_failed", existing.get("asin_fetch_failed", 0)),
             }
 
-        # Per-job, in-memory only -- created fresh for this one Check Now
-        # run, discarded when the job ends (see discovery_catchup_
-        # architecture_spec.md's caching/instrumentation sections). Timing
-        # data flows back out via result["telemetry"] and into the debug
-        # summary below; it does not change discovery/persistence behavior.
+        # Per-job, in-memory only -- shared across every round below so
+        # Brave/LLM call counts and timings are cumulative for the whole
+        # job, not reset each round (see discovery_catchup_architecture_
+        # spec.md #2.5).
         telemetry = DiscoveryTelemetry()
-        executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(series_agent.run_series_check, db, series_id, update_progress, False, telemetry)
-        try:
-            result = future.result(timeout=SERIES_CHECK_HARD_TIMEOUT_SECONDS)
-        except FutureTimeoutError:
-            result = {
-                "series_id": series_id,
-                "missing_books": fallback_missing,
-                "added_books": [],
-                "found": False,
-                "discovery_engine": "agent_v2",
-                "agent_pipeline": True,
-                "status": "no_hits",
-                "provider_failures": [],
-                "all_providers_failed": False,
-                "timed_out": True,
-                # The discovery thread itself is NOT stopped by
-                # cancel_futures=True below (Python can't preempt an
-                # already-running thread) -- it keeps mutating this same
-                # telemetry object in the background even after we've given
-                # up waiting, so this snapshot only reflects what had been
-                # recorded at the moment of timeout, not the eventual total.
-                "telemetry": telemetry.summary(),
-            }
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+        job_started_at = time.monotonic()
 
-        provider_failures = result.get("provider_failures") or []
-        for failure in provider_failures:
-            logger.info(
-                "Provider %s failed: %s",
-                failure.get("provider"),
-                failure.get("error") or "unknown",
+        # ---- Bounded multi-round catch-up loop (architecture spec #2.2) ----
+        # One click must be able to fully reconstruct a long/under-indexed
+        # series from a single owned book, without the user needing to
+        # press Check Now repeatedly. Each round re-runs discovery against
+        # whatever highest_owned_book_number is *now* (the previous round's
+        # persistence just advanced it), persists what it found, then
+        # decides whether another round is worth running. Persistence
+        # itself (dedupe/insert/update, both identity-collapse passes)
+        # happens every round -- round N+1 must see round N's inserts -- but
+        # the notification, series-intelligence rebuild, and job-status
+        # write are deliberately deferred until after the loop (see
+        # "Finalization" below), so a multi-round catch-up looks like one
+        # atomic Check Now to the user, not several.
+        all_persisted_new_books: list[dict] = []
+        total_discovery_delta_count = 0
+        all_provider_failures: list[dict] = []
+        any_all_providers_failed = False
+        rounds_run = 0
+        timed_out = False
+        last_result: dict = {}
+
+        for _round_num in range(1, SERIES_CHECK_MAX_ROUNDS + 1):
+            # The shared timeout bounds *scheduling of new rounds for the
+            # whole job*, not each round individually -- prevents a naive
+            # worst case of SERIES_CHECK_MAX_ROUNDS x
+            # SERIES_CHECK_HARD_TIMEOUT_SECONDS. An already-in-flight round
+            # can't be forcibly cancelled (ThreadPoolExecutor can't preempt
+            # a running thread -- ProcessPoolExecutor-only capability), so
+            # the last round may still overrun the shared budget by up to
+            # one round's own cost. Documented limitation, not a bug (see
+            # architecture spec #2.3).
+            remaining_budget = SERIES_CHECK_HARD_TIMEOUT_SECONDS - (time.monotonic() - job_started_at)
+            if remaining_budget <= 0:
+                timed_out = True
+                break
+
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(series_agent.run_series_check, db, series_id, update_progress, False, telemetry)
+            try:
+                result = future.result(timeout=remaining_budget)
+            except FutureTimeoutError:
+                timed_out = True
+                result = {
+                    "series_id": series_id,
+                    "missing_books": fallback_missing,
+                    "added_books": [],
+                    "found": False,
+                    "discovery_engine": "agent_v2",
+                    "agent_pipeline": True,
+                    "status": "no_hits",
+                    "provider_failures": [],
+                    "all_providers_failed": False,
+                    "timed_out": True,
+                    # The discovery thread itself is NOT stopped by
+                    # cancel_futures=True below (Python can't preempt an
+                    # already-running thread) -- it keeps mutating this same
+                    # telemetry object in the background even after we've
+                    # given up waiting, so this snapshot only reflects what
+                    # had been recorded at the moment of timeout, not the
+                    # eventual total.
+                    "telemetry": telemetry.summary(),
+                }
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+            rounds_run += 1
+            last_result = result
+
+            round_provider_failures = result.get("provider_failures") or []
+            all_provider_failures.extend(round_provider_failures)
+            for failure in round_provider_failures:
+                logger.info(
+                    "Provider %s failed: %s",
+                    failure.get("provider"),
+                    failure.get("error") or "unknown",
+                )
+            if result.get("all_providers_failed"):
+                any_all_providers_failed = True
+
+            db_series = db.query(models.Series).filter(models.Series.id == series_id).first()
+            if not db_series:
+                raise RuntimeError(f"Series {series_id} not found during check job")
+
+            today = date.today()
+            existing_books = (
+                db.query(models.Book)
+                .filter(models.Book.series_id == series_id)
+                # Defense-in-depth alongside the profile_id fix below on newly
+                # created books: series_id should already uniquely scope this to
+                # one profile, but matching should never silently consider a
+                # stray row from a different profile that somehow ended up
+                # pointed at this series_id.
+                .filter(models.Book.profile_id == db_series.profile_id)
+                .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
+                .all()
             )
+
+            existing_by_asin: dict[str, models.Book] = {}
+            existing_by_series_book: dict[str, models.Book] = {}
+            existing_by_canonical_title: dict[str, models.Book] = {}
+
+            for existing in existing_books:
+                existing_asin = str(existing.asin or "").strip().upper()
+                if existing_asin and existing_asin not in existing_by_asin:
+                    existing_by_asin[existing_asin] = existing
+
+                series_book_key = _series_book_identity_key(existing.series_name or db_series.name, existing.book_number)
+                if series_book_key and series_book_key not in existing_by_series_book:
+                    existing_by_series_book[series_book_key] = existing
+
+                canonical_title_key = _canonical_title_identity_key(owned_title_for_identity(existing))
+                if canonical_title_key and canonical_title_key not in existing_by_canonical_title:
+                    existing_by_canonical_title[canonical_title_key] = existing
+
+            persisted_new_books_this_round: list[dict] = []
+            discovered_candidates = result.get("added_books") or []
+            seen_batch_identity_keys: set[str] = set()
+            db_changed = False
+            # Counts upcoming->available transitions on existing rows for
+            # *this* round only -- summed into total_discovery_delta_count
+            # below, alongside every other round's count, for the single
+            # end-of-job notification (see architecture spec #2.2).
+            transitioned_to_available_count = 0
+
+            try:
+                for candidate in discovered_candidates:
+                    title = str(candidate.get("title") or "").strip()
+                    if not title:
+                        continue
+
+                    series_author = str(db_series.author or "").strip()
+                    candidate_author = str(candidate.get("author") or "").strip()
+                    if not _authors_match_exact(series_author, candidate_author):
+                        logger.info("Classification result: INVALID")
+                        continue
+
+                    canonical_metadata = candidate.get("canonical_metadata") if isinstance(candidate.get("canonical_metadata"), dict) else {}
+
+                    normalized_title = str(canonical_metadata.get("title_normalized") or title).strip()
+                    normalized_series_name = str(
+                        canonical_metadata.get("series_name_normalized")
+                        or candidate.get("series_name")
+                        or db_series.name
+                        or ""
+                    ).strip()
+                    normalized_author = candidate_author
+                    normalized_book_number = canonical_metadata.get("book_number_normalized")
+                    if normalized_book_number is None:
+                        normalized_book_number = candidate.get("book_number")
+                    candidate_asin = str(candidate.get("asin_or_id") or "").strip().upper()
+
+                    series_book_key = _series_book_identity_key(normalized_series_name, normalized_book_number)
+                    canonical_title_key = _canonical_title_identity_key(normalized_title)
+
+                    matched_existing: models.Book | None = None
+                    dedupe_reason_code = ""
+                    if candidate_asin and candidate_asin in existing_by_asin:
+                        matched_existing = existing_by_asin[candidate_asin]
+                        dedupe_reason_code = "DEDUPE_UPDATE_BY_ASIN"
+                    elif series_book_key and series_book_key in existing_by_series_book:
+                        matched_existing = existing_by_series_book[series_book_key]
+                        dedupe_reason_code = "DEDUPE_UPDATE_BY_SERIES_BOOK"
+                    elif canonical_title_key and canonical_title_key in existing_by_canonical_title:
+                        matched_existing = existing_by_canonical_title[canonical_title_key]
+                        dedupe_reason_code = "DEDUPE_UPDATE_BY_TITLE"
+
+                    identity_fingerprint = candidate_asin or series_book_key or canonical_title_key or _normalize_discovered_title(normalized_title)
+                    if identity_fingerprint in seen_batch_identity_keys and matched_existing is None:
+                        logger.info(
+                            "[DEDUPE_SKIP_BATCH_DUPLICATE] series_id=%s title=%s identity=%s",
+                            series_id,
+                            normalized_title,
+                            identity_fingerprint,
+                        )
+                        continue
+                    seen_batch_identity_keys.add(identity_fingerprint)
+
+                    status, publication_date, expected_date = _classify_discovered_status(candidate, today)
+                    if status == "upcoming":
+                        logger.info("Classified %s as UPCOMING", normalized_title)
+                    else:
+                        logger.info("Classified %s as AVAILABLE", normalized_title)
+
+                    publication_date = publication_date or _parse_candidate_date(canonical_metadata.get("publish_date_normalized"))
+                    expected_date = expected_date or _parse_candidate_date(canonical_metadata.get("upcoming_date_normalized"))
+
+                    raw_book_number = normalized_book_number
+                    book_number: float | None = None
+                    try:
+                        if raw_book_number is not None and str(raw_book_number).strip() != "":
+                            book_number = float(raw_book_number)
+                    except (TypeError, ValueError):
+                        book_number = None
+
+                    incoming_edition_type = str(canonical_metadata.get("edition_type") or "unknown").strip().lower()
+
+                    if matched_existing is not None:
+                        logger.info("Classification result: EXISTING")
+
+                        # Captured before this candidate's status overwrites
+                        # read_status/is_upcoming_auto below -- this is the only
+                        # way to tell "was upcoming, now available" (a
+                        # notification trigger, per the Auto Discovery MVP
+                        # spec's §3) from "was already available" (not a
+                        # trigger) once the fields are updated.
+                        was_upcoming_before_update = (
+                            str(matched_existing.read_status or "").strip().lower() == "upcoming"
+                            or bool(matched_existing.is_upcoming_auto)
+                            or bool(matched_existing.is_upcoming_final)
+                        )
+
+                        matched_existing.title = normalized_title or matched_existing.title
+                        # Check Now is exempt from FIND and already provider-
+                        # sourced by construction (see the Add Book metadata
+                        # intake design) -- a confirmed match refresh is exactly
+                        # the "system enrichment" case allowed to move
+                        # metadata_source to "discovery" even if the row was
+                        # previously "user"/"provider", and to update
+                        # canonical_title even though it's otherwise never
+                        # user-editable.
+                        matched_existing.canonical_title = normalized_title or matched_existing.canonical_title
+                        matched_existing.metadata_source = "discovery"
+                        matched_existing.author = normalized_author or matched_existing.author
+                        if candidate_asin:
+                            matched_existing.asin = candidate_asin
+                        if not matched_existing.source_url and candidate.get("source_url"):
+                            matched_existing.source_url = str(candidate.get("source_url")).strip()
+
+                        if book_number is not None and (matched_existing.book_number is None or matched_existing.book_number <= 0):
+                            matched_existing.book_number = book_number
+                        if matched_existing.series_order is None and matched_existing.book_number is not None and float(matched_existing.book_number).is_integer():
+                            matched_existing.series_order = int(matched_existing.book_number)
+
+                        if matched_existing.publication_date is None and publication_date is not None:
+                            matched_existing.publication_date = publication_date
+                        elif matched_existing.publication_date is not None and publication_date is not None:
+                            matched_existing.publication_date = min(matched_existing.publication_date, publication_date)
+
+                        if matched_existing.release_date is None and expected_date is not None:
+                            matched_existing.release_date = expected_date
+
+                        current_edition_type = (matched_existing.edition or matched_existing.format or "unknown")
+                        if _edition_priority(incoming_edition_type) > _edition_priority(current_edition_type):
+                            matched_existing.edition = incoming_edition_type
+                            matched_existing.format = incoming_edition_type
+                            logger.info(
+                                "[DEDUPE_MERGE_EDITION] series_id=%s book_id=%s from=%s to=%s",
+                                series_id,
+                                matched_existing.id,
+                                current_edition_type,
+                                incoming_edition_type,
+                            )
+
+                        if status == "upcoming":
+                            matched_existing.read_status = "upcoming"
+                            matched_existing.is_upcoming_auto = True
+                        elif str(matched_existing.read_status or "").strip().lower() != "read":
+                            matched_existing.read_status = "available"
+                            matched_existing.is_upcoming_auto = False
+
+                        matched_existing.is_missing = bool(matched_existing.is_missing and bool(candidate.get("is_missing")))
+                        matched_existing.record_status = "active"
+                        db.flush()
+                        db_changed = True
+
+                        if was_upcoming_before_update and status != "upcoming":
+                            transitioned_to_available_count += 1
+
+                        continue
+
+                    db_book = models.Book(
+                        # Book.profile_id defaults to "robbie" when not passed
+                        # explicitly (see models.py) -- this construction used to
+                        # omit it entirely, so every book discovered by "Check for
+                        # New" on any *other* profile's series silently got
+                        # profile_id="robbie" while staying linked to that other
+                        # profile's series_id. The result was an invisible ghost
+                        # row: excluded from every profile-scoped books query (so
+                        # neither profile could see or delete it), yet still
+                        # counted by series_id-only aggregates like
+                        # compute_series_intelligence_for_series, inflating that
+                        # series' total_books/upcoming flags with a "phantom" book.
+                        profile_id=db_series.profile_id,
+                        title=normalized_title,
+                        # Check Now has no user-entered title to preserve, so
+                        # both title columns get the same resolved value (see
+                        # the Add Book metadata intake design's two-column title
+                        # model) -- unlike a FIND bind, there's nothing here
+                        # that needs protecting from being overwritten.
+                        canonical_title=normalized_title,
+                        metadata_source="discovery",
+                        book_number_source="provider" if book_number is not None else None,
+                        author=normalized_author,
+                        series_id=series_id,
+                        book_number=book_number,
+                        series_order=int(book_number) if book_number is not None and float(book_number).is_integer() else None,
+                        publication_date=publication_date,
+                        release_date=expected_date,
+                        date_added=today,
+                        asin=candidate_asin or None,
+                        source_url=str(candidate.get("source_url")).strip() if candidate.get("source_url") else None,
+                        format=incoming_edition_type if incoming_edition_type != "unknown" else None,
+                        edition=incoming_edition_type if incoming_edition_type != "unknown" else None,
+                        is_read=False,
+                        read_status="upcoming" if status == "upcoming" else "available",
+                        is_upcoming_auto=(status == "upcoming"),
+                        is_upcoming_final=False,
+                        is_missing=bool(candidate.get("is_missing")),
+                        record_status="active",
+                    )
+                    logger.info("Classification result: NEW")
+                    _console_log(f"Persisted new book: {normalized_title}")
+                    db.add(db_book)
+                    db.flush()
+                    db_changed = True
+
+                    if db_book.asin:
+                        existing_by_asin[str(db_book.asin).strip().upper()] = db_book
+                    inserted_series_book_key = _series_book_identity_key(db_series.name, db_book.book_number)
+                    if inserted_series_book_key:
+                        existing_by_series_book[inserted_series_book_key] = db_book
+                    inserted_title_key = _canonical_title_identity_key(owned_title_for_identity(db_book))
+                    if inserted_title_key:
+                        existing_by_canonical_title[inserted_title_key] = db_book
+
+                    persisted_new_books_this_round.append(
+                        {
+                            "id": int(db_book.id),
+                            "title": db_book.title,
+                            "author": db_book.author,
+                            "asin": db_book.asin,
+                            "is_missing": bool(db_book.is_missing),
+                            "status": status,
+                            "date_published": db_book.publication_date.isoformat() if db_book.publication_date else None,
+                            "expected_date": db_book.release_date.isoformat() if db_book.release_date else None,
+                            "source_url": db_book.source_url,
+                            "series_id": series_id,
+                            "library_position": "top",
+                        }
+                    )
+
+                # Durable series-level discovery notification (see services/
+                # notifications.py): counted here per round, but the actual
+                # notification fires only once, after the loop, with the
+                # total summed across every round (see architecture spec
+                # #2.2) -- a per-round fire would spam the user with
+                # multiple "new books found" notifications from one click.
+                new_available_insert_count = sum(
+                    1 for book in persisted_new_books_this_round if book.get("status") != "upcoming"
+                )
+                round_discovery_delta_count = new_available_insert_count + transitioned_to_available_count
+                total_discovery_delta_count += round_discovery_delta_count
+
+                # NOTE: this used to also delete any existing not-yet-read "ghost"
+                # book that this run's candidate set didn't happen to re-surface
+                # (a leftover behavior from the old HTML-scraper pipeline, meant
+                # to clean up its noisier results). That's actively unsafe with
+                # live third-party search APIs: a book correctly discovered on
+                # one Check Now can simply not come back in the exact same
+                # ranked result set on a later call (pagination/ranking/quota
+                # variance), which would silently delete a perfectly valid,
+                # already-confirmed book. True duplicate cleanup among rows that
+                # currently coexist is handled by the identity-collapse passes
+                # below instead, which don't depend on this run's API results.
+
+                # Collapse duplicates that share canonical identity keys.
+                identity_keeper: dict[str, models.Book] = {}
+                refreshed_active_books = (
+                    db.query(models.Book)
+                    .filter(models.Book.series_id == series_id)
+                    .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
+                    .all()
+                )
+                for existing in refreshed_active_books:
+                    key = str(existing.asin or "").strip().upper()
+                    if not key:
+                        key = _series_book_identity_key(existing.series_name or db_series.name, existing.book_number) or ""
+                    if not key:
+                        key = _canonical_title_identity_key(owned_title_for_identity(existing)) or ""
+                    if not key:
+                        continue
+
+                    keeper = identity_keeper.get(key)
+                    if keeper is None:
+                        identity_keeper[key] = existing
+                        continue
+
+                    keeper_score = (
+                        1 if bool(keeper.is_read) else 0,
+                        _edition_priority(keeper.edition or keeper.format),
+                        1 if keeper.publication_date else 0,
+                    )
+                    existing_score = (
+                        1 if bool(existing.is_read) else 0,
+                        _edition_priority(existing.edition or existing.format),
+                        1 if existing.publication_date else 0,
+                    )
+                    if existing_score > keeper_score:
+                        loser = keeper
+                        identity_keeper[key] = existing
+                    else:
+                        loser = existing
+
+                    logger.info(
+                        "[DEDUPE_PRUNE_DUPLICATE_EXISTING] series_id=%s keep_id=%s drop_id=%s key=%s",
+                        series_id,
+                        identity_keeper[key].id,
+                        loser.id,
+                        key,
+                    )
+                    _merge_loser_fields_into_keeper(identity_keeper[key], loser)
+                    loser.record_status = "deleted"
+                    db_changed = True
+
+                # Final strict pass: collapse all duplicates by normalized series+book number,
+                # even when one row has ASIN and another row does not.
+                series_book_keeper: dict[str, models.Book] = {}
+                refreshed_after_identity_prune = (
+                    db.query(models.Book)
+                    .filter(models.Book.series_id == series_id)
+                    .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
+                    .all()
+                )
+                for existing in refreshed_after_identity_prune:
+                    series_book_key = _series_book_identity_key(existing.series_name or db_series.name, existing.book_number)
+                    if not series_book_key:
+                        continue
+
+                    keeper = series_book_keeper.get(series_book_key)
+                    if keeper is None:
+                        series_book_keeper[series_book_key] = existing
+                        continue
+
+                    keeper_score = (
+                        1 if str(keeper.asin or "").strip() else 0,
+                        1 if bool(keeper.is_read) else 0,
+                        _edition_priority(keeper.edition or keeper.format),
+                        1 if keeper.publication_date else 0,
+                    )
+                    existing_score = (
+                        1 if str(existing.asin or "").strip() else 0,
+                        1 if bool(existing.is_read) else 0,
+                        _edition_priority(existing.edition or existing.format),
+                        1 if existing.publication_date else 0,
+                    )
+
+                    if existing_score > keeper_score:
+                        loser = keeper
+                        series_book_keeper[series_book_key] = existing
+                    else:
+                        loser = existing
+
+                    logger.info(
+                        "[DEDUPE_PRUNE_SERIES_BOOK_DUPLICATE] series_id=%s keep_id=%s drop_id=%s key=%s",
+                        series_id,
+                        series_book_keeper[series_book_key].id,
+                        loser.id,
+                        series_book_key,
+                    )
+                    _merge_loser_fields_into_keeper(series_book_keeper[series_book_key], loser)
+                    loser.record_status = "deleted"
+                    db_changed = True
+
+                if db_changed:
+                    db.commit()
+                    db.refresh(db_series)
+
+                logger.info("LIBRARY_SYNC_TRIGGERED series_id=%s", series_id)
+                library_sync.update_from_series(series_id)
+            except Exception:
+                db.rollback()
+                raise
+
+            all_persisted_new_books.extend(persisted_new_books_this_round)
+
+            # ---- Stop condition (architecture spec #2.2, revised) ----
+            # Nothing NEW persisted this round -- another round would just
+            # re-discover/re-update the same rows for no benefit.
+            #
+            # The spec's originally-proposed second stop condition --
+            # "stop if this round's candidates didn't reach the top of its
+            # own lookahead window" -- was tried and measurably wrong: live
+            # Brave results for "book N" queries are noisy enough that a
+            # round can legitimately fall short of its own window's top
+            # while later volumes still exist (confirmed live against the
+            # Jonathan Hunt case: round 1 found up through book 9 against a
+            # book-2..11 window and would have stopped there, but books
+            # 10-18 were real and only surfaced in a later round). Relying
+            # solely on "zero new books" costs at most one extra wasted
+            # round (bounded by SERIES_CHECK_MAX_ROUNDS regardless), in
+            # exchange for actually guaranteeing one-click full
+            # reconstruction, which is the entire point of this loop.
+            if not persisted_new_books_this_round:
+                break
+            if timed_out:
+                break
+
+        # ---- Finalization: runs exactly once, after the loop ----
+        # Built from a fresh dict rather than mutating last_result in place:
+        # series_agent.run_series_check's return value isn't ours to
+        # mutate, and tests that mock it with one shared return_value
+        # object across multiple calls would otherwise see that same mock
+        # corrupted after the first round.
+        result = dict(last_result)
+        result["added_books"] = all_persisted_new_books
+        result["added_count"] = len(all_persisted_new_books)
+        # See the durable-notification block above -- new inserts (excluding
+        # upcoming-only ones) plus upcoming->available transitions, summed
+        # across every round. Kept as a distinct field rather than folding
+        # into added_count/added_books, which already have an established
+        # "fresh inserts only" meaning relied on elsewhere (e.g. services/
+        # discovery_logging.py's debug summary). This is what both the
+        # ephemeral popup and the durable notification row use, so the two
+        # numbers can never disagree.
+        result["discovery_delta_count"] = total_discovery_delta_count
+        result["provider_failures"] = all_provider_failures
+        result["all_providers_failed"] = any_all_providers_failed
+        result["rounds_run"] = rounds_run
+        result["timed_out"] = timed_out
+        result["telemetry"] = telemetry.summary()
 
         db_series = db.query(models.Series).filter(models.Series.id == series_id).first()
         if not db_series:
             raise RuntimeError(f"Series {series_id} not found during check job")
 
-        today = date.today()
-        existing_books = (
-            db.query(models.Book)
-            .filter(models.Book.series_id == series_id)
-            # Defense-in-depth alongside the profile_id fix below on newly
-            # created books: series_id should already uniquely scope this to
-            # one profile, but matching should never silently consider a
-            # stray row from a different profile that somehow ended up
-            # pointed at this series_id.
-            .filter(models.Book.profile_id == db_series.profile_id)
-            .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
-            .all()
-        )
-
-        existing_by_asin: dict[str, models.Book] = {}
-        existing_by_series_book: dict[str, models.Book] = {}
-        existing_by_canonical_title: dict[str, models.Book] = {}
-
-        for existing in existing_books:
-            existing_asin = str(existing.asin or "").strip().upper()
-            if existing_asin and existing_asin not in existing_by_asin:
-                existing_by_asin[existing_asin] = existing
-
-            series_book_key = _series_book_identity_key(existing.series_name or db_series.name, existing.book_number)
-            if series_book_key and series_book_key not in existing_by_series_book:
-                existing_by_series_book[series_book_key] = existing
-
-            canonical_title_key = _canonical_title_identity_key(owned_title_for_identity(existing))
-            if canonical_title_key and canonical_title_key not in existing_by_canonical_title:
-                existing_by_canonical_title[canonical_title_key] = existing
-
-        persisted_new_books: list[dict] = []
-        discovered_candidates = result.get("added_books") or []
-        seen_batch_identity_keys: set[str] = set()
-        db_changed = False
-        # Durable series-level discovery notification (see services/
-        # notifications.py) counts both brand-new inserts (persisted_new_
-        # books below) and upcoming->available transitions on existing
-        # rows -- this counter only tracks the latter, since the former is
-        # already `len(persisted_new_books)`. One aggregated row is
-        # written after this loop, not per-book as the old kind="new_book"
-        # rows were.
-        transitioned_to_available_count = 0
-
-        try:
-            for candidate in discovered_candidates:
-                title = str(candidate.get("title") or "").strip()
-                if not title:
-                    continue
-
-                series_author = str(db_series.author or "").strip()
-                candidate_author = str(candidate.get("author") or "").strip()
-                if not _authors_match_exact(series_author, candidate_author):
-                    logger.info("Classification result: INVALID")
-                    continue
-
-                canonical_metadata = candidate.get("canonical_metadata") if isinstance(candidate.get("canonical_metadata"), dict) else {}
-
-                normalized_title = str(canonical_metadata.get("title_normalized") or title).strip()
-                normalized_series_name = str(
-                    canonical_metadata.get("series_name_normalized")
-                    or candidate.get("series_name")
-                    or db_series.name
-                    or ""
-                ).strip()
-                normalized_author = candidate_author
-                normalized_book_number = canonical_metadata.get("book_number_normalized")
-                if normalized_book_number is None:
-                    normalized_book_number = candidate.get("book_number")
-                candidate_asin = str(candidate.get("asin_or_id") or "").strip().upper()
-
-                series_book_key = _series_book_identity_key(normalized_series_name, normalized_book_number)
-                canonical_title_key = _canonical_title_identity_key(normalized_title)
-
-                matched_existing: models.Book | None = None
-                dedupe_reason_code = ""
-                if candidate_asin and candidate_asin in existing_by_asin:
-                    matched_existing = existing_by_asin[candidate_asin]
-                    dedupe_reason_code = "DEDUPE_UPDATE_BY_ASIN"
-                elif series_book_key and series_book_key in existing_by_series_book:
-                    matched_existing = existing_by_series_book[series_book_key]
-                    dedupe_reason_code = "DEDUPE_UPDATE_BY_SERIES_BOOK"
-                elif canonical_title_key and canonical_title_key in existing_by_canonical_title:
-                    matched_existing = existing_by_canonical_title[canonical_title_key]
-                    dedupe_reason_code = "DEDUPE_UPDATE_BY_TITLE"
-
-                identity_fingerprint = candidate_asin or series_book_key or canonical_title_key or _normalize_discovered_title(normalized_title)
-                if identity_fingerprint in seen_batch_identity_keys and matched_existing is None:
-                    logger.info(
-                        "[DEDUPE_SKIP_BATCH_DUPLICATE] series_id=%s title=%s identity=%s",
-                        series_id,
-                        normalized_title,
-                        identity_fingerprint,
-                    )
-                    continue
-                seen_batch_identity_keys.add(identity_fingerprint)
-
-                status, publication_date, expected_date = _classify_discovered_status(candidate, today)
-                if status == "upcoming":
-                    logger.info("Classified %s as UPCOMING", normalized_title)
-                else:
-                    logger.info("Classified %s as AVAILABLE", normalized_title)
-
-                publication_date = publication_date or _parse_candidate_date(canonical_metadata.get("publish_date_normalized"))
-                expected_date = expected_date or _parse_candidate_date(canonical_metadata.get("upcoming_date_normalized"))
-
-                raw_book_number = normalized_book_number
-                book_number: float | None = None
-                try:
-                    if raw_book_number is not None and str(raw_book_number).strip() != "":
-                        book_number = float(raw_book_number)
-                except (TypeError, ValueError):
-                    book_number = None
-
-                incoming_edition_type = str(canonical_metadata.get("edition_type") or "unknown").strip().lower()
-
-                if matched_existing is not None:
-                    logger.info("Classification result: EXISTING")
-
-                    # Captured before this candidate's status overwrites
-                    # read_status/is_upcoming_auto below -- this is the only
-                    # way to tell "was upcoming, now available" (a
-                    # notification trigger, per the Auto Discovery MVP
-                    # spec's §3) from "was already available" (not a
-                    # trigger) once the fields are updated.
-                    was_upcoming_before_update = (
-                        str(matched_existing.read_status or "").strip().lower() == "upcoming"
-                        or bool(matched_existing.is_upcoming_auto)
-                        or bool(matched_existing.is_upcoming_final)
-                    )
-
-                    matched_existing.title = normalized_title or matched_existing.title
-                    # Check Now is exempt from FIND and already provider-
-                    # sourced by construction (see the Add Book metadata
-                    # intake design) -- a confirmed match refresh is exactly
-                    # the "system enrichment" case allowed to move
-                    # metadata_source to "discovery" even if the row was
-                    # previously "user"/"provider", and to update
-                    # canonical_title even though it's otherwise never
-                    # user-editable.
-                    matched_existing.canonical_title = normalized_title or matched_existing.canonical_title
-                    matched_existing.metadata_source = "discovery"
-                    matched_existing.author = normalized_author or matched_existing.author
-                    if candidate_asin:
-                        matched_existing.asin = candidate_asin
-                    if not matched_existing.source_url and candidate.get("source_url"):
-                        matched_existing.source_url = str(candidate.get("source_url")).strip()
-
-                    if book_number is not None and (matched_existing.book_number is None or matched_existing.book_number <= 0):
-                        matched_existing.book_number = book_number
-                    if matched_existing.series_order is None and matched_existing.book_number is not None and float(matched_existing.book_number).is_integer():
-                        matched_existing.series_order = int(matched_existing.book_number)
-
-                    if matched_existing.publication_date is None and publication_date is not None:
-                        matched_existing.publication_date = publication_date
-                    elif matched_existing.publication_date is not None and publication_date is not None:
-                        matched_existing.publication_date = min(matched_existing.publication_date, publication_date)
-
-                    if matched_existing.release_date is None and expected_date is not None:
-                        matched_existing.release_date = expected_date
-
-                    current_edition_type = (matched_existing.edition or matched_existing.format or "unknown")
-                    if _edition_priority(incoming_edition_type) > _edition_priority(current_edition_type):
-                        matched_existing.edition = incoming_edition_type
-                        matched_existing.format = incoming_edition_type
-                        logger.info(
-                            "[DEDUPE_MERGE_EDITION] series_id=%s book_id=%s from=%s to=%s",
-                            series_id,
-                            matched_existing.id,
-                            current_edition_type,
-                            incoming_edition_type,
-                        )
-
-                    if status == "upcoming":
-                        matched_existing.read_status = "upcoming"
-                        matched_existing.is_upcoming_auto = True
-                    elif str(matched_existing.read_status or "").strip().lower() != "read":
-                        matched_existing.read_status = "available"
-                        matched_existing.is_upcoming_auto = False
-
-                    matched_existing.is_missing = bool(matched_existing.is_missing and bool(candidate.get("is_missing")))
-                    matched_existing.record_status = "active"
-                    db.flush()
-                    db_changed = True
-
-                    if was_upcoming_before_update and status != "upcoming":
-                        transitioned_to_available_count += 1
-
-                    continue
-
-                db_book = models.Book(
-                    # Book.profile_id defaults to "robbie" when not passed
-                    # explicitly (see models.py) -- this construction used to
-                    # omit it entirely, so every book discovered by "Check for
-                    # New" on any *other* profile's series silently got
-                    # profile_id="robbie" while staying linked to that other
-                    # profile's series_id. The result was an invisible ghost
-                    # row: excluded from every profile-scoped books query (so
-                    # neither profile could see or delete it), yet still
-                    # counted by series_id-only aggregates like
-                    # compute_series_intelligence_for_series, inflating that
-                    # series' total_books/upcoming flags with a "phantom" book.
-                    profile_id=db_series.profile_id,
-                    title=normalized_title,
-                    # Check Now has no user-entered title to preserve, so
-                    # both title columns get the same resolved value (see
-                    # the Add Book metadata intake design's two-column title
-                    # model) -- unlike a FIND bind, there's nothing here
-                    # that needs protecting from being overwritten.
-                    canonical_title=normalized_title,
-                    metadata_source="discovery",
-                    book_number_source="provider" if book_number is not None else None,
-                    author=normalized_author,
-                    series_id=series_id,
-                    book_number=book_number,
-                    series_order=int(book_number) if book_number is not None and float(book_number).is_integer() else None,
-                    publication_date=publication_date,
-                    release_date=expected_date,
-                    date_added=today,
-                    asin=candidate_asin or None,
-                    source_url=str(candidate.get("source_url")).strip() if candidate.get("source_url") else None,
-                    format=incoming_edition_type if incoming_edition_type != "unknown" else None,
-                    edition=incoming_edition_type if incoming_edition_type != "unknown" else None,
-                    is_read=False,
-                    read_status="upcoming" if status == "upcoming" else "available",
-                    is_upcoming_auto=(status == "upcoming"),
-                    is_upcoming_final=False,
-                    is_missing=bool(candidate.get("is_missing")),
-                    record_status="active",
-                )
-                logger.info("Classification result: NEW")
-                _console_log(f"Persisted new book: {normalized_title}")
-                db.add(db_book)
-                db.flush()
-                db_changed = True
-
-                if db_book.asin:
-                    existing_by_asin[str(db_book.asin).strip().upper()] = db_book
-                inserted_series_book_key = _series_book_identity_key(db_series.name, db_book.book_number)
-                if inserted_series_book_key:
-                    existing_by_series_book[inserted_series_book_key] = db_book
-                inserted_title_key = _canonical_title_identity_key(owned_title_for_identity(db_book))
-                if inserted_title_key:
-                    existing_by_canonical_title[inserted_title_key] = db_book
-
-                persisted_new_books.append(
-                    {
-                        "id": int(db_book.id),
-                        "title": db_book.title,
-                        "author": db_book.author,
-                        "asin": db_book.asin,
-                        "is_missing": bool(db_book.is_missing),
-                        "status": status,
-                        "date_published": db_book.publication_date.isoformat() if db_book.publication_date else None,
-                        "expected_date": db_book.release_date.isoformat() if db_book.release_date else None,
-                        "source_url": db_book.source_url,
-                        "series_id": series_id,
-                        "library_position": "top",
-                    }
-                )
-
-            # Durable series-level discovery notification (see services/
-            # notifications.py) -- one aggregated row for this series' run,
-            # not one per book. Counts brand-new *available* inserts (a
-            # brand-new *upcoming* insert is intentionally not counted,
-            # same as the old per-book trigger it replaces -- it'll count
-            # later, if/when a subsequent check flips it to available via
-            # transitioned_to_available_count above) plus upcoming-
-            # >available transitions on existing rows.
-            new_available_insert_count = sum(
-                1 for book in persisted_new_books if book.get("status") != "upcoming"
+        if total_discovery_delta_count > 0:
+            create_series_discovery_notification(
+                db,
+                profile_id=db_series.profile_id,
+                series_id=series_id,
+                series_name=db_series.name,
+                count_new_books=total_discovery_delta_count,
             )
-            discovery_delta_count = new_available_insert_count + transitioned_to_available_count
-            if discovery_delta_count > 0:
-                create_series_discovery_notification(
-                    db,
-                    profile_id=db_series.profile_id,
-                    series_id=series_id,
-                    series_name=db_series.name,
-                    count_new_books=discovery_delta_count,
-                )
-                db.flush()
-
-            # NOTE: this used to also delete any existing not-yet-read "ghost"
-            # book that this run's candidate set didn't happen to re-surface
-            # (a leftover behavior from the old HTML-scraper pipeline, meant
-            # to clean up its noisier results). That's actively unsafe with
-            # live third-party search APIs: a book correctly discovered on
-            # one Check Now can simply not come back in the exact same
-            # ranked result set on a later call (pagination/ranking/quota
-            # variance), which would silently delete a perfectly valid,
-            # already-confirmed book. True duplicate cleanup among rows that
-            # currently coexist is handled by the identity-collapse passes
-            # below instead, which don't depend on this run's API results.
-
-            # Collapse duplicates that share canonical identity keys.
-            identity_keeper: dict[str, models.Book] = {}
-            refreshed_active_books = (
-                db.query(models.Book)
-                .filter(models.Book.series_id == series_id)
-                .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
-                .all()
-            )
-            for existing in refreshed_active_books:
-                key = str(existing.asin or "").strip().upper()
-                if not key:
-                    key = _series_book_identity_key(existing.series_name or db_series.name, existing.book_number) or ""
-                if not key:
-                    key = _canonical_title_identity_key(owned_title_for_identity(existing)) or ""
-                if not key:
-                    continue
-
-                keeper = identity_keeper.get(key)
-                if keeper is None:
-                    identity_keeper[key] = existing
-                    continue
-
-                keeper_score = (
-                    1 if bool(keeper.is_read) else 0,
-                    _edition_priority(keeper.edition or keeper.format),
-                    1 if keeper.publication_date else 0,
-                )
-                existing_score = (
-                    1 if bool(existing.is_read) else 0,
-                    _edition_priority(existing.edition or existing.format),
-                    1 if existing.publication_date else 0,
-                )
-                if existing_score > keeper_score:
-                    loser = keeper
-                    identity_keeper[key] = existing
-                else:
-                    loser = existing
-
-                logger.info(
-                    "[DEDUPE_PRUNE_DUPLICATE_EXISTING] series_id=%s keep_id=%s drop_id=%s key=%s",
-                    series_id,
-                    identity_keeper[key].id,
-                    loser.id,
-                    key,
-                )
-                _merge_loser_fields_into_keeper(identity_keeper[key], loser)
-                loser.record_status = "deleted"
-                db_changed = True
-
-            # Final strict pass: collapse all duplicates by normalized series+book number,
-            # even when one row has ASIN and another row does not.
-            series_book_keeper: dict[str, models.Book] = {}
-            refreshed_after_identity_prune = (
-                db.query(models.Book)
-                .filter(models.Book.series_id == series_id)
-                .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
-                .all()
-            )
-            for existing in refreshed_after_identity_prune:
-                series_book_key = _series_book_identity_key(existing.series_name or db_series.name, existing.book_number)
-                if not series_book_key:
-                    continue
-
-                keeper = series_book_keeper.get(series_book_key)
-                if keeper is None:
-                    series_book_keeper[series_book_key] = existing
-                    continue
-
-                keeper_score = (
-                    1 if str(keeper.asin or "").strip() else 0,
-                    1 if bool(keeper.is_read) else 0,
-                    _edition_priority(keeper.edition or keeper.format),
-                    1 if keeper.publication_date else 0,
-                )
-                existing_score = (
-                    1 if str(existing.asin or "").strip() else 0,
-                    1 if bool(existing.is_read) else 0,
-                    _edition_priority(existing.edition or existing.format),
-                    1 if existing.publication_date else 0,
-                )
-
-                if existing_score > keeper_score:
-                    loser = keeper
-                    series_book_keeper[series_book_key] = existing
-                else:
-                    loser = existing
-
-                logger.info(
-                    "[DEDUPE_PRUNE_SERIES_BOOK_DUPLICATE] series_id=%s keep_id=%s drop_id=%s key=%s",
-                    series_id,
-                    series_book_keeper[series_book_key].id,
-                    loser.id,
-                    series_book_key,
-                )
-                _merge_loser_fields_into_keeper(series_book_keeper[series_book_key], loser)
-                loser.record_status = "deleted"
-                db_changed = True
-
-            if db_changed:
-                db.commit()
-                db.refresh(db_series)
-
-            logger.info("LIBRARY_SYNC_TRIGGERED series_id=%s", series_id)
-            library_sync.update_from_series(series_id)
-        except Exception:
-            db.rollback()
-            raise
-
-        result["added_books"] = persisted_new_books
-        result["added_count"] = len(persisted_new_books)
-        # See the durable-notification block above -- new inserts (excluding
-        # upcoming-only ones) plus upcoming->available transitions. Kept as
-        # a distinct field rather than folding into added_count/added_books,
-        # which already have an established "fresh inserts only" meaning
-        # relied on elsewhere (e.g. services/discovery_logging.py's debug
-        # summary). This is what both the ephemeral popup and the durable
-        # notification row use, so the two numbers can never disagree.
-        result["discovery_delta_count"] = discovery_delta_count
+            db.commit()
 
         rebuild_snapshot = recalculate_intelligence(db, series_id, scan_result=result if isinstance(result, dict) else None)
         if isinstance(result, dict) and rebuild_snapshot:
@@ -688,7 +779,7 @@ def run_series_check_job_full(series_id: int) -> None:
             response_status = "error"
             response_message = "All providers failed for this series."
             logger.info("CHECK NOW completed successfully for series: %s", db_series.name)
-        elif persisted_new_books:
+        elif all_persisted_new_books:
             response_status = "success"
             response_message = "NEW BOOKS found and added to library."
             logger.info("CHECK NOW completed successfully for series: %s", db_series.name)
@@ -700,7 +791,7 @@ def run_series_check_job_full(series_id: int) -> None:
         completion = {
             "status": response_status,
             "message": response_message,
-            "new_books": persisted_new_books,
+            "new_books": all_persisted_new_books,
             "counters": counters,
             "status_bar": status_bar,
             "complete": True,
@@ -708,10 +799,11 @@ def run_series_check_job_full(series_id: int) -> None:
             "available_missing": result.get("available_missing") or [],
             "upcoming_books": result.get("upcoming_books") or [],
             "validated_candidates": result.get("validated_candidates") or [],
-            "found_books": persisted_new_books,
+            "found_books": all_persisted_new_books,
             "no_new_books": response_status != "success",
-            "discovery_delta_count": discovery_delta_count,
+            "discovery_delta_count": total_discovery_delta_count,
             "discovery_engine": result.get("discovery_engine") or "new_book_checker",
+            "rounds_run": rounds_run,
             "asin_discovery": result.get("asin_discovery") or {
                 "discovered": 0,
                 "processed": 0,

@@ -73,7 +73,15 @@ WEB_SEARCH_MAX_RESULTS = 8
 # announced-but-not-yet-released preorder, did not, even at count=20).
 # Explicitly searching "<series> book <N>" for the next few sequential
 # numbers reliably surfaces it instead, so both query styles are combined.
-WEB_SEARCH_LOOKAHEAD_BOOKS = 3
+#
+# Raised from 3 to 10 (see discovery_catchup_architecture_spec.md #2.1):
+# long/under-indexed series (e.g. the Jonathan Hunt case that motivated this
+# spec) can sit many volumes ahead of the highest owned book, and 3 wasn't
+# wide enough to catch them in one pass. Still batched into a single LLM
+# structuring call regardless of width -- see _fetch_web_search -- so this
+# only adds Brave calls (and a larger prompt on that one call), not LLM
+# call count.
+WEB_SEARCH_LOOKAHEAD_BOOKS = 10
 
 # When a candidate's first-pass query snippet doesn't include a release date,
 # a second, title-specific "<title> release date" query surfaces

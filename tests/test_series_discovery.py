@@ -1758,10 +1758,11 @@ class WebSearchProviderTest(unittest.TestCase):
             )
 
         queries_used = mock_web_search.call_args[0][0]
-        self.assertIn('"The First Peacemaker" Some Author book 9', queries_used)
-        self.assertIn('"The First Peacemaker" Some Author book 10', queries_used)
-        self.assertIn('"The First Peacemaker" Some Author book 11', queries_used)
-        self.assertNotIn('"The First Peacemaker" Some Author book 12', queries_used)
+        for number in range(9, 9 + discovery_engine.WEB_SEARCH_LOOKAHEAD_BOOKS):
+            self.assertIn(f'"The First Peacemaker" Some Author book {number}', queries_used)
+        self.assertNotIn(
+            f'"The First Peacemaker" Some Author book {9 + discovery_engine.WEB_SEARCH_LOOKAHEAD_BOOKS}', queries_used
+        )
 
     def test_discover_candidates_for_series_lookahead_query_disambiguates_generic_series_names(self):
         # Regression (live bug): "The World Book" by Jason Cheek is a real
