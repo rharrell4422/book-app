@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 import unittest
 from datetime import date
 from unittest.mock import MagicMock, patch
@@ -1730,6 +1731,124 @@ class WebSearchProviderTest(unittest.TestCase):
         self.assertEqual(first[0]["published_date"], "2024-01-01")
         self.assertEqual(second[0]["published_date"], "2024-01-01")
 
+    def test_refinement_batches_multiple_candidates_into_one_llm_call(self):
+        # Cost optimization: N undated candidates in one round must cost one
+        # dedicated Brave query each (query text has to stay per-title) but
+        # only ONE combined LLM structuring call, not N separate ones.
+        raw_results = [
+            {"title": f"Generic listing {n}", "description": "snippet, no date", "url": f"https://example.com/{n}"}
+            for n in range(3)
+        ]
+        first_pass_structured = [
+            {
+                "result_index": n,
+                "title": f"Book {n}",
+                "book_number": n,
+                "author_names": ["Some Author"],
+                "published_date": None,
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+            for n in range(3)
+        ]
+        refinement_raw_by_title = {
+            f"Book {n}": [{"title": f"Book {n} release date", "description": f"Released 2024-0{n+1}-01", "url": f"https://example.com/{n}-date"}]
+            for n in range(3)
+        }
+
+        def fake_brave(query, **kwargs):
+            for title, raw in refinement_raw_by_title.items():
+                if title in query:
+                    return raw
+            return raw_results
+
+        def fake_structure(series_name, author, results, **kwargs):
+            if results == raw_results:
+                return first_pass_structured
+            # Refinement's own combined call -- structure every distinct
+            # undated-candidate release-date result it was actually given,
+            # regardless of how many separate Brave queries fed into it.
+            structured = []
+            for index, item in enumerate(results):
+                for n in range(3):
+                    if f"Book {n} release date" == item["title"]:
+                        structured.append(
+                            {
+                                "result_index": index,
+                                "title": f"Book {n}",
+                                "book_number": n,
+                                "author_names": ["Some Author"],
+                                "published_date": f"2024-0{n + 1}-01",
+                                "is_upcoming": False,
+                                "isbn13": None,
+                            }
+                        )
+            return structured
+
+        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave) as mock_brave, patch.object(
+            discovery_engine, "_structure_web_results_with_llm", side_effect=fake_structure
+        ) as mock_llm:
+            results = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author")
+
+        # 1 targeted-pass Brave call + 3 per-candidate refinement Brave calls.
+        self.assertEqual(mock_brave.call_count, 4)
+        # 1 targeted-pass LLM call + exactly 1 combined refinement LLM call
+        # (not 3) -- this is the whole point of batching.
+        self.assertEqual(mock_llm.call_count, 2)
+        dates = {r["title"]: r["published_date"] for r in results}
+        self.assertEqual(dates, {"Book 0": "2024-01-01", "Book 1": "2024-02-01", "Book 2": "2024-03-01"})
+
+    def test_refinement_never_misattributes_a_date_across_candidates_with_similar_urls(self):
+        # Guardrail regression: if two different undated candidates'
+        # refinement queries happen to surface an overlapping URL (e.g. a
+        # generic series-catalog page both searches turn up), a date
+        # resolved for that URL must never be applied to the WRONG
+        # candidate just because it appeared in that candidate's own raw
+        # fetch too -- only a title match to the correct candidate counts.
+        shared_url = "https://example.com/shared-catalog-page"
+        raw_results = [
+            {"title": "Book Alpha listing", "description": "no date", "url": "https://example.com/alpha"},
+            {"title": "Book Beta listing", "description": "no date", "url": "https://example.com/beta"},
+        ]
+        first_pass_structured = [
+            {"result_index": 0, "title": "Book Alpha", "book_number": 1, "author_names": ["Some Author"], "published_date": None, "is_upcoming": False, "isbn13": None},
+            {"result_index": 1, "title": "Book Beta", "book_number": 2, "author_names": ["Some Author"], "published_date": None, "is_upcoming": False, "isbn13": None},
+        ]
+
+        def fake_brave(query, **kwargs):
+            if "Book Alpha" in query:
+                return [{"title": "series catalog", "description": "...", "url": shared_url}]
+            if "Book Beta" in query:
+                return [{"title": "series catalog", "description": "...", "url": shared_url}]
+            return raw_results
+
+        def fake_structure(series_name, author, results, **kwargs):
+            if results == raw_results:
+                return first_pass_structured
+            # The shared catalog page only ever resolves to "Book Alpha" --
+            # Book Beta must NOT receive this date just because its own
+            # query also happened to surface the same URL.
+            return [
+                {
+                    "result_index": 0,
+                    "title": "Book Alpha",
+                    "book_number": 1,
+                    "author_names": ["Some Author"],
+                    "published_date": "2024-05-01",
+                    "is_upcoming": False,
+                    "isbn13": None,
+                }
+            ]
+
+        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", side_effect=fake_structure
+        ):
+            results = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author")
+
+        dates = {r["title"]: r["published_date"] for r in results}
+        self.assertEqual(dates["Book Alpha"], "2024-05-01")
+        self.assertEqual(dates["Book Beta"], "")  # left unresolved, not misattributed
+
     def test_fetch_web_search_refinement_is_capped_and_tolerates_failures(self):
         # Bound the extra cost: only the first WEB_SEARCH_DATE_REFINEMENT_MAX
         # undated candidates get a second look, and a refinement query
@@ -1808,6 +1927,36 @@ class WebSearchProviderTest(unittest.TestCase):
         passed_raw_results = mock_structure.call_args[0][2]
         self.assertEqual(len(passed_raw_results), 2)
         self.assertEqual({r["url"] for r in passed_raw_results}, {"https://example.com/1", "https://example.com/9"})
+
+    def test_fetch_web_search_parallelizes_brave_calls_with_a_bounded_worker_count(self):
+        # Latency optimization: multiple cache-miss queries fire
+        # concurrently rather than sequentially, but the concurrency itself
+        # must be bounded (WEB_SEARCH_BRAVE_MAX_PARALLEL_WORKERS), not one
+        # thread per query -- a wide lookahead window must not burst every
+        # query at Brave simultaneously.
+        import threading
+
+        max_concurrent = {"value": 0}
+        current_concurrent = {"value": 0}
+        lock = threading.Lock()
+
+        def fake_brave(query, **kwargs):
+            with lock:
+                current_concurrent["value"] += 1
+                max_concurrent["value"] = max(max_concurrent["value"], current_concurrent["value"])
+            time.sleep(0.05)
+            with lock:
+                current_concurrent["value"] -= 1
+            return [{"title": f"Result for {query}", "description": "d", "url": f"https://example.com/{query}"}]
+
+        queries = [f"query {n}" for n in range(12)]
+        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=[]
+        ):
+            discovery_engine._fetch_web_search(queries, "Series", "Author")
+
+        self.assertGreater(max_concurrent["value"], 1)  # actually ran concurrently, not sequentially
+        self.assertLessEqual(max_concurrent["value"], discovery_engine.WEB_SEARCH_BRAVE_MAX_PARALLEL_WORKERS)
 
     def test_fetch_web_search_tolerates_one_query_failing_if_another_succeeds(self):
         def fake_brave(query, **kwargs):

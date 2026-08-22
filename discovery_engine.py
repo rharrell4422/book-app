@@ -94,6 +94,15 @@ WEB_SEARCH_LOOKAHEAD_BOOKS = 10
 # Brave + Anthropic call per undated candidate.
 WEB_SEARCH_DATE_REFINEMENT_MAX = 3
 
+# Bounds concurrent Brave requests within one _fetch_web_search call (the
+# targeted pass alone can have WEB_SEARCH_LOOKAHEAD_BOOKS + 1 = 11 distinct
+# queries) -- a small fixed pool, not one thread per query, so a wide
+# lookahead window doesn't fire a burst of ~11 simultaneous requests and
+# risk Brave rate-limiting that never happened when these were sequential.
+# Purely a latency optimization: does not change Brave call count, LLM call
+# count, or which URLs get fetched.
+WEB_SEARCH_BRAVE_MAX_PARALLEL_WORKERS = 5
+
 # Hardcover's own search index tags each hit with its position within a
 # series (when it has one), which is a far more reliable source of a book's
 # number than trying to parse it out of free-text title formatting -- so a
@@ -1327,76 +1336,137 @@ def generate_series_overview(series_name: str, author: str, books: list[dict]) -
     return text or None
 
 
-def _refine_undated_web_search_result(
-    result: dict,
+def _refine_undated_web_search_results_batch(
+    entries_to_refine: list[tuple[int, dict]],
     series_name: str,
     author: str,
     *,
     telemetry: "DiscoveryTelemetry | None" = None,
     cache: "DiscoveryCache | None" = None,
     scope_type: str = "series",
-) -> dict:
-    """Best-effort second look for a candidate the first pass couldn't date:
-    re-searches specifically for "<title> release date" and re-runs the same
-    LLM structuring on those results. If a date turns up, the downstream
-    upcoming-vs-available classification (which compares the real date to
-    today) takes over from the conservative "no date -> upcoming" guess.
-    Any failure here just leaves the original candidate as-is.
+) -> dict[int, dict]:
+    """Best-effort second look for candidates the first pass couldn't date:
+    fires one dedicated "<title> release date" Brave query per candidate
+    (query text must stay per-candidate -- a shared/merged query text would
+    blur which hits belong to which title), then structures ALL of those
+    queries' combined raw results in a single LLM call rather than one call
+    per candidate -- mirrors the targeted pass's own multi-query-then-
+    single-structure shape and cuts refinement's LLM-call count from one
+    per undated candidate down to one per batch (bounded by
+    WEB_SEARCH_DATE_REFINEMENT_MAX candidates either way).
 
-    Routed through the same Layer A/B cache as _fetch_web_search (via
-    _structure_with_verdict_cache) rather than calling
-    _fetch_brave_web_search/_structure_web_results_with_llm directly --
-    this query text is often repeated verbatim across rounds/passes for the
-    same still-undated candidate (e.g. re-checking an upcoming book that
-    hasn't been dated yet), so leaving it uncached meant paying a fresh
-    Brave+LLM call for the exact same "<title> release date" search every
-    single time it recurred.
+    Both cache layers are shared with _fetch_web_search via
+    _structure_with_verdict_cache: this query text is often repeated
+    verbatim across rounds/passes for the same still-undated candidate
+    (e.g. re-checking an upcoming book that hasn't been dated yet), so
+    leaving it uncached meant paying a fresh Brave+LLM call for the exact
+    same "<title> release date" search every single time it recurred.
+
+    Correlation guardrail: a structured item is only ever applied to the
+    one candidate whose OWN query actually returned that item's URL, AND
+    whose title matches via core_title_key -- never "closest title in the
+    whole batch". Handing the LLM one large, mixed-title batch in a single
+    call is exactly the shape of prompt that caused the missing-volume
+    recall-gap bug (architecture spec #8: a big noisy batch can misclassify
+    or drop an individual item); requiring both source-query provenance and
+    a title match keeps one candidate's resolved date from ever being
+    misattributed to a different candidate. Any candidate this can't
+    cleanly resolve a date for is simply absent from the returned dict --
+    callers must leave that candidate's original entry untouched, not
+    guess.
+
+    Returns {result_index: refined_entry}, where result_index is each
+    input tuple's own first element (the caller's index into its own
+    results list) -- not related to the LLM's own per-call result_index.
     """
-    title = str(result.get("title") or "").strip()
-    if not title:
-        return result
+    refined: dict[int, dict] = {}
+    per_candidate_urls: dict[int, set[str]] = {}
+    all_raw: list[dict] = []
+    seen_urls: set[str] = set()
 
-    # Live regression: quoting just the bare title as an exact phrase (the
-    # previous version of this query) gets swamped for a common title --
-    # "Here We Go Again" is also a Demi Lovato song/album, a movie, a TV
-    # series, etc., none of which are this book. Adding the series name and
-    # author as unquoted extra terms (soft ranking signals, not exact-phrase
-    # requirements) reliably surfaced the actual author's release-
-    # announcement blog post instead.
-    query = " ".join(part for part in (title, series_name, author, "release date") if part)
+    # Same cache-first-then-bounded-parallel shape as _fetch_web_search's
+    # own query loop: resolve cache hits synchronously, fire only genuine
+    # misses concurrently (capped -- WEB_SEARCH_DATE_REFINEMENT_MAX is small
+    # already, but no reason to serialize what doesn't need to be).
+    candidate_queries: dict[int, str] = {}
+    raw_by_index: dict[int, list[dict]] = {}
+    queries_to_fetch: list[tuple[int, str]] = []
+    for index, entry in entries_to_refine:
+        title = str(entry.get("title") or "").strip()
+        if not title:
+            continue
+        # Live regression: quoting just the bare title as an exact phrase
+        # (an earlier version of this query) gets swamped for a common
+        # title -- "Here We Go Again" is also a Demi Lovato song/album, a
+        # movie, a TV series, etc., none of which are this book. Adding the
+        # series name and author as unquoted extra terms (soft ranking
+        # signals, not exact-phrase requirements) reliably surfaced the
+        # actual author's release-announcement blog post instead.
+        query = " ".join(part for part in (title, series_name, author, "release date") if part)
+        candidate_queries[index] = query
 
-    cache_hit = cache.get_provider_fetch("brave", query) if cache is not None else CACHE_MISS
-    if cache_hit is not CACHE_MISS:
-        raw = cache_hit
-    else:
-        try:
-            raw = _fetch_brave_web_search(query, telemetry=telemetry)
-        except Exception:
-            return result
-        if cache is not None:
-            cache.set_provider_fetch("brave", query, raw)
-    if not raw:
-        return result
+        cache_hit = cache.get_provider_fetch("brave", query) if cache is not None else CACHE_MISS
+        if cache_hit is not CACHE_MISS:
+            raw_by_index[index] = cache_hit
+        else:
+            queries_to_fetch.append((index, query))
+
+    if queries_to_fetch:
+        max_workers = min(len(queries_to_fetch), WEB_SEARCH_BRAVE_MAX_PARALLEL_WORKERS)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_index = {
+                executor.submit(_fetch_brave_web_search, query, telemetry=telemetry): index
+                for index, query in queries_to_fetch
+            }
+            for future, index in future_to_index.items():
+                try:
+                    raw = future.result()
+                except Exception:
+                    raw = []
+                raw_by_index[index] = raw
+                if cache is not None:
+                    cache.set_provider_fetch("brave", candidate_queries[index], raw)
+
+    for index, entry in entries_to_refine:
+        raw = raw_by_index.get(index, [])
+        per_candidate_urls[index] = {item["url"] for item in raw}
+        for item in raw:
+            if item["url"] in seen_urls:
+                continue
+            seen_urls.add(item["url"])
+            all_raw.append(item)
+
+    if not all_raw:
+        return refined
 
     try:
         verdict_by_url = _structure_with_verdict_cache(
-            raw, series_name, author, telemetry=telemetry, cache=cache, scope_type=scope_type
+            all_raw, series_name, author, telemetry=telemetry, cache=cache, scope_type=scope_type
         )
     except Exception:
-        return result
+        return refined
 
-    for source in raw:
-        item = verdict_by_url.get(source["url"])
-        if not item:
+    for index, entry in entries_to_refine:
+        candidate_key = core_title_key(str(entry.get("title") or "")) or normalize_text(str(entry.get("title") or ""))
+        if not candidate_key:
             continue
-        published_date = str(item.get("published_date") or "").strip()
-        if published_date:
-            refined = dict(result)
-            refined["published_date"] = published_date
-            refined["upcoming_hint"] = bool(item.get("is_upcoming"))
-            return refined
+        for url in per_candidate_urls.get(index, ()):
+            item = verdict_by_url.get(url)
+            if not item:
+                continue
+            item_key = core_title_key(str(item.get("title") or "")) or normalize_text(str(item.get("title") or ""))
+            if item_key != candidate_key:
+                continue
+            published_date = str(item.get("published_date") or "").strip()
+            if not published_date:
+                continue
+            refined_entry = dict(entry)
+            refined_entry["published_date"] = published_date
+            refined_entry["upcoming_hint"] = bool(item.get("is_upcoming"))
+            refined[index] = refined_entry
+            break
 
-    return result
+    return refined
 
 
 def _structure_with_verdict_cache(
@@ -1429,9 +1499,9 @@ def _structure_with_verdict_cache(
     poisons a later, more focused pass's dedicated retry of the same URL.
 
     Shared by _fetch_web_search (targeted/lookahead/missing-volume passes)
-    and _refine_undated_web_search_result (date-refinement queries) so both
-    get identical caching semantics instead of refinement bypassing the
-    cache entirely.
+    and _refine_undated_web_search_results_batch (date-refinement queries)
+    so both get identical caching semantics instead of refinement bypassing
+    the cache entirely.
     """
     if not raw_results:
         return {}
@@ -1495,19 +1565,44 @@ def _fetch_web_search(
     seen_urls: set[str] = set()
     query_errors: list[Exception] = []
     with maybe_pass_scope(telemetry, pass_label):
-        for query in queries:
+        # Cache lookups are cheap and local -- resolved synchronously first
+        # so only genuine cache misses ever reach the network. Only those
+        # misses are fired concurrently, bounded by a small fixed worker
+        # count (not one thread per query): an unbounded pool would fire
+        # every lookahead query (up to WEB_SEARCH_LOOKAHEAD_BOOKS + 1 of
+        # them) in the same instant, risking Brave rate-limiting that never
+        # happened when these were sequential.
+        items_by_position: dict[int, list[dict]] = {}
+        queries_to_fetch: list[tuple[int, str]] = []
+        for position, query in enumerate(queries):
             cache_hit = cache.get_provider_fetch("brave", query) if cache is not None else CACHE_MISS
             if cache_hit is not CACHE_MISS:
-                items = cache_hit
+                items_by_position[position] = cache_hit
             else:
-                try:
-                    items = _fetch_brave_web_search(query, telemetry=telemetry)
-                except Exception as exc:  # one query's transient failure shouldn't sink the others
-                    query_errors.append(exc)
-                    continue
-                if cache is not None:
-                    cache.set_provider_fetch("brave", query, items)
-            for item in items:
+                queries_to_fetch.append((position, query))
+
+        if queries_to_fetch:
+            max_workers = min(len(queries_to_fetch), WEB_SEARCH_BRAVE_MAX_PARALLEL_WORKERS)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_position = {
+                    executor.submit(_fetch_brave_web_search, query, telemetry=telemetry): position
+                    for position, query in queries_to_fetch
+                }
+                for future, position in future_to_position.items():
+                    try:
+                        items = future.result()
+                    except Exception as exc:  # one query's transient failure shouldn't sink the others
+                        query_errors.append(exc)
+                        continue
+                    items_by_position[position] = items
+                    if cache is not None:
+                        cache.set_provider_fetch("brave", queries[position], items)
+
+        # Results are reassembled in original query order (not completion
+        # order) so URL dedup's "first query wins" behavior is unaffected
+        # by which concurrent fetch happened to finish first.
+        for position in range(len(queries)):
+            for item in items_by_position.get(position, []):
                 if item["url"] in seen_urls:
                     continue
                 seen_urls.add(item["url"])
@@ -1587,17 +1682,20 @@ def _fetch_web_search(
             }
         )
 
-    refinements_used = 0
     with maybe_pass_scope(telemetry, f"{pass_label}_refinement"):
+        entries_to_refine: list[tuple[int, dict]] = []
         for index, entry in enumerate(results):
             if entry.get("published_date"):
                 continue
-            if refinements_used >= WEB_SEARCH_DATE_REFINEMENT_MAX:
+            if len(entries_to_refine) >= WEB_SEARCH_DATE_REFINEMENT_MAX:
                 break
-            refinements_used += 1
-            results[index] = _refine_undated_web_search_result(
-                entry, series_name, author, telemetry=telemetry, cache=cache, scope_type=scope_type
-            )
+            entries_to_refine.append((index, entry))
+
+        refined_by_index = _refine_undated_web_search_results_batch(
+            entries_to_refine, series_name, author, telemetry=telemetry, cache=cache, scope_type=scope_type
+        )
+        for index, refined_entry in refined_by_index.items():
+            results[index] = refined_entry
 
     return results
 
