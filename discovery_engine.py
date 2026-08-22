@@ -1328,7 +1328,13 @@ def generate_series_overview(series_name: str, author: str, books: list[dict]) -
 
 
 def _refine_undated_web_search_result(
-    result: dict, series_name: str, author: str, *, telemetry: "DiscoveryTelemetry | None" = None
+    result: dict,
+    series_name: str,
+    author: str,
+    *,
+    telemetry: "DiscoveryTelemetry | None" = None,
+    cache: "DiscoveryCache | None" = None,
+    scope_type: str = "series",
 ) -> dict:
     """Best-effort second look for a candidate the first pass couldn't date:
     re-searches specifically for "<title> release date" and re-runs the same
@@ -1336,33 +1342,52 @@ def _refine_undated_web_search_result(
     upcoming-vs-available classification (which compares the real date to
     today) takes over from the conservative "no date -> upcoming" guess.
     Any failure here just leaves the original candidate as-is.
+
+    Routed through the same Layer A/B cache as _fetch_web_search (via
+    _structure_with_verdict_cache) rather than calling
+    _fetch_brave_web_search/_structure_web_results_with_llm directly --
+    this query text is often repeated verbatim across rounds/passes for the
+    same still-undated candidate (e.g. re-checking an upcoming book that
+    hasn't been dated yet), so leaving it uncached meant paying a fresh
+    Brave+LLM call for the exact same "<title> release date" search every
+    single time it recurred.
     """
     title = str(result.get("title") or "").strip()
     if not title:
         return result
 
-    try:
-        # Live regression: quoting just the bare title as an exact phrase
-        # (the previous version of this query) gets swamped for a common
-        # title -- "Here We Go Again" is also a Demi Lovato song/album, a
-        # movie, a TV series, etc., none of which are this book. Adding the
-        # series name and author as unquoted extra terms (soft ranking
-        # signals, not exact-phrase requirements) reliably surfaced the
-        # actual author's release-announcement blog post instead.
-        query = " ".join(part for part in (title, series_name, author, "release date") if part)
-        raw = _fetch_brave_web_search(query, telemetry=telemetry)
-    except Exception:
-        return result
+    # Live regression: quoting just the bare title as an exact phrase (the
+    # previous version of this query) gets swamped for a common title --
+    # "Here We Go Again" is also a Demi Lovato song/album, a movie, a TV
+    # series, etc., none of which are this book. Adding the series name and
+    # author as unquoted extra terms (soft ranking signals, not exact-phrase
+    # requirements) reliably surfaced the actual author's release-
+    # announcement blog post instead.
+    query = " ".join(part for part in (title, series_name, author, "release date") if part)
+
+    cache_hit = cache.get_provider_fetch("brave", query) if cache is not None else CACHE_MISS
+    if cache_hit is not CACHE_MISS:
+        raw = cache_hit
+    else:
+        try:
+            raw = _fetch_brave_web_search(query, telemetry=telemetry)
+        except Exception:
+            return result
+        if cache is not None:
+            cache.set_provider_fetch("brave", query, raw)
     if not raw:
         return result
 
     try:
-        structured = _structure_web_results_with_llm(series_name, author, raw, telemetry=telemetry)
+        verdict_by_url = _structure_with_verdict_cache(
+            raw, series_name, author, telemetry=telemetry, cache=cache, scope_type=scope_type
+        )
     except Exception:
         return result
 
-    for item in structured:
-        if not isinstance(item, dict):
+    for source in raw:
+        item = verdict_by_url.get(source["url"])
+        if not item:
             continue
         published_date = str(item.get("published_date") or "").strip()
         if published_date:
@@ -1372,6 +1397,87 @@ def _refine_undated_web_search_result(
             return refined
 
     return result
+
+
+def _structure_with_verdict_cache(
+    raw_results: list[dict],
+    series_name: str | None,
+    author: str,
+    *,
+    diagnostics: list[dict] | None = None,
+    telemetry: "DiscoveryTelemetry | None" = None,
+    cache: "DiscoveryCache | None" = None,
+    scope_type: str = "series",
+    bypass_cached_rejection: bool = False,
+) -> dict[str, dict]:
+    """Layer B LLM-verdict cache (see services/discovery_cache.py): splits
+    raw_results into what's already been sent to the LLM this job
+    (cached_by_url, accepted-or-None-for-rejected) vs. what still needs a
+    fresh call (uncached_raw). result_index from the LLM is resolved against
+    uncached_raw -- the exact subset actually sent -- then immediately
+    converted to a URL-keyed map so nothing downstream relies on positional
+    indices into raw_results at all. Returns only *accepted* verdicts, keyed
+    by URL -- a rejected/no-verdict URL is simply absent from the result.
+
+    `bypass_cached_rejection` (used by the missing-volume interior-gap pass,
+    see _fetch_web_search): when True, a cached *rejection* is treated as a
+    miss and re-sent to the LLM, while a cached *acceptance* is still
+    trusted. See discovery_catchup_architecture_spec.md's recall-gap
+    diagnostic for why: the broad targeted/lookahead pass's large batch can
+    wrongly reject a book-number-bearing URL it would correctly accept in
+    isolation, and that wrong rejection getting cached then silently
+    poisons a later, more focused pass's dedicated retry of the same URL.
+
+    Shared by _fetch_web_search (targeted/lookahead/missing-volume passes)
+    and _refine_undated_web_search_result (date-refinement queries) so both
+    get identical caching semantics instead of refinement bypassing the
+    cache entirely.
+    """
+    if not raw_results:
+        return {}
+
+    series_name_key = _normalize_query_text(series_name) if series_name else ""
+    cached_by_url: dict[str, dict | None] = {}
+    uncached_raw: list[dict] = []
+    for item in raw_results:
+        if cache is None:
+            uncached_raw.append(item)
+            continue
+        verdict = cache.get_llm_verdict(scope_type, series_name_key, item["url"])
+        if verdict is CACHE_MISS or (bypass_cached_rejection and verdict is None):
+            uncached_raw.append(item)
+        else:
+            cached_by_url[item["url"]] = verdict
+
+    fresh_structured = (
+        _structure_web_results_with_llm(series_name, author, uncached_raw, diagnostics=diagnostics, telemetry=telemetry)
+        if uncached_raw
+        else []
+    )
+
+    fresh_by_url: dict[str, dict] = {}
+    accepted_urls: set[str] = set()
+    for item in fresh_structured:
+        if not isinstance(item, dict):
+            continue
+        try:
+            source = uncached_raw[int(item.get("result_index"))]
+        except (TypeError, ValueError, IndexError):
+            continue
+        fresh_by_url[source["url"]] = item
+        accepted_urls.add(source["url"])
+        if cache is not None:
+            cache.set_llm_verdict(scope_type, series_name_key, source["url"], item)
+
+    if cache is not None:
+        for item in uncached_raw:
+            if item["url"] not in accepted_urls:
+                # Negative sentinel: this URL was checked and excluded --
+                # never re-sent to the LLM again within this job (unless a
+                # later bypass_cached_rejection=True caller overrides it).
+                cache.set_llm_verdict(scope_type, series_name_key, item["url"], None)
+
+    return {**{u: v for u, v in cached_by_url.items() if v is not None}, **fresh_by_url}
 
 
 def _fetch_web_search(
@@ -1412,70 +1518,25 @@ def _fetch_web_search(
                 raise query_errors[0]
             return []
 
-        # Layer B LLM-verdict cache (see services/discovery_cache.py):
-        # split raw_results into what's already been sent to the LLM this
-        # job (cached_by_url, accepted-or-None-for-rejected) vs. what still
-        # needs a fresh call (uncached_raw). result_index from the LLM is
-        # resolved against uncached_raw -- the exact subset actually sent --
-        # then immediately converted to a URL-keyed map so nothing
-        # downstream relies on positional indices into raw_results at all.
-        series_name_key = _normalize_query_text(series_name) if series_name else ""
-        cached_by_url: dict[str, dict | None] = {}
-        uncached_raw: list[dict] = []
-        for item in raw_results:
-            if cache is None:
-                uncached_raw.append(item)
-                continue
-            verdict = cache.get_llm_verdict(scope_type, series_name_key, item["url"])
-            # The missing-volume interior-gap pass exists specifically to
-            # give a URL a second, more focused look with a much smaller
-            # batch than the broad targeted/lookahead pass -- a live
-            # diagnostic (discovery_catchup_architecture_spec.md recall-gap
-            # investigation) found the targeted pass's large batch wrongly
-            # rejecting book-number-bearing URLs it would correctly accept
-            # in isolation, and that wrong rejection getting cached and then
-            # silently poisoning this exact retry. A cached *acceptance* is
-            # still trusted (no reason to redo confirmed-correct work), but
-            # a cached *rejection* is treated as a miss here so this pass
-            # can actually re-verify rather than rubber-stamp the earlier
-            # pass's possible mistake.
-            if verdict is CACHE_MISS or (verdict is None and pass_label == "missing_volume"):
-                uncached_raw.append(item)
-            else:
-                cached_by_url[item["url"]] = verdict
-
-        fresh_structured = (
-            _structure_web_results_with_llm(series_name, author, uncached_raw, diagnostics=diagnostics, telemetry=telemetry)
-            if uncached_raw
-            else []
+        # See _structure_with_verdict_cache's own docstring for the Layer B
+        # cache-splicing mechanics. bypass_cached_rejection is scoped to the
+        # missing-volume interior-gap pass -- see that function's docstring
+        # for the recall-gap rationale.
+        verdict_by_url = _structure_with_verdict_cache(
+            raw_results,
+            series_name,
+            author,
+            diagnostics=diagnostics,
+            telemetry=telemetry,
+            cache=cache,
+            scope_type=scope_type,
+            bypass_cached_rejection=(pass_label == "missing_volume"),
         )
-
-        fresh_by_url: dict[str, dict] = {}
-        accepted_urls: set[str] = set()
-        for item in fresh_structured:
-            if not isinstance(item, dict):
-                continue
-            try:
-                source = uncached_raw[int(item.get("result_index"))]
-            except (TypeError, ValueError, IndexError):
-                continue
-            fresh_by_url[source["url"]] = item
-            accepted_urls.add(source["url"])
-            if cache is not None:
-                cache.set_llm_verdict(scope_type, series_name_key, source["url"], item)
-
-        if cache is not None:
-            for item in uncached_raw:
-                if item["url"] not in accepted_urls:
-                    # Negative sentinel: this URL was checked and excluded --
-                    # never re-sent to the LLM again within this job.
-                    cache.set_llm_verdict(scope_type, series_name_key, item["url"], None)
 
         # Reassemble in raw_results' original order (cached-accepted +
         # fresh-accepted), never "fresh then cached" -- keeps
         # _first_present_field-style precedence logic identical whether a
         # given item came from cache or a fresh LLM call this round.
-        verdict_by_url = {**{u: v for u, v in cached_by_url.items() if v is not None}, **fresh_by_url}
         structured_with_source = [
             (verdict_by_url[source["url"]], source) for source in raw_results if source["url"] in verdict_by_url
         ]
@@ -1534,7 +1595,9 @@ def _fetch_web_search(
             if refinements_used >= WEB_SEARCH_DATE_REFINEMENT_MAX:
                 break
             refinements_used += 1
-            results[index] = _refine_undated_web_search_result(entry, series_name, author, telemetry=telemetry)
+            results[index] = _refine_undated_web_search_result(
+                entry, series_name, author, telemetry=telemetry, cache=cache, scope_type=scope_type
+            )
 
     return results
 

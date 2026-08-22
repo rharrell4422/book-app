@@ -202,3 +202,11 @@ Per Copilot's priority order (correctness before further cost/latency work — i
 **Kept as-is:** `temperature=0` on the two extraction/reconciliation calls — not the fix for this specific bug, but still a reasonable determinism improvement with no observed downside (391/391 tests pass), so left in place.
 
 **Not implemented:** the "safety-net retry" (re-verify if `recovered_numbers` doesn't match `targeted_missing`) discussed as a fallback if `temperature=0` didn't close the gap — unnecessary now that the actual cache-poisoning root cause is fixed directly.
+
+---
+
+## 9. Refinement-pass cache integration (post-§8) — DONE
+
+`_refine_undated_web_search_result` (the "`<title> release date`" second-look query for undated candidates) previously bypassed the per-job cache entirely — it called `_fetch_brave_web_search`/`_structure_web_results_with_llm` directly. Fixed by extracting the Layer B cache-splicing logic shared with `_fetch_web_search` into `_structure_with_verdict_cache(...)` (also carries the §8 `bypass_cached_rejection` behavior as a parameter, scoped by the caller rather than hardcoded), and routing refinement's own Brave call through Layer A (`cache.get_provider_fetch`/`set_provider_fetch`) and its structuring call through that same shared helper. Refinement does NOT set `bypass_cached_rejection=True` — its job is date-enrichment on an already-accepted candidate, not a second look at whether to accept it at all, so the §8 semantics don't map cleanly there (revisit only if a future diagnostic shows it matters).
+
+**Live re-verification (Jonathan Hunt, fresh reset to book 1 only):** all 18 books still recovered in one round (`recovered=[10, 11, 13]` unchanged). Cost/latency both improved vs. the §8 post-fix measurement: **10 LLM calls (was 14), 20848/5782 tokens in/out (was 31738/9257), 67.24s wall (was 80.04s)**. `llm_verdict_hits=116` (was 56) confirms refinement queries are now actually landing cache hits instead of bypassing the cache. Full 394-test suite passes (391 previous + 3 new: refinement cache reuse, missing_volume rejection-bypass, non-missing_volume pass still trusts cached rejection).

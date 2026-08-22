@@ -1673,6 +1673,63 @@ class WebSearchProviderTest(unittest.TestCase):
         self.assertEqual(results[0]["published_date"], "")
         self.assertEqual(results[0]["upcoming_hint"], True)
 
+    def test_refinement_pass_reuses_layer_a_and_b_cache_across_calls(self):
+        # Regression: _refine_undated_web_search_result used to call
+        # _fetch_brave_web_search/_structure_web_results_with_llm directly,
+        # bypassing the per-job cache entirely -- the same undated candidate
+        # recurring across rounds (a genuine undated preorder gets re-checked
+        # every round) paid a fresh Brave+LLM call for the identical
+        # "<title> release date" query every single time.
+        cache = DiscoveryCache()
+        raw_results = [{"title": "Listing", "description": "snippet, no date", "url": "https://example.com/1"}]
+        first_pass_structured = [
+            {
+                "result_index": 0,
+                "title": "Book One",
+                "book_number": 1,
+                "author_names": ["Some Author"],
+                "published_date": None,
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+        ]
+        refinement_raw = [{"title": "Book One release date", "description": "Released 2024-01-01", "url": "https://example.com/1-date"}]
+        refinement_structured = [
+            {
+                "result_index": 0,
+                "title": "Book One",
+                "book_number": 1,
+                "author_names": ["Some Author"],
+                "published_date": "2024-01-01",
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+        ]
+
+        def fake_brave(query, **kwargs):
+            if "release date" in query:
+                return refinement_raw
+            return raw_results
+
+        def fake_structure(series_name, author, results, **kwargs):
+            if results == refinement_raw:
+                return refinement_structured
+            return first_pass_structured
+
+        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave) as mock_brave, patch.object(
+            discovery_engine, "_structure_web_results_with_llm", side_effect=fake_structure
+        ) as mock_llm:
+            first = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
+            second = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
+
+        # Round two's identical raw query and identical undated candidate
+        # must be served entirely from cache -- one Brave call and one LLM
+        # call per layer, not two.
+        self.assertEqual(mock_brave.call_count, 2)  # 1 targeted query + 1 refinement query, round one only
+        self.assertEqual(mock_llm.call_count, 2)  # 1 targeted structuring + 1 refinement structuring, round one only
+        self.assertEqual(first[0]["published_date"], "2024-01-01")
+        self.assertEqual(second[0]["published_date"], "2024-01-01")
+
     def test_fetch_web_search_refinement_is_capped_and_tolerates_failures(self):
         # Bound the extra cost: only the first WEB_SEARCH_DATE_REFINEMENT_MAX
         # undated candidates get a second look, and a refinement query
@@ -1972,6 +2029,74 @@ class DiscoveryCacheTest(unittest.TestCase):
 
         mock_llm.assert_called_once()
         self.assertEqual(cache.summary()["llm_verdict_rejected"], 1)
+
+    def test_missing_volume_pass_bypasses_cached_rejection_but_not_acceptance(self):
+        # Regression (recall-gap root cause, discovery_catchup_architecture_
+        # spec.md #8): the broad targeted pass's large batch wrongly
+        # rejected book-number-bearing URLs it would correctly accept in
+        # isolation, and that wrong rejection getting cached silently
+        # poisoned the missing-volume interior-gap pass's own dedicated
+        # retry of the exact same URL -- the whole point of that pass is to
+        # give it a second, cleaner look. A cached rejection must be
+        # bypassed (re-sent to the LLM) when pass_label="missing_volume",
+        # but a cached acceptance must still be trusted as-is (no need to
+        # redo confirmed-correct work).
+        cache = DiscoveryCache()
+        cache.set_llm_verdict("series", "some series", "https://example.com/rejected", None)
+        cache.set_llm_verdict(
+            "series",
+            "some series",
+            "https://example.com/accepted",
+            {"title": "Already Confirmed", "book_number": 2, "author_names": ["Some Author"]},
+        )
+        raw_results = [
+            {"title": "Rejected listing", "description": "snippet", "url": "https://example.com/rejected"},
+            {"title": "Accepted listing", "description": "snippet", "url": "https://example.com/accepted"},
+        ]
+        fresh_structured = [
+            {
+                "result_index": 0,
+                "title": "Actually A Real Book",
+                "book_number": 10,
+                "author_names": ["Some Author"],
+                "published_date": "2024-01-01",
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+        ]
+
+        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=fresh_structured
+        ) as mock_llm:
+            results = discovery_engine._fetch_web_search(
+                ["query"], "Some Series", "Some Author", cache=cache, pass_label="missing_volume"
+            )
+
+        # Only the previously-rejected URL gets re-sent to the LLM -- the
+        # already-accepted one is still served from cache untouched.
+        mock_llm.assert_called_once()
+        sent_raw = mock_llm.call_args.args[2]
+        self.assertEqual([item["url"] for item in sent_raw], ["https://example.com/rejected"])
+
+        titles = {item["title"] for item in results}
+        self.assertIn("Actually A Real Book", titles)
+        self.assertIn("Already Confirmed", titles)
+
+    def test_non_missing_volume_pass_still_trusts_cached_rejection(self):
+        # The bypass is scoped specifically to the missing_volume pass --
+        # every other pass_label (targeted, author_fallback, the default,
+        # etc.) must keep trusting a cached rejection exactly as before.
+        cache = DiscoveryCache()
+        cache.set_llm_verdict("series", "some series", "https://example.com/rejected", None)
+        raw_results = [{"title": "Rejected listing", "description": "snippet", "url": "https://example.com/rejected"}]
+
+        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=[]
+        ) as mock_llm:
+            results = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
+
+        mock_llm.assert_not_called()
+        self.assertEqual(results, [])
 
     def test_llm_verdict_cache_is_scoped_by_series_name_not_bare_url(self):
         # Same URL surfacing under two different series-scoped searches
