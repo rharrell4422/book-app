@@ -905,29 +905,47 @@ class SeriesIntelligenceAgent:
                     "identifier": isbn13 or f"{raw.get('source')}:{raw.get('source_id')}",
                 }
 
-                # Manual-override routing: high -> auto-accept (unchanged
-                # behavior), medium/unverified -> needs_review, low/zero ->
-                # auto-drop. `confidence_entry` is None when
+                # Manual-override routing. `confidence_entry` is None when
                 # confidence_lookup has nothing for this candidate at all
                 # (series_confidence computation failed above, or -- should
                 # never happen, but see correlation_key's docstring -- a
-                # genuine key mismatch); in that case fall back to trusting
-                # belongs_to_series exactly like this function did before
-                # this feature existed: accept outright if it passed the
-                # gate, and since an ambiguous candidate with no confidence
-                # data would otherwise silently vanish exactly as it always
-                # did pre-this-feature, route it to needs_review instead so
-                # a missing confidence computation degrades to "surface it"
-                # rather than "hide it".
+                # genuine key mismatch).
+                #
+                # "low"/"zero" always drop, regardless of belongs_to_series:
+                # these are the confidence engine's own genuine negative
+                # signals (a skeleton-corroborated title mismatch, a
+                # detected author mismatch, malformed data) -- real
+                # information belongs_to_series' cruder heuristic can't see
+                # on its own, which is exactly why cross-contamination
+                # candidates that pass belongs_to_series via a textual title
+                # match still need to be caught here.
+                #
+                # "medium"/"unverified" only route to needs_review when
+                # low_confidence_ambiguous is True, i.e. belongs_to_series
+                # itself couldn't confirm series membership. For a candidate
+                # that already passed belongs_to_series cleanly (explicit
+                # title match, targeted-with-number, etc.), "unverified" is
+                # not a red flag -- it is the *expected*, permanent state
+                # for title_confidence on every genuinely new book, because
+                # SeriesSkeleton only ever contains books already owned (see
+                # confidence_engine._title_confidence). Gating on it
+                # unconditionally was verified live (Jonathan Hunt/Georgia
+                # Wagner, 2026-08-22) to silently route every legitimate new
+                # discovery to needs_review -- which nothing outside this
+                # function reads yet (see the review-list TODO above) --
+                # making "Check Now" report "no books found" even when
+                # discovery worked correctly. So a clean belongs_to_series
+                # pass auto-accepts on medium/unverified/missing-confidence
+                # the same as it always did before this feature existed;
+                # only the genuinely ambiguous (belongs_to_series=False)
+                # case is gated by confidence at all.
                 confidence_entry = confidence_lookup.get(confidence_engine.correlation_key(raw))
                 overall_grade = confidence_entry.get("overall") if confidence_entry else None
 
                 if overall_grade in ("low", "zero"):
                     continue
 
-                if overall_grade in ("medium", "unverified") or (
-                    overall_grade is None and low_confidence_ambiguous
-                ):
+                if low_confidence_ambiguous and (overall_grade in ("medium", "unverified") or overall_grade is None):
                     # Same-author/different-series candidates with valid
                     # numbering can land here permanently -- confidence_engine
                     # has no series-identity dimension, so it can score

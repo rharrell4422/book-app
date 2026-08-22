@@ -2545,30 +2545,40 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         self.assertEqual(result["upcoming_books"], [])
 
     def test_medium_confidence_candidate_routes_to_needs_review_with_series_name_hint(self):
-        # No SeriesSkeleton row for this series -> title_confidence
-        # "unverified" -> overall capped at "medium" -- see
-        # confidence_engine._overall_confidence. series_name_hint is
-        # carried through into the review payload so a human reviewer can
-        # dismiss a same-author/different-series false positive on sight,
-        # without confidence_engine needing a series-identity dimension.
+        # Title has no textual tie to "Cherry Blossom Girls" at all, isn't
+        # tagged "targeted"/"missing_volume_recovery" (so no
+        # targeted_with_number credit), and its number (7) isn't past the
+        # highest owned number (9) either (no continues_numbering credit) --
+        # belongs_to_series fails outright, making this genuinely ambiguous
+        # (low_confidence_ambiguous=True), which is what actually routes a
+        # medium/unverified grade to needs_review. See the routing block's
+        # own comment in run_series_check for why a candidate that instead
+        # passed belongs_to_series cleanly would auto-accept on this same
+        # confidence grade -- "unverified" title_confidence, from the
+        # missing SeriesSkeleton row, is the permanent state for any
+        # candidate number nothing has seen before, not a signal of
+        # ambiguity on its own. series_name_hint is carried through into
+        # the review payload so a human reviewer can dismiss a same-author/
+        # different-series false positive on sight, without confidence_
+        # engine needing a series-identity dimension.
         candidates = [
             {
                 "source": "hardcover",
                 "source_id": "hc-7",
-                "title": "Cherry Blossom Girls Book 7",
+                "title": "Desert Protocol",
                 "authors": ["Harmon Cooper"],
                 "published_date": "2024-02-20",
                 "isbn13": None,
                 "source_url": None,
                 "language": "",
-                "confidence": "targeted",
+                "confidence": "author_fallback",
                 "series_number_hint": 7,
                 "series_name_hint": "Cherry Blossom Girls",
                 "upcoming_hint": False,
             }
         ]
         unified_candidate = discovery_engine.UnifiedCandidate(
-            title="Cherry Blossom Girls Book 7",
+            title="Desert Protocol",
             authors=["Harmon Cooper"],
             series_name="Cherry Blossom Girls",
             series_number=7.0,
@@ -2586,6 +2596,7 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         self.assertEqual(review_entry["overall_confidence"], "medium")
         self.assertEqual(review_entry["series_name_hint"], "Cherry Blossom Girls")
         self.assertTrue(review_entry["needs_review"])
+        self.assertTrue(review_entry["low_confidence_ambiguous"])
 
     def test_high_confidence_candidate_still_auto_accepts(self):
         # A skeleton entry that already agrees with the discovered title
@@ -3306,16 +3317,17 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         # clear belongs_to_series for it. (Gets the series suffix appended
         # since the raw title itself never references the series -- see
         # _title_references_series/display_title in run_series_check.) It
-        # lands in needs_review, not available_missing: this series has no
-        # SeriesSkeleton row, so title_confidence is "unverified" for every
-        # candidate (nothing to compare the title against yet), which caps
-        # overall confidence at "medium" -- see confidence_engine's own
-        # decision table. Only a candidate whose correlation_key has no
-        # entry in confidence_lookup at all (i.e. one series_agent never
-        # asked confidence_engine to score, like the two below) falls back
-        # to belongs_to_series' verdict directly.
-        self.assertIn("Desert Protocol: (Cherry Blossom Girls Book 7)", review_titles)
-        self.assertNotIn("Desert Protocol: (Cherry Blossom Girls Book 7)", available_titles | upcoming_titles)
+        # lands in available_missing, not needs_review: belongs_to_series
+        # passed cleanly (targeted_with_number), so confidence's "unverified"
+        # title grade -- the permanent, expected state for title_confidence
+        # on any book not already in SeriesSkeleton -- doesn't gate
+        # acceptance the way it does for a candidate belongs_to_series
+        # couldn't confirm on its own (see the routing block's own comment,
+        # and the live-bug verification that motivated it: unconditionally
+        # gating on "unverified" routed every legitimate Jonathan Hunt
+        # sequel to needs_review and made "Check Now" report nothing found).
+        self.assertIn("Desert Protocol: (Cherry Blossom Girls Book 7)", available_titles)
+        self.assertNotIn("Desert Protocol: (Cherry Blossom Girls Book 7)", review_titles | upcoming_titles)
         # The brand-new recovered candidate never had a "targeted"
         # confidence to preserve, but its number (10) IS one the
         # missing-volume lookahead specifically searched for -- that
@@ -3501,20 +3513,19 @@ class Phase4DiagnosticsTest(unittest.TestCase):
         self.assertFalse(flag["suppressed_as_known"])
         self.assertEqual(flag["series_number"], 7)
 
-        # The live result carries none of Phase 4's own fields, but it is
-        # no longer independent of confidence routing: this series has no
-        # SeriesSkeleton row, so the candidate's title_confidence is
-        # "unverified" (nothing to compare against yet), capping overall
-        # confidence at "medium" -- which routes it to needs_review rather
-        # than auto-accepting it into available_missing. See
-        # confidence_engine._overall_confidence and the routing block in
-        # run_series_check for why "high" (the only auto-accept grade) is
-        # unreachable for a number no skeleton entry has ever seen.
-        self.assertFalse(result["found"])
-        self.assertEqual(result["available_missing"], [])
-        self.assertEqual(len(result["needs_review"]), 1)
-        self.assertEqual(result["needs_review"][0]["series_number"], 7)
-        self.assertEqual(result["needs_review"][0]["overall_confidence"], "medium")
+        # The live result carries none of Phase 4's own fields. The
+        # candidate's title explicitly references the series name, so
+        # belongs_to_series passes cleanly on its own (explicit_series_
+        # match) -- confidence's "unverified" title grade (the permanent,
+        # expected state for any number no SeriesSkeleton entry has ever
+        # seen, see confidence_engine._overall_confidence) doesn't gate
+        # acceptance for a candidate belongs_to_series already confirmed;
+        # it only gates candidates belongs_to_series itself couldn't
+        # confirm. See the routing block's own comment in run_series_check.
+        self.assertTrue(result["found"])
+        self.assertEqual(len(result["available_missing"]), 1)
+        self.assertEqual(result["available_missing"][0]["series_number"], 7)
+        self.assertEqual(result["needs_review"], [])
         for field in ["new_volume_flags", "external_gap_ratio", "drop_explanations", "external_missing_vs_owned"]:
             self.assertNotIn(field, result)
 
@@ -3577,13 +3588,14 @@ class Phase4DiagnosticsTest(unittest.TestCase):
         # Isolated: the new-volume group is unaffected.
         self.assertEqual(payload["external_gap_ratio"], 0.2)
         self.assertTrue(payload["new_volume_flags"][0]["is_new_volume"])
-        # No SeriesSkeleton row -> title_confidence "unverified" -> overall
-        # capped at "medium" -> needs_review, not auto-accept. See the
-        # comment in test_new_volume_flag_is_true_for_an_externally_expected_
-        # unowned_number for the full explanation; this test only cares
-        # that the failing helper doesn't change *that* outcome.
-        self.assertFalse(result["found"])
-        self.assertEqual(len(result["needs_review"]), 1)
+        # Explicit title match clears belongs_to_series on its own, so this
+        # auto-accepts regardless of confidence's "unverified" title grade
+        # -- see the comment in test_new_volume_flag_is_true_for_an_
+        # externally_expected_unowned_number for the full explanation; this
+        # test only cares that the failing helper doesn't change *that*
+        # outcome.
+        self.assertTrue(result["found"])
+        self.assertEqual(len(result["available_missing"]), 1)
 
     def test_a_failing_gap_helper_blanks_its_whole_dependent_group(self):
         # external_missing_vs_owned feeds both the ratio and the flags, so
@@ -3600,15 +3612,15 @@ class Phase4DiagnosticsTest(unittest.TestCase):
         self.assertEqual(payload["new_volume_flags"], [])
         # Drop explanations are computed separately and still run.
         self.assertEqual(payload["drop_explanations_total"], len(payload["drop_explanations"]))
-        # The live result is untouched by this helper failing, but (see the
-        # comment in test_new_volume_flag_is_true_for_an_externally_expected_
-        # unowned_number) is no longer independent of confidence routing:
-        # no SeriesSkeleton row means this candidate's title_confidence is
-        # "unverified", capping it at "medium" -> needs_review.
-        self.assertFalse(result["found"])
-        self.assertEqual(result["available_missing"], [])
-        self.assertEqual(len(result["needs_review"]), 1)
-        self.assertEqual(result["needs_review"][0]["series_number"], 7)
+        # The live result is untouched by this helper failing -- explicit
+        # title match clears belongs_to_series on its own, so this
+        # auto-accepts (see the comment in test_new_volume_flag_is_true_
+        # for_an_externally_expected_unowned_number for the full
+        # explanation).
+        self.assertTrue(result["found"])
+        self.assertEqual(len(result["available_missing"]), 1)
+        self.assertEqual(result["available_missing"][0]["series_number"], 7)
+        self.assertEqual(result["needs_review"], [])
 
     def test_phase_4_does_not_change_the_live_result(self):
         candidates = [self._raw_candidate(7), self._raw_candidate(6)]
