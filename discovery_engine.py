@@ -1235,6 +1235,12 @@ def _structure_web_results_with_llm(
         response = client.messages.create(
             model=ANTHROPIC_MODEL,
             max_tokens=2000,
+            # Deterministic extraction task (pull book_number/title/etc out of
+            # unambiguous snippet text), not generative writing -- temperature=0
+            # avoids run-to-run variance that otherwise intermittently drops a
+            # correctly-worded candidate (see discovery_catchup_architecture_spec.md
+            # recall-gap diagnostic).
+            temperature=0,
             messages=[{"role": "user", "content": prompt}],
             timeout=WEB_SEARCH_TIMEOUT_SECONDS,
         )
@@ -1421,7 +1427,19 @@ def _fetch_web_search(
                 uncached_raw.append(item)
                 continue
             verdict = cache.get_llm_verdict(scope_type, series_name_key, item["url"])
-            if verdict is CACHE_MISS:
+            # The missing-volume interior-gap pass exists specifically to
+            # give a URL a second, more focused look with a much smaller
+            # batch than the broad targeted/lookahead pass -- a live
+            # diagnostic (discovery_catchup_architecture_spec.md recall-gap
+            # investigation) found the targeted pass's large batch wrongly
+            # rejecting book-number-bearing URLs it would correctly accept
+            # in isolation, and that wrong rejection getting cached and then
+            # silently poisoning this exact retry. A cached *acceptance* is
+            # still trusted (no reason to redo confirmed-correct work), but
+            # a cached *rejection* is treated as a miss here so this pass
+            # can actually re-verify rather than rubber-stamp the earlier
+            # pass's possible mistake.
+            if verdict is CACHE_MISS or (verdict is None and pass_label == "missing_volume"):
                 uncached_raw.append(item)
             else:
                 cached_by_url[item["url"]] = verdict
@@ -2558,6 +2576,10 @@ def _reconcile_candidates_with_llm(
             response = client.messages.create(
                 model=ANTHROPIC_MODEL,
                 max_tokens=3000,
+                # Deterministic normalize/merge/flag task, not generative writing --
+                # see _structure_web_results_with_llm's temperature=0 for the same
+                # rationale.
+                temperature=0,
                 messages=[{"role": "user", "content": prompt}],
                 timeout=WEB_SEARCH_TIMEOUT_SECONDS,
             )
