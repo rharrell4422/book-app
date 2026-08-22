@@ -52,7 +52,15 @@ load_dotenv()
 GOOGLE_BOOKS_ENDPOINT = "https://www.googleapis.com/books/v1/volumes"
 OPENLIBRARY_ENDPOINT = "https://openlibrary.org/search.json"
 HARDCOVER_ENDPOINT = "https://api.hardcover.app/v1/graphql"
-BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
+# Brave Search is no longer a viable provider: its only sub-enterprise tier
+# caps out at 1000 queries/month, which this app hit during personal-use
+# testing alone. Serper is its replacement -- see
+# discovery_agentic_migration_decision_log.md. Serper's coverage of the
+# indie/LitRPG/web-serial sources Brave used to surface is unverified and
+# may differ; see _web_search_enabled/_llm_structuring_enabled below and
+# discover_candidates_for_series' diagnostic-only mode for how to check
+# that coverage by hand before relying on it.
+SERPER_SEARCH_ENDPOINT = "https://google.serper.dev/search"
 REQUEST_TIMEOUT_SECONDS = 12.0
 WEB_SEARCH_TIMEOUT_SECONDS = 20.0
 
@@ -80,8 +88,8 @@ WEB_SEARCH_MAX_RESULTS = 8
 # spec) can sit many volumes ahead of the highest owned book, and 3 wasn't
 # wide enough to catch them in one pass. Still batched into a single LLM
 # structuring call regardless of width -- see _fetch_web_search -- so this
-# only adds Brave calls (and a larger prompt on that one call), not LLM
-# call count.
+# only adds web-search-provider calls (and a larger prompt on that one
+# call), not LLM call count.
 WEB_SEARCH_LOOKAHEAD_BOOKS = 10
 
 # When a candidate's first-pass query snippet doesn't include a release date,
@@ -91,17 +99,17 @@ WEB_SEARCH_LOOKAHEAD_BOOKS = 10
 # "<series> book N" query does -- observed live: a just-released book's
 # generic listing had no date in its snippet and got wrongly defaulted to
 # "upcoming" until this second look ran. Capped since it costs one extra
-# Brave + Anthropic call per undated candidate.
+# web-search + Anthropic call per undated candidate.
 WEB_SEARCH_DATE_REFINEMENT_MAX = 3
 
-# Bounds concurrent Brave requests within one _fetch_web_search call (the
-# targeted pass alone can have WEB_SEARCH_LOOKAHEAD_BOOKS + 1 = 11 distinct
-# queries) -- a small fixed pool, not one thread per query, so a wide
-# lookahead window doesn't fire a burst of ~11 simultaneous requests and
-# risk Brave rate-limiting that never happened when these were sequential.
-# Purely a latency optimization: does not change Brave call count, LLM call
-# count, or which URLs get fetched.
-WEB_SEARCH_BRAVE_MAX_PARALLEL_WORKERS = 5
+# Bounds concurrent web-search-provider requests within one _fetch_web_search
+# call (the targeted pass alone can have WEB_SEARCH_LOOKAHEAD_BOOKS + 1 = 11
+# distinct queries) -- a small fixed pool, not one thread per query, so a
+# wide lookahead window doesn't fire a burst of ~11 simultaneous requests and
+# risk provider rate-limiting that never happened when these were
+# sequential. Purely a latency optimization: does not change web-search call
+# count, LLM call count, or which URLs get fetched.
+WEB_SEARCH_MAX_PARALLEL_WORKERS = 5
 
 # Hardcover's own search index tags each hit with its position within a
 # series (when it has one), which is a far more reliable source of a book's
@@ -1027,12 +1035,12 @@ def backfill_missing_publication_dates(candidates: list[dict], author: str) -> N
     ever fills a blank date, never overwrites a real one.
 
     Candidates with no published_date at all are almost always ones the
-    Brave+LLM web-search pass surfaced without a confirmed date in its
-    result snippets -- classify_upcoming's own conservative default then
-    treats those as "not confirmed available yet" (see its docstring),
-    which is often wrong for an already-released indie/KU title that Brave
-    just didn't happen to state a date for. The same real book is frequently
-    already in Hardcover's structured catalog with a real release date --
+    web-search+LLM pass surfaced without a confirmed date in its result
+    snippets -- classify_upcoming's own conservative default then treats
+    those as "not confirmed available yet" (see its docstring), which is
+    often wrong for an already-released indie/KU title that the web-search
+    provider just didn't happen to state a date for. The same real book is
+    frequently already in Hardcover's structured catalog with a real release date --
     it just didn't get chosen as this fused candidate's representative hit
     because the broader "<series> <author>" search that ran earlier either
     didn't surface it prominently enough, or Hardcover's own search index
@@ -1090,34 +1098,56 @@ def backfill_missing_publication_dates(candidates: list[dict], author: str) -> N
             break
 
 
-def _fetch_brave_web_search(
+def _web_search_enabled() -> bool:
+    """Frontier web-search coverage (Serper), independent of whether an LLM
+    is available to structure it into candidates -- see
+    _llm_structuring_enabled and discover_candidates_for_series' diagnostic-
+    only mode, which is exactly "web search enabled, LLM structuring not"
+    made explicit and useful instead of just falling through to the
+    original combined-gate behavior of running nothing at all.
+    """
+    return bool(os.environ.get("SERPER_API_KEY", "").strip())
+
+
+def _llm_structuring_enabled() -> bool:
+    return bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+
+
+def _fetch_serper_web_search(
     query: str, count: int = WEB_SEARCH_MAX_RESULTS, *, telemetry: "DiscoveryTelemetry | None" = None
 ) -> list[dict]:
-    api_key = os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()
+    """Brave Search's replacement (see SERPER_SEARCH_ENDPOINT's comment). Same
+    return shape as the function this replaced (list of {title,
+    description, url}), so every downstream consumer -- LLM structuring,
+    caching, dedup -- is unaffected by the provider swap.
+    """
+    api_key = os.environ.get("SERPER_API_KEY", "").strip()
     if not api_key:
         return []
 
-    headers = {**REQUEST_HEADERS, "Accept": "application/json", "X-Subscription-Token": api_key}
-    params = {"q": query, "count": count}
+    headers = {**REQUEST_HEADERS, "X-API-KEY": api_key, "Content-Type": "application/json"}
+    payload = {"q": query, "num": count}
     started = time.monotonic()
     try:
-        response = httpx.get(BRAVE_SEARCH_ENDPOINT, params=params, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+        response = httpx.post(
+            SERPER_SEARCH_ENDPOINT, json=payload, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS
+        )
         response.raise_for_status()
     finally:
         if telemetry is not None:
-            telemetry.record_brave_call(query=query, duration_s=time.monotonic() - started)
+            telemetry.record_web_search_call(query=query, duration_s=time.monotonic() - started)
 
-    hits = ((response.json() or {}).get("web") or {}).get("results") or []
+    hits = (response.json() or {}).get("organic") or []
     results: list[dict] = []
     for hit in hits:
         title = str(hit.get("title") or "").strip()
-        url = str(hit.get("url") or "").strip()
+        url = str(hit.get("link") or "").strip()
         if not title or not url:
             continue
         results.append(
             {
                 "title": title,
-                "description": str(hit.get("description") or "").strip(),
+                "description": str(hit.get("snippet") or "").strip(),
                 "url": url,
             }
         )
@@ -1346,7 +1376,7 @@ def _refine_undated_web_search_results_batch(
     scope_type: str = "series",
 ) -> dict[int, dict]:
     """Best-effort second look for candidates the first pass couldn't date:
-    fires one dedicated "<title> release date" Brave query per candidate
+    fires one dedicated "<title> release date" web-search query per candidate
     (query text must stay per-candidate -- a shared/merged query text would
     blur which hits belong to which title), then structures ALL of those
     queries' combined raw results in a single LLM call rather than one call
@@ -1359,8 +1389,8 @@ def _refine_undated_web_search_results_batch(
     _structure_with_verdict_cache: this query text is often repeated
     verbatim across rounds/passes for the same still-undated candidate
     (e.g. re-checking an upcoming book that hasn't been dated yet), so
-    leaving it uncached meant paying a fresh Brave+LLM call for the exact
-    same "<title> release date" search every single time it recurred.
+    leaving it uncached meant paying a fresh web-search+LLM call for the
+    exact same "<title> release date" search every single time it recurred.
 
     Correlation guardrail: a structured item is only ever applied to the
     one candidate whose OWN query actually returned that item's URL, AND
@@ -1405,17 +1435,17 @@ def _refine_undated_web_search_results_batch(
         query = " ".join(part for part in (title, series_name, author, "release date") if part)
         candidate_queries[index] = query
 
-        cache_hit = cache.get_provider_fetch("brave", query) if cache is not None else CACHE_MISS
+        cache_hit = cache.get_provider_fetch("web_search", query) if cache is not None else CACHE_MISS
         if cache_hit is not CACHE_MISS:
             raw_by_index[index] = cache_hit
         else:
             queries_to_fetch.append((index, query))
 
     if queries_to_fetch:
-        max_workers = min(len(queries_to_fetch), WEB_SEARCH_BRAVE_MAX_PARALLEL_WORKERS)
+        max_workers = min(len(queries_to_fetch), WEB_SEARCH_MAX_PARALLEL_WORKERS)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_index = {
-                executor.submit(_fetch_brave_web_search, query, telemetry=telemetry): index
+                executor.submit(_fetch_serper_web_search, query, telemetry=telemetry): index
                 for index, query in queries_to_fetch
             }
             for future, index in future_to_index.items():
@@ -1425,7 +1455,7 @@ def _refine_undated_web_search_results_batch(
                     raw = []
                 raw_by_index[index] = raw
                 if cache is not None:
-                    cache.set_provider_fetch("brave", candidate_queries[index], raw)
+                    cache.set_provider_fetch("web_search", candidate_queries[index], raw)
 
     for index, entry in entries_to_refine:
         raw = raw_by_index.get(index, [])
@@ -1570,22 +1600,22 @@ def _fetch_web_search(
         # misses are fired concurrently, bounded by a small fixed worker
         # count (not one thread per query): an unbounded pool would fire
         # every lookahead query (up to WEB_SEARCH_LOOKAHEAD_BOOKS + 1 of
-        # them) in the same instant, risking Brave rate-limiting that never
-        # happened when these were sequential.
+        # them) in the same instant, risking provider rate-limiting that
+        # never happened when these were sequential.
         items_by_position: dict[int, list[dict]] = {}
         queries_to_fetch: list[tuple[int, str]] = []
         for position, query in enumerate(queries):
-            cache_hit = cache.get_provider_fetch("brave", query) if cache is not None else CACHE_MISS
+            cache_hit = cache.get_provider_fetch("web_search", query) if cache is not None else CACHE_MISS
             if cache_hit is not CACHE_MISS:
                 items_by_position[position] = cache_hit
             else:
                 queries_to_fetch.append((position, query))
 
         if queries_to_fetch:
-            max_workers = min(len(queries_to_fetch), WEB_SEARCH_BRAVE_MAX_PARALLEL_WORKERS)
+            max_workers = min(len(queries_to_fetch), WEB_SEARCH_MAX_PARALLEL_WORKERS)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_position = {
-                    executor.submit(_fetch_brave_web_search, query, telemetry=telemetry): position
+                    executor.submit(_fetch_serper_web_search, query, telemetry=telemetry): position
                     for position, query in queries_to_fetch
                 }
                 for future, position in future_to_position.items():
@@ -1596,7 +1626,7 @@ def _fetch_web_search(
                         continue
                     items_by_position[position] = items
                     if cache is not None:
-                        cache.set_provider_fetch("brave", queries[position], items)
+                        cache.set_provider_fetch("web_search", queries[position], items)
 
         # Results are reassembled in original query order (not completion
         # order) so URL dedup's "first query wins" behavior is unaffected
@@ -1801,7 +1831,7 @@ def _fetch_all_providers_parallel(
     pass_label: str = "targeted",
 ) -> dict:
     """Fetch Google Books, OpenLibrary, Hardcover, and (optionally) the
-    Brave+LLM web-search provider concurrently instead of one after another.
+    web-search+LLM provider concurrently instead of one after another.
 
     This only changes *how* the four provider calls are issued (threaded
     instead of sequential) -- it does not change what gets sent to each
@@ -1851,10 +1881,7 @@ def _fetch_all_providers_parallel(
             ]
 
     run_web_search = bool(
-        enable_web_search
-        and resolved_web_queries
-        and os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()
-        and os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        enable_web_search and resolved_web_queries and _web_search_enabled() and _llm_structuring_enabled()
     )
 
     # Layer A provider-fetch cache (see services/discovery_cache.py):
@@ -2225,12 +2252,12 @@ def _unified_candidate_to_raw_dict(candidate: UnifiedCandidate) -> dict:
 
 
 # Bounds how many gap numbers _reconstruct_series_skeleton will fire a
-# targeted Brave lookahead query for in one call -- a series with a large
-# number of gaps (e.g. only book 1 and book 12 are owned/found) would
+# targeted web-search lookahead query for in one call -- a series with a
+# large number of gaps (e.g. only book 1 and book 12 are owned/found) would
 # otherwise turn into a double-digit number of live web searches in a
 # single Check Now run. All still batched into one _fetch_web_search call
-# (one shared Brave loop + one LLM structuring pass), same as the existing
-# highest-owned-number lookahead in _fetch_all_providers_parallel.
+# (one shared web-search loop + one LLM structuring pass), same as the
+# existing highest-owned-number lookahead in _fetch_all_providers_parallel.
 MAX_MISSING_VOLUME_LOOKAHEAD_QUERIES = 6
 
 
@@ -2264,7 +2291,7 @@ def _reconstruct_series_skeleton(
     those numbers has no owned book AND no discovered candidate at all.
 
     For each such gap (up to MAX_MISSING_VOLUME_LOOKAHEAD_QUERIES), fires a
-    targeted Brave+LLM lookahead query ("<series> <author> book <N>")
+    targeted web-search+LLM lookahead query ("<series> <author> book <N>")
     specifically for that missing number. This is more surgical than the
     generic targeted "<series> <author>" query or the highest-owned-number-
     only lookahead _fetch_all_providers_parallel already does: it can
@@ -2295,7 +2322,7 @@ def _reconstruct_series_skeleton(
     unified_candidates with any newly-recovered volumes fused in; when
     there's nothing missing, no resolvable series_name/author, no resolvable
     expected total at all, or web search isn't configured
-    (BRAVE_SEARCH_API_KEY/ANTHROPIC_API_KEY), it's returned unchanged.
+    (SERPER_API_KEY/ANTHROPIC_API_KEY), it's returned unchanged.
     """
     resolved_series_name = series_name or next((c.series_name for c in unified_candidates if c.series_name), None)
     resolved_author = author or next(
@@ -2333,7 +2360,7 @@ def _reconstruct_series_skeleton(
         not missing_numbers
         or not resolved_series_name
         or not resolved_author
-        or not (os.environ.get("BRAVE_SEARCH_API_KEY", "").strip() and os.environ.get("ANTHROPIC_API_KEY", "").strip())
+        or not (_web_search_enabled() and _llm_structuring_enabled())
     ):
         return _result(missing_numbers, [], unified_candidates)
 
@@ -3268,18 +3295,25 @@ def precheck_for_new_volumes(
 ) -> bool:
     """Cheap "is there anything new" check for a series that was recently
     fully checked (see discovery_catchup_architecture_spec.md #7.2) --
-    catalog-only (Google Books + OpenLibrary + Hardcover), zero Brave
+    catalog-only (Google Books + OpenLibrary + Hardcover), zero web-search
     calls, zero LLM calls. Returns True if the full multi-round loop
     should run, False if it's safe to short-circuit.
 
-    Only Hardcover's raw results carry a structured numeric series
-    position (`series_number_hint` -- see _fetch_hardcover); Google Books
-    and OpenLibrary's raw results don't expose one at all, so this can
-    only ever confirm "yes, something new" via Hardcover. This is an
-    accepted, documented gap (see the spec section above): a false
-    "nothing new" here just means the next check that isn't gated by the
-    3-day staleness window (never later than the 7-day auto-discovery
-    sweep) still catches it -- not a permanent miss.
+    Hardcover's raw results carry a structured numeric series position
+    (`series_number_hint` -- see _fetch_hardcover) directly, so those are
+    trusted outright. Google Books and OpenLibrary's raw results don't
+    expose one at all -- for those, a number is instead inferred from the
+    hit's own title via infer_number_from_title, same title-parsing
+    heuristic series_agent.py's belongs_to_series loop already relies on
+    for provider hits with no structured hint. This is a deliberate
+    accuracy-over-cost trade-off (see discovery_agentic_migration_
+    decision_log.md): a noisy, title-inferred number can occasionally
+    trigger an extra multi-round pass this check could have short-
+    circuited, but the prior Hardcover-only version's false "nothing new"
+    could silently miss a real new volume that Google Books/OpenLibrary
+    already indexed but Hardcover's own search hadn't yet -- for a
+    personal-use precheck, a wasted extra pass is far cheaper than a
+    missed release.
     """
     query_author = primary_author_name(author)
     targeted_query_text = f"{series_name} {query_author}".strip()
@@ -3306,6 +3340,21 @@ def precheck_for_new_volumes(
                 return True
         except (TypeError, ValueError):
             continue
+
+    # Google Books/OpenLibrary carry no structured series-position field at
+    # all -- infer_number_from_title's title-parsing heuristic is the only
+    # signal available for them (see this function's own docstring for why
+    # that's an accepted trade-off here, not a full replacement for a real
+    # structured hint).
+    for provider in ("google", "openlibrary"):
+        for hit in fetch_results.get(provider) or []:
+            if not _author_matches(hit.get("authors") or [], author):
+                continue
+            number = infer_number_from_title(hit.get("title"), series_name)
+            if number is None:
+                continue
+            if number > ceiling:
+                return True
     return False
 
 
@@ -3353,7 +3402,7 @@ def discover_candidates_for_series(
     still triggering fallback for being incomplete.
 
     The fallback pass has never queried web search by default, since
-    Brave+LLM structuring here is a noisier, costlier signal than the
+    web-search+LLM structuring here is a noisier, costlier signal than the
     catalog APIs already provide -- enable_fallback_web_search opts into it
     anyway for a caller that wants the extra coverage.
     """
@@ -3386,6 +3435,29 @@ def discover_candidates_for_series(
     # co-authored results still pass.
     query_author = primary_author_name(author)
     targeted_query_text = f"{series_name} {query_author}".strip()
+
+    if _web_search_enabled() and not _llm_structuring_enabled():
+        # Diagnostic-only mode: a Serper key with no Anthropic key means
+        # there's no way to structure raw hits into real candidates, so
+        # don't try. This exists purely so Serper's own indie/LitRPG/
+        # web-serial coverage -- unverified, and possibly quite different
+        # from Brave's -- can be checked by hand against a real query
+        # before being relied on for anything (see
+        # discovery_agentic_migration_decision_log.md). No other
+        # provider/pass runs, nothing is fused/filtered, and nothing here
+        # can ever be added to the library: this is a standalone coverage
+        # probe, not a partial discovery run.
+        return {
+            "candidates": [],
+            "unified_candidates": [],
+            "provider_failures": [],
+            "all_providers_failed": False,
+            "used_author_fallback": False,
+            "drop_diagnostics": [],
+            "diagnostic_mode": "web_search_coverage_probe",
+            "diagnostic_raw_web_snippets": _fetch_serper_web_search(targeted_query_text, telemetry=telemetry),
+        }
+
     any_provider_succeeded = False
 
     # Google/OpenLibrary/Hardcover/web-search fetched concurrently (see
@@ -3428,10 +3500,12 @@ def discover_candidates_for_series(
 
     # Live web search fills the coverage gap the catalog APIs above have for
     # indie/self-published titles and pure announcements -- only runs when
-    # both a Brave key and an Anthropic key are configured, since it needs
-    # both to search and to structure the results.
+    # both a web-search key (Serper) and an Anthropic key are configured,
+    # since it needs both to search and to structure the results. (Just a
+    # web-search key with no Anthropic key never reaches this far --
+    # see the diagnostic-only short-circuit above.)
     web_search_raw = fetch_results["web"]
-    if os.environ.get("BRAVE_SEARCH_API_KEY", "").strip() and os.environ.get("ANTHROPIC_API_KEY", "").strip():
+    if _web_search_enabled() and _llm_structuring_enabled():
         if "web" in failures:
             provider_failures.append({"provider": "web_search", "error": str(failures["web"])})
         else:
@@ -3493,8 +3567,8 @@ def discover_candidates_for_series(
         # pass already does -- keeps the fallback pass able to trigger on
         # low completeness/confidence without it being author-wide in scope.
         # Web search still stays off by default (enable_fallback_web_search
-        # opts in) since Brave+LLM structuring here is a noisier, costlier
-        # signal than the catalog APIs already provide.
+        # opts in) since web-search+LLM structuring here is a noisier,
+        # costlier signal than the catalog APIs already provide.
         fallback_results = _fetch_all_providers_parallel(
             query_author,
             series_name,
@@ -3542,7 +3616,7 @@ def discover_candidates_for_series(
 
         if enable_fallback_web_search:
             web_fallback = fallback_results["web"]
-            if os.environ.get("BRAVE_SEARCH_API_KEY", "").strip() and os.environ.get("ANTHROPIC_API_KEY", "").strip():
+            if _web_search_enabled() and _llm_structuring_enabled():
                 if "web" in fallback_failures:
                     provider_failures.append({"provider": "web_search_fallback", "error": str(fallback_failures["web"])})
                 else:
@@ -3697,7 +3771,7 @@ def discover_candidates_for_author(
 
     Deliberately much lighter than discover_candidates_for_series: one plain
     author-bibliography query per catalog API (no series name to search
-    against) plus at most one Brave web-search query -- no lookahead
+    against) plus at most one web-search query -- no lookahead
     queries, since there's no single "next book number" to look ahead from
     when the results can span several different series at once. Each
     candidate carries its own guessed series name (see series_name_hint on
@@ -3751,7 +3825,7 @@ def discover_candidates_for_author(
         any_provider_succeeded = True
 
     web_search_raw = fetch_results["web"]
-    if os.environ.get("BRAVE_SEARCH_API_KEY", "").strip() and os.environ.get("ANTHROPIC_API_KEY", "").strip():
+    if _web_search_enabled() and _llm_structuring_enabled():
         if "web" in failures:
             provider_failures.append({"provider": "web_search", "error": str(failures["web"])})
         else:

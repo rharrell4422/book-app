@@ -1227,7 +1227,7 @@ export default function SeriesDetailPage() {
     if (!series) return;
 
     // Complements automated "Check for New": that only surfaces a next book
-    // if it's already indexed well enough by Google Books/Hardcover/Brave
+    // if it's already indexed well enough by Google Books/Hardcover/web
     // search to be classified as belonging to this series (a generic or
     // common-word series title can get swamped by unrelated results and
     // miss a real release entirely). This gives a fast manual escape hatch

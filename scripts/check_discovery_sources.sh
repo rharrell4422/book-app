@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Guards against silently regressing to zero working discovery providers.
 # Book discovery is API-based (discovery_engine.py calling Google Books,
-# OpenLibrary, Hardcover.app, and a Brave Search + Claude web-search
+# OpenLibrary, Hardcover.app, and a Serper Search + Claude web-search
 # provider) rather than HTML scraping -- this checks that each provider's
 # fetch function still exists and is still wired into the series discovery
 # agent.

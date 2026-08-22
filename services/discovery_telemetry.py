@@ -1,5 +1,5 @@
 """Per-job instrumentation for a single Check Now run -- pass-level timing,
-Brave/LLM call counts, and LLM token usage.
+web-search/LLM call counts, and LLM token usage.
 
 Built to answer one concrete question empirically instead of by estimate:
 how long does one discovery round actually take, and where does that time
@@ -9,12 +9,12 @@ catch-up loop and its cache design)? See discovery_catchup_architecture_spec.md.
 Threading note: `_fetch_all_providers_parallel` runs Google Books/
 OpenLibrary/Hardcover/web-search concurrently across worker threads, but
 only the "web" task ever touches a DiscoveryTelemetry instance (the other
-three providers make no Brave/LLM calls), and passes are otherwise strictly
-sequential within one `run_series_check` call (targeted -> author-fallback
--> reconciliation -> missing-volume). So a single shared `_current_pass`
-label, guarded by a lock, is safe: no two passes are ever actually mid-flight
-on Brave/LLM at the same wall-clock moment, despite the object being shared
-across threads.
+three providers make no web-search/LLM calls), and passes are otherwise
+strictly sequential within one `run_series_check` call (targeted ->
+author-fallback -> reconciliation -> missing-volume). So a single shared
+`_current_pass` label, guarded by a lock, is safe: no two passes are ever
+actually mid-flight on web-search/LLM at the same wall-clock moment, despite
+the object being shared across threads.
 
 Every parameter that touches this module elsewhere is optional and defaults
 to None, matching the existing `diagnostics` parameter convention already
@@ -34,7 +34,7 @@ class DiscoveryTelemetry:
         self._lock = threading.Lock()
         self._current_pass = "unlabeled"
         self.passes: list[dict] = []
-        self.brave_calls: list[dict] = []
+        self.web_search_calls: list[dict] = []
         self.llm_calls: list[dict] = []
 
     @contextmanager
@@ -58,9 +58,9 @@ class DiscoveryTelemetry:
                 )
                 self._current_pass = previous
 
-    def record_brave_call(self, *, query: str, duration_s: float) -> None:
+    def record_web_search_call(self, *, query: str, duration_s: float) -> None:
         with self._lock:
-            self.brave_calls.append(
+            self.web_search_calls.append(
                 {"pass": self._current_pass, "query": query, "duration_s": round(duration_s, 3)}
             )
 
@@ -78,7 +78,7 @@ class DiscoveryTelemetry:
     def summary(self) -> dict:
         with self._lock:
             passes = list(self.passes)
-            brave_calls = list(self.brave_calls)
+            web_search_calls = list(self.web_search_calls)
             llm_calls = list(self.llm_calls)
 
         by_pass: dict[str, dict] = {}
@@ -86,16 +86,24 @@ class DiscoveryTelemetry:
         def _bucket(name: str) -> dict:
             return by_pass.setdefault(
                 name,
-                {"pass_duration_s": 0.0, "brave_calls": 0, "brave_duration_s": 0.0, "llm_calls": 0, "llm_duration_s": 0.0, "tokens_in": 0, "tokens_out": 0},
+                {
+                    "pass_duration_s": 0.0,
+                    "web_search_calls": 0,
+                    "web_search_duration_s": 0.0,
+                    "llm_calls": 0,
+                    "llm_duration_s": 0.0,
+                    "tokens_in": 0,
+                    "tokens_out": 0,
+                },
             )
 
         for entry in passes:
             bucket = _bucket(entry["pass"])
             bucket["pass_duration_s"] = round(bucket["pass_duration_s"] + entry["duration_s"], 3)
-        for call in brave_calls:
+        for call in web_search_calls:
             bucket = _bucket(call["pass"])
-            bucket["brave_calls"] += 1
-            bucket["brave_duration_s"] = round(bucket["brave_duration_s"] + call["duration_s"], 3)
+            bucket["web_search_calls"] += 1
+            bucket["web_search_duration_s"] = round(bucket["web_search_duration_s"] + call["duration_s"], 3)
         for call in llm_calls:
             bucket = _bucket(call["pass"])
             bucket["llm_calls"] += 1
@@ -105,7 +113,7 @@ class DiscoveryTelemetry:
 
         return {
             "by_pass": by_pass,
-            "total_brave_calls": len(brave_calls),
+            "total_web_search_calls": len(web_search_calls),
             "total_llm_calls": len(llm_calls),
             "total_tokens_in": sum(c["tokens_in"] for c in llm_calls),
             "total_tokens_out": sum(c["tokens_out"] for c in llm_calls),

@@ -50,11 +50,12 @@ SERIES_CHECK_HARD_TIMEOUT_SECONDS = 300
 SERIES_CHECK_MAX_ROUNDS = 3
 # Gates the cheap catalog-only pre-check (discovery_catchup_architecture_
 # spec.md #7.2): a series last fully checked within this many days skips
-# straight to a Google Books/OpenLibrary/Hardcover-only fetch (zero Brave,
-# zero LLM calls) before committing to the full multi-round loop. Chosen to
-# sit safely below services/auto_discovery.py's AUTO_DISCOVERY_COOLDOWN
-# (7 days) so it never fires on the primary recurring sweep cadence -- only
-# on genuinely redundant close-together re-checks.
+# straight to a Google Books/OpenLibrary/Hardcover-only fetch (zero
+# web-search, zero LLM calls) before committing to the full multi-round
+# loop. Chosen to sit safely below services/auto_discovery.py's
+# AUTO_DISCOVERY_COOLDOWN (7 days) so it never fires on the primary
+# recurring sweep cadence -- only on genuinely redundant close-together
+# re-checks.
 SERIES_CHECK_PRECHECK_STALENESS_DAYS = 3
 
 
@@ -214,9 +215,9 @@ def run_series_check_job_full(series_id: int) -> None:
             }
 
         # Per-job, in-memory only -- shared across every round below so
-        # Brave/LLM call counts and timings are cumulative for the whole
-        # job, not reset each round (see discovery_catchup_architecture_
-        # spec.md #2.5).
+        # web-search/LLM call counts and timings are cumulative for the
+        # whole job, not reset each round (see discovery_catchup_
+        # architecture_spec.md #2.5).
         telemetry = DiscoveryTelemetry()
         # Also per-job/in-memory/shared-across-rounds, and always active
         # (no policy gate -- see spec #7.1): dedupes provider fetches and
@@ -250,7 +251,7 @@ def run_series_check_job_full(series_id: int) -> None:
         # ---- Cheap pre-check for a recently-checked series (architecture
         # spec #7.2) ----
         # A series checked within the last SERIES_CHECK_PRECHECK_STALENESS_
-        # DAYS days gets one catalog-only (zero Brave, zero LLM) fetch
+        # DAYS days gets one catalog-only (zero web-search, zero LLM) fetch
         # before committing to the full multi-round loop -- if nothing
         # shows up numbered beyond what's already known (owned, upcoming,
         # or a tracked interior gap), skip the full loop entirely. A

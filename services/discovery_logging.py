@@ -98,7 +98,7 @@ def log_discovery_summary(*, result: dict, terminal_error: str | None = None) ->
     if telemetry:
         _console_log(
             "--- telemetry: "
-            f"total_brave_calls={telemetry.get('total_brave_calls', 0)} "
+            f"total_web_search_calls={telemetry.get('total_web_search_calls', 0)} "
             f"total_llm_calls={telemetry.get('total_llm_calls', 0)} "
             f"total_tokens_in={telemetry.get('total_tokens_in', 0)} "
             f"total_tokens_out={telemetry.get('total_tokens_out', 0)} ---"
@@ -108,7 +108,8 @@ def log_discovery_summary(*, result: dict, terminal_error: str | None = None) ->
             _console_log(
                 f"  PASS {pass_name}: "
                 f"duration={stats.get('pass_duration_s', 0)}s "
-                f"brave_calls={stats.get('brave_calls', 0)} (brave_time={stats.get('brave_duration_s', 0)}s) "
+                f"web_search_calls={stats.get('web_search_calls', 0)} "
+                f"(web_search_time={stats.get('web_search_duration_s', 0)}s) "
                 f"llm_calls={stats.get('llm_calls', 0)} (llm_time={stats.get('llm_duration_s', 0)}s) "
                 f"tokens_in={stats.get('tokens_in', 0)} tokens_out={stats.get('tokens_out', 0)}"
             )

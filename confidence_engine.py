@@ -1,11 +1,14 @@
 """Phase 3 of agentic discovery (see project design chat): a deterministic,
 side-effect-free confidence scoring layer over Phase 2's delta output.
 
-Shadow mode only. Nothing in this module touches the database, calls an
-LLM, makes a network request, or mutates its inputs -- it's a pure
+Still side-effect-free -- nothing in this module touches the database,
+calls an LLM, makes a network request, or mutates its inputs; it's a pure
 function of (skeleton_entries, provider_candidates, delta) -> a confidence
-dict. The only current caller (agents/series_agent.py) logs the result and
-discards it; nothing reads or acts on it yet.
+dict. As of the manual-override rollout, `agents/series_agent.py` reads
+`overall` per candidate (via `correlation_key`, below) to route it to
+auto-accept/needs_review/auto-drop -- see that module's `run_series_check`
+for the routing logic. This module still only ever computes; it never
+decides anything itself.
 
 Reuses discovery_engine's own text-normalization/title guards
 (normalize_text, core_title_key, _title_is_series_variant) rather than
@@ -33,6 +36,20 @@ avoid reintroducing bugs this app has already fixed elsewhere:
   regression of that fix. A valid fractional number is judged on the same
   high/medium footing as a valid integer; only a genuinely malformed
   value (non-numeric, negative) is graded low.
+
+Title Confidence has a fifth grade, "unverified", distinct from "low":
+"low" means a skeleton entry exists for this number and the title
+disagrees with it (a real, corroborated mismatch); "unverified" means no
+skeleton entry exists to compare against at all -- most commonly a
+genuinely new book the library doesn't own yet, which is the exact case
+the manual-override routing needs to be able to tell apart from an actual
+contradiction (see _overall_confidence). Only "title_confidence" ever
+produces "unverified" -- provider/number/series-alignment confidence
+never do, so at most one of the four dimensions can carry it. Without
+this distinction, every first-time discovery of a brand-new book would
+grade "low" purely for being new (no skeleton entry can exist for a
+number nothing has seen before) and get auto-dropped by the routing
+below -- the exact regression this grade exists to prevent.
 """
 
 from datetime import datetime
@@ -45,7 +62,7 @@ _PROVIDER_CONFIDENCE = {
     "hardcover": "high",
     "google_books": "medium",
     "openlibrary": "low",  # see module docstring: collapsed from "medium-low"
-    "web_search": "low",  # Brave snippet, per spec
+    "web_search": "low",  # frontier web-search snippet (formerly Brave, now Serper), per spec
 }
 
 
@@ -62,11 +79,49 @@ def _candidate_key(candidate: dict) -> tuple:
     """Matching key used to cross-reference a candidate against Phase 2's
     delta output -- not python object identity, so this still works if a
     caller passes an equivalent but separately-built dict/list.
+
+    Both sides of every existing call site (compute_confidence's own
+    `provider_candidates` and delta's `malformed_books[*]["candidate"]`)
+    are discovery_engine's PRE-_filter_and_merge `unified_candidates`
+    (each converted via UnifiedCandidate.model_dump()), so both always
+    carry the number under the field name "series_number" -- this
+    function must keep assuming that and nothing else. Do not widen it to
+    also check "series_number_hint"; that would fix nothing here (both
+    sides already agree) and risks masking a real regression if one side
+    ever stopped being pre-filter. See `correlation_key` below for the
+    unrelated, POST-filter lookup case.
     """
     return (
         str(candidate.get("title") or "").strip().lower(),
         candidate.get("isbn13"),
         _to_float_or_none(candidate.get("series_number")),
+    )
+
+
+def correlation_key(candidate: dict) -> tuple:
+    """Same (title, isbn13, number) shape as `_candidate_key`, but tolerant
+    of which field name carries the series number -- for correlating a
+    scored PRE-_filter_and_merge candidate (this module's own input,
+    field name "series_number") against a POST-_filter_and_merge raw
+    candidate dict (what agents/series_agent.py's belongs_to_series loop
+    iterates, field name "series_number_hint" instead -- see
+    discovery_engine._unified_candidate_to_raw_dict, which never copies
+    UnifiedCandidate.series_number back onto "series_number_hint").
+
+    Deliberately a separate function rather than a change to
+    `_candidate_key` itself: `_candidate_key`'s existing callers are both
+    pre-filter and already internally consistent (see its own docstring)
+    -- widening it to also check "series_number_hint" would have no effect
+    there and would risk silently hiding a future regression instead of
+    surfacing it.
+    """
+    number = candidate.get("series_number")
+    if number is None:
+        number = candidate.get("series_number_hint")
+    return (
+        str(candidate.get("title") or "").strip().lower(),
+        candidate.get("isbn13"),
+        _to_float_or_none(number),
     )
 
 
@@ -81,7 +136,14 @@ def _skeleton_by_number(skeleton_entries: list[dict]) -> dict[float, dict]:
 
 def _provider_confidence(candidate: dict) -> str:
     provenance = candidate.get("source_provenance") or []
-    provider_names = {entry.get("provider") for entry in provenance if entry.get("provider")}
+    # Provenance entries key their provider name as "source" (see
+    # discovery_engine.py's UnifiedCandidate provenance dicts, and
+    # delta_engine._candidate_providers, which had the identical bug) --
+    # no provenance entry has ever actually used "provider", so a prior
+    # version of this line silently always fell through the `not levels`
+    # branch below and graded every candidate's provider_confidence "low"
+    # regardless of its real source, hardcover included.
+    provider_names = {entry.get("source") for entry in provenance if entry.get("source")}
     levels = [_PROVIDER_CONFIDENCE.get(name, "low") for name in provider_names]
     if not levels:
         return "low"
@@ -112,8 +174,10 @@ def _title_confidence(
     if skeleton_entry is None:
         # Nothing in the skeleton to corroborate this title against yet
         # (a genuinely new book, or one with no resolvable number) -- not
-        # wrong, just unverified.
-        return "low"
+        # wrong, just unverified. Distinct from "low", which is reserved
+        # for a title that *does* have a skeleton entry to compare against
+        # and disagrees with it (see module docstring).
+        return "unverified"
 
     skeleton_title = str(skeleton_entry.get("title") or "").strip()
     if discovery_engine.normalize_text(title) == discovery_engine.normalize_text(skeleton_title):
@@ -151,27 +215,42 @@ def _series_alignment_confidence(candidate: dict, series_author: str | None) -> 
         # (which is reserved for an actual, confirmed mismatch).
         return "low"
 
-    series_tokens_by_name = [
-        {token for token in discovery_engine.normalize_text(name).split() if token}
+    series_name_variants = [
+        [token for token in discovery_engine.normalize_text(name).split() if token]
         for name in discovery_engine.split_author_names(series_author) or [series_author]
     ]
 
     for candidate_author in candidate_authors:
-        candidate_tokens = {
+        candidate_token_list = [
             token for token in discovery_engine.normalize_text(candidate_author).split() if token
-        }
-        if not candidate_tokens:
+        ]
+        if not candidate_token_list:
             continue
-        for series_tokens in series_tokens_by_name:
-            if not series_tokens:
+        candidate_tokens = set(candidate_token_list)
+        # Surname is the last word as *written*, not the alphabetically-last
+        # token. sorted(candidate_tokens)[-1] only happens to work when the
+        # given name alphabetically precedes the surname (e.g. "gj" <
+        # "wagner") -- it silently breaks the opposite case ("gj" vs
+        # "adams": sorted() puts "gj" last, not "adams", so a real surname
+        # match is missed and this falls through to "zero" instead of the
+        # "medium" the initials-variant case below is built for). Author
+        # strings are conventionally "given name(s) surname", so position,
+        # not alphabetical rank, is the actual surname signal. (Residual
+        # gap: a surname-first string with no comma, e.g. "Wagner GJ", is
+        # still read with "GJ" as the surname -- both this function and
+        # discovery_engine._author_matches already agree on rejecting that
+        # narrower case, so it's out of scope here.)
+        candidate_surname = candidate_token_list[-1]
+        for series_token_list in series_name_variants:
+            if not series_token_list:
                 continue
-            candidate_surname = sorted(candidate_tokens)[-1] if candidate_tokens else None
-            series_surname = sorted(series_tokens)[-1] if series_tokens else None
+            series_tokens = set(series_token_list)
+            series_surname = series_token_list[-1]
             # Token sets share every word -> exact match regardless of
             # order (co-author strings, "Jr."/middle names aside).
             if candidate_tokens == series_tokens:
                 return "high"
-            if candidate_surname and candidate_surname == series_surname:
+            if candidate_surname == series_surname:
                 candidate_given = candidate_tokens - {candidate_surname}
                 series_given = series_tokens - {series_surname}
                 if _given_names_are_initials_variant(candidate_given, series_given):
@@ -209,14 +288,31 @@ def _overall_confidence(levels: list[str]) -> str:
     high/mix of high+medium/mostly low/any zero), so the remaining cases
     (e.g. a mix including both high and low, or all medium) are resolved
     here by always rounding DOWN toward caution rather than up: any zero
-    wins outright, then all-high, then anything that's high/medium only,
-    then any remaining low pulls the whole thing down to low.
+    wins outright, then all-high, then anything that's high/medium (or
+    title's "unverified" -- see below) only, then any remaining low pulls
+    the whole thing down to low.
+
+    "unverified" (title-only, see module docstring) is treated as
+    medium-or-better for this ceiling check, but deliberately can never by
+    itself produce "high": the `all(level == "high" ...)` branch requires
+    the literal string "high", so a genuinely new book (provider high,
+    title unverified, number medium-for-a-new-number, alignment high) caps
+    at "medium" rather than falling all the way to "low" the way a plain
+    four-grade reading of "not all high" would have produced. That
+    four-grade reading was the original defect: it meant compute_confidence
+    could never score a book the skeleton has never seen above "low", i.e.
+    it could only ever corroborate already-owned books, never usefully
+    route a brand-new discovery to needs_review instead of auto-dropping
+    it. A skeleton-disagreement ("low") among the other three dimensions
+    still pulls the result down to "low" even with title "unverified",
+    same as it always has -- "unverified" only relaxes the ceiling, it
+    never raises the floor.
     """
     if any(level == "zero" for level in levels):
         return "zero"
     if all(level == "high" for level in levels):
         return "high"
-    if all(level in ("high", "medium") for level in levels):
+    if all(level in ("high", "medium", "unverified") for level in levels):
         return "medium"
     return "low"
 

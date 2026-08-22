@@ -57,7 +57,7 @@ def main() -> None:
         print(f"ROUND {round_num} wall_time={elapsed:.2f}s added_count={len(added)} owned_after={owned_after}")
         if telemetry:
             print(
-                f"  telemetry: brave_calls={telemetry.get('total_brave_calls')} "
+                f"  telemetry: web_search_calls={telemetry.get('total_web_search_calls')} "
                 f"llm_calls={telemetry.get('total_llm_calls')} "
                 f"tokens_in={telemetry.get('total_tokens_in')} tokens_out={telemetry.get('total_tokens_out')}"
             )
@@ -84,7 +84,7 @@ def main() -> None:
             break
 
     print("\n\n===== SUMMARY =====")
-    total_brave = sum((r["telemetry"] or {}).get("total_brave_calls", 0) for r in rounds)
+    total_web_search = sum((r["telemetry"] or {}).get("total_web_search_calls", 0) for r in rounds)
     total_llm = sum((r["telemetry"] or {}).get("total_llm_calls", 0) for r in rounds)
     total_tokens_in = sum((r["telemetry"] or {}).get("total_tokens_in", 0) for r in rounds)
     total_tokens_out = sum((r["telemetry"] or {}).get("total_tokens_out", 0) for r in rounds)
@@ -94,7 +94,7 @@ def main() -> None:
             f"round {r['round']}: {r['wall_time_s']}s, added={r['added_count']}, "
             f"owned_after={r['owned_after']}, status={r['status']}"
         )
-    print(f"TOTAL wall_time={total_wall:.2f}s brave_calls={total_brave} llm_calls={total_llm} "
+    print(f"TOTAL wall_time={total_wall:.2f}s web_search_calls={total_web_search} llm_calls={total_llm} "
           f"tokens_in={total_tokens_in} tokens_out={total_tokens_out}")
 
 

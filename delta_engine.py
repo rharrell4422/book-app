@@ -40,8 +40,14 @@ def _to_float_or_none(value) -> float | None:
 
 
 def _candidate_providers(candidate: dict) -> list[str]:
+    # Provenance entries key their provider name as "source" (see
+    # discovery_engine.py's _unified_candidate_to_raw_dict/
+    # _format_candidate_for_reconciliation, both of which read
+    # member.get("source")) -- a prior version of this function read
+    # "provider" instead, which no provenance entry has ever actually
+    # used, so it silently always returned an empty list.
     provenance = candidate.get("source_provenance") or []
-    providers = {entry.get("provider") for entry in provenance if entry.get("provider")}
+    providers = {entry.get("source") for entry in provenance if entry.get("source")}
     return sorted(providers)
 
 

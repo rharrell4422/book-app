@@ -11,7 +11,7 @@ on).
 Two layers:
 
 - Layer A (provider-fetch cache): raw Google Books/OpenLibrary/Hardcover/
-  Brave results, keyed by (provider, normalized query text). Deliberately
+  web-search results, keyed by (provider, normalized query text). Deliberately
   simpler than the originally-specified semantic tuple key
   (provider, series_name_normalized, primary_author_name, book_number) --
   literal-query-text keying already captures the dominant real-world case
@@ -52,10 +52,10 @@ class DiscoveryCache:
         self._provider_fetch: dict[tuple[str, str], list[dict]] = {}
         self._llm_verdict: dict[tuple[str, str, str], dict | None] = {}
         # Counts avoided live calls -- a provider-fetch hit is one fewer
-        # Google/OpenLibrary/Hardcover/Brave call, an LLM-verdict hit is
-        # one fewer URL that needs sending to _structure_web_results_with_
-        # llm. Reported in the debug summary as the cache's own measured
-        # effect, rather than an estimate.
+        # Google/OpenLibrary/Hardcover/web-search call, an LLM-verdict hit
+        # is one fewer URL that needs sending to _structure_web_results_
+        # with_llm. Reported in the debug summary as the cache's own
+        # measured effect, rather than an estimate.
         self._provider_fetch_hits = 0
         self._llm_verdict_hits = 0
 

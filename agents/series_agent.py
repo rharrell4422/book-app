@@ -16,6 +16,7 @@ from services.discovery_cache import DiscoveryCache
 from services.discovery_logging import log_discovery_summary
 from services.discovery_telemetry import DiscoveryTelemetry
 from services.identity import owned_title_for_identity
+from services.skeleton_store import backfill_skeleton_for_series
 
 
 logger = logging.getLogger(__name__)
@@ -275,6 +276,7 @@ def _empty_result(series_id: int | None, series_name: str | None, reason: str) -
         "missing_books": [],
         "available_missing": [],
         "upcoming_books": [],
+        "needs_review": [],
         "validated_candidates": [],
         "found": False,
         "candidate": None,
@@ -420,17 +422,43 @@ class SeriesIntelligenceAgent:
             provider_failures = discovery["provider_failures"]
             all_providers_failed = discovery["all_providers_failed"]
 
-            # Phase 2 + 3 of agentic discovery, SHADOW MODE ONLY: computes a
-            # deterministic delta between the Phase 1 SeriesSkeleton
-            # baseline and this run's PRE-_filter_and_merge candidates
-            # (discovery["unified_candidates"] -- see delta_engine's own
-            # docstring for why pre-filter, not the post-filter
-            # `candidates` above), then a deterministic confidence score
-            # per candidate on top of that delta, and logs both. Nothing
-            # downstream reads `series_delta`/`series_confidence`; neither
-            # can change `candidates`, `provider_failures`, or anything
-            # persisted by this run.
+            # Phase 2 + 3 of agentic discovery: computes a deterministic
+            # delta between the Phase 1 SeriesSkeleton baseline and this
+            # run's PRE-_filter_and_merge candidates (discovery["unified_
+            # candidates"] -- see delta_engine's own docstring for why
+            # pre-filter, not the post-filter `candidates` above), then a
+            # deterministic confidence score per candidate on top of that
+            # delta, and logs both. As of the manual-override rollout,
+            # `confidence_lookup` below is consulted by the belongs_to_series
+            # loop to route each POST-filter candidate to auto-accept/
+            # needs_review/auto-drop -- see `confidence_engine.correlation_key`
+            # for why that lookup needs its own key function rather than
+            # `confidence_engine._candidate_key`. Still cannot change
+            # `candidates` or `provider_failures` themselves, or anything
+            # about discovery/fetching -- only which of *this* function's own
+            # three output buckets (available_missing/upcoming_books vs.
+            # needs_review vs. dropped) an already-discovered candidate lands
+            # in.
+            series_confidence: dict = {"confidence": []}
             try:
+                # Rebuilt here rather than just read, and rather than relying
+                # on a boot-time backfill: nothing calls
+                # skeleton_store.backfill_all_skeletons() at startup today,
+                # so a SeriesSkeleton row would otherwise never exist and
+                # title_confidence would grade every candidate "unverified"
+                # forever, capping overall confidence at "medium" even for
+                # books the library already owns adjacent numbers of (see
+                # confidence_engine's own docstring on why "unverified" caps
+                # rather than fails, and _title_confidence for the "high"
+                # grade this starves without a populated skeleton). This is
+                # currently a full rebuild from ground-truth Book rows every
+                # run (see backfill_skeleton_for_series's own docstring) --
+                # lossless today because nothing yet writes a non-library
+                # entry into the skeleton, so there is nothing an overwrite
+                # could lose. Not committed here: it shares the single
+                # db.commit() at the end of this function alongside
+                # series.has_new_books/last_checked.
+                backfill_skeleton_for_series(db, series_id)
                 skeleton_row = (
                     db.query(SeriesSkeleton).filter(SeriesSkeleton.series_id == series_id).first()
                 )
@@ -456,10 +484,24 @@ class SeriesIntelligenceAgent:
                 )
                 logger.info("series_confidence: %s", json.dumps(series_confidence, default=str))
             except Exception:
-                # Shadow-mode diagnostics must never be able to fail a real
-                # Check Now run -- log and move on exactly like any other
-                # best-effort telemetry would.
+                # If this fails, `series_confidence` stays the empty default
+                # set above -- confidence_lookup below will then be empty,
+                # and the routing logic degrades to "trust belongs_to_series
+                # exactly like before this feature existed" (see the
+                # comment at the routing site). This computation must never
+                # be able to fail a real Check Now run.
                 logger.exception("series_delta/series_confidence computation failed for series_id=%s", series_id)
+
+            # Keyed by confidence_engine.correlation_key so the loop below
+            # can look up a POST-filter `raw` candidate's grade even though
+            # this dict is built from PRE-filter candidates (see that
+            # function's docstring for exactly why the two need a shared,
+            # field-name-tolerant key rather than object identity or
+            # confidence_engine._candidate_key).
+            confidence_lookup: dict[tuple, dict] = {
+                confidence_engine.correlation_key(entry["candidate"]): entry
+                for entry in series_confidence.get("confidence", [])
+            }
 
             # Missing-volume detection: a series can own/find books 1-4 and
             # 6-9 but nothing for 5 -- that's not book 5 ranking low in the
@@ -572,11 +614,12 @@ class SeriesIntelligenceAgent:
 
             # A candidate with no published_date at all defaults to
             # "unconfirmed"/upcoming below (see classify_upcoming) even when
-            # it's a real, already-released book -- Brave's web-search
-            # snippets frequently just don't state a date, especially for
-            # under-indexed indie/KU titles (regression: every Jonathan Hunt
-            # sequel this run found came back this way, and all but one
-            # showed up as "Upcoming" despite being already published).
+            # it's a real, already-released book -- the web-search
+            # provider's snippets frequently just don't state a date,
+            # especially for under-indexed indie/KU titles (regression:
+            # every Jonathan Hunt sequel this run found came back this way,
+            # and all but one showed up as "Upcoming" despite being already
+            # published).
             # Filling in a real date via a dedicated Hardcover lookup, when
             # one exists, lets a genuinely-released book land in
             # available_missing instead of upcoming_books -- see
@@ -653,6 +696,7 @@ class SeriesIntelligenceAgent:
             today = date.today()
             available_missing: list[dict] = []
             upcoming_books: list[dict] = []
+            needs_review: list[dict] = []
             candidate_diagnostics: list[dict] = []
             # Phase 3.5 of agentic discovery, PURE SHADOW MODE: captures the
             # one silent-drop point that lives in this function rather than
@@ -771,8 +815,25 @@ class SeriesIntelligenceAgent:
                 if belongs_to_series:
                     belongs_indices.add(index)
 
-                if not belongs_to_series:
-                    continue
+                # A candidate that fails belongs_to_series no longer stops
+                # here. It used to be a hard drop -- correct when this
+                # loop's only two outcomes were "add it" or "silently
+                # discard it", but it means genuinely ambiguous candidates
+                # (no resolvable number, no title match, an unmatched
+                # continues_numbering) never got a chance to be looked at,
+                # even the ones a human would recognize at a glance (see
+                # discovery_agentic_migration_decision_log.md's Copilot-DIFF
+                # round on ambiguity preservation). Confidence grading
+                # below is what actually keeps this safe: an ambiguous
+                # candidate can now only reach needs_review (visible, not
+                # auto-added) or get dropped anyway on a "low"/"zero"
+                # grade -- it is never auto-accepted into available_missing/
+                # upcoming_books off belongs_to_series=False alone. See the
+                # routing block below for why "high" is effectively
+                # unreachable for these (title_confidence can't be "high"
+                # without a skeleton entry, so overall can't be "high"
+                # either -- see confidence_engine._overall_confidence).
+                low_confidence_ambiguous = not belongs_to_series
 
                 isbn13 = str(raw.get("isbn13") or "").strip()
                 already_known = _is_known_candidate(
@@ -843,6 +904,59 @@ class SeriesIntelligenceAgent:
                     "provider": raw.get("source"),
                     "identifier": isbn13 or f"{raw.get('source')}:{raw.get('source_id')}",
                 }
+
+                # Manual-override routing: high -> auto-accept (unchanged
+                # behavior), medium/unverified -> needs_review, low/zero ->
+                # auto-drop. `confidence_entry` is None when
+                # confidence_lookup has nothing for this candidate at all
+                # (series_confidence computation failed above, or -- should
+                # never happen, but see correlation_key's docstring -- a
+                # genuine key mismatch); in that case fall back to trusting
+                # belongs_to_series exactly like this function did before
+                # this feature existed: accept outright if it passed the
+                # gate, and since an ambiguous candidate with no confidence
+                # data would otherwise silently vanish exactly as it always
+                # did pre-this-feature, route it to needs_review instead so
+                # a missing confidence computation degrades to "surface it"
+                # rather than "hide it".
+                confidence_entry = confidence_lookup.get(confidence_engine.correlation_key(raw))
+                overall_grade = confidence_entry.get("overall") if confidence_entry else None
+
+                if overall_grade in ("low", "zero"):
+                    continue
+
+                if overall_grade in ("medium", "unverified") or (
+                    overall_grade is None and low_confidence_ambiguous
+                ):
+                    # Same-author/different-series candidates with valid
+                    # numbering can land here permanently -- confidence_engine
+                    # has no series-identity dimension, so it can score
+                    # "medium" on numbering/title alone even when the
+                    # candidate is actually an unrelated book by the same
+                    # author. series_name_hint (below) is the cheap,
+                    # deliberate mitigation: it lets a human dismiss those
+                    # at a glance without this module needing new scoring
+                    # logic. This is an expected noise floor, not a bug.
+                    needs_review.append(
+                        {
+                            **canonical,
+                            "needs_review": True,
+                            "low_confidence_ambiguous": low_confidence_ambiguous,
+                            "series_name_hint": raw.get("series_name_hint"),
+                            "overall_confidence": overall_grade,
+                            "provider_confidence": (
+                                confidence_entry.get("provider_confidence") if confidence_entry else None
+                            ),
+                            "title_confidence": confidence_entry.get("title_confidence") if confidence_entry else None,
+                            "number_confidence": (
+                                confidence_entry.get("number_confidence") if confidence_entry else None
+                            ),
+                            "series_alignment_confidence": (
+                                confidence_entry.get("series_alignment_confidence") if confidence_entry else None
+                            ),
+                        }
+                    )
+                    continue
 
                 if is_upcoming:
                     upcoming_books.append(canonical)
@@ -985,6 +1099,7 @@ class SeriesIntelligenceAgent:
                 "missing_books": available_missing,
                 "available_missing": available_missing,
                 "upcoming_books": upcoming_books,
+                "needs_review": needs_review,
                 "validated_candidates": [],
                 "found": found,
                 "candidate": (available_missing[0] if available_missing else (upcoming_books[0] if upcoming_books else None)),

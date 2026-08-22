@@ -13,7 +13,7 @@ import crud
 import discovery_engine
 from agents.series_agent import SeriesIntelligenceAgent, discover_more_by_author, discover_series_by_name
 from database import Base
-from models import Book, Series
+from models import Book, Series, SeriesSkeleton
 from services.discovery_cache import DiscoveryCache
 
 
@@ -651,12 +651,12 @@ class GenerateSeriesOverviewTest(unittest.TestCase):
 
 class PrecheckForNewVolumesTest(unittest.TestCase):
     """Tests discovery_engine.precheck_for_new_volumes -- the catalog-only
-    (no Brave, no LLM) short-circuit check described in
+    (no web search, no LLM) short-circuit check described in
     discovery_catchup_architecture_spec.md #7.2.
     """
 
     def setUp(self):
-        self._env_patch = patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""})
+        self._env_patch = patch.dict(os.environ, {"SERPER_API_KEY": "", "ANTHROPIC_API_KEY": ""})
         self._env_patch.start()
 
     def tearDown(self):
@@ -721,16 +721,144 @@ class PrecheckForNewVolumesTest(unittest.TestCase):
 
         self.assertFalse(found)
 
-    def test_never_issues_a_brave_or_llm_call(self):
+    def test_never_issues_a_web_search_or_llm_call(self):
         with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
             discovery_engine, "_fetch_google_books", return_value=[]
         ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]), patch.object(
-            discovery_engine, "_fetch_brave_web_search"
-        ) as mock_brave, patch.object(discovery_engine, "_structure_web_results_with_llm") as mock_llm:
+            discovery_engine, "_fetch_serper_web_search"
+        ) as mock_serper, patch.object(discovery_engine, "_structure_web_results_with_llm") as mock_llm:
             discovery_engine.precheck_for_new_volumes("Jonathan Hunt", "Georgia Wagner", ceiling=18.0)
 
-        mock_brave.assert_not_called()
+        mock_serper.assert_not_called()
         mock_llm.assert_not_called()
+
+    def test_returns_true_when_a_google_books_hit_title_infers_past_ceiling(self):
+        # Google Books/OpenLibrary carry no structured series-position field
+        # at all (unlike Hardcover's series_number_hint) -- this precheck
+        # now also infers a number from the hit's own title text for those
+        # two, rather than only ever being able to confirm "something new"
+        # via Hardcover.
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
+            discovery_engine,
+            "_fetch_google_books",
+            return_value=[
+                {
+                    "source": "google_books",
+                    "authors": ["Georgia Wagner"],
+                    "title": "Jonathan Hunt Book 19",
+                }
+            ],
+        ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]):
+            found = discovery_engine.precheck_for_new_volumes("Jonathan Hunt", "Georgia Wagner", ceiling=18.0)
+
+        self.assertTrue(found)
+
+    def test_returns_true_when_an_openlibrary_hit_title_infers_past_ceiling(self):
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
+            discovery_engine, "_fetch_google_books", return_value=[]
+        ), patch.object(
+            discovery_engine,
+            "_fetch_openlibrary",
+            return_value=[
+                {
+                    "source": "openlibrary",
+                    "authors": ["Georgia Wagner"],
+                    "title": "Jonathan Hunt Book 19",
+                }
+            ],
+        ):
+            found = discovery_engine.precheck_for_new_volumes("Jonathan Hunt", "Georgia Wagner", ceiling=18.0)
+
+        self.assertTrue(found)
+
+    def test_google_books_hit_below_ceiling_does_not_trigger(self):
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
+            discovery_engine,
+            "_fetch_google_books",
+            return_value=[
+                {
+                    "source": "google_books",
+                    "authors": ["Georgia Wagner"],
+                    "title": "Jonathan Hunt Book 3",
+                }
+            ],
+        ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]):
+            found = discovery_engine.precheck_for_new_volumes("Jonathan Hunt", "Georgia Wagner", ceiling=18.0)
+
+        self.assertFalse(found)
+
+    def test_google_books_hit_from_non_matching_author_is_ignored(self):
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
+            discovery_engine,
+            "_fetch_google_books",
+            return_value=[
+                {
+                    "source": "google_books",
+                    "authors": ["Some Other Author"],
+                    "title": "Jonathan Hunt Book 19",
+                }
+            ],
+        ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]):
+            found = discovery_engine.precheck_for_new_volumes("Jonathan Hunt", "Georgia Wagner", ceiling=18.0)
+
+        self.assertFalse(found)
+
+
+class WebSearchDiagnosticModeTest(unittest.TestCase):
+    """Tests discover_candidates_for_series' diagnostic-only short-circuit:
+    a Serper key with no Anthropic key means there's no way to structure
+    raw hits into real candidates, so the whole normal pipeline (every
+    provider, fusion, filtering) is skipped entirely and the caller gets
+    back raw search snippets instead -- a standalone coverage probe for
+    Serper's still-unverified indie/LitRPG/web-serial coverage, not a
+    partial discovery run.
+    """
+
+    def test_web_search_enabled_without_llm_returns_raw_snippets_only(self):
+        raw_snippets = [{"title": "Some Hit", "description": "d", "url": "https://example.com/1"}]
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": ""}), patch.object(
+            discovery_engine, "_fetch_serper_web_search", return_value=raw_snippets
+        ) as mock_serper, patch.object(discovery_engine, "_fetch_all_providers_parallel") as mock_parallel:
+            result = discovery_engine.discover_candidates_for_series("Some Series", "Some Author")
+
+        self.assertEqual(result["diagnostic_mode"], "web_search_coverage_probe")
+        self.assertEqual(result["diagnostic_raw_web_snippets"], raw_snippets)
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["unified_candidates"], [])
+        mock_serper.assert_called_once()
+        # No other provider/pass runs at all -- this is a standalone probe,
+        # not a partial discovery run.
+        mock_parallel.assert_not_called()
+
+    def test_both_keys_present_runs_the_normal_pipeline_not_diagnostic_mode(self):
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+            discovery_engine, "_fetch_serper_web_search"
+        ) as mock_serper, patch.object(
+            discovery_engine, "_fetch_hardcover", return_value=[]
+        ), patch.object(
+            discovery_engine, "_fetch_google_books", return_value=[]
+        ), patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=[]
+        ):
+            result = discovery_engine.discover_candidates_for_series("Some Series", "Some Author")
+
+        self.assertNotIn("diagnostic_mode", result)
+        self.assertNotIn("diagnostic_raw_web_snippets", result)
+
+    def test_neither_key_present_runs_the_normal_pipeline_not_diagnostic_mode(self):
+        with patch.dict(os.environ, {"SERPER_API_KEY": "", "ANTHROPIC_API_KEY": ""}), patch.object(
+            discovery_engine, "_fetch_serper_web_search"
+        ) as mock_serper, patch.object(
+            discovery_engine, "_fetch_hardcover", return_value=[]
+        ), patch.object(
+            discovery_engine, "_fetch_google_books", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]):
+            result = discovery_engine.discover_candidates_for_series("Some Series", "Some Author")
+
+        self.assertNotIn("diagnostic_mode", result)
+        mock_serper.assert_not_called()
 
 
 class DiscoverCandidatesForSeriesTest(unittest.TestCase):
@@ -743,7 +871,7 @@ class DiscoverCandidatesForSeriesTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self._env_patch = patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""})
+        self._env_patch = patch.dict(os.environ, {"SERPER_API_KEY": "", "ANTHROPIC_API_KEY": ""})
         self._env_patch.start()
 
     def tearDown(self):
@@ -927,7 +1055,7 @@ class DiscoverCandidatesForAuthorTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self._env_patch = patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""})
+        self._env_patch = patch.dict(os.environ, {"SERPER_API_KEY": "", "ANTHROPIC_API_KEY": ""})
         self._env_patch.start()
 
     def tearDown(self):
@@ -947,7 +1075,7 @@ class DiscoverCandidatesForAuthorTest(unittest.TestCase):
         # Unlike discover_candidates_for_series, there's no single "next
         # book number" to look ahead from when results can span several
         # different series -- only one plain web-search query should fire.
-        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
             discovery_engine, "_fetch_hardcover", return_value=[]
         ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
             discovery_engine, "_fetch_openlibrary", return_value=[]
@@ -1084,7 +1212,7 @@ class EnrichMissingSeriesHintsTest(unittest.TestCase):
     def setUp(self):
         self._env_patch = patch.dict(
             os.environ,
-            {"HARDCOVER_API_KEY": "test-key", "BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""},
+            {"HARDCOVER_API_KEY": "test-key", "SERPER_API_KEY": "", "ANTHROPIC_API_KEY": ""},
         )
         self._env_patch.start()
 
@@ -1409,34 +1537,32 @@ class BackfillMissingPublicationDatesTest(unittest.TestCase):
 
 
 class WebSearchProviderTest(unittest.TestCase):
-    """Tests the Brave Search + Claude web-search discovery provider, with
-    the HTTP call to Brave and the Anthropic client both mocked out so this
+    """Tests the Serper + Claude web-search discovery provider, with the
+    HTTP call to Serper and the Anthropic client both mocked out so this
     runs offline, deterministically, and without spending real API credits.
     """
 
-    def test_fetch_brave_web_search_returns_empty_without_api_key(self):
-        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": ""}):
-            self.assertEqual(discovery_engine._fetch_brave_web_search("Some Series Author"), [])
+    def test_fetch_serper_web_search_returns_empty_without_api_key(self):
+        with patch.dict(os.environ, {"SERPER_API_KEY": ""}):
+            self.assertEqual(discovery_engine._fetch_serper_web_search("Some Series Author"), [])
 
-    def test_fetch_brave_web_search_parses_response(self):
+    def test_fetch_serper_web_search_parses_response(self):
         mock_response = MagicMock()
         mock_response.json.return_value = {
-            "web": {
-                "results": [
-                    {"title": "Book Announced", "description": "A new entry.", "url": "https://example.com/a"},
-                    {"title": "", "description": "Missing title, should be skipped", "url": "https://example.com/b"},
-                ]
-            }
+            "organic": [
+                {"title": "Book Announced", "snippet": "A new entry.", "link": "https://example.com/a"},
+                {"title": "", "snippet": "Missing title, should be skipped", "link": "https://example.com/b"},
+            ]
         }
-        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key"}), patch.object(
-            discovery_engine.httpx, "get", return_value=mock_response
-        ) as mock_get:
-            results = discovery_engine._fetch_brave_web_search("Some Series Author")
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-key"}), patch.object(
+            discovery_engine.httpx, "post", return_value=mock_response
+        ) as mock_post:
+            results = discovery_engine._fetch_serper_web_search("Some Series Author")
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["title"], "Book Announced")
         self.assertEqual(results[0]["url"], "https://example.com/a")
-        self.assertTrue(mock_get.called)
+        self.assertTrue(mock_post.called)
 
     def test_structure_web_results_returns_empty_without_api_key(self):
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
@@ -1503,7 +1629,7 @@ class WebSearchProviderTest(unittest.TestCase):
             )
         self.assertEqual(result, [])
 
-    def test_fetch_web_search_combines_brave_and_llm_structuring(self):
+    def test_fetch_web_search_combines_serper_and_llm_structuring(self):
         raw_results = [{"title": "Peacemaker Book 8 Announced", "description": "snippet", "url": "https://example.com/8"}]
         structured = [
             {
@@ -1516,7 +1642,7 @@ class WebSearchProviderTest(unittest.TestCase):
                 "isbn13": None,
             }
         ]
-        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=structured
         ):
             results = discovery_engine._fetch_web_search(["query"], "The First Peacemaker", "Some Author")
@@ -1548,7 +1674,7 @@ class WebSearchProviderTest(unittest.TestCase):
                 "isbn13": None,
             }
         ]
-        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=structured
         ):
             results = discovery_engine._fetch_web_search(["query"], "Series", "Some Author")
@@ -1588,7 +1714,7 @@ class WebSearchProviderTest(unittest.TestCase):
             }
         ]
 
-        def fake_brave(query, **kwargs):
+        def fake_serper(query, **kwargs):
             if "release date" in query:
                 return refinement_raw
             return raw_results
@@ -1598,7 +1724,7 @@ class WebSearchProviderTest(unittest.TestCase):
                 return refinement_structured
             return first_pass_structured
 
-        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
             discovery_engine, "_structure_web_results_with_llm", side_effect=fake_structure
         ):
             results = discovery_engine._fetch_web_search(["query"], "The First Peacemaker", "Some Author")
@@ -1628,13 +1754,13 @@ class WebSearchProviderTest(unittest.TestCase):
         ]
         captured_queries = []
 
-        def fake_brave(query, **kwargs):
+        def fake_serper(query, **kwargs):
             captured_queries.append(query)
             if "release date" in query:
                 return []
             return raw_results
 
-        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=first_pass_structured
         ):
             discovery_engine._fetch_web_search(["query"], "The World Book", "Jason Cheek")
@@ -1665,7 +1791,7 @@ class WebSearchProviderTest(unittest.TestCase):
             }
         ]
 
-        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=structured
         ):
             results = discovery_engine._fetch_web_search(["query"], "The First Peacemaker", "Some Author")
@@ -1676,10 +1802,10 @@ class WebSearchProviderTest(unittest.TestCase):
 
     def test_refinement_pass_reuses_layer_a_and_b_cache_across_calls(self):
         # Regression: _refine_undated_web_search_result used to call
-        # _fetch_brave_web_search/_structure_web_results_with_llm directly,
+        # _fetch_serper_web_search/_structure_web_results_with_llm directly,
         # bypassing the per-job cache entirely -- the same undated candidate
         # recurring across rounds (a genuine undated preorder gets re-checked
-        # every round) paid a fresh Brave+LLM call for the identical
+        # every round) paid a fresh web-search+LLM call for the identical
         # "<title> release date" query every single time.
         cache = DiscoveryCache()
         raw_results = [{"title": "Listing", "description": "snippet, no date", "url": "https://example.com/1"}]
@@ -1707,7 +1833,7 @@ class WebSearchProviderTest(unittest.TestCase):
             }
         ]
 
-        def fake_brave(query, **kwargs):
+        def fake_serper(query, **kwargs):
             if "release date" in query:
                 return refinement_raw
             return raw_results
@@ -1717,24 +1843,24 @@ class WebSearchProviderTest(unittest.TestCase):
                 return refinement_structured
             return first_pass_structured
 
-        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave) as mock_brave, patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper) as mock_serper, patch.object(
             discovery_engine, "_structure_web_results_with_llm", side_effect=fake_structure
         ) as mock_llm:
             first = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
             second = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
 
         # Round two's identical raw query and identical undated candidate
-        # must be served entirely from cache -- one Brave call and one LLM
-        # call per layer, not two.
-        self.assertEqual(mock_brave.call_count, 2)  # 1 targeted query + 1 refinement query, round one only
+        # must be served entirely from cache -- one web-search call and one
+        # LLM call per layer, not two.
+        self.assertEqual(mock_serper.call_count, 2)  # 1 targeted query + 1 refinement query, round one only
         self.assertEqual(mock_llm.call_count, 2)  # 1 targeted structuring + 1 refinement structuring, round one only
         self.assertEqual(first[0]["published_date"], "2024-01-01")
         self.assertEqual(second[0]["published_date"], "2024-01-01")
 
     def test_refinement_batches_multiple_candidates_into_one_llm_call(self):
         # Cost optimization: N undated candidates in one round must cost one
-        # dedicated Brave query each (query text has to stay per-title) but
-        # only ONE combined LLM structuring call, not N separate ones.
+        # dedicated web-search query each (query text has to stay per-title)
+        # but only ONE combined LLM structuring call, not N separate ones.
         raw_results = [
             {"title": f"Generic listing {n}", "description": "snippet, no date", "url": f"https://example.com/{n}"}
             for n in range(3)
@@ -1756,7 +1882,7 @@ class WebSearchProviderTest(unittest.TestCase):
             for n in range(3)
         }
 
-        def fake_brave(query, **kwargs):
+        def fake_serper(query, **kwargs):
             for title, raw in refinement_raw_by_title.items():
                 if title in query:
                     return raw
@@ -1767,7 +1893,7 @@ class WebSearchProviderTest(unittest.TestCase):
                 return first_pass_structured
             # Refinement's own combined call -- structure every distinct
             # undated-candidate release-date result it was actually given,
-            # regardless of how many separate Brave queries fed into it.
+            # regardless of how many separate web-search queries fed into it.
             structured = []
             for index, item in enumerate(results):
                 for n in range(3):
@@ -1785,13 +1911,13 @@ class WebSearchProviderTest(unittest.TestCase):
                         )
             return structured
 
-        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave) as mock_brave, patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper) as mock_serper, patch.object(
             discovery_engine, "_structure_web_results_with_llm", side_effect=fake_structure
         ) as mock_llm:
             results = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author")
 
-        # 1 targeted-pass Brave call + 3 per-candidate refinement Brave calls.
-        self.assertEqual(mock_brave.call_count, 4)
+        # 1 targeted-pass web-search call + 3 per-candidate refinement calls.
+        self.assertEqual(mock_serper.call_count, 4)
         # 1 targeted-pass LLM call + exactly 1 combined refinement LLM call
         # (not 3) -- this is the whole point of batching.
         self.assertEqual(mock_llm.call_count, 2)
@@ -1815,7 +1941,7 @@ class WebSearchProviderTest(unittest.TestCase):
             {"result_index": 1, "title": "Book Beta", "book_number": 2, "author_names": ["Some Author"], "published_date": None, "is_upcoming": False, "isbn13": None},
         ]
 
-        def fake_brave(query, **kwargs):
+        def fake_serper(query, **kwargs):
             if "Book Alpha" in query:
                 return [{"title": "series catalog", "description": "...", "url": shared_url}]
             if "Book Beta" in query:
@@ -1840,7 +1966,7 @@ class WebSearchProviderTest(unittest.TestCase):
                 }
             ]
 
-        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
             discovery_engine, "_structure_web_results_with_llm", side_effect=fake_structure
         ):
             results = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author")
@@ -1875,13 +2001,13 @@ class WebSearchProviderTest(unittest.TestCase):
 
         call_count = {"n": 0}
 
-        def fake_brave(query, **kwargs):
+        def fake_serper(query, **kwargs):
             if "release date" in query:
                 call_count["n"] += 1
                 raise RuntimeError("boom")
             return raw_results
 
-        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=structured
         ):
             results = discovery_engine._fetch_web_search(["query"], "Series", "Some Author")
@@ -1893,14 +2019,14 @@ class WebSearchProviderTest(unittest.TestCase):
     def test_fetch_web_search_skips_llm_items_with_out_of_range_index(self):
         raw_results = [{"title": "Some Result", "description": "snippet", "url": "https://example.com/1"}]
         structured = [{"result_index": 5, "title": "Bad Index", "book_number": None, "author_names": [], "is_upcoming": False}]
-        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=structured
         ):
             results = discovery_engine._fetch_web_search(["query"], "Series", "Author")
         self.assertEqual(results, [])
 
-    def test_fetch_web_search_returns_empty_when_brave_has_no_results(self):
-        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=[]):
+    def test_fetch_web_search_returns_empty_when_web_search_has_no_results(self):
+        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=[]):
             results = discovery_engine._fetch_web_search(["query"], "Series", "Author")
         self.assertEqual(results, [])
 
@@ -1909,7 +2035,7 @@ class WebSearchProviderTest(unittest.TestCase):
         # generic query and can legitimately return overlapping pages --
         # those should be merged into one deduped raw-result list (by URL)
         # before the single LLM structuring call, not passed through twice.
-        def fake_brave(query, **kwargs):
+        def fake_serper(query, **kwargs):
             if query == "generic":
                 return [
                     {"title": "Series Book 1", "description": "d", "url": "https://example.com/1"},
@@ -1919,7 +2045,7 @@ class WebSearchProviderTest(unittest.TestCase):
                 return [{"title": "Series Book 9", "description": "d", "url": "https://example.com/9"}]
             return []
 
-        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=[]
         ) as mock_structure:
             discovery_engine._fetch_web_search(["generic", "book 9"], "Series", "Author")
@@ -1928,19 +2054,19 @@ class WebSearchProviderTest(unittest.TestCase):
         self.assertEqual(len(passed_raw_results), 2)
         self.assertEqual({r["url"] for r in passed_raw_results}, {"https://example.com/1", "https://example.com/9"})
 
-    def test_fetch_web_search_parallelizes_brave_calls_with_a_bounded_worker_count(self):
+    def test_fetch_web_search_parallelizes_web_search_calls_with_a_bounded_worker_count(self):
         # Latency optimization: multiple cache-miss queries fire
         # concurrently rather than sequentially, but the concurrency itself
-        # must be bounded (WEB_SEARCH_BRAVE_MAX_PARALLEL_WORKERS), not one
+        # must be bounded (WEB_SEARCH_MAX_PARALLEL_WORKERS), not one
         # thread per query -- a wide lookahead window must not burst every
-        # query at Brave simultaneously.
+        # query at the web-search provider simultaneously.
         import threading
 
         max_concurrent = {"value": 0}
         current_concurrent = {"value": 0}
         lock = threading.Lock()
 
-        def fake_brave(query, **kwargs):
+        def fake_serper(query, **kwargs):
             with lock:
                 current_concurrent["value"] += 1
                 max_concurrent["value"] = max(max_concurrent["value"], current_concurrent["value"])
@@ -1950,21 +2076,21 @@ class WebSearchProviderTest(unittest.TestCase):
             return [{"title": f"Result for {query}", "description": "d", "url": f"https://example.com/{query}"}]
 
         queries = [f"query {n}" for n in range(12)]
-        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=[]
         ):
             discovery_engine._fetch_web_search(queries, "Series", "Author")
 
         self.assertGreater(max_concurrent["value"], 1)  # actually ran concurrently, not sequentially
-        self.assertLessEqual(max_concurrent["value"], discovery_engine.WEB_SEARCH_BRAVE_MAX_PARALLEL_WORKERS)
+        self.assertLessEqual(max_concurrent["value"], discovery_engine.WEB_SEARCH_MAX_PARALLEL_WORKERS)
 
     def test_fetch_web_search_tolerates_one_query_failing_if_another_succeeds(self):
-        def fake_brave(query, **kwargs):
+        def fake_serper(query, **kwargs):
             if query == "bad":
                 raise RuntimeError("rate limited")
             return [{"title": "Found It", "description": "d", "url": "https://example.com/ok"}]
 
-        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=fake_brave), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=[]
         ) as mock_structure:
             discovery_engine._fetch_web_search(["bad", "good"], "Series", "Author")
@@ -1973,7 +2099,7 @@ class WebSearchProviderTest(unittest.TestCase):
         self.assertEqual(len(passed_raw_results), 1)
 
     def test_fetch_web_search_raises_when_every_query_fails(self):
-        with patch.object(discovery_engine, "_fetch_brave_web_search", side_effect=RuntimeError("boom")):
+        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
                 discovery_engine._fetch_web_search(["bad1", "bad2"], "Series", "Author")
 
@@ -1991,7 +2117,7 @@ class WebSearchProviderTest(unittest.TestCase):
             "series_number_hint": 8,
             "upcoming_hint": False,
         }
-        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
             discovery_engine, "_fetch_hardcover", return_value=[]
         ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
             discovery_engine, "_fetch_openlibrary", return_value=[]
@@ -2024,7 +2150,7 @@ class WebSearchProviderTest(unittest.TestCase):
             "series_number_hint": 5,
             "upcoming_hint": True,
         }
-        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
             discovery_engine, "_fetch_hardcover", return_value=[]
         ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
             discovery_engine, "_fetch_openlibrary", return_value=[]
@@ -2043,7 +2169,7 @@ class WebSearchProviderTest(unittest.TestCase):
         # the caller knows the highest book number currently owned, explicit
         # "<series> book <N>" queries for the next few numbers should be
         # added alongside the generic one.
-        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
             discovery_engine, "_fetch_hardcover", return_value=[]
         ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
             discovery_engine, "_fetch_openlibrary", return_value=[]
@@ -2067,7 +2193,7 @@ class WebSearchProviderTest(unittest.TestCase):
         # encyclopedia listings and missed a real new release (book 21,
         # "Here We Go Again", released 2026-07-15). Including the author
         # name in the query disambiguates it.
-        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
             discovery_engine, "_fetch_hardcover", return_value=[]
         ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
             discovery_engine, "_fetch_openlibrary", return_value=[]
@@ -2080,7 +2206,7 @@ class WebSearchProviderTest(unittest.TestCase):
         self.assertIn('"The World Book" Jason Cheek book 21', queries_used)
 
     def test_discover_candidates_for_series_skips_web_search_without_keys(self):
-        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""}), patch.object(
+        with patch.dict(os.environ, {"SERPER_API_KEY": "", "ANTHROPIC_API_KEY": ""}), patch.object(
             discovery_engine, "_fetch_hardcover", return_value=[]
         ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]), patch.object(
             discovery_engine, "_fetch_openlibrary", return_value=[]
@@ -2097,7 +2223,7 @@ class DiscoveryCacheTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self._env_patch = patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""})
+        self._env_patch = patch.dict(os.environ, {"SERPER_API_KEY": "", "ANTHROPIC_API_KEY": ""})
         self._env_patch.start()
 
     def tearDown(self):
@@ -2149,7 +2275,7 @@ class DiscoveryCacheTest(unittest.TestCase):
             }
         ]
 
-        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=structured
         ) as mock_llm:
             first = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
@@ -2170,7 +2296,7 @@ class DiscoveryCacheTest(unittest.TestCase):
         cache = DiscoveryCache()
         raw_results = [{"title": "Junk listing", "description": "snippet", "url": "https://example.com/junk"}]
 
-        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=[]
         ) as mock_llm:
             discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
@@ -2214,7 +2340,7 @@ class DiscoveryCacheTest(unittest.TestCase):
             }
         ]
 
-        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=fresh_structured
         ) as mock_llm:
             results = discovery_engine._fetch_web_search(
@@ -2239,7 +2365,7 @@ class DiscoveryCacheTest(unittest.TestCase):
         cache.set_llm_verdict("series", "some series", "https://example.com/rejected", None)
         raw_results = [{"title": "Rejected listing", "description": "snippet", "url": "https://example.com/rejected"}]
 
-        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=[]
         ) as mock_llm:
             results = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
@@ -2265,7 +2391,7 @@ class DiscoveryCacheTest(unittest.TestCase):
             }
         ]
 
-        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=structured
         ) as mock_llm:
             discovery_engine._fetch_web_search(["query"], "Series A", "Some Author", cache=cache)
@@ -2306,7 +2432,7 @@ class DiscoveryCacheTest(unittest.TestCase):
             }
         ]
 
-        with patch.object(discovery_engine, "_fetch_brave_web_search", return_value=raw_results), patch.object(
+        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
             discovery_engine, "_structure_web_results_with_llm", return_value=fresh_structured
         ) as mock_llm:
             results = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
@@ -2417,6 +2543,144 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         self.assertEqual(len(result["available_missing"]), 1)
         self.assertEqual(result["available_missing"][0]["series_number"], 7)
         self.assertEqual(result["upcoming_books"], [])
+
+    def test_medium_confidence_candidate_routes_to_needs_review_with_series_name_hint(self):
+        # No SeriesSkeleton row for this series -> title_confidence
+        # "unverified" -> overall capped at "medium" -- see
+        # confidence_engine._overall_confidence. series_name_hint is
+        # carried through into the review payload so a human reviewer can
+        # dismiss a same-author/different-series false positive on sight,
+        # without confidence_engine needing a series-identity dimension.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "Cherry Blossom Girls Book 7",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 7,
+                "series_name_hint": "Cherry Blossom Girls",
+                "upcoming_hint": False,
+            }
+        ]
+        unified_candidate = discovery_engine.UnifiedCandidate(
+            title="Cherry Blossom Girls Book 7",
+            authors=["Harmon Cooper"],
+            series_name="Cherry Blossom Girls",
+            series_number=7.0,
+            metadata_completeness_score=1.0,
+            source_provenance=[{"source": "hardcover"}],
+        )
+        with self._mock_discovery(candidates, unified_candidates=[unified_candidate]):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertFalse(result["found"])
+        self.assertEqual(result["available_missing"], [])
+        self.assertEqual(len(result["needs_review"]), 1)
+        review_entry = result["needs_review"][0]
+        self.assertEqual(review_entry["overall_confidence"], "medium")
+        self.assertEqual(review_entry["series_name_hint"], "Cherry Blossom Girls")
+        self.assertTrue(review_entry["needs_review"])
+
+    def test_high_confidence_candidate_still_auto_accepts(self):
+        # A skeleton entry that already agrees with the discovered title
+        # for this number is what lets title_confidence reach "high" (the
+        # only grade the routing auto-accepts on) -- see
+        # confidence_engine._title_confidence. run_series_check backfills
+        # the skeleton from owned Book rows on every run (see its own
+        # comment), which would immediately overwrite this hand-seeded row
+        # with one that has no entry for book 7 at all (book 7 isn't
+        # owned -- it's the very candidate under test), silently
+        # regressing this back to "unverified"/medium. Patched out here so
+        # this test can isolate confidence routing from that backfill
+        # mechanics -- see the class-level note on this being the only
+        # currently reachable path to "high" for a not-yet-owned
+        # candidate; a real Check Now run cannot manufacture this state
+        # today (backfill_skeleton_for_series only ever knows about
+        # already-owned numbers, and any candidate reaching this point has
+        # already been excluded from being a title/ISBN match against
+        # those by discovery's own owned-title filter).
+        self.db.add(
+            SeriesSkeleton(
+                series_id=self.series.id,
+                skeleton_json=[{"book_number": 7.0, "title": "Cherry Blossom Girls Book 7"}],
+            )
+        )
+        self.db.commit()
+
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "Cherry Blossom Girls Book 7",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 7,
+                "upcoming_hint": False,
+            }
+        ]
+        unified_candidate = discovery_engine.UnifiedCandidate(
+            title="Cherry Blossom Girls Book 7",
+            authors=["Harmon Cooper"],
+            series_name="Cherry Blossom Girls",
+            series_number=7.0,
+            metadata_completeness_score=1.0,
+            source_provenance=[{"source": "hardcover"}],
+        )
+        with self._mock_discovery(candidates, unified_candidates=[unified_candidate]), patch(
+            "agents.series_agent.backfill_skeleton_for_series"
+        ):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertTrue(result["found"])
+        self.assertEqual(len(result["available_missing"]), 1)
+        self.assertEqual(result["needs_review"], [])
+
+    def test_zero_confidence_candidate_is_dropped_not_reviewed(self):
+        # Author mismatch drives series_alignment_confidence to "zero",
+        # which wins outright regardless of the other three dimensions --
+        # this must be dropped, not surfaced for review (needs_review is
+        # for genuine uncertainty, not a confirmed mismatch).
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "Cherry Blossom Girls Book 7",
+                "authors": ["A Totally Different Author"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 7,
+                "upcoming_hint": False,
+            }
+        ]
+        unified_candidate = discovery_engine.UnifiedCandidate(
+            title="Cherry Blossom Girls Book 7",
+            authors=["A Totally Different Author"],
+            series_name="Cherry Blossom Girls",
+            series_number=7.0,
+            metadata_completeness_score=1.0,
+            source_provenance=[{"source": "hardcover"}],
+        )
+        with self._mock_discovery(candidates, unified_candidates=[unified_candidate]):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertFalse(result["found"])
+        self.assertEqual(result["available_missing"], [])
+        self.assertEqual(result["needs_review"], [])
 
     def test_future_dated_book_is_classified_upcoming(self):
         far_future_year = date.today().year + 5
@@ -2944,6 +3208,16 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
             series_name="Cherry Blossom Girls",
             series_number=7.0,
             isbn13="9780000000007",
+            # Fusion always computes a real completeness score for a live
+            # candidate; the field's own pydantic default (0.0) is only
+            # ever seen here because this test builds a UnifiedCandidate
+            # directly rather than through fusion, and 0.0 is below
+            # discovery_engine.RECONCILIATION_METADATA_COMPLETENESS_THRESHOLD
+            # -- delta_engine would misread that as "insufficient_metadata"
+            # and confidence_engine would downgrade provider_confidence off
+            # of it, for a reason with nothing to do with what this test
+            # actually exercises.
+            metadata_completeness_score=1.0,
             source_provenance=[
                 {
                     "source": "hardcover",
@@ -3024,14 +3298,24 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
 
         available_titles = {book["title"] for book in result["available_missing"]}
         upcoming_titles = {book["title"] for book in result["upcoming_books"]}
-        all_titles = available_titles | upcoming_titles
+        review_titles = {book["title"] for book in result["needs_review"]}
+        all_titles = available_titles | upcoming_titles | review_titles
         # The pre-existing "targeted" candidate must survive -- its title has
         # no textual tie to "Cherry Blossom Girls" at all, so only a
         # preserved "targeted" confidence (via targeted_with_number) can
         # clear belongs_to_series for it. (Gets the series suffix appended
         # since the raw title itself never references the series -- see
-        # _title_references_series/display_title in run_series_check.)
-        self.assertIn("Desert Protocol: (Cherry Blossom Girls Book 7)", all_titles)
+        # _title_references_series/display_title in run_series_check.) It
+        # lands in needs_review, not available_missing: this series has no
+        # SeriesSkeleton row, so title_confidence is "unverified" for every
+        # candidate (nothing to compare the title against yet), which caps
+        # overall confidence at "medium" -- see confidence_engine's own
+        # decision table. Only a candidate whose correlation_key has no
+        # entry in confidence_lookup at all (i.e. one series_agent never
+        # asked confidence_engine to score, like the two below) falls back
+        # to belongs_to_series' verdict directly.
+        self.assertIn("Desert Protocol: (Cherry Blossom Girls Book 7)", review_titles)
+        self.assertNotIn("Desert Protocol: (Cherry Blossom Girls Book 7)", available_titles | upcoming_titles)
         # The brand-new recovered candidate never had a "targeted"
         # confidence to preserve, but its number (10) IS one the
         # missing-volume lookahead specifically searched for -- that
@@ -3042,10 +3326,18 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         # textual tie to the series name.
         self.assertIn("The Levee Ghosts: (Cherry Blossom Girls Book 10)", all_titles)
         # The stray hit's number was never actually recovered by the
-        # lookahead, so it gets no special trust -- still correctly
-        # rejected for lacking both a strong confidence and any textual
-        # tie to the series.
-        self.assertNotIn("Unrelated Standalone Thriller: (Cherry Blossom Girls Book 11)", all_titles)
+        # lookahead, so it gets no special trust and correctly fails
+        # belongs_to_series for lacking both a strong confidence and any
+        # textual tie to the series -- but failing that gate no longer
+        # means silently dropped. series_agent never asked confidence_engine
+        # to score it either (it's not in this test's `unified_candidates`
+        # override), so there's no grade to route on; the safe fallback for
+        # "ambiguous and nothing to grade it" is needs_review, not silent
+        # disappearance -- a human still needs to see and dismiss it.
+        self.assertIn("Unrelated Standalone Thriller: (Cherry Blossom Girls Book 11)", review_titles)
+        self.assertNotIn(
+            "Unrelated Standalone Thriller: (Cherry Blossom Girls Book 11)", available_titles | upcoming_titles
+        )
 
     def test_no_author_on_file_returns_empty_result_without_calling_apis(self):
         series = Series(name="No Author Series")
@@ -3157,6 +3449,11 @@ class Phase4DiagnosticsTest(unittest.TestCase):
             authors=["Harmon Cooper"],
             series_name="Cherry Blossom Girls",
             series_number=float(number),
+            # See test_missing_volume_recovery_does_not_downgrade_an_
+            # already_targeted_candidates_confidence's existing_candidate
+            # fixture for why this needs to be set explicitly rather than
+            # left at the pydantic default.
+            metadata_completeness_score=1.0,
             source_provenance=[{"source": "hardcover", "series_total_hint": total_hint}],
         )
 
@@ -3165,7 +3462,7 @@ class Phase4DiagnosticsTest(unittest.TestCase):
         result never depends on ambient API keys) and returns the parsed
         series_external_reality payload alongside the result.
         """
-        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "", "ANTHROPIC_API_KEY": ""}), self._mock_discovery(
+        with patch.dict(os.environ, {"SERPER_API_KEY": "", "ANTHROPIC_API_KEY": ""}), self._mock_discovery(
             candidates, **overrides
         ), self.assertLogs("agents.series_agent", level="INFO") as captured:
             agent = SeriesIntelligenceAgent()
@@ -3204,10 +3501,20 @@ class Phase4DiagnosticsTest(unittest.TestCase):
         self.assertFalse(flag["suppressed_as_known"])
         self.assertEqual(flag["series_number"], 7)
 
-        # Shadow mode: the live result is exactly what it was before
-        # Phase 4, and carries none of its fields.
-        self.assertTrue(result["found"])
-        self.assertEqual(len(result["available_missing"]), 1)
+        # The live result carries none of Phase 4's own fields, but it is
+        # no longer independent of confidence routing: this series has no
+        # SeriesSkeleton row, so the candidate's title_confidence is
+        # "unverified" (nothing to compare against yet), capping overall
+        # confidence at "medium" -- which routes it to needs_review rather
+        # than auto-accepting it into available_missing. See
+        # confidence_engine._overall_confidence and the routing block in
+        # run_series_check for why "high" (the only auto-accept grade) is
+        # unreachable for a number no skeleton entry has ever seen.
+        self.assertFalse(result["found"])
+        self.assertEqual(result["available_missing"], [])
+        self.assertEqual(len(result["needs_review"]), 1)
+        self.assertEqual(result["needs_review"][0]["series_number"], 7)
+        self.assertEqual(result["needs_review"][0]["overall_confidence"], "medium")
         for field in ["new_volume_flags", "external_gap_ratio", "drop_explanations", "external_missing_vs_owned"]:
             self.assertNotIn(field, result)
 
@@ -3270,7 +3577,13 @@ class Phase4DiagnosticsTest(unittest.TestCase):
         # Isolated: the new-volume group is unaffected.
         self.assertEqual(payload["external_gap_ratio"], 0.2)
         self.assertTrue(payload["new_volume_flags"][0]["is_new_volume"])
-        self.assertTrue(result["found"])
+        # No SeriesSkeleton row -> title_confidence "unverified" -> overall
+        # capped at "medium" -> needs_review, not auto-accept. See the
+        # comment in test_new_volume_flag_is_true_for_an_externally_expected_
+        # unowned_number for the full explanation; this test only cares
+        # that the failing helper doesn't change *that* outcome.
+        self.assertFalse(result["found"])
+        self.assertEqual(len(result["needs_review"]), 1)
 
     def test_a_failing_gap_helper_blanks_its_whole_dependent_group(self):
         # external_missing_vs_owned feeds both the ratio and the flags, so
@@ -3287,10 +3600,15 @@ class Phase4DiagnosticsTest(unittest.TestCase):
         self.assertEqual(payload["new_volume_flags"], [])
         # Drop explanations are computed separately and still run.
         self.assertEqual(payload["drop_explanations_total"], len(payload["drop_explanations"]))
-        # Still pure shadow mode: the live result is untouched by any of it.
-        self.assertTrue(result["found"])
-        self.assertEqual(len(result["available_missing"]), 1)
-        self.assertEqual(result["available_missing"][0]["series_number"], 7)
+        # The live result is untouched by this helper failing, but (see the
+        # comment in test_new_volume_flag_is_true_for_an_externally_expected_
+        # unowned_number) is no longer independent of confidence routing:
+        # no SeriesSkeleton row means this candidate's title_confidence is
+        # "unverified", capping it at "medium" -> needs_review.
+        self.assertFalse(result["found"])
+        self.assertEqual(result["available_missing"], [])
+        self.assertEqual(len(result["needs_review"]), 1)
+        self.assertEqual(result["needs_review"][0]["series_number"], 7)
 
     def test_phase_4_does_not_change_the_live_result(self):
         candidates = [self._raw_candidate(7), self._raw_candidate(6)]
