@@ -2098,10 +2098,35 @@ class WebSearchProviderTest(unittest.TestCase):
         passed_raw_results = mock_structure.call_args[0][2]
         self.assertEqual(len(passed_raw_results), 1)
 
-    def test_fetch_web_search_raises_when_every_query_fails(self):
+    def test_fetch_web_search_no_longer_raises_when_every_query_fails(self):
+        # Superseded: a total Serper failure used to raise straight out of
+        # _fetch_web_search, which skipped the Apify fallback sub-flow
+        # entirely (see ApifyDiscoverySubFlowTest's
+        # test_fetch_web_search_falls_back_to_apify_when_every_serper_query_fails).
+        # With no apify_budget passed here, the fallback attempt itself is
+        # a no-op, so this now returns [] rather than raising.
         with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=RuntimeError("boom")):
-            with self.assertRaises(RuntimeError):
-                discovery_engine._fetch_web_search(["bad1", "bad2"], "Series", "Author")
+            results = discovery_engine._fetch_web_search(["bad1", "bad2"], "Series", "Author")
+        self.assertEqual(results, [])
+
+    def test_fetch_web_search_records_diagnostic_when_every_query_fails(self):
+        diagnostics: list[dict] = []
+        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=RuntimeError("boom")):
+            discovery_engine._fetch_web_search(
+                ["bad1", "bad2"], "Series", "Author", diagnostics=diagnostics, pass_label="targeted"
+            )
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(diagnostics[0]["type"], "web_search_provider_unhealthy")
+        self.assertEqual(diagnostics[0]["pass_label"], "targeted")
+        self.assertIn("boom", diagnostics[0]["error"])
+
+    def test_fetch_web_search_records_diagnostic_when_no_results_found(self):
+        diagnostics: list[dict] = []
+        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=[]):
+            discovery_engine._fetch_web_search(["query"], "Series", "Author", diagnostics=diagnostics)
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(diagnostics[0]["type"], "web_search_provider_unhealthy")
+        self.assertEqual(diagnostics[0]["error"], "no results")
 
     def test_discover_candidates_for_series_wires_in_web_search_results(self):
         web_candidate = {
@@ -2347,6 +2372,116 @@ class ApifyDiscoverySubFlowTest(unittest.TestCase):
         mock_apify.assert_not_called()
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["source"], "web_search")
+
+    def test_fetch_web_search_falls_back_to_apify_when_every_serper_query_fails(self):
+        # The core fix (Apify integration design chat's final consensus):
+        # a Serper 403/etc. on every query used to raise straight out of
+        # _fetch_web_search, skipping the Apify sub-flow entirely. Now it
+        # should fall through and attempt Apify's search-actor fallback.
+        apify_candidate = {
+            "source": "apify",
+            "title": "The First Peacemaker",
+            "authors": ["Some Author"],
+            "published_date": "2026-08-09",
+            "isbn13": None,
+            "source_url": "https://amazon.com/dp/B0AAA1111",
+            "series_number_hint": None,
+            "upcoming_hint": None,
+            "series_name_hint": None,
+            "asin": "B0AAA1111",
+            "cover_image": None,
+        }
+        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
+            discovery_engine, "_fetch_serper_web_search", side_effect=RuntimeError("403 Unauthorized")
+        ), patch.object(discovery_engine, "fetch_apify_candidates", return_value=[apify_candidate]) as mock_fetch:
+            results = discovery_engine._fetch_web_search(
+                ["bad1", "bad2"], "The First Peacemaker", "Some Author", apify_budget=discovery_engine.ApifyCallBudget()
+            )
+
+        self.assertEqual(mock_fetch.call_args[0][0], "bad1")
+        self.assertIsNone(mock_fetch.call_args[0][1])
+        self.assertEqual(results, [apify_candidate])
+
+    def test_fetch_web_search_falls_back_to_apify_when_serper_finds_nothing(self):
+        apify_candidate = {
+            "source": "apify",
+            "title": "The First Peacemaker",
+            "authors": ["Some Author"],
+            "published_date": "2026-08-09",
+            "isbn13": None,
+            "source_url": "https://amazon.com/dp/B0AAA1111",
+            "series_number_hint": None,
+            "upcoming_hint": None,
+            "series_name_hint": None,
+            "asin": "B0AAA1111",
+            "cover_image": None,
+        }
+        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
+            discovery_engine, "_fetch_serper_web_search", return_value=[]
+        ), patch.object(discovery_engine, "fetch_apify_candidates", return_value=[apify_candidate]):
+            results = discovery_engine._fetch_web_search(
+                ["query"], "The First Peacemaker", "Some Author", apify_budget=discovery_engine.ApifyCallBudget()
+            )
+
+        self.assertEqual(results, [apify_candidate])
+
+    def test_fetch_web_search_llm_rejecting_everything_does_not_trigger_apify_fallback(self):
+        # Deliberately different from the empty/failed-raw-fetch case: raw
+        # hits DID come back, the LLM just decided none of them are a real
+        # book. That's a softer semantic failure where Apify's independent
+        # Amazon search is more likely to add noise than signal -- see
+        # _fetch_web_search's own docstring/comments.
+        raw_results = [{"title": "Unrelated", "description": "snippet", "url": "https://example.com/1"}]
+        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
+            discovery_engine, "_fetch_serper_web_search", return_value=raw_results
+        ), patch.object(discovery_engine, "_structure_web_results_with_llm", return_value=[]), patch.object(
+            discovery_engine, "fetch_apify_candidates"
+        ) as mock_fetch:
+            results = discovery_engine._fetch_web_search(
+                ["query"], "Series", "Author", apify_budget=discovery_engine.ApifyCallBudget()
+            )
+
+        mock_fetch.assert_not_called()
+        self.assertEqual(results, [])
+
+    def test_discover_candidates_for_series_promotes_serper_failure_into_provider_failures(self):
+        # Even when Apify substitutes successfully, Serper's own health
+        # must still be visible in provider_failures (not silently
+        # swallowed just because the pass produced candidates) -- see
+        # _promote_web_search_health_diagnostics.
+        apify_candidate = {
+            "source": "apify",
+            "title": "The First Peacemaker Book 8",
+            "authors": ["Some Author"],
+            "published_date": "2026-08-09",
+            "isbn13": None,
+            "source_url": "https://amazon.com/dp/B0AAA1111",
+            "series_number_hint": 8,
+            "upcoming_hint": False,
+            "series_name_hint": None,
+            "asin": "B0AAA1111",
+            "cover_image": None,
+        }
+        with patch.dict(
+            os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key", "APIFY_API_TOKEN": "test-token"}
+        ), patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
+            discovery_engine, "_fetch_google_books", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]), patch.object(
+            discovery_engine, "_fetch_serper_web_search", side_effect=RuntimeError("403 Unauthorized")
+        ), patch.object(discovery_engine, "fetch_apify_candidates", return_value=[apify_candidate]):
+            result = discovery_engine.discover_candidates_for_series("The First Peacemaker", "Some Author")
+
+        web_failures = [f for f in result["provider_failures"] if f["provider"] == "web_search"]
+        self.assertEqual(len(web_failures), 1)
+        self.assertIn("403", web_failures[0]["error"])
+        self.assertTrue(web_failures[0]["apify_fallback_used"])
+        # Apify's substitution still means the run overall did not fail.
+        self.assertFalse(result["all_providers_failed"])
+        # The health marker must not leak into drop_diagnostics as a fake
+        # per-candidate drop entry.
+        self.assertEqual(result["drop_diagnostics"], [])
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["candidates"][0]["source"], "apify")
 
     def test_discover_candidates_for_series_shares_one_budget_across_targeted_and_fallback_passes(self):
         # Regression guard for the Apify integration design chat's

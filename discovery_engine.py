@@ -1631,6 +1631,49 @@ def _fetch_apify_discovery(
         return []
 
 
+def _promote_web_search_health_diagnostics(
+    diagnostics_list: list[dict],
+    provider_failures_list: list[dict],
+    pass_label: str,
+    provider_name: str,
+) -> None:
+    """Promotes _fetch_web_search's "web_search_provider_unhealthy" markers
+    (recorded when Serper's HTTP layer failed or returned zero raw hits,
+    even though Apify's fallback may have let the pass still return
+    candidates -- see _fetch_web_search) into a real provider_failures
+    entry, called right after each pass's fetch in
+    discover_candidates_for_series.
+
+    This is the one place Serper's health becomes visible again: once
+    _fetch_web_search stops raising in this scenario (the whole point of
+    the fallback), _fetch_all_providers_parallel's own
+    `except Exception as exc: failures[provider] = exc` bookkeeping never
+    fires, so nothing would otherwise land in provider_failures even
+    though Serper genuinely failed. provider_failures is what actually
+    surfaces in the Check Now debug summary (see
+    services/discovery_logging.py) and the API response, so recording the
+    marker via a plain _log() line alone would not be enough.
+
+    Removes the promoted markers from diagnostics_list in place -- they're
+    a provider-health signal, not an actual dropped candidate, so they
+    must not also surface as a fake entry in compute_drop_explanations's
+    per-candidate drop list.
+    """
+    remaining: list[dict] = []
+    for entry in diagnostics_list:
+        if entry.get("type") == "web_search_provider_unhealthy" and entry.get("pass_label") == pass_label:
+            provider_failures_list.append(
+                {
+                    "provider": provider_name,
+                    "error": entry.get("error"),
+                    "apify_fallback_used": True,
+                }
+            )
+        else:
+            remaining.append(entry)
+    diagnostics_list[:] = remaining
+
+
 def _fetch_web_search(
     queries: list[str],
     series_name: str | None,
@@ -1691,9 +1734,40 @@ def _fetch_web_search(
                 raw_results.append(item)
 
         if not raw_results:
-            if query_errors and len(query_errors) == len(queries):
-                raise query_errors[0]
-            return []
+            # Previously this either re-raised (all queries errored, e.g. a
+            # Serper 403) or returned [] silently (all queries succeeded but
+            # found zero organic hits) -- in both cases execution never
+            # reached the Apify sub-flow at the bottom of this function (a
+            # raise skips the rest of the function entirely; so does an
+            # early return), so a Serper outage/empty-result pass could
+            # never be substituted by Apify even though Apify was
+            # independently configured and reachable. Per the Apify
+            # integration design chat's consensus, both cases now instead
+            # fall through to the Apify fallback below -- recorded into
+            # `diagnostics` rather than raised, so
+            # discover_candidates_for_series can still surface Serper's
+            # unhealthy status in provider_failures even when Apify
+            # successfully substitutes (see the promotion logic there).
+            # Deliberately NOT extended to "raw hits came back but the LLM
+            # structured zero real candidates out of them" -- that's a
+            # softer, different failure mode (the LLM deciding nothing here
+            # is a real book), where an independent Amazon search is more
+            # likely to add noise than signal; that case still returns []
+            # further down, unchanged.
+            error_text = (
+                str(query_errors[0])
+                if query_errors and len(query_errors) == len(queries)
+                else "no results"
+            )
+            if diagnostics is not None:
+                diagnostics.append(
+                    {
+                        "type": "web_search_provider_unhealthy",
+                        "pass_label": pass_label,
+                        "error": error_text,
+                    }
+                )
+            return _fetch_apify_discovery(queries[0] if queries else "", [], apify_budget)
 
         # See _structure_with_verdict_cache's own docstring for the Layer B
         # cache-splicing mechanics. bypass_cached_rejection is scoped to the
@@ -1789,6 +1863,18 @@ def _fetch_web_search(
     # Amazon-page extraction is trusted over an LLM's guess at unstructured
     # search-snippet text, and that trust only takes effect here if it
     # appears first.
+    #
+    # Skipped entirely when `results` is empty -- raw hits DID come back
+    # (otherwise the early-return fallback above would have fired
+    # instead), but the LLM structured zero real candidates out of them.
+    # That's the LLM legitimately deciding nothing here is a real book, a
+    # softer/different failure mode than the raw fetch itself producing
+    # nothing -- an independent Apify search-actor call on the same query
+    # is more likely to introduce noise than signal here, so this
+    # deliberately does NOT fall back the way an empty/failed raw fetch
+    # does (see the Apify integration design chat's consensus).
+    if not results:
+        return results
     apify_candidates = _fetch_apify_discovery(queries[0] if queries else "", results, apify_budget)
     return apify_candidates + results
 
@@ -3595,6 +3681,12 @@ def discover_candidates_for_series(
             provider_failures.append({"provider": "web_search", "error": str(failures["web"])})
         else:
             any_provider_succeeded = True
+        # Surfaces Serper's health here even though "web" not in failures
+        # no longer implies Serper itself succeeded -- see
+        # _promote_web_search_health_diagnostics's own docstring.
+        _promote_web_search_health_diagnostics(
+            discovery_drop_diagnostics, provider_failures, "targeted", "web_search"
+        )
 
     # Fuse each real book's raw hits (across all four providers) into one
     # enriched candidate before merging/filtering -- see
@@ -3707,6 +3799,9 @@ def discover_candidates_for_series(
                     provider_failures.append({"provider": "web_search_fallback", "error": str(fallback_failures["web"])})
                 else:
                     any_provider_succeeded = True
+                _promote_web_search_health_diagnostics(
+                    discovery_drop_diagnostics, provider_failures, "author_fallback", "web_search_fallback"
+                )
 
         fused_fallback_candidates = _fuse_and_score_candidates(fallback_results, author, series_name)
         if _needs_llm_reconciliation(fused_fallback_candidates, series_name):
