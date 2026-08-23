@@ -44,6 +44,7 @@ from pydantic import BaseModel, Field
 from services.identity import _edition_priority, _normalize_title_for_identity
 from services.discovery_telemetry import DiscoveryTelemetry, maybe_pass_scope
 from services.discovery_cache import DiscoveryCache, CACHE_MISS, _normalize_query_text
+from apify_provider import ApifyCallBudget, apify_enabled, fetch_apify_candidates
 
 # Loaded here (rather than relying on the entry point having done it first)
 # so this module reads the right API key regardless of import order.
@@ -1580,6 +1581,56 @@ def _structure_with_verdict_cache(
     return {**{u: v for u, v in cached_by_url.items() if v is not None}, **fresh_by_url}
 
 
+# Domains checked to recognize a structured web-search result as an Amazon
+# product page -- see _fetch_apify_discovery. Kept intentionally small/
+# literal (substring match, not a full URL parser) since these are already-
+# fetched, already-LLM-accepted source_url values, not untrusted input.
+_AMAZON_URL_DOMAINS = ("amazon.com", "amazon.co.uk", "amazon.ca", "amazon.de", "amazon.co.jp", "amazon.in")
+
+
+def _fetch_apify_discovery(
+    query: str,
+    structured_web_results: list[dict],
+    budget: "ApifyCallBudget | None",
+) -> list[dict]:
+    """Sequential Apify sub-flow attached to the Serper+Anthropic web-search
+    pass (see _fetch_web_search) -- NOT one of the parallel providers in
+    _fetch_all_providers_parallel. Phase 1 scope (Check Now only, per the
+    Apify integration design chat's consensus):
+
+    - If the already-LLM-structured web-search results include an Amazon
+      product URL, skip Apify's own search actor and go straight to the
+      product-extraction actor on that URL -- top 1 only (see the module
+      docstring on symmetric fan-out caps).
+    - Otherwise, fall back to Apify's search actor on `query`, then the
+      product actor on its top 1 result.
+
+    Returns [] with no error whenever Apify isn't configured/budget is
+    exhausted/either actor call fails -- see fetch_apify_candidates.
+    """
+    if budget is None or not apify_enabled():
+        return []
+
+    amazon_urls = [
+        str(result["source_url"]).strip()
+        for result in structured_web_results
+        if result.get("source_url")
+        and any(domain in str(result["source_url"]).lower() for domain in _AMAZON_URL_DOMAINS)
+    ]
+    # Top 1 only, even when multiple Amazon URLs are already present in the
+    # structured web-search results -- symmetric with the top-1 cap on
+    # Apify's own search-actor results inside fetch_apify_candidates, so
+    # worst-case Apify usage per pass stays at exactly one search-or-
+    # direct-URL call plus one product-extraction call.
+    top_amazon_urls = amazon_urls[:1]
+
+    try:
+        return fetch_apify_candidates(query, top_amazon_urls or None, budget)
+    except Exception as exc:  # Apify failures must never break web-search's own results.
+        _log(f"apify sub-flow failed: {exc}")
+        return []
+
+
 def _fetch_web_search(
     queries: list[str],
     series_name: str | None,
@@ -1590,6 +1641,7 @@ def _fetch_web_search(
     cache: "DiscoveryCache | None" = None,
     scope_type: str = "series",
     pass_label: str = "web_search",
+    apify_budget: "ApifyCallBudget | None" = None,
 ) -> list[dict]:
     raw_results: list[dict] = []
     seen_urls: set[str] = set()
@@ -1727,7 +1779,18 @@ def _fetch_web_search(
         for index, refined_entry in refined_by_index.items():
             results[index] = refined_entry
 
-    return results
+    # Apify sub-flow: sequential, attached to this web-search pass rather
+    # than run as its own parallel provider (see _fetch_apify_discovery).
+    # Prepended -- not appended -- to `results` so Apify candidates sort
+    # ahead of web_search's own LLM-parsed-snippet candidates inside
+    # _fuse_and_score_candidates' ordered_raw list, which picks
+    # members[0] as a duplicate group's primary/backfill-source record by
+    # position, not by _PROVIDER_CONFIDENCE_WEIGHT -- Apify's structured
+    # Amazon-page extraction is trusted over an LLM's guess at unstructured
+    # search-snippet text, and that trust only takes effect here if it
+    # appears first.
+    apify_candidates = _fetch_apify_discovery(queries[0] if queries else "", results, apify_budget)
+    return apify_candidates + results
 
 
 def _filter_and_merge(
@@ -1829,6 +1892,7 @@ def _fetch_all_providers_parallel(
     telemetry: "DiscoveryTelemetry | None" = None,
     cache: "DiscoveryCache | None" = None,
     pass_label: str = "targeted",
+    apify_budget: "ApifyCallBudget | None" = None,
 ) -> dict:
     """Fetch Google Books, OpenLibrary, Hardcover, and (optionally) the
     web-search+LLM provider concurrently instead of one after another.
@@ -1917,7 +1981,13 @@ def _fetch_all_providers_parallel(
         tasks["web"] = (
             _fetch_web_search,
             (resolved_web_queries, series_name, author),
-            {"diagnostics": diagnostics, "telemetry": telemetry, "cache": cache, "pass_label": pass_label},
+            {
+                "diagnostics": diagnostics,
+                "telemetry": telemetry,
+                "cache": cache,
+                "pass_label": pass_label,
+                "apify_budget": apify_budget,
+            },
         )
 
     if tasks:
@@ -1958,6 +2028,13 @@ _PROVIDER_CONFIDENCE_WEIGHT = {
     "hardcover": 0.4,
     "google_books": 0.3,
     "openlibrary": 0.25,
+    # Structured Amazon-product-page extraction -- trusted above
+    # web_search's LLM-parsed-snippet guesses, but below the three catalog
+    # APIs until proven stable in production (Apify integration design
+    # chat's consensus). See _fetch_apify_discovery for how Apify
+    # candidates also get positional (not just weight) primacy over
+    # web_search inside _fuse_and_score_candidates.
+    "apify": 0.20,
     "web_search": 0.15,
 }
 
@@ -3229,7 +3306,7 @@ def _filter_cross_series_contamination(
 # finalize_discovery_output -- e.g. a targeted-pass hit and a fallback-pass
 # hit that plain title-key dedupe didn't recognize as the same book). Any
 # other/unrecognized source sorts last.
-_PROVIDER_SORT_RANK = {"hardcover": 0, "google_books": 1, "openlibrary": 2, "web_search": 3}
+_PROVIDER_SORT_RANK = {"hardcover": 0, "google_books": 1, "openlibrary": 2, "apify": 3, "web_search": 4}
 
 _TRANSIENT_CANDIDATE_FIELDS = ("confidence_score", "metadata_completeness_score", "source_provenance")
 
@@ -3460,6 +3537,13 @@ def discover_candidates_for_series(
 
     any_provider_succeeded = False
 
+    # One shared budget for this entire run -- both the targeted pass below
+    # and the author-fallback pass further down (if triggered) are passed
+    # this SAME instance, so APIFY_MAX_CALLS_PER_SERIES_RUN caps total
+    # Apify usage across the whole discover_candidates_for_series() call,
+    # not per pass. See apify_provider.ApifyCallBudget's own docstring.
+    apify_budget = ApifyCallBudget()
+
     # Google/OpenLibrary/Hardcover/web-search fetched concurrently (see
     # _fetch_all_providers_parallel) instead of one after another -- query
     # construction and per-provider error handling are unchanged, only the
@@ -3477,6 +3561,7 @@ def discover_candidates_for_series(
         telemetry=telemetry,
         cache=cache,
         pass_label="targeted",
+        apify_budget=apify_budget,
     )
     failures = fetch_results["_failures"]
 
@@ -3585,6 +3670,7 @@ def discover_candidates_for_series(
             telemetry=telemetry,
             cache=cache,
             pass_label="author_fallback",
+            apify_budget=apify_budget,
         )
         # Explicit cross-series contamination -- a fallback hit tagged with
         # one of this author's OTHER tracked series' names -- is dropped

@@ -2216,6 +2216,160 @@ class WebSearchProviderTest(unittest.TestCase):
         mock_web_search.assert_not_called()
 
 
+class ApifyDiscoverySubFlowTest(unittest.TestCase):
+    """Tests _fetch_apify_discovery (the sequential Apify sub-flow attached
+    to the Serper+Anthropic web-search pass, Check Now only for Phase 1)
+    and its wiring into _fetch_web_search. discovery_engine.fetch_apify_candidates
+    is patched directly here (imported from apify_provider) -- apify_provider.py's
+    own test_apify_provider.py suite covers that function's internals
+    (actor calls, budget, field normalization) in isolation.
+    """
+
+    def _structured_result(self, source_url, title="A Book"):
+        return {
+            "source": "web_search",
+            "title": title,
+            "authors": ["Some Author"],
+            "published_date": "2026-01-01",
+            "isbn13": None,
+            "source_url": source_url,
+            "series_number_hint": None,
+            "upcoming_hint": False,
+            "series_name_hint": None,
+        }
+
+    def test_returns_empty_without_a_budget(self):
+        result = discovery_engine._fetch_apify_discovery(
+            "query", [self._structured_result("https://amazon.com/dp/B0AAA1111")], None
+        )
+        self.assertEqual(result, [])
+
+    def test_returns_empty_when_apify_not_enabled(self):
+        with patch.dict(os.environ, {"APIFY_API_TOKEN": ""}):
+            result = discovery_engine._fetch_apify_discovery(
+                "query", [self._structured_result("https://amazon.com/dp/B0AAA1111")], discovery_engine.ApifyCallBudget()
+            )
+        self.assertEqual(result, [])
+
+    def test_passes_top_1_amazon_url_from_structured_results_when_present(self):
+        results = [
+            self._structured_result("https://example.com/not-amazon"),
+            self._structured_result("https://amazon.com/dp/B0AAA1111"),
+            self._structured_result("https://amazon.com/dp/B0BBB2222"),
+        ]
+        budget = discovery_engine.ApifyCallBudget()
+        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
+            discovery_engine, "fetch_apify_candidates", return_value=[]
+        ) as mock_fetch:
+            discovery_engine._fetch_apify_discovery("query", results, budget)
+
+        mock_fetch.assert_called_once_with("query", ["https://amazon.com/dp/B0AAA1111"], budget)
+
+    def test_passes_none_for_urls_when_no_amazon_url_present(self):
+        results = [self._structured_result("https://example.com/not-amazon")]
+        budget = discovery_engine.ApifyCallBudget()
+        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
+            discovery_engine, "fetch_apify_candidates", return_value=[]
+        ) as mock_fetch:
+            discovery_engine._fetch_apify_discovery("query", results, budget)
+
+        mock_fetch.assert_called_once_with("query", None, budget)
+
+    def test_exception_from_fetch_apify_candidates_is_caught(self):
+        budget = discovery_engine.ApifyCallBudget()
+        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
+            discovery_engine, "fetch_apify_candidates", side_effect=RuntimeError("boom")
+        ):
+            result = discovery_engine._fetch_apify_discovery(
+                "query", [self._structured_result("https://amazon.com/dp/B0AAA1111")], budget
+            )
+        self.assertEqual(result, [])
+
+    def test_fetch_web_search_prepends_apify_candidates_ahead_of_web_search(self):
+        raw_results = [{"title": "Peacemaker Book 8", "description": "snippet", "url": "https://amazon.com/dp/B0AAA1111"}]
+        structured = [
+            {
+                "result_index": 0,
+                "title": "The First Peacemaker",
+                "book_number": 8,
+                "author_names": ["Some Author"],
+                "published_date": "2026-08-09",
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+        ]
+        apify_candidate = {
+            "source": "apify",
+            "title": "The First Peacemaker",
+            "authors": ["Some Author"],
+            "published_date": "2026-08-09",
+            "isbn13": "9781234567897",
+            "source_url": "https://amazon.com/dp/B0AAA1111",
+            "series_number_hint": None,
+            "upcoming_hint": None,
+            "series_name_hint": None,
+            "asin": "B0AAA1111",
+            "cover_image": "https://example.com/cover.jpg",
+        }
+        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
+            discovery_engine, "_fetch_serper_web_search", return_value=raw_results
+        ), patch.object(discovery_engine, "_structure_web_results_with_llm", return_value=structured), patch.object(
+            discovery_engine, "fetch_apify_candidates", return_value=[apify_candidate]
+        ):
+            results = discovery_engine._fetch_web_search(
+                ["query"], "The First Peacemaker", "Some Author", apify_budget=discovery_engine.ApifyCallBudget()
+            )
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["source"], "apify")
+        self.assertEqual(results[1]["source"], "web_search")
+
+    def test_fetch_web_search_without_apify_budget_never_calls_apify(self):
+        raw_results = [{"title": "Peacemaker Book 8", "description": "snippet", "url": "https://amazon.com/dp/B0AAA1111"}]
+        structured = [
+            {
+                "result_index": 0,
+                "title": "The First Peacemaker",
+                "book_number": 8,
+                "author_names": ["Some Author"],
+                "published_date": "2026-08-09",
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+        ]
+        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
+            discovery_engine, "_fetch_serper_web_search", return_value=raw_results
+        ), patch.object(discovery_engine, "_structure_web_results_with_llm", return_value=structured), patch.object(
+            discovery_engine, "fetch_apify_candidates"
+        ) as mock_apify:
+            results = discovery_engine._fetch_web_search(["query"], "The First Peacemaker", "Some Author")
+
+        mock_apify.assert_not_called()
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["source"], "web_search")
+
+    def test_discover_candidates_for_series_shares_one_budget_across_targeted_and_fallback_passes(self):
+        # Regression guard for the Apify integration design chat's
+        # consensus: APIFY_MAX_CALLS_PER_SERIES_RUN must apply across the
+        # WHOLE series-check run, not reset per pass -- so the exact same
+        # ApifyCallBudget instance must reach both
+        # _fetch_all_providers_parallel calls.
+        captured_budgets = []
+
+        def fake_fetch_all_providers_parallel(*args, **kwargs):
+            captured_budgets.append(kwargs.get("apify_budget"))
+            return {"google": [], "openlibrary": [], "hardcover": [], "web": [], "_failures": {}}
+
+        with patch.dict(os.environ, {"SERPER_API_KEY": "", "ANTHROPIC_API_KEY": ""}), patch.object(
+            discovery_engine, "_fetch_all_providers_parallel", side_effect=fake_fetch_all_providers_parallel
+        ), patch.object(discovery_engine, "_should_trigger_author_fallback", return_value=True):
+            discovery_engine.discover_candidates_for_series("Some Series", "Some Author")
+
+        self.assertEqual(len(captured_budgets), 2)
+        self.assertIsNotNone(captured_budgets[0])
+        self.assertIs(captured_budgets[0], captured_budgets[1])
+
+
 class DiscoveryCacheTest(unittest.TestCase):
     """Tests the two-layer per-job cache (services/discovery_cache.py,
     architecture spec #2.4/#7.1) as it's exercised through

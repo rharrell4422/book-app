@@ -62,6 +62,11 @@ _PROVIDER_CONFIDENCE = {
     "hardcover": "high",
     "google_books": "medium",
     "openlibrary": "low",  # see module docstring: collapsed from "medium-low"
+    # Structured Amazon-product-page extraction (Phase 1, Check Now only --
+    # see apify_provider.py). Starts at "medium" pending production
+    # validation; upgrade to "high" once stable (Apify integration design
+    # chat's consensus).
+    "apify": "medium",
     "web_search": "low",  # frontier web-search snippet (formerly Brave, now Serper), per spec
 }
 
