@@ -78,12 +78,25 @@ APIFY_AMAZON_ACTOR_ID = "junglee/free-amazon-product-scraper"
 
 # How many Amazon listings to request per categoryUrls entry, whether it's
 # a direct product URL (which realistically only ever has 1 listing) or a
-# built search-results URL (which can have many). Chosen from manual
-# testing (2026-08-24): a fuzzy series-name-only search query returned 5
-# distinct real listings from the same series with zero `error`-typed
-# items at this cap -- good discovery coverage per call at this actor's
-# pay-per-event pricing (~$6.20/1,000 results).
-APIFY_MAX_ITEMS_PER_START_URL = 5
+# built search-results URL (which can have many). Originally 5, based on
+# an initial manual test that just confirmed the actor could return
+# *multiple* real listings at all. Raised to 25 after a follow-up manual
+# test (2026-08-24, "Jonathan Hunt Thriller Series Georgia Wagner" --
+# single primary-author query, see primary_author_name/query_author in
+# discovery_engine.py) showed 5 was leaving most of an 18-book series on
+# the table: Amazon's own search log for that exact query reported
+# productsCount=18 (i.e. every book in the series IS reachable from one
+# search), but a cap of 5 only ever samples the top 5 of those per call.
+# 25 comfortably covers a search that returns exactly one hit per book
+# (18) plus some slack for the same title showing up as a second, separate
+# ASIN (that test also surfaced ~10 foreign-language-edition duplicates of
+# already-seen titles -- harmless noise fusion/dedup downstream should
+# absorb, not a reason to keep the cap artificially low). Still one call
+# per run either way (see APIFY_MAX_CALLS_PER_SERIES_RUN) -- cost scales
+# with items actually returned, not the cap itself, and stays negligible
+# at this actor's pay-per-event pricing (~$6.20/1,000 results: 25 items
+# is well under $0.20).
+APIFY_MAX_ITEMS_PER_START_URL = 25
 
 # Apify actor runs are inherently slower than a plain HTTP call to a JSON
 # API (a real scrape, not just a lookup) -- 30s gives a real run a fair

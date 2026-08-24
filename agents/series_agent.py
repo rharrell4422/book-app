@@ -633,6 +633,23 @@ class SeriesIntelligenceAgent:
             except Exception:
                 logger.exception("publication-date backfill failed for series_id=%s", series_id)
 
+            # missing_volume_recovery candidates (tagged just above, in the
+            # skeleton re-merge) are the one case backfill above can't help
+            # with: they typically already have *a* date -- just one an LLM
+            # read off a raw web-search snippet for a single targeted "book
+            # N" query, this pipeline's least reliable source for a hard
+            # fact like a release date. Live regression (2026-08-24):
+            # "Jonathan Hunt Thriller Series" Book 9 was recovered this way
+            # with published_date misread as a full year after its real
+            # release, wrongly landing it in upcoming_books instead of
+            # available_missing below. See verify_missing_volume_recovery_
+            # dates' own docstring for why this needs to actually override a
+            # present-but-wrong date rather than only filling a blank one.
+            try:
+                discovery_engine.verify_missing_volume_recovery_dates(candidates, series_author)
+            except Exception:
+                logger.exception("missing-volume-recovery date verification failed for series_id=%s", series_id)
+
             _console_log(
                 f"Candidates found: {len(candidates)} (author_fallback_used={discovery['used_author_fallback']}, "
                 f"missing_volumes={skeleton['missing_numbers']}, recovered={skeleton['recovered_numbers']})"

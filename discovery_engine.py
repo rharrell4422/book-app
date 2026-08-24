@@ -1028,6 +1028,16 @@ def _fetch_hardcover(query: str, max_results: int = 25) -> list[dict]:
 # conservative "unconfirmed" default.
 MAX_PUBLICATION_DATE_BACKFILL_LOOKUPS = 8
 
+# Bounds verify_missing_volume_recovery_dates's own lookups, separately from
+# MAX_PUBLICATION_DATE_BACKFILL_LOOKUPS above -- deliberately small (this
+# path is meant for the rare 1-3 candidates a single Check Now run recovers
+# via the missing-volume lookahead, not a large sweep) and also caps its own
+# Apify fallback calls via a dedicated ApifyCallBudget, entirely separate
+# from discover_candidates_for_series' own per-run Apify budget (see that
+# function's ApifyCallBudget docstring) since this verification pass runs
+# afterward, in series_agent.py, with no access to that budget instance.
+MAX_MISSING_VOLUME_DATE_VERIFICATION_LOOKUPS = 3
+
 
 def backfill_missing_publication_dates(candidates: list[dict], author: str) -> None:
     """Fills in a real published_date for candidates that don't have one,
@@ -1097,6 +1107,112 @@ def backfill_missing_publication_dates(candidates: list[dict], author: str) -> N
                 if hit_isbn13:
                     raw["isbn13"] = hit_isbn13
             break
+
+
+def verify_missing_volume_recovery_dates(candidates: list[dict], author: str) -> None:
+    """Re-verifies published_date for every candidate tagged
+    confidence=="missing_volume_recovery" against Hardcover, falling back to
+    a dedicated Apify product lookup when Hardcover has nothing usable --
+    and, unlike backfill_missing_publication_dates above, OVERRIDES an
+    already-present date rather than only filling a blank one.
+
+    missing_volume_recovery candidates come from _reconstruct_series_
+    skeleton's lookahead pass: an LLM reading raw web-search snippets for a
+    single targeted query ("<series> <author> book <N>"), the least
+    reliable source this pipeline has for a hard fact like a release date --
+    unlike Hardcover's/Apify's own structured catalog data, it can state a
+    confident-looking date that's simply wrong, which classify_upcoming then
+    trusts at face value. Live regression (2026-08-24): "Jonathan Hunt
+    Thriller Series" Book 9 ("The Terror Plot") was recovered this way with
+    published_date parsed as 2027-03-06, a full year after its real release
+    (2026-06-11) -- wrongly classifying an already-available book as
+    upcoming. backfill_missing_publication_dates couldn't have caught this:
+    it explicitly skips any candidate that already has *a* date, blank or
+    not being the only thing it checks.
+
+    Deliberately narrow-scoped to missing_volume_recovery candidates only
+    (never the broader candidate pool backfill_missing_publication_dates
+    covers) -- every other source (Hardcover, Google Books, OpenLibrary,
+    Apify's own structured product data, even a plain "targeted" web-search
+    hit) already carries enough of its own structure/corroboration to be
+    trusted at face value; re-verifying every candidate's date on every run
+    would multiply this function's live API calls for no benefit on sources
+    that aren't the problem.
+
+    Mutates each matching candidate dict in place. Silently does nothing
+    (never raises) if HARDCOVER_API_KEY is unset AND Apify isn't enabled --
+    same fail-open convention as every other optional-provider function in
+    this module.
+    """
+    targets = [raw for raw in candidates if raw.get("confidence") == "missing_volume_recovery"]
+    if not targets:
+        return
+
+    hardcover_key = bool(os.environ.get("HARDCOVER_API_KEY", "").strip())
+    apify_budget = ApifyCallBudget(max_calls=MAX_MISSING_VOLUME_DATE_VERIFICATION_LOOKUPS) if apify_enabled() else None
+    if not hardcover_key and apify_budget is None:
+        return
+
+    lookups_done = 0
+    for raw in targets:
+        if lookups_done >= MAX_MISSING_VOLUME_DATE_VERIFICATION_LOOKUPS:
+            break
+        title = str(raw.get("title") or "").strip()
+        if not title:
+            continue
+        lookups_done += 1
+
+        isbn13 = str(raw.get("isbn13") or "").strip()
+        title_key = core_title_key(title)
+        existing_date = str(raw.get("published_date") or "").strip()
+        verified_date: str | None = None
+        verified_isbn13: str | None = None
+
+        if hardcover_key:
+            try:
+                hits = _fetch_hardcover(isbn13 or title)
+            except Exception:
+                hits = []
+            for hit in hits:
+                if isbn13:
+                    if str(hit.get("isbn13") or "").strip() != isbn13:
+                        continue
+                elif core_title_key(str(hit.get("title") or "")) != title_key:
+                    continue
+                if not _author_matches(hit.get("authors") or [], author):
+                    continue
+                hit_date = str(hit.get("published_date") or "").strip()
+                if hit_date:
+                    verified_date = hit_date
+                    if not isbn13:
+                        verified_isbn13 = str(hit.get("isbn13") or "").strip() or None
+                    break
+
+        if verified_date is None and apify_budget is not None:
+            try:
+                apify_hits = fetch_apify_candidates(f"{title} {author}".strip(), None, apify_budget)
+            except Exception:
+                apify_hits = []
+            for hit in apify_hits:
+                if core_title_key(str(hit.get("title") or "")) != title_key:
+                    continue
+                if not _author_matches(hit.get("authors") or [], author):
+                    continue
+                hit_date = str(hit.get("published_date") or "").strip()
+                if hit_date:
+                    verified_date = hit_date
+                    if not isbn13 and not verified_isbn13:
+                        verified_isbn13 = str(hit.get("isbn13") or "").strip() or None
+                    break
+
+        if verified_date and verified_date != existing_date:
+            _log(
+                f"missing_volume_recovery date override for {title!r}: "
+                f"{existing_date or 'unset'!r} -> {verified_date!r}"
+            )
+            raw["published_date"] = verified_date
+        if verified_isbn13 and not isbn13:
+            raw["isbn13"] = verified_isbn13
 
 
 def _web_search_enabled() -> bool:

@@ -1557,6 +1557,185 @@ class BackfillMissingPublicationDatesTest(unittest.TestCase):
         self.assertEqual(candidates[0]["published_date"], "")
 
 
+class VerifyMissingVolumeRecoveryDatesTest(unittest.TestCase):
+    """Regression coverage for verify_missing_volume_recovery_dates -- live
+    bug (2026-08-24): "Jonathan Hunt Thriller Series" Book 9 ("The Terror
+    Plot") was recovered via the missing-volume lookahead pass with
+    published_date misread by the LLM as a full year after its real release,
+    wrongly classifying an already-available book as upcoming. Unlike
+    backfill_missing_publication_dates (which only ever fills a *blank*
+    date), this must override an already-present-but-wrong one -- but only
+    for confidence=="missing_volume_recovery" candidates.
+    """
+
+    def setUp(self):
+        patcher = patch.object(discovery_engine.os.environ, "get", side_effect=lambda key, default="": (
+            "test-key" if key == "HARDCOVER_API_KEY" else default
+        ))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_overrides_a_wrong_existing_date_via_hardcover(self):
+        candidates = [
+            {
+                "title": "The Terror Plot",
+                "authors": ["Georgia Wagner"],
+                "isbn13": None,
+                "published_date": "2027-03-06",
+                "confidence": "missing_volume_recovery",
+            }
+        ]
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[
+                {
+                    "title": "The Terror Plot",
+                    "authors": ["Georgia Wagner", "Scott Cook"],
+                    "isbn13": "9798242219999",
+                    "published_date": "2026-06-11",
+                }
+            ],
+        ):
+            discovery_engine.verify_missing_volume_recovery_dates(candidates, "Georgia Wagner; Scott Cook")
+
+        self.assertEqual(candidates[0]["published_date"], "2026-06-11")
+        self.assertEqual(candidates[0]["isbn13"], "9798242219999")
+
+    def test_leaves_non_recovery_candidates_untouched_even_with_a_bad_date(self):
+        candidates = [
+            {
+                "title": "The Terror Plot",
+                "authors": ["Georgia Wagner"],
+                "isbn13": None,
+                "published_date": "2027-03-06",
+                "confidence": "targeted",
+            }
+        ]
+        with patch.object(discovery_engine, "_fetch_hardcover") as mock_fetch:
+            discovery_engine.verify_missing_volume_recovery_dates(candidates, "Georgia Wagner; Scott Cook")
+
+        mock_fetch.assert_not_called()
+        self.assertEqual(candidates[0]["published_date"], "2027-03-06")
+
+    def test_falls_back_to_apify_when_hardcover_has_no_match(self):
+        candidates = [
+            {
+                "title": "The Terror Plot",
+                "authors": ["Georgia Wagner"],
+                "isbn13": None,
+                "published_date": "2027-03-06",
+                "confidence": "missing_volume_recovery",
+            }
+        ]
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
+            discovery_engine, "apify_enabled", return_value=True
+        ), patch.object(
+            discovery_engine,
+            "fetch_apify_candidates",
+            return_value=[
+                {
+                    "title": "The Terror Plot",
+                    "authors": ["Georgia Wagner", "Scott Cook"],
+                    "isbn13": "9798242219999",
+                    "published_date": "2026-06-11",
+                }
+            ],
+        ) as mock_apify:
+            discovery_engine.verify_missing_volume_recovery_dates(candidates, "Georgia Wagner; Scott Cook")
+
+        mock_apify.assert_called_once()
+        self.assertEqual(candidates[0]["published_date"], "2026-06-11")
+
+    def test_no_change_when_neither_source_has_a_usable_date(self):
+        candidates = [
+            {
+                "title": "The Terror Plot",
+                "authors": ["Georgia Wagner"],
+                "isbn13": None,
+                "published_date": "2027-03-06",
+                "confidence": "missing_volume_recovery",
+            }
+        ]
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
+            discovery_engine, "apify_enabled", return_value=False
+        ):
+            discovery_engine.verify_missing_volume_recovery_dates(candidates, "Georgia Wagner; Scott Cook")
+
+        self.assertEqual(candidates[0]["published_date"], "2027-03-06")
+
+    def test_no_op_without_hardcover_key_or_apify(self):
+        candidates = [
+            {
+                "title": "The Terror Plot",
+                "authors": ["Georgia Wagner"],
+                "isbn13": None,
+                "published_date": "2027-03-06",
+                "confidence": "missing_volume_recovery",
+            }
+        ]
+        with patch.object(discovery_engine.os.environ, "get", return_value=""), patch.object(
+            discovery_engine, "apify_enabled", return_value=False
+        ), patch.object(discovery_engine, "_fetch_hardcover") as mock_fetch:
+            discovery_engine.verify_missing_volume_recovery_dates(candidates, "Georgia Wagner; Scott Cook")
+
+        mock_fetch.assert_not_called()
+        self.assertEqual(candidates[0]["published_date"], "2027-03-06")
+
+    def test_stops_after_the_lookup_cap_is_reached(self):
+        candidates = [
+            {
+                "title": f"Book {n}",
+                "authors": ["Georgia Wagner"],
+                "isbn13": None,
+                "published_date": "2027-01-01",
+                "confidence": "missing_volume_recovery",
+            }
+            for n in range(discovery_engine.MAX_MISSING_VOLUME_DATE_VERIFICATION_LOOKUPS + 3)
+        ]
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]) as mock_fetch, patch.object(
+            discovery_engine, "apify_enabled", return_value=False
+        ):
+            discovery_engine.verify_missing_volume_recovery_dates(candidates, "Georgia Wagner; Scott Cook")
+
+        self.assertEqual(mock_fetch.call_count, discovery_engine.MAX_MISSING_VOLUME_DATE_VERIFICATION_LOOKUPS)
+
+    def test_rejects_a_same_titled_hit_by_an_unrelated_author(self):
+        candidates = [
+            {
+                "title": "The Winter Siege",
+                "authors": ["Georgia Wagner"],
+                "isbn13": None,
+                "published_date": "2027-03-06",
+                "confidence": "missing_volume_recovery",
+            }
+        ]
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[
+                {
+                    "title": "The Winter Siege",
+                    "authors": ["Ariana Franklin", "Samantha Norman"],
+                    "isbn13": "9780593070611",
+                    "published_date": "2014-10-09",
+                }
+            ],
+        ), patch.object(discovery_engine, "apify_enabled", return_value=False):
+            discovery_engine.verify_missing_volume_recovery_dates(candidates, "Georgia Wagner; Scott Cook")
+
+        self.assertEqual(candidates[0]["published_date"], "2027-03-06")
+
+    def test_no_targets_short_circuits_before_any_lookup(self):
+        candidates = [
+            {"title": "Some Other Book", "authors": ["Georgia Wagner"], "published_date": "", "confidence": "targeted"}
+        ]
+        with patch.object(discovery_engine, "_fetch_hardcover") as mock_fetch:
+            discovery_engine.verify_missing_volume_recovery_dates(candidates, "Georgia Wagner")
+
+        mock_fetch.assert_not_called()
+
+
 class WebSearchProviderTest(unittest.TestCase):
     """Tests the Serper + Claude web-search discovery provider, with the
     HTTP call to Serper and the Anthropic client both mocked out so this
