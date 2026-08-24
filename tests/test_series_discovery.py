@@ -11,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 import crud
 import discovery_engine
+import provider_io
 from agents.series_agent import (
     SeriesIntelligenceAgent,
     _needs_review_to_skeleton_updates,
@@ -747,8 +748,8 @@ class PrecheckForNewVolumesTest(unittest.TestCase):
         with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
             discovery_engine, "_fetch_google_books", return_value=[]
         ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]), patch.object(
-            discovery_engine, "_fetch_serper_web_search"
-        ) as mock_serper, patch.object(discovery_engine, "_structure_web_results_with_llm") as mock_llm:
+            provider_io, "_fetch_serper_web_search"
+        ) as mock_serper, patch.object(provider_io, "_structure_web_results_with_llm") as mock_llm:
             discovery_engine.precheck_for_new_volumes("Jonathan Hunt", "Georgia Wagner", ceiling=18.0)
 
         mock_serper.assert_not_called()
@@ -838,6 +839,10 @@ class WebSearchDiagnosticModeTest(unittest.TestCase):
 
     def test_web_search_enabled_without_llm_returns_raw_snippets_only(self):
         raw_snippets = [{"title": "Some Hit", "description": "d", "url": "https://example.com/1"}]
+        # discover_candidates_for_series' diagnostic-probe short-circuit calls
+        # _fetch_serper_web_search directly (not through _fetch_web_search),
+        # from code that still lives in discovery_engine.py -- so this must be
+        # patched at that level, unlike the unit-level _fetch_web_search tests.
         with patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": ""}), patch.object(
             discovery_engine, "_fetch_serper_web_search", return_value=raw_snippets
         ) as mock_serper, patch.object(discovery_engine, "_fetch_all_providers_parallel") as mock_parallel:
@@ -875,7 +880,7 @@ class WebSearchDiagnosticModeTest(unittest.TestCase):
 
     def test_both_keys_present_runs_the_normal_pipeline_not_diagnostic_mode(self):
         with patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
-            discovery_engine, "_fetch_serper_web_search"
+            provider_io, "_fetch_serper_web_search"
         ) as mock_serper, patch.object(
             discovery_engine, "_fetch_hardcover", return_value=[]
         ), patch.object(
@@ -883,7 +888,7 @@ class WebSearchDiagnosticModeTest(unittest.TestCase):
         ), patch.object(
             discovery_engine, "_fetch_openlibrary", return_value=[]
         ), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=[]
+            provider_io, "_structure_web_results_with_llm", return_value=[]
         ):
             result = discovery_engine.discover_candidates_for_series("Some Series", "Some Author")
 
@@ -892,7 +897,7 @@ class WebSearchDiagnosticModeTest(unittest.TestCase):
 
     def test_neither_key_present_runs_the_normal_pipeline_not_diagnostic_mode(self):
         with patch.dict(os.environ, {"SERPER_API_KEY": "", "ANTHROPIC_API_KEY": ""}), patch.object(
-            discovery_engine, "_fetch_serper_web_search"
+            provider_io, "_fetch_serper_web_search"
         ) as mock_serper, patch.object(
             discovery_engine, "_fetch_hardcover", return_value=[]
         ), patch.object(
@@ -1497,7 +1502,7 @@ class HardcoverProviderTest(unittest.TestCase):
                 }
             }
         ]
-        with patch.object(discovery_engine, "os") as mock_os, patch.object(
+        with patch.object(provider_io, "os") as mock_os, patch.object(
             discovery_engine.httpx, "post", return_value=self._mock_response(hits)
         ):
             mock_os.environ.get.return_value = "test-key"
@@ -1532,7 +1537,7 @@ class HardcoverProviderTest(unittest.TestCase):
                 }
             }
         ]
-        with patch.object(discovery_engine, "os") as mock_os, patch.object(
+        with patch.object(provider_io, "os") as mock_os, patch.object(
             discovery_engine.httpx, "post", return_value=self._mock_response(hits)
         ):
             mock_os.environ.get.return_value = "test-key"
@@ -1560,7 +1565,7 @@ class HardcoverProviderTest(unittest.TestCase):
                 }
             }
         ]
-        with patch.object(discovery_engine, "os") as mock_os, patch.object(
+        with patch.object(provider_io, "os") as mock_os, patch.object(
             discovery_engine.httpx, "post", return_value=self._mock_response(hits)
         ):
             mock_os.environ.get.return_value = "test-key"
@@ -1584,7 +1589,7 @@ class HardcoverProviderTest(unittest.TestCase):
                 }
             }
         ]
-        with patch.object(discovery_engine, "os") as mock_os, patch.object(
+        with patch.object(provider_io, "os") as mock_os, patch.object(
             discovery_engine.httpx, "post", return_value=self._mock_response(hits)
         ):
             mock_os.environ.get.return_value = "test-key"
@@ -1604,7 +1609,7 @@ class HardcoverProviderTest(unittest.TestCase):
                 }
             }
         ]
-        with patch.object(discovery_engine, "os") as mock_os, patch.object(
+        with patch.object(provider_io, "os") as mock_os, patch.object(
             discovery_engine.httpx, "post", return_value=self._mock_response(hits)
         ):
             mock_os.environ.get.return_value = "test-key"
@@ -1636,7 +1641,7 @@ class BackfillMissingPublicationDatesTest(unittest.TestCase):
             {"title": "The Levee Ghosts", "authors": ["Georgia Wagner"], "isbn13": "9798242217126", "published_date": ""}
         ]
         with patch.object(
-            discovery_engine,
+            provider_io,
             "_fetch_hardcover",
             return_value=[
                 {"title": "The Levee Ghosts", "authors": ["Georgia Wagner", "Scott Cook"], "isbn13": "9798242217126", "published_date": "2026-01-01"}
@@ -1649,7 +1654,7 @@ class BackfillMissingPublicationDatesTest(unittest.TestCase):
     def test_backfills_via_title_lookup_when_isbn_is_unknown(self):
         candidates = [{"title": "Desert Protocol", "authors": ["Georgia Wagner"], "isbn13": None, "published_date": ""}]
         with patch.object(
-            discovery_engine,
+            provider_io,
             "_fetch_hardcover",
             return_value=[
                 {"title": "Desert Protocol", "authors": ["Georgia Wagner", "Scott Cook"], "isbn13": "9798242216228", "published_date": "2026-01-01"}
@@ -1668,7 +1673,7 @@ class BackfillMissingPublicationDatesTest(unittest.TestCase):
         # different author with the same generic title.
         candidates = [{"title": "The Winter Siege", "authors": ["Georgia Wagner"], "isbn13": None, "published_date": ""}]
         with patch.object(
-            discovery_engine,
+            provider_io,
             "_fetch_hardcover",
             return_value=[
                 {"title": "The Winter Siege", "authors": ["Ariana Franklin", "Samantha Norman"], "isbn13": "9780593070611", "published_date": "2014-10-09"}
@@ -1682,7 +1687,7 @@ class BackfillMissingPublicationDatesTest(unittest.TestCase):
         candidates = [
             {"title": "Desert Protocol", "authors": ["Georgia Wagner"], "isbn13": None, "published_date": "2026-01-01"}
         ]
-        with patch.object(discovery_engine, "_fetch_hardcover") as mock_fetch:
+        with patch.object(provider_io, "_fetch_hardcover") as mock_fetch:
             discovery_engine.backfill_missing_publication_dates(candidates, "Georgia Wagner; Scott Cook")
 
         mock_fetch.assert_not_called()
@@ -1693,7 +1698,7 @@ class BackfillMissingPublicationDatesTest(unittest.TestCase):
             {"title": f"Book {n}", "authors": ["Georgia Wagner"], "isbn13": None, "published_date": ""}
             for n in range(discovery_engine.MAX_PUBLICATION_DATE_BACKFILL_LOOKUPS + 3)
         ]
-        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]) as mock_fetch:
+        with patch.object(provider_io, "_fetch_hardcover", return_value=[]) as mock_fetch:
             discovery_engine.backfill_missing_publication_dates(candidates, "Georgia Wagner; Scott Cook")
 
         self.assertEqual(mock_fetch.call_count, discovery_engine.MAX_PUBLICATION_DATE_BACKFILL_LOOKUPS)
@@ -1701,7 +1706,7 @@ class BackfillMissingPublicationDatesTest(unittest.TestCase):
     def test_no_op_without_a_hardcover_api_key(self):
         candidates = [{"title": "Desert Protocol", "authors": ["Georgia Wagner"], "isbn13": None, "published_date": ""}]
         with patch.object(discovery_engine.os.environ, "get", return_value=""), patch.object(
-            discovery_engine, "_fetch_hardcover"
+            provider_io, "_fetch_hardcover"
         ) as mock_fetch:
             discovery_engine.backfill_missing_publication_dates(candidates, "Georgia Wagner; Scott Cook")
 
@@ -1738,7 +1743,7 @@ class VerifyMissingVolumeRecoveryDatesTest(unittest.TestCase):
             }
         ]
         with patch.object(
-            discovery_engine,
+            provider_io,
             "_fetch_hardcover",
             return_value=[
                 {
@@ -1764,7 +1769,7 @@ class VerifyMissingVolumeRecoveryDatesTest(unittest.TestCase):
                 "confidence": "targeted",
             }
         ]
-        with patch.object(discovery_engine, "_fetch_hardcover") as mock_fetch:
+        with patch.object(provider_io, "_fetch_hardcover") as mock_fetch:
             discovery_engine.verify_missing_volume_recovery_dates(candidates, "Georgia Wagner; Scott Cook")
 
         mock_fetch.assert_not_called()
@@ -1780,10 +1785,10 @@ class VerifyMissingVolumeRecoveryDatesTest(unittest.TestCase):
                 "confidence": "missing_volume_recovery",
             }
         ]
-        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
-            discovery_engine, "apify_enabled", return_value=True
+        with patch.object(provider_io, "_fetch_hardcover", return_value=[]), patch.object(
+            provider_io, "apify_enabled", return_value=True
         ), patch.object(
-            discovery_engine,
+            provider_io,
             "fetch_apify_candidates",
             return_value=[
                 {
@@ -1809,8 +1814,8 @@ class VerifyMissingVolumeRecoveryDatesTest(unittest.TestCase):
                 "confidence": "missing_volume_recovery",
             }
         ]
-        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
-            discovery_engine, "apify_enabled", return_value=False
+        with patch.object(provider_io, "_fetch_hardcover", return_value=[]), patch.object(
+            provider_io, "apify_enabled", return_value=False
         ):
             discovery_engine.verify_missing_volume_recovery_dates(candidates, "Georgia Wagner; Scott Cook")
 
@@ -1827,8 +1832,8 @@ class VerifyMissingVolumeRecoveryDatesTest(unittest.TestCase):
             }
         ]
         with patch.object(discovery_engine.os.environ, "get", return_value=""), patch.object(
-            discovery_engine, "apify_enabled", return_value=False
-        ), patch.object(discovery_engine, "_fetch_hardcover") as mock_fetch:
+            provider_io, "apify_enabled", return_value=False
+        ), patch.object(provider_io, "_fetch_hardcover") as mock_fetch:
             discovery_engine.verify_missing_volume_recovery_dates(candidates, "Georgia Wagner; Scott Cook")
 
         mock_fetch.assert_not_called()
@@ -1845,8 +1850,8 @@ class VerifyMissingVolumeRecoveryDatesTest(unittest.TestCase):
             }
             for n in range(discovery_engine.MAX_MISSING_VOLUME_DATE_VERIFICATION_LOOKUPS + 3)
         ]
-        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]) as mock_fetch, patch.object(
-            discovery_engine, "apify_enabled", return_value=False
+        with patch.object(provider_io, "_fetch_hardcover", return_value=[]) as mock_fetch, patch.object(
+            provider_io, "apify_enabled", return_value=False
         ):
             discovery_engine.verify_missing_volume_recovery_dates(candidates, "Georgia Wagner; Scott Cook")
 
@@ -1863,7 +1868,7 @@ class VerifyMissingVolumeRecoveryDatesTest(unittest.TestCase):
             }
         ]
         with patch.object(
-            discovery_engine,
+            provider_io,
             "_fetch_hardcover",
             return_value=[
                 {
@@ -1873,7 +1878,7 @@ class VerifyMissingVolumeRecoveryDatesTest(unittest.TestCase):
                     "published_date": "2014-10-09",
                 }
             ],
-        ), patch.object(discovery_engine, "apify_enabled", return_value=False):
+        ), patch.object(provider_io, "apify_enabled", return_value=False):
             discovery_engine.verify_missing_volume_recovery_dates(candidates, "Georgia Wagner; Scott Cook")
 
         self.assertEqual(candidates[0]["published_date"], "2027-03-06")
@@ -1882,7 +1887,7 @@ class VerifyMissingVolumeRecoveryDatesTest(unittest.TestCase):
         candidates = [
             {"title": "Some Other Book", "authors": ["Georgia Wagner"], "published_date": "", "confidence": "targeted"}
         ]
-        with patch.object(discovery_engine, "_fetch_hardcover") as mock_fetch:
+        with patch.object(provider_io, "_fetch_hardcover") as mock_fetch:
             discovery_engine.verify_missing_volume_recovery_dates(candidates, "Georgia Wagner")
 
         mock_fetch.assert_not_called()
@@ -1918,7 +1923,7 @@ class UrlKeyedResolutionTest(unittest.TestCase):
         # resolution against the ORIGINAL raw_results list, index 0 would
         # instead wrongly resolve to Book A.
         with patch.object(
-            discovery_engine,
+            provider_io,
             "_structure_web_results_with_llm",
             return_value=[{"result_index": 0, "title": "Book B", "series_name": "Some Series", "book_number": 2}],
         ):
@@ -1938,7 +1943,7 @@ class UrlKeyedResolutionTest(unittest.TestCase):
     def test_a_result_index_out_of_range_for_the_uncached_subset_is_dropped_not_misattached(self):
         raw_results = [{"title": "Book A", "description": "", "url": "https://example.com/a"}]
         with patch.object(
-            discovery_engine,
+            provider_io,
             "_structure_web_results_with_llm",
             return_value=[{"result_index": 5, "title": "Nonexistent", "series_name": "Some Series"}],
         ):
@@ -2072,8 +2077,8 @@ class WebSearchProviderTest(unittest.TestCase):
                 "isbn13": None,
             }
         ]
-        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        with patch.object(provider_io, "_fetch_serper_web_search", return_value=raw_results), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=structured
         ):
             results = discovery_engine._fetch_web_search(["query"], "The First Peacemaker", "Some Author")
 
@@ -2105,8 +2110,8 @@ class WebSearchProviderTest(unittest.TestCase):
                 "isbn13": None,
             }
         ]
-        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        with patch.object(provider_io, "_fetch_serper_web_search", return_value=raw_results), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=structured
         ):
             results = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author")
 
@@ -2131,8 +2136,8 @@ class WebSearchProviderTest(unittest.TestCase):
                 "isbn13": None,
             }
         ]
-        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        with patch.object(provider_io, "_fetch_serper_web_search", return_value=raw_results), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=structured
         ):
             results = discovery_engine._fetch_web_search(["query"], "Series", "Some Author")
 
@@ -2181,8 +2186,8 @@ class WebSearchProviderTest(unittest.TestCase):
                 return refinement_structured
             return first_pass_structured
 
-        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", side_effect=fake_structure
+        with patch.object(provider_io, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
+            provider_io, "_structure_web_results_with_llm", side_effect=fake_structure
         ):
             results = discovery_engine._fetch_web_search(["query"], "The First Peacemaker", "Some Author")
 
@@ -2217,8 +2222,8 @@ class WebSearchProviderTest(unittest.TestCase):
                 return []
             return raw_results
 
-        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=first_pass_structured
+        with patch.object(provider_io, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=first_pass_structured
         ):
             discovery_engine._fetch_web_search(["query"], "The World Book", "Jason Cheek")
 
@@ -2248,8 +2253,8 @@ class WebSearchProviderTest(unittest.TestCase):
             }
         ]
 
-        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        with patch.object(provider_io, "_fetch_serper_web_search", return_value=raw_results), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=structured
         ):
             results = discovery_engine._fetch_web_search(["query"], "The First Peacemaker", "Some Author")
 
@@ -2300,8 +2305,8 @@ class WebSearchProviderTest(unittest.TestCase):
                 return refinement_structured
             return first_pass_structured
 
-        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper) as mock_serper, patch.object(
-            discovery_engine, "_structure_web_results_with_llm", side_effect=fake_structure
+        with patch.object(provider_io, "_fetch_serper_web_search", side_effect=fake_serper) as mock_serper, patch.object(
+            provider_io, "_structure_web_results_with_llm", side_effect=fake_structure
         ) as mock_llm:
             first = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
             second = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
@@ -2368,8 +2373,8 @@ class WebSearchProviderTest(unittest.TestCase):
                         )
             return structured
 
-        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper) as mock_serper, patch.object(
-            discovery_engine, "_structure_web_results_with_llm", side_effect=fake_structure
+        with patch.object(provider_io, "_fetch_serper_web_search", side_effect=fake_serper) as mock_serper, patch.object(
+            provider_io, "_structure_web_results_with_llm", side_effect=fake_structure
         ) as mock_llm:
             results = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author")
 
@@ -2423,8 +2428,8 @@ class WebSearchProviderTest(unittest.TestCase):
                 }
             ]
 
-        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", side_effect=fake_structure
+        with patch.object(provider_io, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
+            provider_io, "_structure_web_results_with_llm", side_effect=fake_structure
         ):
             results = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author")
 
@@ -2464,8 +2469,8 @@ class WebSearchProviderTest(unittest.TestCase):
                 raise RuntimeError("boom")
             return raw_results
 
-        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        with patch.object(provider_io, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=structured
         ):
             results = discovery_engine._fetch_web_search(["query"], "Series", "Some Author")
 
@@ -2476,14 +2481,14 @@ class WebSearchProviderTest(unittest.TestCase):
     def test_fetch_web_search_skips_llm_items_with_out_of_range_index(self):
         raw_results = [{"title": "Some Result", "description": "snippet", "url": "https://example.com/1"}]
         structured = [{"result_index": 5, "title": "Bad Index", "book_number": None, "author_names": [], "is_upcoming": False}]
-        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        with patch.object(provider_io, "_fetch_serper_web_search", return_value=raw_results), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=structured
         ):
             results = discovery_engine._fetch_web_search(["query"], "Series", "Author")
         self.assertEqual(results, [])
 
     def test_fetch_web_search_returns_empty_when_web_search_has_no_results(self):
-        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=[]):
+        with patch.object(provider_io, "_fetch_serper_web_search", return_value=[]):
             results = discovery_engine._fetch_web_search(["query"], "Series", "Author")
         self.assertEqual(results, [])
 
@@ -2502,8 +2507,8 @@ class WebSearchProviderTest(unittest.TestCase):
                 return [{"title": "Series Book 9", "description": "d", "url": "https://example.com/9"}]
             return []
 
-        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=[]
+        with patch.object(provider_io, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=[]
         ) as mock_structure:
             discovery_engine._fetch_web_search(["generic", "book 9"], "Series", "Author")
 
@@ -2533,8 +2538,8 @@ class WebSearchProviderTest(unittest.TestCase):
             return [{"title": f"Result for {query}", "description": "d", "url": f"https://example.com/{query}"}]
 
         queries = [f"query {n}" for n in range(12)]
-        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=[]
+        with patch.object(provider_io, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=[]
         ):
             discovery_engine._fetch_web_search(queries, "Series", "Author")
 
@@ -2547,8 +2552,8 @@ class WebSearchProviderTest(unittest.TestCase):
                 raise RuntimeError("rate limited")
             return [{"title": "Found It", "description": "d", "url": "https://example.com/ok"}]
 
-        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=[]
+        with patch.object(provider_io, "_fetch_serper_web_search", side_effect=fake_serper), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=[]
         ) as mock_structure:
             discovery_engine._fetch_web_search(["bad", "good"], "Series", "Author")
 
@@ -2562,13 +2567,13 @@ class WebSearchProviderTest(unittest.TestCase):
         # test_fetch_web_search_falls_back_to_apify_when_every_serper_query_fails).
         # With no apify_budget passed here, the fallback attempt itself is
         # a no-op, so this now returns [] rather than raising.
-        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=RuntimeError("boom")):
+        with patch.object(provider_io, "_fetch_serper_web_search", side_effect=RuntimeError("boom")):
             results = discovery_engine._fetch_web_search(["bad1", "bad2"], "Series", "Author")
         self.assertEqual(results, [])
 
     def test_fetch_web_search_records_diagnostic_when_every_query_fails(self):
         diagnostics: list[dict] = []
-        with patch.object(discovery_engine, "_fetch_serper_web_search", side_effect=RuntimeError("boom")):
+        with patch.object(provider_io, "_fetch_serper_web_search", side_effect=RuntimeError("boom")):
             discovery_engine._fetch_web_search(
                 ["bad1", "bad2"], "Series", "Author", diagnostics=diagnostics, pass_label="targeted"
             )
@@ -2579,7 +2584,7 @@ class WebSearchProviderTest(unittest.TestCase):
 
     def test_fetch_web_search_records_diagnostic_when_no_results_found(self):
         diagnostics: list[dict] = []
-        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=[]):
+        with patch.object(provider_io, "_fetch_serper_web_search", return_value=[]):
             discovery_engine._fetch_web_search(["query"], "Series", "Author", diagnostics=diagnostics)
         self.assertEqual(len(diagnostics), 1)
         self.assertEqual(diagnostics[0]["type"], "web_search_provider_unhealthy")
@@ -2741,7 +2746,7 @@ class ApifyDiscoverySubFlowTest(unittest.TestCase):
         ]
         budget = discovery_engine.ApifyCallBudget()
         with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
-            discovery_engine, "fetch_apify_candidates", return_value=[]
+            provider_io, "fetch_apify_candidates", return_value=[]
         ) as mock_fetch:
             discovery_engine._fetch_apify_discovery("query", results, budget)
 
@@ -2751,7 +2756,7 @@ class ApifyDiscoverySubFlowTest(unittest.TestCase):
         results = [self._structured_result("https://example.com/not-amazon")]
         budget = discovery_engine.ApifyCallBudget()
         with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
-            discovery_engine, "fetch_apify_candidates", return_value=[]
+            provider_io, "fetch_apify_candidates", return_value=[]
         ) as mock_fetch:
             discovery_engine._fetch_apify_discovery("query", results, budget)
 
@@ -2760,7 +2765,7 @@ class ApifyDiscoverySubFlowTest(unittest.TestCase):
     def test_exception_from_fetch_apify_candidates_is_caught(self):
         budget = discovery_engine.ApifyCallBudget()
         with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
-            discovery_engine, "fetch_apify_candidates", side_effect=RuntimeError("boom")
+            provider_io, "fetch_apify_candidates", side_effect=RuntimeError("boom")
         ):
             result = discovery_engine._fetch_apify_discovery(
                 "query", [self._structured_result("https://amazon.com/dp/B0AAA1111")], budget
@@ -2794,9 +2799,9 @@ class ApifyDiscoverySubFlowTest(unittest.TestCase):
             "cover_image": "https://example.com/cover.jpg",
         }
         with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
-            discovery_engine, "_fetch_serper_web_search", return_value=raw_results
-        ), patch.object(discovery_engine, "_structure_web_results_with_llm", return_value=structured), patch.object(
-            discovery_engine, "fetch_apify_candidates", return_value=[apify_candidate]
+            provider_io, "_fetch_serper_web_search", return_value=raw_results
+        ), patch.object(provider_io, "_structure_web_results_with_llm", return_value=structured), patch.object(
+            provider_io, "fetch_apify_candidates", return_value=[apify_candidate]
         ):
             results = discovery_engine._fetch_web_search(
                 ["query"], "The First Peacemaker", "Some Author", apify_budget=discovery_engine.ApifyCallBudget()
@@ -2820,9 +2825,9 @@ class ApifyDiscoverySubFlowTest(unittest.TestCase):
             }
         ]
         with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
-            discovery_engine, "_fetch_serper_web_search", return_value=raw_results
-        ), patch.object(discovery_engine, "_structure_web_results_with_llm", return_value=structured), patch.object(
-            discovery_engine, "fetch_apify_candidates"
+            provider_io, "_fetch_serper_web_search", return_value=raw_results
+        ), patch.object(provider_io, "_structure_web_results_with_llm", return_value=structured), patch.object(
+            provider_io, "fetch_apify_candidates"
         ) as mock_apify:
             results = discovery_engine._fetch_web_search(["query"], "The First Peacemaker", "Some Author")
 
@@ -2849,8 +2854,8 @@ class ApifyDiscoverySubFlowTest(unittest.TestCase):
             "cover_image": None,
         }
         with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
-            discovery_engine, "_fetch_serper_web_search", side_effect=RuntimeError("403 Unauthorized")
-        ), patch.object(discovery_engine, "fetch_apify_candidates", return_value=[apify_candidate]) as mock_fetch:
+            provider_io, "_fetch_serper_web_search", side_effect=RuntimeError("403 Unauthorized")
+        ), patch.object(provider_io, "fetch_apify_candidates", return_value=[apify_candidate]) as mock_fetch:
             results = discovery_engine._fetch_web_search(
                 ["bad1", "bad2"], "The First Peacemaker", "Some Author", apify_budget=discovery_engine.ApifyCallBudget()
             )
@@ -2874,8 +2879,8 @@ class ApifyDiscoverySubFlowTest(unittest.TestCase):
             "cover_image": None,
         }
         with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
-            discovery_engine, "_fetch_serper_web_search", return_value=[]
-        ), patch.object(discovery_engine, "fetch_apify_candidates", return_value=[apify_candidate]):
+            provider_io, "_fetch_serper_web_search", return_value=[]
+        ), patch.object(provider_io, "fetch_apify_candidates", return_value=[apify_candidate]):
             results = discovery_engine._fetch_web_search(
                 ["query"], "The First Peacemaker", "Some Author", apify_budget=discovery_engine.ApifyCallBudget()
             )
@@ -2890,9 +2895,9 @@ class ApifyDiscoverySubFlowTest(unittest.TestCase):
         # _fetch_web_search's own docstring/comments.
         raw_results = [{"title": "Unrelated", "description": "snippet", "url": "https://example.com/1"}]
         with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
-            discovery_engine, "_fetch_serper_web_search", return_value=raw_results
-        ), patch.object(discovery_engine, "_structure_web_results_with_llm", return_value=[]), patch.object(
-            discovery_engine, "fetch_apify_candidates"
+            provider_io, "_fetch_serper_web_search", return_value=raw_results
+        ), patch.object(provider_io, "_structure_web_results_with_llm", return_value=[]), patch.object(
+            provider_io, "fetch_apify_candidates"
         ) as mock_fetch:
             results = discovery_engine._fetch_web_search(
                 ["query"], "Series", "Author", apify_budget=discovery_engine.ApifyCallBudget()
@@ -2924,8 +2929,8 @@ class ApifyDiscoverySubFlowTest(unittest.TestCase):
         ), patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
             discovery_engine, "_fetch_google_books", return_value=[]
         ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]), patch.object(
-            discovery_engine, "_fetch_serper_web_search", side_effect=RuntimeError("403 Unauthorized")
-        ), patch.object(discovery_engine, "fetch_apify_candidates", return_value=[apify_candidate]):
+            provider_io, "_fetch_serper_web_search", side_effect=RuntimeError("403 Unauthorized")
+        ), patch.object(provider_io, "fetch_apify_candidates", return_value=[apify_candidate]):
             result = discovery_engine.discover_candidates_for_series("The First Peacemaker", "Some Author")
 
         web_failures = [f for f in result["provider_failures"] if f["provider"] == "web_search"]
@@ -3021,8 +3026,8 @@ class DiscoveryCacheTest(unittest.TestCase):
             }
         ]
 
-        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        with patch.object(provider_io, "_fetch_serper_web_search", return_value=raw_results), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=structured
         ) as mock_llm:
             first = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
             second = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
@@ -3042,8 +3047,8 @@ class DiscoveryCacheTest(unittest.TestCase):
         cache = DiscoveryCache()
         raw_results = [{"title": "Junk listing", "description": "snippet", "url": "https://example.com/junk"}]
 
-        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=[]
+        with patch.object(provider_io, "_fetch_serper_web_search", return_value=raw_results), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=[]
         ) as mock_llm:
             discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
             discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
@@ -3087,8 +3092,8 @@ class DiscoveryCacheTest(unittest.TestCase):
             }
         ]
 
-        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=fresh_structured
+        with patch.object(provider_io, "_fetch_serper_web_search", return_value=raw_results), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=fresh_structured
         ) as mock_llm:
             results = discovery_engine._fetch_web_search(
                 ["query"], "Some Series", "Some Author", cache=cache, pass_label="missing_volume"
@@ -3113,8 +3118,8 @@ class DiscoveryCacheTest(unittest.TestCase):
         cache.set_llm_verdict("series", "some", "https://example.com/rejected", None)
         raw_results = [{"title": "Rejected listing", "description": "snippet", "url": "https://example.com/rejected"}]
 
-        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=[]
+        with patch.object(provider_io, "_fetch_serper_web_search", return_value=raw_results), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=[]
         ) as mock_llm:
             results = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
 
@@ -3139,8 +3144,8 @@ class DiscoveryCacheTest(unittest.TestCase):
             }
         ]
 
-        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        with patch.object(provider_io, "_fetch_serper_web_search", return_value=raw_results), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=structured
         ) as mock_llm:
             discovery_engine._fetch_web_search(["query"], "Series A", "Some Author", cache=cache)
             discovery_engine._fetch_web_search(["query"], "Series B", "Some Author", cache=cache)
@@ -3181,8 +3186,8 @@ class DiscoveryCacheTest(unittest.TestCase):
             }
         ]
 
-        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
-            discovery_engine, "_structure_web_results_with_llm", return_value=fresh_structured
+        with patch.object(provider_io, "_fetch_serper_web_search", return_value=raw_results), patch.object(
+            provider_io, "_structure_web_results_with_llm", return_value=fresh_structured
         ) as mock_llm:
             results = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author", cache=cache)
 

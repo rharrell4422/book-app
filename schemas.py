@@ -296,20 +296,6 @@ class NormalizeTitlesRequest(BaseModel):
     exclude_upcoming: bool = True
 
 
-# ------------------------------------------------------------
-# Import confirmation request Schemas
-# ------------------------------------------------------------
-
-class SeriesImportConfirmationDecision(BaseModel):
-    book_id: int
-    decision: Literal["yes", "no", "dont_know"]
-    series_name: str | None = None
-    note: str | None = None
-
-
-class SeriesImportConfirmationResolveRequest(BaseModel):
-    decisions: list[SeriesImportConfirmationDecision]
-
 
 # ------------------------------------------------------------
 # "More by this author" series overview request schema

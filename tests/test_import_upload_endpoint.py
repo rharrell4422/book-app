@@ -3,10 +3,11 @@ routers/imports.py: POST /import/preview, POST /import/upload, and
 POST /import/reset_profile.
 
 Uses a private file-backed SQLite database (not the real books.db) for
-both the FastAPI `get_db` dependency and `importer.importer.SessionLocal`
--- `run_import`/`preview_import` open their own session internally, so a
-plain `:memory:` engine wouldn't be visible across the two separately
-opened sessions the way a real deployment's single shared engine is.
+the FastAPI `get_db` dependency plus `importer.pipeline.SessionLocal` and
+`importer.preview.SessionLocal` -- `run_import`/`preview_import` open
+their own session internally, so a plain `:memory:` engine wouldn't be
+visible across the two separately opened sessions the way a real
+deployment's single shared engine is.
 """
 
 import os
@@ -50,21 +51,26 @@ class ImportUploadEndpointTest(unittest.TestCase):
 
         main.app.dependency_overrides[get_db] = override_get_db
 
-        self.session_local_patcher = self._patch_importer_session_local()
-        self.session_local_patcher.start()
+        self.session_local_patchers = self._patch_importer_session_locals()
+        for patcher in self.session_local_patchers:
+            patcher.start()
 
         self.client = TestClient(main.app)
         self.token = create_owner_token()
         self.owner_headers = {"Authorization": f"Bearer {self.token}", "X-Profile-Id": "daughter"}
 
-    def _patch_importer_session_local(self):
+    def _patch_importer_session_locals(self):
         from unittest.mock import patch
 
-        return patch("importer.importer.SessionLocal", self.SessionLocal)
+        return [
+            patch("importer.pipeline.SessionLocal", self.SessionLocal),
+            patch("importer.preview.SessionLocal", self.SessionLocal),
+        ]
 
     def tearDown(self):
         main.app.dependency_overrides.pop(get_db, None)
-        self.session_local_patcher.stop()
+        for patcher in self.session_local_patchers:
+            patcher.stop()
         self.engine.dispose()
         os.remove(self.db_path)
 

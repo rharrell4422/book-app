@@ -10,11 +10,12 @@ hardening added to importer/importer.py:
   4. `preview_import` never writes to the database.
   5. `reset_profile_data` only clears the requested profile's rows.
 
-These tests patch `importer.importer.SessionLocal` to point at a private
-in-memory database instead of the real `books.db` -- `run_import` and
-`preview_import` open their own sessions internally rather than accepting
-an injected one, so patching the module-level session factory is the only
-way to redirect them safely in a test.
+These tests patch `importer.pipeline.SessionLocal`/`importer.preview.
+SessionLocal` to point at a private in-memory database instead of the real
+`books.db` -- `run_import` and `preview_import` open their own sessions
+internally rather than accepting an injected one, so patching the
+module-level session factory is the only way to redirect them safely in a
+test.
 """
 
 import csv
@@ -85,7 +86,7 @@ class RunImportPartialFailureTest(unittest.TestCase):
         self.engine.dispose()
 
     def test_bad_row_is_skipped_without_aborting_later_rows(self):
-        with patch("importer.importer.SessionLocal", self.SessionLocal):
+        with patch("importer.pipeline.SessionLocal", self.SessionLocal):
             result = run_import(self.csv_path, profile_id="daughter")
 
         self.assertEqual(result["imported_count"], 2)
@@ -106,7 +107,7 @@ class RunImportPartialFailureTest(unittest.TestCase):
         # create_or_update_book commits internally -- a failure there
         # leaves the session in a state that needs an explicit rollback
         # before it can be reused for the next row.
-        with patch("importer.importer.SessionLocal", self.SessionLocal):
+        with patch("importer.pipeline.SessionLocal", self.SessionLocal):
             result = run_import(self.csv_path, profile_id="daughter")
         self.assertEqual(result["imported_count"] + result["failed_count"], 3)
 
@@ -190,8 +191,8 @@ class RunImportScopedIntelligenceTest(unittest.TestCase):
         self.engine.dispose()
 
     def test_only_the_importing_profiles_series_are_recalculated(self):
-        with patch("importer.importer.SessionLocal", self.SessionLocal), patch(
-            "importer.importer.recalculate_intelligence"
+        with patch("importer.pipeline.SessionLocal", self.SessionLocal), patch(
+            "importer.pipeline.recalculate_intelligence"
         ) as mock_recalc:
             run_import(self.csv_path, profile_id="daughter")
 
@@ -239,11 +240,10 @@ class ExplicitSeriesNameAutoLinksOnFirstImportTest(unittest.TestCase):
         self.engine.dispose()
 
     def test_series_tagged_rows_auto_link_without_confirmation(self):
-        with patch("importer.importer.SessionLocal", self.SessionLocal):
+        with patch("importer.pipeline.SessionLocal", self.SessionLocal):
             result = run_import(self.csv_path, profile_id="mackenzie")
 
         self.assertEqual(result["imported_count"], 3)
-        self.assertEqual(result["confirmation_required_count"], 0)
 
         db = self.SessionLocal()
         try:
@@ -261,18 +261,16 @@ class ExplicitSeriesNameAutoLinksOnFirstImportTest(unittest.TestCase):
         finally:
             db.close()
 
-    def test_decision_helper_never_asks_for_confirmation_when_series_name_given(self):
+    def test_decision_helper_always_links_when_a_meaningful_series_name_is_given(self):
         db = self.SessionLocal()
         try:
             decision = _series_link_decision(
                 db, {"title": "Scavengers", "series_name": "Quest Academy"}, "mackenzie"
             )
             self.assertTrue(decision["should_link"])
-            self.assertFalse(decision["needs_confirmation"])
 
             standalone_decision = _series_link_decision(db, {"title": "Lone Book", "series_name": ""}, "mackenzie")
             self.assertFalse(standalone_decision["should_link"])
-            self.assertFalse(standalone_decision["needs_confirmation"])
         finally:
             db.close()
 
@@ -321,7 +319,7 @@ class PlaceholderSeriesNameIsRejectedTest(unittest.TestCase):
         self.engine.dispose()
 
     def test_placeholder_tagged_rows_stay_standalone_not_a_bogus_series(self):
-        with patch("importer.importer.SessionLocal", self.SessionLocal):
+        with patch("importer.pipeline.SessionLocal", self.SessionLocal):
             result = run_import(self.csv_path, profile_id="mackenzie")
 
         self.assertEqual(result["imported_count"], 4)
@@ -375,8 +373,8 @@ class RunImportPerSeriesIntelligenceIsolationTest(unittest.TestCase):
                 raise RuntimeError("simulated bad data for this one series")
             return real_recalculate_intelligence(db, series_id, scan_result=scan_result)
 
-        with patch("importer.importer.SessionLocal", self.SessionLocal), patch(
-            "importer.importer.recalculate_intelligence", side_effect=flaky_recalculate_intelligence
+        with patch("importer.pipeline.SessionLocal", self.SessionLocal), patch(
+            "importer.pipeline.recalculate_intelligence", side_effect=flaky_recalculate_intelligence
         ):
             run_import(self.csv_path, profile_id="mackenzie")
 
@@ -440,7 +438,7 @@ class PreviewImportTest(unittest.TestCase):
         self.engine.dispose()
 
     def test_preview_reports_counts_without_writing_anything(self):
-        with patch("importer.importer.SessionLocal", self.SessionLocal):
+        with patch("importer.preview.SessionLocal", self.SessionLocal):
             result = preview_import(self.csv_path, profile_id="daughter")
 
         self.assertEqual(result["row_count"], 4)

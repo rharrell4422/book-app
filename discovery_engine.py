@@ -22,6 +22,26 @@ shared globally across all callers without a key, so it may return 429s
 even under light use. Set the GOOGLE_BOOKS_API_KEY environment variable
 (free from Google Cloud Console) for reliable results -- OpenLibrary has
 no such restriction and needs no key.
+
+RT-1a: this module used to hold everything below directly (~4500 lines).
+It's now split across four modules by concern, each importable on its own:
+
+  - discovery_text.py: shared, dependency-free text/identity primitives
+    (normalization, title parsing, number/date inference).
+  - provider_io.py: raw provider fetches (Google Books/OpenLibrary/
+    Hardcover/Serper) plus the Anthropic LLM calls that structure/reconcile
+    their results.
+  - deterministic_fusion.py: pure, no-I/O candidate fusion/scoring/edition-
+    collapse and the deterministic contamination/fallback gating.
+  - diagnostics.py: pure diagnostic-only external-vs-owned computations and
+    drop-reason explanations.
+
+This module now holds only top-level discovery orchestration
+(discover_candidates_for_series/discover_candidates_for_author and their
+direct helpers) and re-exports everything from the four modules above, so
+every existing caller (agents/series_agent.py, provider_protocol.py,
+tests, etc.) that does `from discovery_engine import X` or
+`discovery_engine.X` keeps working unchanged.
 """
 from __future__ import annotations
 
@@ -36,19 +56,10 @@ import httpx
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
-# Reused, not reimplemented -- these are the same edition-title-normalization
-# and edition-priority-ranking heuristics services/series_check_engine.py
-# already uses for its DB-write-path edition collapse (see
-# _finalize_candidates), so a "which edition wins" decision means the same
-# thing on both the discovery side and the persistence side.
 from services.identity import _edition_priority, _normalize_title_for_identity, _normalize_series_name_for_identity
 from services.discovery_telemetry import DiscoveryTelemetry, maybe_pass_scope
 from services.discovery_cache import DiscoveryCache, CACHE_MISS
 from apify_provider import ApifyCallBudget, apify_enabled, fetch_apify_candidates
-# PP-2/PP-3: _fetch_all_providers_parallel calls providers through these
-# adapters (never-raising, uniform ProviderFetchResult contract) instead of
-# calling _fetch_google_books/_fetch_openlibrary/_fetch_hardcover/
-# _fetch_web_search directly -- see provider_protocol.py's module docstring.
 from provider_protocol import (
     GoogleBooksProvider,
     OpenLibraryProvider,
@@ -56,2551 +67,141 @@ from provider_protocol import (
     WebDiscoveryProvider,
 )
 
+from discovery_text import (
+    NON_NEW_RELEASE_TITLE_MARKERS,
+    NON_NEW_RELEASE_TITLE_PATTERNS,
+    PLACEHOLDER_TITLE_MARKERS,
+    _SERIES_INDEX_SUFFIX_PATTERN,
+    _TITLE_VARIANT_FILLER_TOKENS,
+    _SOLO_GENRE_TAGLINE_TOKENS,
+    _TITLE_SERIES_MARKER_PATTERN,
+    _DASH_SERIES_MARKER_PATTERN,
+    _PLACEHOLDER_DATE_PATTERN,
+    _LEADING_ARTICLE_PATTERN,
+    _WORD_NUMBERS,
+    _BUNDLE_TITLE_PATTERN,
+    looks_like_placeholder_title,
+    normalize_series_branding_name,
+    _token_set,
+    _token_overlap_ratio,
+    _series_names_compatible,
+    _title_is_series_variant,
+    looks_like_series_index_entry,
+    infer_series_hint_from_title_text,
+    clean_display_title,
+    looks_like_placeholder_date,
+    _log,
+    normalize_text,
+    _strip_leading_article,
+    _title_core_segment,
+    core_title_key,
+    bare_title_key,
+    _normalize_number_context,
+    _parse_positive_number,
+    infer_number_from_title,
+    looks_like_non_new_release,
+    is_english_or_unknown,
+    parse_flexible_date,
+    classify_upcoming,
+    split_author_names,
+    primary_author_name,
+    _author_matches,
+    _to_int_or_none,
+    _integral_or_none,
+)
+from provider_io import (
+    GOOGLE_BOOKS_ENDPOINT,
+    OPENLIBRARY_ENDPOINT,
+    HARDCOVER_ENDPOINT,
+    SERPER_SEARCH_ENDPOINT,
+    REQUEST_TIMEOUT_SECONDS,
+    WEB_SEARCH_TIMEOUT_SECONDS,
+    ANTHROPIC_MODEL,
+    WEB_SEARCH_MAX_RESULTS,
+    WEB_SEARCH_LOOKAHEAD_BOOKS,
+    WEB_SEARCH_DATE_REFINEMENT_MAX,
+    WEB_SEARCH_MAX_PARALLEL_WORKERS,
+    _HARDCOVER_SEARCH_QUERY,
+    REQUEST_HEADERS,
+    MAX_PUBLICATION_DATE_BACKFILL_LOOKUPS,
+    MAX_MISSING_VOLUME_DATE_VERIFICATION_LOOKUPS,
+    _WEB_SEARCH_STRUCTURING_PROMPT,
+    _SERIES_OVERVIEW_PROMPT,
+    _AMAZON_URL_DOMAINS,
+    RECONCILIATION_SERIES_COMPLETENESS_THRESHOLD,
+    RECONCILIATION_METADATA_COMPLETENESS_THRESHOLD,
+    RECONCILIATION_DISAGREEMENT_RATIO_THRESHOLD,
+    RECONCILIATION_MAX_CANDIDATES,
+    _LLM_RECONCILIATION_PROMPT,
+    _fetch_google_books,
+    _fetch_openlibrary,
+    _fetch_hardcover,
+    backfill_missing_publication_dates,
+    verify_missing_volume_recovery_dates,
+    _web_search_enabled,
+    _llm_structuring_enabled,
+    _fetch_serper_web_search,
+    _structure_web_results_with_llm,
+    generate_series_overview,
+    _refine_undated_web_search_results_batch,
+    _structure_with_verdict_cache,
+    _fetch_apify_discovery,
+    _promote_web_search_health_diagnostics,
+    _fetch_web_search,
+    _fetch_all_providers_parallel,
+    _candidate_has_provenance_disagreement,
+    _needs_llm_reconciliation,
+    _format_candidate_for_reconciliation,
+    _coerce_reconciled_float,
+    _coerce_reconciled_str,
+    _apply_reconciliation_entry,
+    _reconcile_candidates_with_llm,
+)
+from deterministic_fusion import (
+    _METADATA_COMPLETENESS_FIELDS,
+    _PROVIDER_CONFIDENCE_WEIGHT,
+    _EDITION_TITLE_MARKERS,
+    FALLBACK_SERIES_COMPLETENESS_THRESHOLD,
+    FALLBACK_CONFIDENCE_THRESHOLD,
+    _PROVIDER_SORT_RANK,
+    _TRANSIENT_CANDIDATE_FIELDS,
+    UnifiedCandidate,
+    _filter_and_merge,
+    _first_present_field,
+    _fuse_and_score_candidates,
+    _unified_candidate_to_raw_dict,
+    _resolve_candidate_number,
+    _reconciled_completeness_score,
+    _infer_edition_type_from_title,
+    _resolved_edition_type,
+    _same_underlying_book,
+    _edition_strength,
+    _strictly_better_metadata,
+    _collapse_edition_group,
+    _finalize_candidates,
+    _series_completeness_and_confidence,
+    _should_trigger_author_fallback,
+    _is_cross_series_contamination,
+    _filter_cross_series_contamination,
+    _candidate_sort_key,
+    finalize_discovery_output,
+)
+from diagnostics import (
+    MAX_DROP_EXPLANATIONS,
+    _DROP_EXPLANATIONS,
+    _DEFAULT_DROP_EXPLANATION,
+    _record_drop_diagnostic,
+    compute_external_missing_vs_owned,
+    compute_inferred_number,
+    compute_owned_number_coverage,
+    compute_new_volume_flags,
+    compute_external_gap_ratio,
+    compute_drop_explanations,
+)
+
 # Loaded here (rather than relying on the entry point having done it first)
 # so this module reads the right API key regardless of import order.
 load_dotenv()
-
-GOOGLE_BOOKS_ENDPOINT = "https://www.googleapis.com/books/v1/volumes"
-OPENLIBRARY_ENDPOINT = "https://openlibrary.org/search.json"
-HARDCOVER_ENDPOINT = "https://api.hardcover.app/v1/graphql"
-# Brave Search is no longer a viable provider: its only sub-enterprise tier
-# caps out at 1000 queries/month, which this app hit during personal-use
-# testing alone. Serper is its replacement -- see
-# discovery_agentic_migration_decision_log.md. Serper's coverage of the
-# indie/LitRPG/web-serial sources Brave used to surface is unverified and
-# may differ; see _web_search_enabled/_llm_structuring_enabled below and
-# discover_candidates_for_series' diagnostic-only mode for how to check
-# that coverage by hand before relying on it.
-SERPER_SEARCH_ENDPOINT = "https://google.serper.dev/search"
-REQUEST_TIMEOUT_SECONDS = 12.0
-WEB_SEARCH_TIMEOUT_SECONDS = 20.0
-
-# Structured APIs (Google Books/OpenLibrary/Hardcover) index catalog metadata,
-# which lags behind for indie/self-published titles and pure announcements
-# that only exist as blog posts, retailer pre-order pages, or author social
-# posts. This provider fills that gap with a live web search whose raw,
-# unstructured results are then normalized into the same candidate shape by
-# a small LLM call, rather than trying to hand-write regexes/heuristics for
-# every possible way a book announcement can be phrased across the web.
-ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
-WEB_SEARCH_MAX_RESULTS = 8
-
-# A generic "<series> <author>" search's relevance ranking skews heavily
-# towards whichever entry has the most existing links/reviews -- almost
-# always book 1 -- so a brand new release can fail to place in the top
-# results even with a generous count (observed live: book 8 of a series
-# appeared in a plain "<series> <author>" search, but book 9, an
-# announced-but-not-yet-released preorder, did not, even at count=20).
-# Explicitly searching "<series> book <N>" for the next few sequential
-# numbers reliably surfaces it instead, so both query styles are combined.
-#
-# Raised from 3 to 10 (see discovery_catchup_architecture_spec.md #2.1):
-# long/under-indexed series (e.g. the Jonathan Hunt case that motivated this
-# spec) can sit many volumes ahead of the highest owned book, and 3 wasn't
-# wide enough to catch them in one pass. Still batched into a single LLM
-# structuring call regardless of width -- see _fetch_web_search -- so this
-# only adds web-search-provider calls (and a larger prompt on that one
-# call), not LLM call count.
-WEB_SEARCH_LOOKAHEAD_BOOKS = 10
-
-# When a candidate's first-pass query snippet doesn't include a release date,
-# a second, title-specific "<title> release date" query surfaces
-# date-focused pages (Goodreads, author sites, retailer detail pages, "new
-# releases this week" roundups, etc.) far more often than the broader
-# "<series> book N" query does -- observed live: a just-released book's
-# generic listing had no date in its snippet and got wrongly defaulted to
-# "upcoming" until this second look ran. Capped since it costs one extra
-# web-search + Anthropic call per undated candidate.
-WEB_SEARCH_DATE_REFINEMENT_MAX = 3
-
-# Bounds concurrent web-search-provider requests within one _fetch_web_search
-# call (the targeted pass alone can have WEB_SEARCH_LOOKAHEAD_BOOKS + 1 = 11
-# distinct queries) -- a small fixed pool, not one thread per query, so a
-# wide lookahead window doesn't fire a burst of ~11 simultaneous requests and
-# risk provider rate-limiting that never happened when these were
-# sequential. Purely a latency optimization: does not change web-search call
-# count, LLM call count, or which URLs get fetched.
-WEB_SEARCH_MAX_PARALLEL_WORKERS = 5
-
-# Hardcover's own search index tags each hit with its position within a
-# series (when it has one), which is a far more reliable source of a book's
-# number than trying to parse it out of free-text title formatting -- so a
-# result from this provider carries that as an explicit hint rather than
-# leaving it to title-text inference.
-_HARDCOVER_SEARCH_QUERY = """
-query Search($query: String!, $perPage: Int!) {
-  search(query: $query, query_type: "Book", per_page: $perPage) {
-    results
-  }
-}
-"""
-
-# OpenLibrary (and, less aggressively, Google Books) apply basic
-# bot-mitigation heuristics that can reject requests using generic HTTP
-# client default user agents. A descriptive User-Agent identifying this
-# app, per OpenLibrary's own guidance, avoids spurious 403s.
-REQUEST_HEADERS = {"User-Agent": "BookAppSeriesTracker/1.0 (personal series-tracking tool)"}
-
-# Titles that are almost never a new story entry in the series -- they
-# bundle/repackage existing books rather than introduce a new one.
-NON_NEW_RELEASE_TITLE_MARKERS = (
-    "omnibus",
-    "box set",
-    "boxset",
-    # "collection" deliberately excluded (regression, live bug): a brand
-    # new companion release can legitimately be branded as a "collection"
-    # of new short stories -- e.g. Rebecca Yarros's "Threshing Day (Wing
-    # and Claw Collection)", a real September 2026 Empyrean release, not a
-    # repackaging of already-published books. This marker was too broad;
-    # a true bundle of existing content is already caught by the more
-    # specific markers below (omnibus/box set/bundle/"complete series") or
-    # by series_agent's is_compilation_of_owned_titles check, which flags a
-    # candidate that spells out 2+ already-owned titles by name.
-    "compilation",
-    "anthology",
-    "complete series",
-    "bundle",
-    "deluxe edition",
-    "special edition",
-    "collector's edition",
-    "anniversary edition",
-    "illustrated edition",
-    "annotated edition",
-    "extended edition",
-    "author's cut",
-    # Foreign-language editions -- the structured language field is often
-    # missing on these records, so title text is the more reliable signal.
-    "french edition",
-    "spanish edition",
-    "german edition",
-    "italian edition",
-    "portuguese edition",
-    "dutch edition",
-)
-
-# Word-boundary patterns for non-new-release detection where a plain
-# substring check would risk false positives (e.g. "tome" is also an
-# ordinary English word meaning "a large book").
-NON_NEW_RELEASE_TITLE_PATTERNS = (
-    re.compile(r"\btome\s*\d*\b"),
-    # "<Series Name> Series, Volume I" / "... Series Volume 1" -- a common
-    # indie/legacy-publisher naming convention for a multi-book compilation
-    # listing, distinct from "Volume 7" used as a standalone numbered entry.
-    re.compile(r"\bseries,?\s+volume\b", re.IGNORECASE),
-)
-
-# A speculative "there will eventually be a book N, we just don't know its
-# title yet" mention -- common in fan wikis/forums/roundups discussing an
-# unannounced future release -- isn't a real, actionable book. Surfacing a
-# literal "Untitled" entry as if it were a confirmed new release just adds
-# noise with nothing a reader can act on (live regression: a web-search hit
-# discussing fan speculation about a series' next book got structured by the
-# LLM into a candidate literally titled "Untitled").
-PLACEHOLDER_TITLE_MARKERS = (
-    "untitled",
-    "unannounced",
-    "unnamed",
-    "unconfirmed title",
-    "tba",
-    "tbd",
-    "to be announced",
-    "to be determined",
-    "to be titled",
-    "working title",
-    "coming soon",
-)
-
-
-def looks_like_placeholder_title(title: str) -> bool:
-    title_norm = normalize_text(title)
-    if not title_norm:
-        return True
-    return any(marker in f" {title_norm} " for marker in (f" {m} " for m in PLACEHOLDER_TITLE_MARKERS))
-
-
-# Generic, non-book suffixes publishers/cataloguers tack onto a bare series
-# name for a series-level listing (an aggregation page, a boxed-set/imprint
-# entity, an author-page grouping, etc.) rather than any single book --
-# stripped before comparing a candidate's title (or a candidate's guessed
-# series name) to a known series name so "<series> Universe"/"<series>
-# Collection"/etc. are treated the same as the bare "<series>" name.
-_SERIES_INDEX_SUFFIX_PATTERN = re.compile(r"\b(?:series|universe|collection|world|saga)\b")
-
-
-def normalize_series_branding_name(name: str | None) -> str:
-    """Strip generic branding words a cataloguer tacks onto a series name
-    ("Universe", "Series", "Collection", ...) so two listings for the same
-    tracked series don't fail to match over a single extra word (regression:
-    an author-wide discovery pass guessed series name "Duchy of Terra
-    Universe" for a book already owned under the tracked series "Duchy of
-    Terra", and the exact-text comparison used elsewhere treated them as
-    two different series, mislabeling an owned book "not yet tracked").
-
-    Deliberately narrow: only strips *generic* words, never a distinctive
-    proper-noun qualifier. "Starship's Mage: Red Falcon" and "Starship's
-    Mage: UnArcana Rebellion" must NOT collapse to "Starship's Mage" here --
-    those are real, distinct sub-series/rebranded editions, and conflating
-    them was the exact cause of an earlier cross-series contamination bug.
-    """
-    stripped = _SERIES_INDEX_SUFFIX_PATTERN.sub("", normalize_text(name)).strip()
-    return re.sub(r"\s+", " ", stripped).strip()
-
-
-# Local duplicates of agents/series_agent.py's _token_set/_token_overlap_ratio
-# rather than importing them -- series_agent.py imports this module, not the
-# other way around, so importing back would be circular. Same semantics
-# (normalize_text + split; overlap divided by the SMALLER set's size, not
-# the union, so a short series name isn't unfairly penalized just for
-# having fewer tokens than a longer, more descriptive variant).
-def _token_set(value: str | None) -> set[str]:
-    return {token for token in normalize_text(value).split() if token}
-
-
-def _token_overlap_ratio(left: set[str], right: set[str]) -> float:
-    if not left or not right:
-        return 0.0
-    return len(left & right) / max(1, min(len(left), len(right)))
-
-
-def _series_names_compatible(hint: str | None, target: str | None) -> bool:
-    """True if `hint` and `target` plausibly name the same series, just
-    branded/worded differently across providers (e.g. Hardcover's bare
-    "Jonathan Hunt" vs. Google Books' "Jonathan Hunt Thriller Series") --
-    as opposed to two genuinely different series that happen to share some
-    text. Used anywhere a hint needs to be checked against a series
-    identity, whether that's the target series being searched for
-    (_is_cross_series_contamination, the Phase 2 scoring penalty) or another
-    hint from the same candidate's own source_provenance
-    (_candidate_has_provenance_disagreement).
-
-    normalize_series_branding_name handles the common case (a generic
-    suffix word like "Series"/"Universe" added or dropped). Token
-    subset/overlap on top of that handles the harder case above, where the
-    two names aren't a pure suffix difference -- one is just a shorter or
-    more/less descriptive rendering of the other. Requiring at least 2
-    overlapping tokens (not just a high ratio) guards against two short,
-    unrelated series names being called "compatible" purely because they
-    happen to share one common word (e.g. "Jonathan Hunt" vs. a
-    hypothetical unrelated "Hunt for Red October" would otherwise clear a
-    plain >=0.5 ratio on the single shared word "hunt" alone).
-    """
-    normalized_hint = normalize_series_branding_name(str(hint or ""))
-    normalized_target = normalize_series_branding_name(str(target or ""))
-    if not normalized_hint or not normalized_target:
-        return False
-    if normalized_hint == normalized_target:
-        return True
-
-    hint_tokens = _token_set(normalized_hint)
-    target_tokens = _token_set(normalized_target)
-    overlap = hint_tokens & target_tokens
-    if len(overlap) < 2:
-        return False
-
-    if hint_tokens <= target_tokens or target_tokens <= hint_tokens:
-        return True
-
-    return _token_overlap_ratio(hint_tokens, target_tokens) >= 0.5
-
-
-# Words that add no real distinguishing content to a title beyond restating
-# "this is part of the series" -- a title that's just the series name plus
-# some of these (e.g. "Jonathan Hunt Thriller Series Book 6") is exactly as
-# much a non-book stub as the bare series name alone, just with extra filler
-# stapled on. Deliberately does NOT include genre/descriptive words -- those
-# are exactly the kind of real (if generic) content _title_is_series_variant
-# must NOT treat as filler, or it would wrongly reject genuinely-titled books
-# that happen to lead with the full series name (a common indie-catalog
-# convention -- see _TITLE_SERIES_MARKER_PATTERN/_DASH_SERIES_MARKER_PATTERN
-# elsewhere in this file for the same convention in reverse).
-_TITLE_VARIANT_FILLER_TOKENS = {
-    "a", "an", "the",
-    "book", "books", "novel", "novella", "novellas", "novels",
-    "vol", "vols", "volume", "volumes", "part", "parts", "no", "number", "numbers",
-}
-
-# Bare genre-category nouns that self-published/indie catalog listings
-# routinely tack onto a series name as a back-cover tagline -- "A <Series>
-# Thriller", "A <Series> Mystery", "A <Series> Romance" -- rather than as
-# any part of a real, individually-titled book (regression: "Check Now" on
-# Georgia Wagner's "Jonathan Hunt Thriller Series" admitted a candidate
-# titled exactly "A Jonathan Hunt Thriller" -- no ISBN, no real subtitle,
-# just the series name plus this exact tagline idiom -- as a new book,
-# because "thriller" isn't _TITLE_VARIANT_FILLER_TOKENS' kind of filler and
-# the tracked series name itself didn't happen to already contain the word
-# "Thriller" to cancel it out). Unlike _TITLE_VARIANT_FILLER_TOKENS, these
-# are ONLY treated as filler when the title's single remaining token beyond
-# the series name is one of these -- two or more such tokens (or one of
-# these alongside any other real word) is left alone as likely-genuine,
-# more substantial descriptive content, not this narrow one-word tagline
-# idiom.
-_SOLO_GENRE_TAGLINE_TOKENS = {
-    "thriller", "thrillers",
-    "mystery", "mysteries",
-    "romance", "romances",
-    "saga", "sagas",
-    "epic", "epics",
-    "adventure", "adventures",
-    "drama", "dramas",
-    "chronicle", "chronicles",
-    "tale", "tales",
-    "story", "stories",
-}
-
-
-def _title_is_series_variant(
-    title: str, series_name: str | None, isbn13: str | None, structured_number_hint
-) -> bool:
-    """True if `title` is effectively just the series name -- an exact
-    match, or a trivial variant of it ("A <Series> Thriller", "<Series>
-    Book 6", "<Series> Novel") -- rather than a real, distinctly-titled
-    book. Complements looks_like_series_index_entry: that function catches
-    the bare, unadorned series name; this one catches the same underlying
-    non-book stub with a little filler text stapled on, which slips past
-    looks_like_series_index_entry's exact-form comparison (regression:
-    "Check Now" on Georgia Wagner's "Jonathan Hunt Thriller Series" admitted
-    a candidate titled "A Jonathan Hunt Thriller" -- no ISBN, no real
-    subtitle, nothing but the series' own name and a genre word -- as if it
-    were a new, distinctly-titled book. This recurred even after an initial
-    fix, because that fix only cancelled the genre word out when it was
-    already part of the *tracked series name's own text* -- if the series
-    is tracked under a shorter name that doesn't itself contain "Thriller",
-    the word survived as if it were real content. See
-    _SOLO_GENRE_TAGLINE_TOKENS: a single bare genre-category word is now
-    filler in its own right, independent of how the series name happens to
-    be spelled).
-
-    structured_number_hint must come from a provider's own structured field
-    (e.g. Hardcover's series_number_hint), NOT a number inferred from this
-    same title's own text -- a "Book 6" parsed out of the very title being
-    checked here isn't independent evidence of a real book on its own, since
-    that's exactly the filler text this function exists to see through.
-    It's still useful as corroboration for a title that also names its own
-    "Book <N>" filler (see below), since a title/provider pair that agree on
-    the same N is a real, self-consistent signal.
-
-    Passing the ISBN through unconditionally short-circuits this (same
-    guard looks_like_series_index_entry itself uses) -- an ISBN is tied to
-    one specific real edition, so it's strong enough evidence on its own.
-
-    For a title that's an EXACT match to the series name -- carrying zero
-    content beyond the series' own branding -- a bare structured number is
-    NOT enough cover unless it's plausibly the series' own eponymous first
-    entry (position 1): a real book is essentially never titled exactly
-    like its series except for that one legitimate case (e.g. "Mistborn"
-    for "Mistborn"). Treating ANY structured number as sufficient cover
-    for an exact-match title was itself a regression: Hardcover assigning
-    a real series-position number (e.g. 6) to what was otherwise still
-    just a bare/placeholder title let that exact malformed combination
-    straight through. A partial/trivial-variant title (e.g. "<Series> Book
-    7") is different -- there the "Book 7" is a common, legitimate
-    self-published title convention (see _TITLE_SERIES_MARKER_PATTERN),
-    and a structured number hint at all (any position, since it's the
-    title's own restated number this time, not an unrelated one) still
-    counts as real corroboration.
-    """
-    if isbn13:
-        return False
-    normalized_title = normalize_series_branding_name(str(title or ""))
-    normalized_series = normalize_series_branding_name(str(series_name or ""))
-    if not normalized_title or not normalized_series:
-        return False
-    if normalized_title == normalized_series:
-        try:
-            is_eponymous_first_entry = structured_number_hint is not None and float(structured_number_hint) == 1
-        except (TypeError, ValueError):
-            is_eponymous_first_entry = False
-        return not is_eponymous_first_entry
-    if structured_number_hint:
-        return False
-
-    title_tokens = _token_set(normalized_title)
-    series_tokens = _token_set(normalized_series)
-    overlap = title_tokens & series_tokens
-    if len(overlap) < 2:
-        return False
-
-    # Tokens the title has beyond the series name itself -- if every one of
-    # those is just generic filler (an article, "book"/"novel", a bare
-    # number), the title carries no real distinguishing content at all and
-    # is just as much a stub as an exact match. A title with even one real
-    # word beyond the series name (a genuine subtitle, however short) is a
-    # real, distinctly-titled book and must NOT be excluded here -- so this
-    # is the sole determinant, not a secondary check alongside a raw
-    # overlap-ratio threshold: a plain ratio would also flag a real title
-    # that happens to fully restate the series name up front (e.g.
-    # "<Series>: <Real Subtitle>"), since restating the whole series name
-    # trivially maximizes overlap regardless of how substantial the rest of
-    # the title is.
-    unique_title_tokens = title_tokens - series_tokens
-    meaningful_unique_tokens = {
-        token for token in unique_title_tokens if token not in _TITLE_VARIANT_FILLER_TOKENS and not token.isdigit()
-    }
-    # A single bare genre tagline word (see _SOLO_GENRE_TAGLINE_TOKENS) is
-    # filler too, but ONLY when it's the one and only meaningful token left --
-    # any second real word alongside it means there's genuine descriptive
-    # content here, not just the series-name-plus-tagline idiom.
-    if len(meaningful_unique_tokens) == 1 and meaningful_unique_tokens <= _SOLO_GENRE_TAGLINE_TOKENS:
-        return True
-    return not meaningful_unique_tokens
-
-
-def looks_like_series_index_entry(
-    title: str, series_name: str | None, isbn13: str | None, has_number_hint: bool
-) -> bool:
-    """Some catalog listings are for the series itself -- a Goodreads-style
-    aggregation page, a boxed set cataloged under the bare series name, an
-    author-page "series" entity, etc. -- rather than any single book in it
-    (live regression: a search for "The Empyrean" by Rebecca Yarros returned
-    separate records literally titled "The Empyrean" and "The Empyrean
-    Series", both with no book number, that both passed through as if they
-    were new, unread entries). Requiring the absence of *both* an ISBN and
-    an explicit book-number hint keeps this from misfiring on a real,
-    individually-cataloged eponymous book 1 (e.g. "Mistborn" for the
-    "Mistborn" series), which will almost always carry at least one of those.
-    """
-    if isbn13 or has_number_hint:
-        return False
-    title_norm = normalize_text(title)
-    series_norm = normalize_text(series_name)
-    if not title_norm or not series_norm:
-        return False
-    stripped = normalize_series_branding_name(title)
-    title_forms = {title_norm, stripped} if stripped else {title_norm}
-    if series_norm in title_forms:
-        return True
-    # Second live regression on the same fix: a profile's tracked series was
-    # auto-created from an imported spreadsheet's bare series column value
-    # ("Empyrean"), while Google Books' own bare-series-listing records used
-    # the full, article-carrying name ("The Empyrean" / "The Empyrean
-    # Series") -- the same stub-listing pattern above, just missed because
-    # the two sides disagreed on a leading "The". Comparing article-stripped
-    # forms here is safe specifically because series_name is always the one
-    # already-known series this check is evaluating a candidate against --
-    # never a lookup across a profile's *other*, unrelated tracked series
-    # (that broader ambiguity is why normalize_series_branding_name/
-    # _strip_leading_article aren't merged for series matching in general;
-    # see _strip_leading_article's docstring).
-    series_no_article = _strip_leading_article(series_norm)
-    title_forms_no_article = {_strip_leading_article(form) for form in title_forms}
-    return bool(series_no_article) and series_no_article in title_forms_no_article
-
-
-# Catches the common indie-publishing convention of naming a spin-off
-# novella/short story after its parent series right in the subtitle (e.g.
-# "Fae, Flames & Fedoras: A Changeling Blood Universe Novella") -- Google
-# Books/OpenLibrary never populate a structured series field, so without
-# this the book shows up as a bare standalone with no way to group it with
-# the rest of its series.
-_TITLE_SERIES_MARKER_PATTERN = re.compile(
-    r":\s*a\s+(.+?)\s+(?:universe|series|saga|world)\s+(?:novella|short story|story|book|companion)\b",
-    re.IGNORECASE,
-)
-
-# Another common cataloguer convention (seen heavily on Hardcover-style
-# listings): "<Title> - <Series Name> #<N>", with no structured series
-# field at all -- e.g. "A Little Too Close - Madigan Mountain #2",
-# "Ignite - Legacy #0.7". Without reading this, a book whose *only*
-# available listing uses this format never gets grouped with the rest of
-# its series at all (regression: an author-wide discovery pass for Rebecca
-# Yarros put every "Legacy" novella in "New standalone books" instead of
-# forming a "Legacy" series group, since none of them had any other,
-# more-structured listing to fall back on).
-_DASH_SERIES_MARKER_PATTERN = re.compile(r"\s-\s+(.+?)\s*#\s*[\d.]+\s*$")
-
-
-def infer_series_hint_from_title_text(title: str) -> str | None:
-    raw = str(title or "")
-    for pattern in (_TITLE_SERIES_MARKER_PATTERN, _DASH_SERIES_MARKER_PATTERN):
-        match = pattern.search(raw)
-        if match:
-            guess = re.sub(r"\s+", " ", match.group(1)).strip()
-            if guess:
-                return guess
-    return None
-
-
-def clean_display_title(title: str) -> str:
-    """Strips the redundant "- <Series Name> #<N>" suffix (see
-    _DASH_SERIES_MARKER_PATTERN above) from a title meant for display.
-
-    Without this, even after such a candidate is correctly grouped under
-    its series and deduplicated against a cleaner-titled listing of the
-    same book, whichever raw copy happened to win the dedup tie-break
-    could still be the ugly "A Little Too Close - Madigan Mountain #2"
-    version rather than the plain "A Little Too Close" a reader expects --
-    the series name and number are already shown structurally elsewhere on
-    the row, so repeating them in the title itself is pure clutter.
-    """
-    raw = str(title or "")
-    match = _DASH_SERIES_MARKER_PATTERN.search(raw)
-    if not match:
-        return raw
-    cleaned = raw[: match.start()].strip()
-    return cleaned or raw
-
-
-_PLACEHOLDER_DATE_PATTERN = re.compile(r"^\d{4}-01-01$")
-
-
-def looks_like_placeholder_date(iso_date: str | None) -> bool:
-    """A literal January 1st is the common "we only know the year" stand-in
-    several catalogs use in place of a real, precise publication date --
-    not evidence the book actually released on that exact day (live
-    regression: an author-wide discovery pass showed several already-listed
-    standalone titles with dates like 1/1/1900 and 1/1/2017 -- including the
-    same 1/1/2017 on three unrelated titles -- displayed with the same
-    confidence as a genuinely-dated release).
-    """
-    return bool(_PLACEHOLDER_DATE_PATTERN.match(str(iso_date or "").strip()))
-
-
-def _log(message: str) -> None:
-    print(f"[discovery_engine] {message}", flush=True)
-
-
-def normalize_text(value: str | None) -> str:
-    # "&" is treated as the word "and" (not just stripped to a space) so
-    # "Muses & Melodies" and "Muses and Melodies" -- the same book, listed
-    # under two spelling conventions by two different sources -- normalize
-    # to identical text instead of silently differing by one word.
-    with_and = re.sub(r"&", " and ", str(value or "").lower())
-    cleaned = re.sub(r"[^a-z0-9\s]", " ", with_and)
-    return re.sub(r"\s+", " ", cleaned).strip()
-
-
-_LEADING_ARTICLE_PATTERN = re.compile(r"^(?:the|an?)\s+")
-
-
-def _strip_leading_article(normalized_text: str) -> str:
-    """Drops a leading "the"/"a"/"an" from an already-normalize_text'd
-    title so "The Reality of Everything" and "Reality of Everything" --
-    the same book, one source's title carrying the article and another's
-    dropping it -- resolve to the same identity key.
-
-    Deliberately NOT folded into normalize_text() itself: that function is
-    also used for *series* names (see normalize_series_branding_name),
-    where the article is part of the series' actual identity ("The
-    Empyrean" needs to stay distinguishable from a hypothetical unrelated
-    series just called "Empyrean") -- only book-title matching wants this.
-    """
-    return _LEADING_ARTICLE_PATTERN.sub("", normalized_text, count=1)
-
-
-def _title_core_segment(raw: str) -> str:
-    # ':', '(', ',' and a standalone " - " are the separators commonly used
-    # to introduce a subtitle/series-suffix ("Title: subtitle", "Title
-    # (Series Book N)", "Title, A Series Short Story", "Title - Series
-    # #N"). Splitting on whichever comes first gives a stable "core title"
-    # across differently-formatted sources -- e.g. Hardcover's "Havoc in
-    # the Deathyards, A Completionist Chronicles Short Story" vs
-    # OpenLibrary's bare "Havoc in the Deathyards" both reduce to "havoc in
-    # the deathyards". The " - " split requires surrounding spaces
-    # specifically so it never fires on a hyphenated word inside the title
-    # itself (e.g. "Self-Made Superhero"). A few owned titles use a comma
-    # as part of the actual title itself (e.g. "2 Lies, 2 Thrones",
-    # "Arisen, Book Two - ..."), which this over-truncates -- but
-    # core_title_key folds the book number (parsed from the *full* raw
-    # title, not the truncated core) back in, which still keeps
-    # same-series siblings distinct, and bare_title_key is only trusted
-    # when its result is unique across the owned catalog. Both safeguards
-    # absorb this.
-    return re.split(r"[:,(]|\s+-\s+", raw, maxsplit=1)[0]
-
-
-def core_title_key(title: str | None) -> str:
-    """Titles in this app's library are often stored as
-    "Core Title: (Series Name Book N)" while API results are usually just
-    the bare "Core Title". Comparing on the text before the first subtitle
-    separator gives a stable identity key across both shapes -- *except*
-    for series that name every entry "<Series Name> (Volume N): <subtitle>"
-    or similar, where the volume number itself lives inside that first
-    separated segment. Truncating there would make every volume collapse
-    to the exact same key (e.g. book 1 and book 4 both becoming just
-    "1 lifesteal"), making it impossible to ever recognize a new volume as
-    distinct from an owned one. To avoid that, fold any book/volume number
-    found anywhere in the title into the key.
-    """
-    raw = str(title or "")
-    normalized_core = _strip_leading_article(normalize_text(_title_core_segment(raw)))
-    number = infer_number_from_title(raw)
-    if number:
-        # Truncated to its integer part regardless of whether it's whole
-        # or fractional, matching exactly what the old integer-only
-        # implementation always did, so this key stays completely
-        # unchanged now that infer_number_from_title can return a genuinely
-        # fractional value (e.g. 3.5 for "Book 3.5") -- the
-        # fractional-collision problem that preserves against is handled
-        # at the persistence identity layer instead, not here. See
-        # services/identity.py's _normalized_book_number_value /
-        # _series_book_identity_key.
-        return f"{normalized_core} {int(number)}"
-    return normalized_core
-
-
-def bare_title_key(title: str | None) -> str:
-    """Like core_title_key, but never folds in a book/volume number -- used
-    as a fallback identity signal for candidates whose title carries no
-    parseable number at all (e.g. a search result that comes back as just
-    the bare book title "Crown" with no "(Series Book 9)" suffix and no
-    other number hint). core_title_key can't recognize that as the already-
-    owned "Crown: A LitRPG: (Unbound Book 9)" since one side folds in "9"
-    and the other has no number to fold in. Callers should only trust this
-    as an identity match when the candidate's own inferred number is empty
-    (i.e. there's nothing more specific to compare) AND the bare key is
-    unique across the owned catalog (so it can't conflate two different,
-    numbered volumes that happen to share a one-word core title).
-    """
-    raw = str(title or "")
-    return _strip_leading_article(normalize_text(_title_core_segment(raw)))
-
-
-_WORD_NUMBERS = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
-    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
-    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
-}
-
-
-def _normalize_number_context(value: str | None) -> str:
-    """Like normalize_text, but protects a decimal point sitting between two
-    digits (e.g. the ".5" in "Book 3.5") before stripping punctuation, so a
-    fractional book-number pattern matched against the result can still see
-    it. Every other punctuation character (colons, parens, hyphens, etc.)
-    collapses to a space exactly as normalize_text already does -- this is
-    strictly a superset, not a behavior change, for any title with no
-    digit.digit sequence at all.
-    """
-    text = str(value or "").lower()
-    text = re.sub(r"(?<=\d)\.(?=\d)", "\uE000", text)
-    text = re.sub(r"[^a-z0-9\uE000\s]", " ", text)
-    text = text.replace("\uE000", ".")
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _parse_positive_number(raw_value: str | None) -> float | None:
-    try:
-        value = float(raw_value)
-    except (TypeError, ValueError):
-        return None
-    return value if value > 0 else None
-
-
-def infer_number_from_title(title: str | None, series_name: str | None = None) -> float | None:
-    """Returns the inferred series position for `title`, preferring (in
-    order): a "#N" marker, a "book/volume/vol N" marker, a spelled-out
-    "book/volume/vol <word>" marker, then (if `series_name` is given) a bare
-    "<series name> N" prefix or mid-title occurrence.
-
-    Fractional positions (e.g. "Book 3.5" for a companion/novella slotted
-    between two numbered entries) are preserved as a float rather than
-    truncated to their integer part -- see services/identity.py's
-    _normalized_book_number_value docstring for why truncating a genuinely
-    fractional position is dangerous (it collapses a companion book's
-    identity onto the numbered entry beside it). Fractional support only
-    extends to the "#"/"book"/"volume"/"vol" keyword patterns below; the
-    bare "<series name> N" positional patterns remain integer-only exactly
-    as before, since a fractional position is essentially never expressed
-    that way in practice.
-
-    core_title_key (below) intentionally truncates this back to its integer
-    part before folding it into a discovery matching key -- that key needs
-    to stay stable across whole-number titles regardless of this function's
-    own precision, and the fractional-collision problem this preserves
-    against belongs at the persistence identity layer, not the discovery
-    matching key. See that function's own note.
-    """
-    # Checked against the raw (non-normalized) title first: normalize_text
-    # strips punctuation like "#", so a "#7"-style pattern could never
-    # actually match once run against the already-normalized text below.
-    hash_match = re.search(r"#\s*(\d+(?:\.\d+)?)\b", str(title or ""))
-    if hash_match:
-        value = _parse_positive_number(hash_match.group(1))
-        if value is not None:
-            return value
-
-    # A separately (lightly) normalized pass that preserves a digit.digit
-    # decimal point -- see _normalize_number_context -- so "Book 3.5" isn't
-    # silently truncated to "Book 3" the way plain normalize_text would
-    # force it to be (it strips "." unconditionally).
-    number_context = _normalize_number_context(title)
-    if number_context:
-        keyword_patterns = (
-            r"\bbook\s*(\d+(?:\.\d+)?)\b",
-            r"\bvolume\s*(\d+(?:\.\d+)?)\b",
-            r"\bvol\.?\s*(\d+(?:\.\d+)?)\b",
-        )
-        for pattern in keyword_patterns:
-            match = re.search(pattern, number_context)
-            if not match:
-                continue
-            value = _parse_positive_number(match.group(1))
-            if value is not None:
-                return value
-
-    cleaned = normalize_text(title)
-    if not cleaned:
-        return None
-
-    # Some listings spell the number out ("Book One", "Volume Two") instead
-    # of using a digit -- same intent, different formatting. No fractional
-    # form exists for a spelled-out number.
-    word_pattern = r"\b(?:book|volume|vol\.?)\s+(" + "|".join(_WORD_NUMBERS) + r")\b"
-    word_match = re.search(word_pattern, cleaned)
-    if word_match:
-        value = _WORD_NUMBERS.get(word_match.group(1))
-        if value:
-            return float(value)
-
-    # Many rapid-release indie/LitRPG series just number titles as
-    # "<Series Name> <N>" with no "book"/"vol"/"#" keyword at all (e.g.
-    # "All the Skills 5"). If the title starts with the series name
-    # followed directly by a bare number, treat that as the entry number.
-    series_norm = normalize_text(series_name)
-    if series_norm and cleaned.startswith(series_norm):
-        remainder = cleaned[len(series_norm):].strip()
-        match = re.match(r"(\d+)\b", remainder)
-        if match:
-            try:
-                value = int(match.group(1))
-            except ValueError:
-                value = 0
-            if value > 0:
-                return float(value)
-
-    # Same bare "<Series Name> <N>" pattern, but appearing anywhere in the
-    # title rather than only as a strict prefix -- e.g. a reprint listing
-    # titled "By Schism Rent Asunder (Safehold 2) Publisher: Tor..." embeds
-    # the series-name-plus-number as a parenthetical rather than a prefix.
-    if series_norm:
-        anywhere_match = re.search(rf"\b{re.escape(series_norm)}\s+(\d+)\b", cleaned)
-        if anywhere_match:
-            try:
-                value = int(anywhere_match.group(1))
-            except ValueError:
-                value = 0
-            if value > 0:
-                return float(value)
-    return None
-
-
-_BUNDLE_TITLE_PATTERN = re.compile(r"\b\d+\s+books?\b")
-
-
-def looks_like_non_new_release(title: str) -> bool:
-    title_norm = normalize_text(title)
-    if any(marker in title_norm for marker in NON_NEW_RELEASE_TITLE_MARKERS):
-        return True
-    if any(pattern.search(title_norm) for pattern in NON_NEW_RELEASE_TITLE_PATTERNS):
-        return True
-    return bool(_BUNDLE_TITLE_PATTERN.search(title_norm))
-
-
-def is_english_or_unknown(language: str | None) -> bool:
-    """This app's library is in English -- exclude editions we can
-    positively identify as a different language (translations), but don't
-    require the language field to be present since many entries lack one.
-    """
-    code = str(language or "").strip().lower()
-    if not code:
-        return True
-    return code in {"en", "eng", "en-us", "en-gb"}
-
-
-def parse_flexible_date(value: str | None) -> date | None:
-    """Best-effort parse of Google Books / OpenLibrary date strings, which
-    can be full dates, year-month, or just a year.
-    """
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
-        try:
-            return date.fromisoformat(raw)
-        except ValueError:
-            return None
-    if re.fullmatch(r"\d{4}-\d{2}", raw):
-        try:
-            return date.fromisoformat(f"{raw}-01")
-        except ValueError:
-            return None
-    if re.fullmatch(r"\d{4}", raw):
-        try:
-            return date(int(raw), 1, 1)
-        except ValueError:
-            return None
-    return None
-
-
-def classify_upcoming(parsed_date: date | None, upcoming_hint: bool | None) -> bool:
-    """A candidate is treated as upcoming (not yet available to read) when
-    either its known release date is still in the future, or -- when
-    there's no date at all to compare -- a provider's own hint says it
-    isn't out yet (e.g. Hardcover's `unreleased` flag, or the web-search
-    safety net that defaults an undated result to "unconfirmed" rather than
-    assuming it's already out). Extracted so both the single-series check
-    (agents/series_agent.py) and author-wide discovery classify status the
-    exact same way instead of each having their own copy of this rule.
-    """
-    if parsed_date:
-        return parsed_date > date.today()
-    return bool(upcoming_hint)
-
-
-def split_author_names(value: str | None) -> list[str]:
-    """Series in this app's library sometimes store multiple co-authors in
-    one string (e.g. "J.N Chaney; Terry Maggert"). Split those apart so
-    each name can be matched/queried individually -- APIs match one author
-    name at a time and rarely list co-authors concatenated like that.
-    """
-    if not value:
-        return []
-    parts = re.split(r"\s*(?:;|,|&|\band\b)\s*", str(value), flags=re.IGNORECASE)
-    return [p.strip() for p in parts if p and p.strip()]
-
-
-def primary_author_name(value: str | None) -> str:
-    names = split_author_names(value)
-    return names[0] if names else str(value or "").strip()
-
-
-def _author_matches(candidate_authors: list[str], target_author: str) -> bool:
-    target_names = split_author_names(target_author) or [target_author]
-    for target_name in target_names:
-        target_tokens = [token for token in normalize_text(target_name).split() if len(token) > 1]
-        if not target_tokens:
-            continue
-        for candidate in candidate_authors:
-            candidate_norm = normalize_text(candidate)
-            if all(token in candidate_norm for token in target_tokens):
-                return True
-    return False
-
-
-def _fetch_google_books(query: str, max_results: int = 40) -> list[dict]:
-    params: dict = {"q": query, "maxResults": max_results}
-    api_key = os.environ.get("GOOGLE_BOOKS_API_KEY", "").strip()
-    if api_key:
-        params["key"] = api_key
-    response = httpx.get(GOOGLE_BOOKS_ENDPOINT, params=params, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
-    response.raise_for_status()
-
-    items = (response.json() or {}).get("items") or []
-    results: list[dict] = []
-    for item in items:
-        info = item.get("volumeInfo") or {}
-        title = str(info.get("title") or "").strip()
-        if not title:
-            continue
-        subtitle = str(info.get("subtitle") or "").strip()
-        full_title = f"{title}: {subtitle}" if subtitle else title
-        identifiers = info.get("industryIdentifiers") or []
-        isbn13 = next((i.get("identifier") for i in identifiers if i.get("type") == "ISBN_13"), None)
-        results.append(
-            {
-                "source": "google_books",
-                "source_id": item.get("id"),
-                "title": full_title,
-                "authors": info.get("authors") or [],
-                "published_date": str(info.get("publishedDate") or "").strip(),
-                "description": info.get("description"),
-                "isbn13": str(isbn13 or "").strip() or None,
-                "source_url": str(info.get("infoLink") or "").strip() or None,
-                "language": str(info.get("language") or "").strip(),
-            }
-        )
-    return results
-
-
-def _fetch_openlibrary(query: str, max_results: int = 40) -> list[dict]:
-    params = {"q": query, "limit": max_results}
-    response = httpx.get(OPENLIBRARY_ENDPOINT, params=params, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
-    response.raise_for_status()
-
-    docs = (response.json() or {}).get("docs") or []
-    results: list[dict] = []
-    for doc in docs:
-        title = str(doc.get("title") or "").strip()
-        if not title:
-            continue
-        year = doc.get("first_publish_year")
-        isbn_list = doc.get("isbn") or []
-        languages = doc.get("language") or []
-        results.append(
-            {
-                "source": "openlibrary",
-                "source_id": doc.get("key"),
-                "title": title,
-                "authors": doc.get("author_name") or [],
-                "published_date": str(year) if year else "",
-                "description": None,
-                "isbn13": next((i for i in isbn_list if len(str(i)) == 13), None),
-                "source_url": f"https://openlibrary.org{doc.get('key')}" if doc.get("key") else None,
-                "language": str(languages[0]) if languages else "",
-            }
-        )
-    return results
-
-
-def _fetch_hardcover(query: str, max_results: int = 25) -> list[dict]:
-    api_key = os.environ.get("HARDCOVER_API_KEY", "").strip()
-    if not api_key:
-        return []
-
-    headers = {**REQUEST_HEADERS, "Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {"query": _HARDCOVER_SEARCH_QUERY, "variables": {"query": query, "perPage": max_results}}
-    response = httpx.post(HARDCOVER_ENDPOINT, json=payload, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
-    response.raise_for_status()
-
-    body = response.json() or {}
-    if body.get("errors"):
-        raise RuntimeError(str(body["errors"])[:300])
-
-    hits = (((body.get("data") or {}).get("search") or {}).get("results") or {}).get("hits") or []
-    results: list[dict] = []
-    for hit in hits:
-        doc = hit.get("document") or {}
-        title = str(doc.get("title") or "").strip()
-        if not title:
-            continue
-
-        isbns = doc.get("isbns") or []
-        isbn13 = next((i for i in isbns if len(str(i)) == 13), None)
-
-        featured_series = doc.get("featured_series") or {}
-        series_position = None
-        raw_position = featured_series.get("position")
-        if raw_position is not None:
-            try:
-                # Rounding to the nearest int used to collapse Hardcover's
-                # fractional positions (0.5-style companion novellas/side
-                # stories, e.g. "Threshing Day" at position 3.5 in The
-                # Empyrean) into a whole number -- and Python's round-half-
-                # to-even rounds X.5 *up* whenever the next integer is even,
-                # so position 3.5 became "Book 4", making a side story
-                # indistinguishable from (and blocking/confusing detection
-                # of) the real next numbered entry. Keep the float as-is so
-                # downstream code can tell a companion book (non-integer
-                # position) apart from a genuine next-in-sequence book.
-                series_position = float(raw_position)
-            except (TypeError, ValueError):
-                series_position = None
-
-        # Hardcover's own crowd-sourced series length -- a real answer to
-        # "how many books are in this series" that doesn't depend on our own
-        # search coverage. primary_books_count (numbered main entries) is
-        # preferred over books_count (which also counts 0.5-style novellas/
-        # side content) since it's the more intuitive "book N of M" figure;
-        # falls back to books_count when that's the only one present.
-        series_info = featured_series.get("series") or {}
-        series_total_hint = series_info.get("primary_books_count") or series_info.get("books_count")
-        try:
-            series_total_hint = int(series_total_hint) if series_total_hint else None
-        except (TypeError, ValueError):
-            series_total_hint = None
-
-        results.append(
-            {
-                "source": "hardcover",
-                "source_id": doc.get("id"),
-                "title": title,
-                "authors": doc.get("author_names") or [],
-                "published_date": str(doc.get("release_date") or "").strip(),
-                "description": doc.get("description"),
-                "isbn13": str(isbn13 or "").strip() or None,
-                "source_url": f"https://hardcover.app/books/{doc.get('slug')}" if doc.get("slug") else None,
-                "language": "",
-                "series_number_hint": series_position,
-                "upcoming_hint": bool(featured_series.get("unreleased")),
-                # Only populated when Hardcover's own index actually ties
-                # this book to a series -- used as a per-candidate series
-                # name signal by discover_candidates_for_author, which (unlike
-                # discover_candidates_for_series) has no single fixed series
-                # name of its own to compare candidates against. The name
-                # itself lives one level deeper than `position`/`unreleased`
-                # (verified against a live API response) -- featured_series
-                # is `{position, unreleased, series: {id, name, slug, ...}}`,
-                # not a flat object with its own "name" key.
-                "series_name_hint": str((featured_series.get("series") or {}).get("name") or "").strip() or None,
-                "series_total_hint": series_total_hint,
-            }
-        )
-    return results
-
-
-# Bounds how many extra, dedicated Hardcover lookups
-# backfill_missing_publication_dates will issue in one call -- an unusually
-# large batch of undated candidates (e.g. a big author-fallback sweep)
-# shouldn't turn into a dozen-plus extra live API calls on top of everything
-# else a Check Now run already does. Anything beyond the cap is left with
-# no published_date, still covered by classify_upcoming's existing
-# conservative "unconfirmed" default.
-MAX_PUBLICATION_DATE_BACKFILL_LOOKUPS = 8
-
-# Bounds verify_missing_volume_recovery_dates's own lookups, separately from
-# MAX_PUBLICATION_DATE_BACKFILL_LOOKUPS above -- deliberately small (this
-# path is meant for the rare 1-3 candidates a single Check Now run recovers
-# via the missing-volume lookahead, not a large sweep) and also caps its own
-# Apify fallback calls via a dedicated ApifyCallBudget, entirely separate
-# from discover_candidates_for_series' own per-run Apify budget (see that
-# function's ApifyCallBudget docstring) since this verification pass runs
-# afterward, in series_agent.py, with no access to that budget instance.
-MAX_MISSING_VOLUME_DATE_VERIFICATION_LOOKUPS = 3
-
-
-def backfill_missing_publication_dates(candidates: list[dict], author: str) -> None:
-    """Fills in a real published_date for candidates that don't have one,
-    by issuing a dedicated Hardcover lookup per candidate (by ISBN when
-    known, else by title) -- mutates each candidate dict in place, and only
-    ever fills a blank date, never overwrites a real one.
-
-    Candidates with no published_date at all are almost always ones the
-    web-search+LLM pass surfaced without a confirmed date in its result
-    snippets -- classify_upcoming's own conservative default then treats
-    those as "not confirmed available yet" (see its docstring), which is
-    often wrong for an already-released indie/KU title that the web-search
-    provider just didn't happen to state a date for. The same real book is
-    frequently already in Hardcover's structured catalog with a real release date --
-    it just didn't get chosen as this fused candidate's representative hit
-    because the broader "<series> <author>" search that ran earlier either
-    didn't surface it prominently enough, or Hardcover's own search index
-    doesn't have this specific title tagged under the series at all (see the
-    live regression this was written for: Georgia Wagner's "Jonathan Hunt
-    Thriller Series" -- Hardcover's series-scoped search never surfaced
-    several already-released titles, but a direct ISBN/title lookup for
-    each one did, immediately, with a real past release date).
-
-    A bare title lookup can collide with a same-titled, unrelated real book
-    by a different author (regression while building this: "The Desert
-    Reckoning" and "The Winter Siege" are both real, unrelated non-Wagner
-    books already in Hardcover's catalog) -- guarded against by requiring
-    the hit's own title to resolve to the same core_title_key AND its
-    author(s) to match via _author_matches before trusting its date. An
-    ISBN lookup is trusted on ISBN equality alone since ISBNs don't collide.
-    """
-    if not os.environ.get("HARDCOVER_API_KEY", "").strip():
-        return
-
-    lookups_done = 0
-    for raw in candidates:
-        if lookups_done >= MAX_PUBLICATION_DATE_BACKFILL_LOOKUPS:
-            break
-        if str(raw.get("published_date") or "").strip():
-            continue
-        title = str(raw.get("title") or "").strip()
-        if not title:
-            continue
-
-        isbn13 = str(raw.get("isbn13") or "").strip()
-        try:
-            hits = _fetch_hardcover(isbn13 or title)
-        except Exception:
-            continue
-        lookups_done += 1
-
-        title_key = core_title_key(title)
-        for hit in hits:
-            if isbn13:
-                if str(hit.get("isbn13") or "").strip() != isbn13:
-                    continue
-            elif core_title_key(str(hit.get("title") or "")) != title_key:
-                continue
-            if not _author_matches(hit.get("authors") or [], author):
-                continue
-            hit_date = str(hit.get("published_date") or "").strip()
-            if not hit_date:
-                continue
-            raw["published_date"] = hit_date
-            if not isbn13:
-                hit_isbn13 = str(hit.get("isbn13") or "").strip()
-                if hit_isbn13:
-                    raw["isbn13"] = hit_isbn13
-            break
-
-
-def verify_missing_volume_recovery_dates(candidates: list[dict], author: str) -> None:
-    """Re-verifies published_date for every candidate tagged
-    confidence=="missing_volume_recovery" against Hardcover, falling back to
-    a dedicated Apify product lookup when Hardcover has nothing usable --
-    and, unlike backfill_missing_publication_dates above, OVERRIDES an
-    already-present date rather than only filling a blank one.
-
-    missing_volume_recovery candidates come from _reconstruct_series_
-    skeleton's lookahead pass: an LLM reading raw web-search snippets for a
-    single targeted query ("<series> <author> book <N>"), the least
-    reliable source this pipeline has for a hard fact like a release date --
-    unlike Hardcover's/Apify's own structured catalog data, it can state a
-    confident-looking date that's simply wrong, which classify_upcoming then
-    trusts at face value. Live regression (2026-08-24): "Jonathan Hunt
-    Thriller Series" Book 9 ("The Terror Plot") was recovered this way with
-    published_date parsed as 2027-03-06, a full year after its real release
-    (2026-06-11) -- wrongly classifying an already-available book as
-    upcoming. backfill_missing_publication_dates couldn't have caught this:
-    it explicitly skips any candidate that already has *a* date, blank or
-    not being the only thing it checks.
-
-    Deliberately narrow-scoped to missing_volume_recovery candidates only
-    (never the broader candidate pool backfill_missing_publication_dates
-    covers) -- every other source (Hardcover, Google Books, OpenLibrary,
-    Apify's own structured product data, even a plain "targeted" web-search
-    hit) already carries enough of its own structure/corroboration to be
-    trusted at face value; re-verifying every candidate's date on every run
-    would multiply this function's live API calls for no benefit on sources
-    that aren't the problem.
-
-    Mutates each matching candidate dict in place. Silently does nothing
-    (never raises) if HARDCOVER_API_KEY is unset AND Apify isn't enabled --
-    same fail-open convention as every other optional-provider function in
-    this module.
-    """
-    targets = [raw for raw in candidates if raw.get("confidence") == "missing_volume_recovery"]
-    if not targets:
-        return
-
-    hardcover_key = bool(os.environ.get("HARDCOVER_API_KEY", "").strip())
-    apify_budget = ApifyCallBudget(max_calls=MAX_MISSING_VOLUME_DATE_VERIFICATION_LOOKUPS) if apify_enabled() else None
-    if not hardcover_key and apify_budget is None:
-        return
-
-    lookups_done = 0
-    for raw in targets:
-        if lookups_done >= MAX_MISSING_VOLUME_DATE_VERIFICATION_LOOKUPS:
-            break
-        title = str(raw.get("title") or "").strip()
-        if not title:
-            continue
-        lookups_done += 1
-
-        isbn13 = str(raw.get("isbn13") or "").strip()
-        title_key = core_title_key(title)
-        existing_date = str(raw.get("published_date") or "").strip()
-        verified_date: str | None = None
-        verified_isbn13: str | None = None
-
-        if hardcover_key:
-            try:
-                hits = _fetch_hardcover(isbn13 or title)
-            except Exception:
-                hits = []
-            for hit in hits:
-                if isbn13:
-                    if str(hit.get("isbn13") or "").strip() != isbn13:
-                        continue
-                elif core_title_key(str(hit.get("title") or "")) != title_key:
-                    continue
-                if not _author_matches(hit.get("authors") or [], author):
-                    continue
-                hit_date = str(hit.get("published_date") or "").strip()
-                if hit_date:
-                    verified_date = hit_date
-                    if not isbn13:
-                        verified_isbn13 = str(hit.get("isbn13") or "").strip() or None
-                    break
-
-        if verified_date is None and apify_budget is not None:
-            try:
-                apify_hits = fetch_apify_candidates(f"{title} {author}".strip(), None, apify_budget)
-            except Exception:
-                apify_hits = []
-            for hit in apify_hits:
-                if core_title_key(str(hit.get("title") or "")) != title_key:
-                    continue
-                if not _author_matches(hit.get("authors") or [], author):
-                    continue
-                hit_date = str(hit.get("published_date") or "").strip()
-                if hit_date:
-                    verified_date = hit_date
-                    if not isbn13 and not verified_isbn13:
-                        verified_isbn13 = str(hit.get("isbn13") or "").strip() or None
-                    break
-
-        if verified_date and verified_date != existing_date:
-            _log(
-                f"missing_volume_recovery date override for {title!r}: "
-                f"{existing_date or 'unset'!r} -> {verified_date!r}"
-            )
-            raw["published_date"] = verified_date
-        if verified_isbn13 and not isbn13:
-            raw["isbn13"] = verified_isbn13
-
-
-def _web_search_enabled() -> bool:
-    """Frontier web-search coverage (Serper), independent of whether an LLM
-    is available to structure it into candidates -- see
-    _llm_structuring_enabled and discover_candidates_for_series' diagnostic-
-    only mode, which is exactly "web search enabled, LLM structuring not"
-    made explicit and useful instead of just falling through to the
-    original combined-gate behavior of running nothing at all.
-    """
-    return bool(os.environ.get("SERPER_API_KEY", "").strip())
-
-
-def _llm_structuring_enabled() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
-
-
-def _fetch_serper_web_search(
-    query: str, count: int = WEB_SEARCH_MAX_RESULTS, *, telemetry: "DiscoveryTelemetry | None" = None
-) -> list[dict]:
-    """Brave Search's replacement (see SERPER_SEARCH_ENDPOINT's comment). Same
-    return shape as the function this replaced (list of {title,
-    description, url}), so every downstream consumer -- LLM structuring,
-    caching, dedup -- is unaffected by the provider swap.
-    """
-    api_key = os.environ.get("SERPER_API_KEY", "").strip()
-    if not api_key:
-        return []
-
-    headers = {**REQUEST_HEADERS, "X-API-KEY": api_key, "Content-Type": "application/json"}
-    payload = {"q": query, "num": count}
-    started = time.monotonic()
-    try:
-        response = httpx.post(
-            SERPER_SEARCH_ENDPOINT, json=payload, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS
-        )
-        response.raise_for_status()
-    finally:
-        if telemetry is not None:
-            telemetry.record_web_search_call(query=query, duration_s=time.monotonic() - started)
-
-    hits = (response.json() or {}).get("organic") or []
-    results: list[dict] = []
-    for hit in hits:
-        title = str(hit.get("title") or "").strip()
-        url = str(hit.get("link") or "").strip()
-        if not title or not url:
-            continue
-        results.append(
-            {
-                "title": title,
-                "description": str(hit.get("snippet") or "").strip(),
-                "url": url,
-            }
-        )
-    return results
-
-
-_WEB_SEARCH_STRUCTURING_PROMPT = """You are extracting structured book-release data from live web search results.
-
-{scope_line}
-Target author: "{author}"
-
-Below are {count} web search results returned for this search. For EACH result that actually describes a specific book entry by {title_scope} (a released book, an upcoming/pre-order book, or a firm announcement of one) extract its data. Skip results that are: reviews or discussions of a book without any new release info,{skip_other_series} retailer category/search pages, fan wiki summaries of a whole series, news unrelated to a specific book, or fan speculation/discussion about a future book that has no confirmed title yet (e.g. only referred to as "the next book" or "an untitled sequel").
-
-Search results:
-{snippets}
-
-A retailer listing existing (e.g. a Kindle Store page) is NOT proof a book has already been released -- pre-order listings look identical to a snippet with no date. If the snippet/title does not explicitly confirm a release date or that the book is already out, set "is_upcoming" to true and "published_date" to null rather than guessing it's already available -- it's far more useful to flag a book as "coming soon, exact date unconfirmed" than to wrongly tell a reader something is ready to read.
-
-Respond with ONLY a JSON array (no prose, no markdown code fences). Each element must have this shape:
-{{"result_index": <int, the [N] index above>, "title": <string, the clean book title without the series name or a "Book N" suffix>, "series_name": <string or null, the name of the series this book belongs to, if any -- null if it's a standalone>, "book_number": <int or null, this book's position in its series if stated or clearly implied>, "author_names": [<string>, ...], "published_date": <string, "YYYY-MM-DD"/"YYYY-MM"/"YYYY" if EXPLICITLY stated in the snippet, else null>, "is_upcoming": <bool, see rule above>, "isbn13": <string or null>}}
-
-If none of the results are genuine matches, respond with exactly: []"""
-
-
-def _to_int_or_none(value) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return None
-
-
-def _integral_or_none(value) -> int | None:
-    """Deliberately NOT _to_int_or_none: that one *truncates* (3.5 -> 3),
-    this one rejects anything non-integral (3.5 -> None). A 0.5/3.5-style
-    companion novella is real content but is not volume 3, and treating it
-    as one is exactly the confusion _fetch_hardcover keeps series_position
-    as a float to avoid (see its own comment). Numeric strings parse
-    ("3" and "3.0" both -> 3) so a provider that ever hands back a string
-    hint degrades gracefully rather than being silently skipped.
-    """
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return int(number) if number.is_integer() else None
-
-
-def _record_drop_diagnostic(
-    stage: str,
-    candidate_identity: dict | None,
-    reason: str,
-    diagnostics_list: list[dict] | None,
-) -> None:
-    """Phase 3.5 of agentic discovery, PURE SHADOW MODE: records that a
-    candidate/provider result was silently dropped and why, at points that
-    previously discarded it with no trace at all (a JSON parse failure
-    voiding the whole web provider, a cross-series contamination filter, an
-    LLM reconciliation exclusion, or series_agent.py's own already-known
-    suppression). A no-op whenever diagnostics_list is None, so every
-    existing caller that doesn't pass one stays completely unaffected --
-    this can only ever add entries to a list a caller explicitly opted
-    into, never change what gets accepted/rejected.
-    """
-    if diagnostics_list is None:
-        return
-    diagnostics_list.append(
-        {
-            "stage": stage,
-            "candidate_identity": candidate_identity,
-            "reason": reason,
-        }
-    )
-
-
-def _structure_web_results_with_llm(
-    series_name: str | None,
-    author: str,
-    raw_results: list[dict],
-    *,
-    diagnostics: list[dict] | None = None,
-    telemetry: "DiscoveryTelemetry | None" = None,
-) -> list[dict]:
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not api_key or not raw_results:
-        return []
-
-    import anthropic
-
-    snippets = "\n\n".join(
-        f"[{i}] Title: {r['title']}\nSnippet: {r['description']}\nURL: {r['url']}"
-        for i, r in enumerate(raw_results)
-    )
-    series_name = str(series_name or "").strip()
-    if series_name:
-        # Scoped to one specific series (the normal Check Now case) -- other
-        # series by the same author are noise here, so explicitly excluded.
-        scope_line = f'Target series: "{series_name}"'
-        skip_other_series = " unrelated books by other authors, other series by the same author,"
-        title_scope = "this series by this author"
-    else:
-        # Author-wide discovery has no single series to scope to -- every
-        # series and standalone by this author is in scope, so the "other
-        # series by the same author" exclusion from the scoped case would be
-        # wrong here and is dropped.
-        scope_line = "Target: ANY book by this author, across all of their series and standalone works."
-        skip_other_series = " unrelated books by other authors,"
-        title_scope = "this author"
-
-    prompt = _WEB_SEARCH_STRUCTURING_PROMPT.format(
-        scope_line=scope_line,
-        author=author,
-        count=len(raw_results),
-        snippets=snippets,
-        skip_other_series=skip_other_series,
-        title_scope=title_scope,
-    )
-
-    client = anthropic.Anthropic(api_key=api_key)
-    started = time.monotonic()
-    response = None
-    try:
-        response = client.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=2000,
-            # Deterministic extraction task (pull book_number/title/etc out of
-            # unambiguous snippet text), not generative writing -- temperature=0
-            # avoids run-to-run variance that otherwise intermittently drops a
-            # correctly-worded candidate (see discovery_catchup_architecture_spec.md
-            # recall-gap diagnostic).
-            temperature=0,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=WEB_SEARCH_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:  # CR-2: a failed structuring call must degrade to
-        # "no candidates from this pass" like a JSON-parse failure below,
-        # not raise AttributeError from `response` staying None on the next
-        # line -- see _reconcile_candidates_with_llm for the same pattern.
-        _log(f"LLM web-search structuring call failed: {exc}")
-        _record_drop_diagnostic(
-            "web_structuring",
-            {"title": None, "isbn13": None, "series_number": None},
-            "llm_call_failure",
-            diagnostics,
-        )
-        return []
-    finally:
-        if telemetry is not None:
-            usage = getattr(response, "usage", None)
-            telemetry.record_llm_call(
-                duration_s=time.monotonic() - started,
-                tokens_in=getattr(usage, "input_tokens", 0) or 0,
-                tokens_out=getattr(usage, "output_tokens", 0) or 0,
-            )
-    text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text").strip()
-
-    # The prompt asks for raw JSON, but strip markdown fences defensively in
-    # case the model wraps its answer in one anyway.
-    if text.startswith("```"):
-        text = text.strip("`").strip()
-        if text.lower().startswith("json"):
-            text = text[4:].strip()
-
-    try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        _record_drop_diagnostic(
-            "web_structuring",
-            {"title": None, "isbn13": None, "series_number": None},
-            "json_parse_failure",
-            diagnostics,
-        )
-        return []
-    return parsed if isinstance(parsed, list) else []
-
-
-_SERIES_OVERVIEW_PROMPT = """You are writing a short, spoiler-light overview of a book series for a reader deciding whether to start it.
-
-Series: "{series_name}" by {author}
-
-Below are the descriptions of books discovered in this series so far. Use ONLY this information -- do not invent plot details, characters, or facts not present in the text below.
-
-{book_descriptions}
-
-Write 2-4 sentences covering: the general premise/setting/genre, and what kind of reader would enjoy it. Do not describe it book-by-book or mention book numbers. Do not add a title or heading. Respond with ONLY the overview text, no prose before or after it."""
-
-
-def generate_series_overview(series_name: str, author: str, books: list[dict]) -> str | None:
-    """On-demand only (called from a "Series Overview" button click, never
-    during discovery itself) -- synthesizes a short premise summary for a
-    series the user doesn't own yet, from descriptions already fetched
-    during discovery. Reuses the same Anthropic client/model as the
-    web-search structuring pass rather than adding new LLM infrastructure.
-
-    Deliberately does not re-fetch anything: the caller passes in whatever
-    descriptions the discovery pass already returned, keeping this to a
-    single LLM call with no additional catalog API cost.
-    """
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not api_key:
-        return None
-
-    usable_books = [b for b in books if str(b.get("description") or "").strip()]
-    if not usable_books:
-        return None
-
-    import anthropic
-
-    book_descriptions = "\n\n".join(
-        f"- {str(b.get('title') or 'Untitled').strip()}: {str(b.get('description') or '').strip()}"
-        for b in usable_books
-    )
-    prompt = _SERIES_OVERVIEW_PROMPT.format(
-        series_name=series_name or "this series",
-        author=author or "this author",
-        book_descriptions=book_descriptions,
-    )
-
-    client = anthropic.Anthropic(api_key=api_key)
-    try:
-        response = client.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=400,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=WEB_SEARCH_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:  # CR-2: on-demand, best-effort call -- a failure
-        # here must surface as "no overview available" (this function's own
-        # documented "not during discovery" contract), not a 500 from the
-        # "Series Overview" button.
-        _log(f"LLM series overview call failed: {exc}")
-        return None
-    text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text").strip()
-    return text or None
-
-
-def _refine_undated_web_search_results_batch(
-    entries_to_refine: list[tuple[int, dict]],
-    series_name: str,
-    author: str,
-    *,
-    telemetry: "DiscoveryTelemetry | None" = None,
-    cache: "DiscoveryCache | None" = None,
-    scope_type: str = "series",
-) -> dict[int, dict]:
-    """Best-effort second look for candidates the first pass couldn't date:
-    fires one dedicated "<title> release date" web-search query per candidate
-    (query text must stay per-candidate -- a shared/merged query text would
-    blur which hits belong to which title), then structures ALL of those
-    queries' combined raw results in a single LLM call rather than one call
-    per candidate -- mirrors the targeted pass's own multi-query-then-
-    single-structure shape and cuts refinement's LLM-call count from one
-    per undated candidate down to one per batch (bounded by
-    WEB_SEARCH_DATE_REFINEMENT_MAX candidates either way).
-
-    Both cache layers are shared with _fetch_web_search via
-    _structure_with_verdict_cache: this query text is often repeated
-    verbatim across rounds/passes for the same still-undated candidate
-    (e.g. re-checking an upcoming book that hasn't been dated yet), so
-    leaving it uncached meant paying a fresh web-search+LLM call for the
-    exact same "<title> release date" search every single time it recurred.
-
-    Correlation guardrail: a structured item is only ever applied to the
-    one candidate whose OWN query actually returned that item's URL, AND
-    whose title matches via core_title_key -- never "closest title in the
-    whole batch". Handing the LLM one large, mixed-title batch in a single
-    call is exactly the shape of prompt that caused the missing-volume
-    recall-gap bug (architecture spec #8: a big noisy batch can misclassify
-    or drop an individual item); requiring both source-query provenance and
-    a title match keeps one candidate's resolved date from ever being
-    misattributed to a different candidate. Any candidate this can't
-    cleanly resolve a date for is simply absent from the returned dict --
-    callers must leave that candidate's original entry untouched, not
-    guess.
-
-    Returns {result_index: refined_entry}, where result_index is each
-    input tuple's own first element (the caller's index into its own
-    results list) -- not related to the LLM's own per-call result_index.
-    """
-    refined: dict[int, dict] = {}
-    per_candidate_urls: dict[int, set[str]] = {}
-    all_raw: list[dict] = []
-    seen_urls: set[str] = set()
-
-    # Same cache-first-then-bounded-parallel shape as _fetch_web_search's
-    # own query loop: resolve cache hits synchronously, fire only genuine
-    # misses concurrently (capped -- WEB_SEARCH_DATE_REFINEMENT_MAX is small
-    # already, but no reason to serialize what doesn't need to be).
-    candidate_queries: dict[int, str] = {}
-    raw_by_index: dict[int, list[dict]] = {}
-    queries_to_fetch: list[tuple[int, str]] = []
-    for index, entry in entries_to_refine:
-        title = str(entry.get("title") or "").strip()
-        if not title:
-            continue
-        # Live regression: quoting just the bare title as an exact phrase
-        # (an earlier version of this query) gets swamped for a common
-        # title -- "Here We Go Again" is also a Demi Lovato song/album, a
-        # movie, a TV series, etc., none of which are this book. Adding the
-        # series name and author as unquoted extra terms (soft ranking
-        # signals, not exact-phrase requirements) reliably surfaced the
-        # actual author's release-announcement blog post instead.
-        query = " ".join(part for part in (title, series_name, author, "release date") if part)
-        candidate_queries[index] = query
-
-        cache_hit = cache.get_provider_fetch("web_search", query) if cache is not None else CACHE_MISS
-        if cache_hit is not CACHE_MISS:
-            raw_by_index[index] = cache_hit
-        else:
-            queries_to_fetch.append((index, query))
-
-    if queries_to_fetch:
-        max_workers = min(len(queries_to_fetch), WEB_SEARCH_MAX_PARALLEL_WORKERS)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_index = {
-                executor.submit(_fetch_serper_web_search, query, telemetry=telemetry): index
-                for index, query in queries_to_fetch
-            }
-            for future, index in future_to_index.items():
-                try:
-                    raw = future.result()
-                except Exception:
-                    raw = []
-                raw_by_index[index] = raw
-                if cache is not None:
-                    cache.set_provider_fetch("web_search", candidate_queries[index], raw)
-
-    for index, entry in entries_to_refine:
-        raw = raw_by_index.get(index, [])
-        per_candidate_urls[index] = {item["url"] for item in raw}
-        for item in raw:
-            if item["url"] in seen_urls:
-                continue
-            seen_urls.add(item["url"])
-            all_raw.append(item)
-
-    if not all_raw:
-        return refined
-
-    try:
-        verdict_by_url = _structure_with_verdict_cache(
-            all_raw, series_name, author, telemetry=telemetry, cache=cache, scope_type=scope_type
-        )
-    except Exception:
-        return refined
-
-    for index, entry in entries_to_refine:
-        candidate_key = core_title_key(str(entry.get("title") or "")) or normalize_text(str(entry.get("title") or ""))
-        if not candidate_key:
-            continue
-        for url in per_candidate_urls.get(index, ()):
-            item = verdict_by_url.get(url)
-            if not item:
-                continue
-            item_key = core_title_key(str(item.get("title") or "")) or normalize_text(str(item.get("title") or ""))
-            if item_key != candidate_key:
-                continue
-            published_date = str(item.get("published_date") or "").strip()
-            if not published_date:
-                continue
-            refined_entry = dict(entry)
-            refined_entry["published_date"] = published_date
-            refined_entry["upcoming_hint"] = bool(item.get("is_upcoming"))
-            refined[index] = refined_entry
-            break
-
-    return refined
-
-
-def _structure_with_verdict_cache(
-    raw_results: list[dict],
-    series_name: str | None,
-    author: str,
-    *,
-    diagnostics: list[dict] | None = None,
-    telemetry: "DiscoveryTelemetry | None" = None,
-    cache: "DiscoveryCache | None" = None,
-    scope_type: str = "series",
-    bypass_cached_rejection: bool = False,
-) -> dict[str, dict]:
-    """Layer B LLM-verdict cache (see services/discovery_cache.py): splits
-    raw_results into what's already been sent to the LLM this job
-    (cached_by_url, accepted-or-None-for-rejected) vs. what still needs a
-    fresh call (uncached_raw). result_index from the LLM is resolved against
-    uncached_raw -- the exact subset actually sent -- then immediately
-    converted to a URL-keyed map so nothing downstream relies on positional
-    indices into raw_results at all. Returns only *accepted* verdicts, keyed
-    by URL -- a rejected/no-verdict URL is simply absent from the result.
-
-    `bypass_cached_rejection` (used by the missing-volume interior-gap pass,
-    see _fetch_web_search): when True, a cached *rejection* is treated as a
-    miss and re-sent to the LLM, while a cached *acceptance* is still
-    trusted. See discovery_catchup_architecture_spec.md's recall-gap
-    diagnostic for why: the broad targeted/lookahead pass's large batch can
-    wrongly reject a book-number-bearing URL it would correctly accept in
-    isolation, and that wrong rejection getting cached then silently
-    poisons a later, more focused pass's dedicated retry of the same URL.
-
-    Shared by _fetch_web_search (targeted/lookahead/missing-volume passes)
-    and _refine_undated_web_search_results_batch (date-refinement queries)
-    so both get identical caching semantics instead of refinement bypassing
-    the cache entirely.
-    """
-    if not raw_results:
-        return {}
-
-    # FIX-LB-KEY: this cache key used to be built with _normalize_query_text
-    # (the same normalizer Layer A's provider-fetch cache uses for raw query
-    # text), which doesn't match the normalizer used everywhere else a
-    # series' identity is compared/deduped (services/identity.py's
-    # _normalize_series_name_for_identity -- e.g. it strips a trailing
-    # "series"/"book series" suffix, which _normalize_query_text does not).
-    # Two spellings of the same series that only differ in a way
-    # _normalize_series_name_for_identity treats as identical but
-    # _normalize_query_text does not would silently miss each other's
-    # cached verdicts within the same job. Low-risk to change:
-    # DiscoveryCache is created fresh per Check Now job and discarded at job
-    # end (see services/discovery_cache.py's own docstring), so this only
-    # affects within-job cache hit/miss consistency, not any persisted key.
-    series_name_key = _normalize_series_name_for_identity(series_name) if series_name else ""
-    cached_by_url: dict[str, dict | None] = {}
-    uncached_raw: list[dict] = []
-    for item in raw_results:
-        if cache is None:
-            uncached_raw.append(item)
-            continue
-        verdict = cache.get_llm_verdict(scope_type, series_name_key, item["url"])
-        if verdict is CACHE_MISS or (bypass_cached_rejection and verdict is None):
-            uncached_raw.append(item)
-        else:
-            cached_by_url[item["url"]] = verdict
-
-    fresh_structured = (
-        _structure_web_results_with_llm(series_name, author, uncached_raw, diagnostics=diagnostics, telemetry=telemetry)
-        if uncached_raw
-        else []
-    )
-
-    fresh_by_url: dict[str, dict] = {}
-    accepted_urls: set[str] = set()
-    for item in fresh_structured:
-        if not isinstance(item, dict):
-            continue
-        try:
-            source = uncached_raw[int(item.get("result_index"))]
-        except (TypeError, ValueError, IndexError):
-            continue
-        fresh_by_url[source["url"]] = item
-        accepted_urls.add(source["url"])
-        if cache is not None:
-            cache.set_llm_verdict(scope_type, series_name_key, source["url"], item)
-
-    if cache is not None:
-        for item in uncached_raw:
-            if item["url"] not in accepted_urls:
-                # Negative sentinel: this URL was checked and excluded --
-                # never re-sent to the LLM again within this job (unless a
-                # later bypass_cached_rejection=True caller overrides it).
-                cache.set_llm_verdict(scope_type, series_name_key, item["url"], None)
-
-    return {**{u: v for u, v in cached_by_url.items() if v is not None}, **fresh_by_url}
-
-
-# Domains checked to recognize a structured web-search result as an Amazon
-# product page -- see _fetch_apify_discovery. Kept intentionally small/
-# literal (substring match, not a full URL parser) since these are already-
-# fetched, already-LLM-accepted source_url values, not untrusted input.
-_AMAZON_URL_DOMAINS = ("amazon.com", "amazon.co.uk", "amazon.ca", "amazon.de", "amazon.co.jp", "amazon.in")
-
-
-def _fetch_apify_discovery(
-    query: str,
-    structured_web_results: list[dict],
-    budget: "ApifyCallBudget | None",
-) -> list[dict]:
-    """Sequential Apify sub-flow attached to the Serper+Anthropic web-search
-    pass (see _fetch_web_search) -- NOT one of the parallel providers in
-    _fetch_all_providers_parallel. Phase 1 scope (Check Now only, per the
-    Apify integration design chat's consensus):
-
-    - If the already-LLM-structured web-search results include an Amazon
-      product URL, run Apify's single actor directly on that URL -- top 1
-      only (see the module docstring on symmetric fan-out caps).
-    - Otherwise, run the same actor on a search-results URL built from
-      `query` instead -- see apify_provider.py's module docstring for why
-      one actor call now covers both cases (single-actor design, replacing
-      an earlier two-actor search-then-product design).
-
-    Returns [] with no error whenever Apify isn't configured/budget is
-    exhausted/the actor call fails -- see fetch_apify_candidates.
-    """
-    if budget is None or not apify_enabled():
-        return []
-
-    amazon_urls = [
-        str(result["source_url"]).strip()
-        for result in structured_web_results
-        if result.get("source_url")
-        and any(domain in str(result["source_url"]).lower() for domain in _AMAZON_URL_DOMAINS)
-    ]
-    # Top 1 only, even when multiple Amazon URLs are already present in the
-    # structured web-search results -- worst-case Apify usage per pass
-    # stays at exactly one actor call either way (direct-URL lookup or
-    # built search-results URL), per apify_provider.py's single-actor
-    # design.
-    top_amazon_urls = amazon_urls[:1]
-
-    try:
-        return fetch_apify_candidates(query, top_amazon_urls or None, budget)
-    except Exception as exc:  # Apify failures must never break web-search's own results.
-        _log(f"apify sub-flow failed: {exc}")
-        return []
-
-
-def _promote_web_search_health_diagnostics(
-    diagnostics_list: list[dict],
-    provider_failures_list: list[dict],
-    pass_label: str,
-    provider_name: str,
-) -> None:
-    """Promotes _fetch_web_search's "web_search_provider_unhealthy" markers
-    (recorded when Serper's HTTP layer failed or returned zero raw hits,
-    even though Apify's fallback may have let the pass still return
-    candidates -- see _fetch_web_search) into a real provider_failures
-    entry, called right after each pass's fetch in
-    discover_candidates_for_series.
-
-    This is the one place Serper's health becomes visible again: once
-    _fetch_web_search stops raising in this scenario (the whole point of
-    the fallback), _fetch_all_providers_parallel's own
-    `except Exception as exc: failures[provider] = exc` bookkeeping never
-    fires, so nothing would otherwise land in provider_failures even
-    though Serper genuinely failed. provider_failures is what actually
-    surfaces in the Check Now debug summary (see
-    services/discovery_logging.py) and the API response, so recording the
-    marker via a plain _log() line alone would not be enough.
-
-    Removes the promoted markers from diagnostics_list in place -- they're
-    a provider-health signal, not an actual dropped candidate, so they
-    must not also surface as a fake entry in compute_drop_explanations's
-    per-candidate drop list.
-    """
-    remaining: list[dict] = []
-    for entry in diagnostics_list:
-        if entry.get("type") == "web_search_provider_unhealthy" and entry.get("pass_label") == pass_label:
-            provider_failures_list.append(
-                {
-                    "provider": provider_name,
-                    "error": entry.get("error"),
-                    "apify_fallback_used": True,
-                }
-            )
-        else:
-            remaining.append(entry)
-    diagnostics_list[:] = remaining
-
-
-def _fetch_web_search(
-    queries: list[str],
-    series_name: str | None,
-    author: str,
-    *,
-    diagnostics: list[dict] | None = None,
-    telemetry: "DiscoveryTelemetry | None" = None,
-    cache: "DiscoveryCache | None" = None,
-    scope_type: str = "series",
-    pass_label: str = "web_search",
-    apify_budget: "ApifyCallBudget | None" = None,
-) -> list[dict]:
-    raw_results: list[dict] = []
-    seen_urls: set[str] = set()
-    query_errors: list[Exception] = []
-    with maybe_pass_scope(telemetry, pass_label):
-        # Cache lookups are cheap and local -- resolved synchronously first
-        # so only genuine cache misses ever reach the network. Only those
-        # misses are fired concurrently, bounded by a small fixed worker
-        # count (not one thread per query): an unbounded pool would fire
-        # every lookahead query (up to WEB_SEARCH_LOOKAHEAD_BOOKS + 1 of
-        # them) in the same instant, risking provider rate-limiting that
-        # never happened when these were sequential.
-        items_by_position: dict[int, list[dict]] = {}
-        queries_to_fetch: list[tuple[int, str]] = []
-        for position, query in enumerate(queries):
-            cache_hit = cache.get_provider_fetch("web_search", query) if cache is not None else CACHE_MISS
-            if cache_hit is not CACHE_MISS:
-                items_by_position[position] = cache_hit
-            else:
-                queries_to_fetch.append((position, query))
-
-        if queries_to_fetch:
-            max_workers = min(len(queries_to_fetch), WEB_SEARCH_MAX_PARALLEL_WORKERS)
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_position = {
-                    executor.submit(_fetch_serper_web_search, query, telemetry=telemetry): position
-                    for position, query in queries_to_fetch
-                }
-                for future, position in future_to_position.items():
-                    try:
-                        items = future.result()
-                    except Exception as exc:  # one query's transient failure shouldn't sink the others
-                        query_errors.append(exc)
-                        continue
-                    items_by_position[position] = items
-                    if cache is not None:
-                        cache.set_provider_fetch("web_search", queries[position], items)
-
-        # Results are reassembled in original query order (not completion
-        # order) so URL dedup's "first query wins" behavior is unaffected
-        # by which concurrent fetch happened to finish first.
-        for position in range(len(queries)):
-            for item in items_by_position.get(position, []):
-                if item["url"] in seen_urls:
-                    continue
-                seen_urls.add(item["url"])
-                raw_results.append(item)
-
-        if not raw_results:
-            # Previously this either re-raised (all queries errored, e.g. a
-            # Serper 403) or returned [] silently (all queries succeeded but
-            # found zero organic hits) -- in both cases execution never
-            # reached the Apify sub-flow at the bottom of this function (a
-            # raise skips the rest of the function entirely; so does an
-            # early return), so a Serper outage/empty-result pass could
-            # never be substituted by Apify even though Apify was
-            # independently configured and reachable. Per the Apify
-            # integration design chat's consensus, both cases now instead
-            # fall through to the Apify fallback below -- recorded into
-            # `diagnostics` rather than raised, so
-            # discover_candidates_for_series can still surface Serper's
-            # unhealthy status in provider_failures even when Apify
-            # successfully substitutes (see the promotion logic there).
-            # Deliberately NOT extended to "raw hits came back but the LLM
-            # structured zero real candidates out of them" -- that's a
-            # softer, different failure mode (the LLM deciding nothing here
-            # is a real book), where an independent Amazon search is more
-            # likely to add noise than signal; that case still returns []
-            # further down, unchanged.
-            error_text = (
-                str(query_errors[0])
-                if query_errors and len(query_errors) == len(queries)
-                else "no results"
-            )
-            if diagnostics is not None:
-                diagnostics.append(
-                    {
-                        "type": "web_search_provider_unhealthy",
-                        "pass_label": pass_label,
-                        "error": error_text,
-                    }
-                )
-            return _fetch_apify_discovery(queries[0] if queries else "", [], apify_budget)
-
-        # See _structure_with_verdict_cache's own docstring for the Layer B
-        # cache-splicing mechanics. bypass_cached_rejection is scoped to the
-        # missing-volume interior-gap pass -- see that function's docstring
-        # for the recall-gap rationale.
-        verdict_by_url = _structure_with_verdict_cache(
-            raw_results,
-            series_name,
-            author,
-            diagnostics=diagnostics,
-            telemetry=telemetry,
-            cache=cache,
-            scope_type=scope_type,
-            bypass_cached_rejection=(pass_label == "missing_volume"),
-        )
-
-        # Reassemble in raw_results' original order (cached-accepted +
-        # fresh-accepted), never "fresh then cached" -- keeps
-        # _first_present_field-style precedence logic identical whether a
-        # given item came from cache or a fresh LLM call this round.
-        structured_with_source = [
-            (verdict_by_url[source["url"]], source) for source in raw_results if source["url"] in verdict_by_url
-        ]
-
-    results: list[dict] = []
-    for item, source in structured_with_source:
-        title = str(item.get("title") or "").strip()
-        if not title:
-            continue
-
-        book_number = item.get("book_number")
-        try:
-            # CR-3: float, not int -- a fractional position (0.5/0.7-style
-            # companion/novella entries) from LLM-structured web results
-            # used to get silently truncated to an int (or to None, if
-            # truncation produced 0 where the caller only checked truthiness
-            # elsewhere), while Hardcover's own hint keeps the float (see
-            # _fetch_hardcover's series_position above for the identical
-            # rationale) -- an asymmetric loss of legitimate fractional
-            # entries depending on which provider happened to surface them.
-            book_number = float(book_number) if book_number is not None else None
-        except (TypeError, ValueError):
-            book_number = None
-
-        author_names = item.get("author_names")
-        if not isinstance(author_names, list) or not author_names:
-            author_names = [author]
-
-        published_date = str(item.get("published_date") or "").strip()
-        # Belt-and-suspenders on top of the prompt's own instruction: a
-        # retailer/store listing existing is not proof a book is actually
-        # out yet (pre-orders look identical), so if the model didn't
-        # extract an explicit date, treat it as not-yet-confirmed-available
-        # regardless of what it set "is_upcoming" to -- safer to under- than
-        # over-claim availability here.
-        upcoming_hint = bool(item.get("is_upcoming")) or not published_date
-
-        results.append(
-            {
-                "source": "web_search",
-                "source_id": source["url"],
-                "title": title,
-                "authors": [str(a) for a in author_names if str(a).strip()],
-                "published_date": published_date,
-                "description": source.get("description"),
-                "isbn13": str(item.get("isbn13") or "").strip() or None,
-                "source_url": source["url"],
-                "language": "",
-                "series_number_hint": book_number,
-                "upcoming_hint": upcoming_hint,
-                # The LLM's own guess at which series (if any) this result
-                # belongs to -- used as a per-candidate series-name signal by
-                # discover_candidates_for_author (see series_name_hint on the
-                # Hardcover provider for the same purpose).
-                "series_name_hint": str(item.get("series_name") or "").strip() or None,
-            }
-        )
-
-    with maybe_pass_scope(telemetry, f"{pass_label}_refinement"):
-        entries_to_refine: list[tuple[int, dict]] = []
-        for index, entry in enumerate(results):
-            if entry.get("published_date"):
-                continue
-            if len(entries_to_refine) >= WEB_SEARCH_DATE_REFINEMENT_MAX:
-                break
-            entries_to_refine.append((index, entry))
-
-        refined_by_index = _refine_undated_web_search_results_batch(
-            entries_to_refine, series_name, author, telemetry=telemetry, cache=cache, scope_type=scope_type
-        )
-        for index, refined_entry in refined_by_index.items():
-            results[index] = refined_entry
-
-    # Apify sub-flow: sequential, attached to this web-search pass rather
-    # than run as its own parallel provider (see _fetch_apify_discovery).
-    # Prepended -- not appended -- to `results` so Apify candidates sort
-    # ahead of web_search's own LLM-parsed-snippet candidates inside
-    # _fuse_and_score_candidates' ordered_raw list, which picks
-    # members[0] as a duplicate group's primary/backfill-source record by
-    # position, not by _PROVIDER_CONFIDENCE_WEIGHT -- Apify's structured
-    # Amazon-page extraction is trusted over an LLM's guess at unstructured
-    # search-snippet text, and that trust only takes effect here if it
-    # appears first.
-    #
-    # Skipped entirely when `results` is empty -- raw hits DID come back
-    # (otherwise the early-return fallback above would have fired
-    # instead), but the LLM structured zero real candidates out of them.
-    # That's the LLM legitimately deciding nothing here is a real book, a
-    # softer/different failure mode than the raw fetch itself producing
-    # nothing -- an independent Apify search on the same query is more
-    # likely to introduce noise than signal here, so this deliberately
-    # does NOT fall back the way an empty/failed raw fetch does (see the
-    # Apify integration design chat's consensus).
-    if not results:
-        return results
-    apify_candidates = _fetch_apify_discovery(queries[0] if queries else "", results, apify_budget)
-    return apify_candidates + results
-
-
-def _filter_and_merge(
-    raw_results: list[dict],
-    author: str,
-    exclude_title_keys: set[str],
-    confidence: str,
-    series_name: str | None = None,
-) -> list[dict]:
-    merged: list[dict] = []
-    seen_keys: set[str] = set()
-    for raw in raw_results:
-        if not _author_matches(raw.get("authors") or [], author):
-            continue
-        title = str(raw.get("title") or "").strip()
-        if not title:
-            continue
-        if looks_like_non_new_release(title):
-            continue
-        if looks_like_placeholder_title(title):
-            continue
-        if not is_english_or_unknown(raw.get("language")):
-            continue
-
-        isbn13 = str(raw.get("isbn13") or "").strip()
-        has_number_hint = bool(raw.get("series_number_hint")) or bool(
-            infer_number_from_title(title, series_name)
-        )
-        # Google Books/OpenLibrary never carry a structured series field, so
-        # for candidates missing one, fall back to a narrow title-text
-        # pattern (see infer_series_hint_from_title_text) before giving up.
-        series_name_hint = raw.get("series_name_hint") or infer_series_hint_from_title_text(title)
-        # discover_candidates_for_series always knows the one series it's
-        # checking, so that fixed name is authoritative here. Author-wide
-        # discovery has no such fixed name (series_name is None) and instead
-        # falls back to each individual candidate's own guessed series name
-        # (from Hardcover's index, the web-search LLM pass, or the title-text
-        # fallback above) so the same stub-listing check still applies
-        # per-candidate.
-        effective_series_name = series_name or series_name_hint
-        if looks_like_series_index_entry(
-            title, effective_series_name, isbn13, has_number_hint
-        ) or _title_is_series_variant(title, effective_series_name, isbn13, raw.get("series_number_hint")):
-            continue
-
-        title_key = core_title_key(title)
-        if title_key and title_key in exclude_title_keys:
-            continue
-
-        dedupe_key = isbn13 or title_key or normalize_text(title)
-        if dedupe_key in seen_keys:
-            continue
-        seen_keys.add(dedupe_key)
-        merged.append(
-            {
-                **raw,
-                # Preserve a candidate's own already-assigned confidence
-                # (present when `raw` came from re-merging previously-fused
-                # UnifiedCandidates, e.g. series_agent.py's missing-volume
-                # skeleton reconstruction -- see _unified_candidate_to_raw_dict)
-                # rather than unconditionally overwriting it with this call's
-                # single blanket `confidence` argument. Fresh provider hits
-                # (the normal targeted/fallback fetch passes) never carry a
-                # "confidence" key yet at this point, so they still get
-                # stamped with `confidence` exactly as before -- this only
-                # changes behavior for candidates that already have one.
-                # Without this, re-merging a series' full candidate set after
-                # skeleton recovery collapsed EVERY candidate's confidence
-                # (including originals from a clean "targeted" hit) down to
-                # a single "author_fallback" whenever fallback triggered at
-                # all, which silently defeated series_agent.py's
-                # targeted_with_number acceptance check for every candidate
-                # in a series whose titles don't textually reference the
-                # series name (regression: Georgia Wagner's "Jonathan Hunt
-                # Thriller Series" -- author-fallback always triggers because
-                # providers under-index it, so real sequels like "Desert
-                # Protocol" and "The Levee Ghosts" never had any other way to
-                # clear the gate and "Check Now" always reported zero new
-                # books despite discovery correctly finding them).
-                "confidence": raw.get("confidence") or confidence,
-                "series_name_hint": series_name_hint,
-                "series_total_hint": raw.get("series_total_hint"),
-            }
-        )
-    return merged
-
-
-def _fetch_all_providers_parallel(
-    query_author: str,
-    series_name: str | None,
-    targeted_query_text: str,
-    highest_owned_book_number: int | None,
-    *,
-    author: str,
-    openlibrary_query: str | None = None,
-    web_search_queries: list[str] | None = None,
-    enable_web_search: bool = True,
-    diagnostics: list[dict] | None = None,
-    telemetry: "DiscoveryTelemetry | None" = None,
-    cache: "DiscoveryCache | None" = None,
-    pass_label: str = "targeted",
-    apify_budget: "ApifyCallBudget | None" = None,
-) -> dict:
-    """Fetch Google Books, OpenLibrary, Hardcover, and (optionally) the
-    web-search+LLM provider concurrently instead of one after another.
-
-    This only changes *how* the four provider calls are issued (threaded
-    instead of sequential) -- it does not change what gets sent to each
-    provider, nor how each provider's own errors/timeouts are handled.
-    Every _fetch_* function keeps its own REQUEST_TIMEOUT_SECONDS/
-    WEB_SEARCH_TIMEOUT_SECONDS and lets its own exceptions propagate exactly
-    as before; this function just catches whichever one propagates from
-    each thread so a single slow/failing provider can't block -- or crash --
-    the others, mirroring the previous per-provider try/except blocks.
-
-    Default query construction below reproduces
-    discover_candidates_for_series's targeted (primary) pass exactly:
-    Google gets `"<series>" inauthor:"<author>"` (or plain `inauthor:` with
-    no series name), OpenLibrary/Hardcover both get the bare
-    `targeted_query_text`, and the web-search query list is the
-    lookahead-aware "<series> book <N>" set gated on highest_owned_book_number.
-    Callers whose query shape genuinely differs -- the author-bibliography
-    fallback pass and discover_candidates_for_author's plain author-wide
-    sweep, both of which use OpenLibrary's `author:"<name>"` field query and
-    (for the latter) a different web-search query -- pass
-    openlibrary_query/web_search_queries explicitly to reproduce their own
-    existing query text unchanged; the fallback pass also passes
-    enable_web_search=False since it never queries web search at all.
-
-    Returns {"google": [...], "openlibrary": [...], "hardcover": [...],
-    "web": [...]} exactly like the four raw lists the sequential calls used
-    to produce, plus "_failures": {provider_key: exception} for any provider
-    whose call failed -- callers use that to build the same
-    provider_failures/any_provider_succeeded bookkeeping they always have,
-    unchanged.
-
-    PP-2/PP-3: each provider is now called through a `provider_protocol.py`
-    adapter (`GoogleBooksProvider`/`OpenLibraryProvider`/`HardcoverProvider`/
-    `WebDiscoveryProvider`), so none of the four `_fetch_*` calls below can
-    raise out of this function any more -- every adapter's `.fetch()` always
-    returns a `ProviderFetchResult(items, ok, error)`; failure is signaled by
-    `ok=False`, not by a propagated exception. This function still builds
-    the same `results`/`failures` dicts as before (`results[provider]` stays
-    a plain `list[dict]` via `.to_legacy_dict()`, `failures[provider]` stays
-    an object `str()`-able into the same message), so every existing
-    downstream consumer (`_fuse_and_score_candidates`,
-    `discover_candidates_for_series`'s provider_failures bookkeeping) is
-    unaffected by this internal change. The outer `try/except` around
-    `future.result()` is kept anyway as a belt-and-suspenders guard against a
-    bug *inside* an adapter itself, not because a provider is expected to
-    raise through it.
-    """
-    google_query = f'"{series_name}" inauthor:"{query_author}"' if series_name else f'inauthor:"{query_author}"'
-    resolved_openlibrary_query = openlibrary_query if openlibrary_query is not None else targeted_query_text
-    hardcover_query = targeted_query_text
-
-    if web_search_queries is not None:
-        resolved_web_queries = web_search_queries
-    else:
-        resolved_web_queries = [targeted_query_text] if targeted_query_text else []
-        if series_name and highest_owned_book_number:
-            lookahead_author = f" {query_author}" if query_author else ""
-            resolved_web_queries += [
-                f'"{series_name}"{lookahead_author} book {number}'
-                for number in range(
-                    highest_owned_book_number + 1, highest_owned_book_number + 1 + WEB_SEARCH_LOOKAHEAD_BOOKS
-                )
-            ]
-
-    run_web_search = bool(
-        enable_web_search and resolved_web_queries and _web_search_enabled() and _llm_structuring_enabled()
-    )
-
-    # Layer A provider-fetch cache (see services/discovery_cache.py):
-    # Google/OpenLibrary/Hardcover's query text here doesn't depend on
-    # highest_owned_book_number at all, so it's byte-identical on every
-    # round of the same job -- a live measurement (discovery_catchup_
-    # architecture_spec.md #6) showed this exact repeated call being paid
-    # fresh on every round. A cache hit short-circuits the fetch entirely
-    # (that provider is left out of `tasks` below and never submitted to
-    # the executor).
-    catalog_queries = {
-        "google": google_query,
-        "openlibrary": resolved_openlibrary_query,
-        "hardcover": hardcover_query,
-    }
-    results: dict[str, list[dict]] = {"google": [], "openlibrary": [], "hardcover": [], "web": []}
-    failures: dict[str, Exception] = {}
-
-    tasks: dict[str, tuple] = {}
-    catalog_fetchers = {
-        "google": GoogleBooksProvider(),
-        "openlibrary": OpenLibraryProvider(),
-        "hardcover": HardcoverProvider(),
-    }
-    for provider, query in catalog_queries.items():
-        cache_hit = cache.get_provider_fetch(provider, query) if cache is not None else CACHE_MISS
-        if cache_hit is not CACHE_MISS:
-            results[provider] = cache_hit
-        else:
-            tasks[provider] = (catalog_fetchers[provider].fetch, (query,), {"telemetry": telemetry})
-
-    if run_web_search:
-        tasks["web"] = (
-            WebDiscoveryProvider().fetch,
-            (resolved_web_queries, series_name, author),
-            {
-                "diagnostics": diagnostics,
-                "telemetry": telemetry,
-                "cache": cache,
-                "pass_label": pass_label,
-                "apify_budget": apify_budget,
-            },
-        )
-
-    if tasks:
-        with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-            future_to_provider = {
-                executor.submit(func, *args, **kwargs): provider for provider, (func, args, kwargs) in tasks.items()
-            }
-            for future, provider in future_to_provider.items():
-                try:
-                    fetch_result = future.result()
-                except Exception as exc:  # belt-and-suspenders only -- see docstring
-                    failures[provider] = exc
-                    continue
-                if fetch_result.ok:
-                    results[provider] = [item.to_legacy_dict() for item in fetch_result.items]
-                    if cache is not None and provider in catalog_queries:
-                        cache.set_provider_fetch(provider, catalog_queries[provider], results[provider])
-                else:
-                    failures[provider] = RuntimeError(fetch_result.error or f"{provider} provider failed")
-
-    results["_failures"] = failures
-    return results
-
-
-_METADATA_COMPLETENESS_FIELDS = (
-    "title",
-    "authors",
-    "series_name_hint",
-    "series_number_hint",
-    "isbn13",
-    "published_date",
-    "description",
-)
-
-# Rough per-provider weight for confidence_score, mirroring the same
-# hardcover > google_books > openlibrary > web_search trust ordering
-# discover_candidates_for_series's own merge-priority comment already
-# documents elsewhere (Hardcover's series data is structured/curated;
-# web_search's is an LLM's best-effort read of free-text search snippets).
-# Corroboration across multiple *different* providers and a real ISBN both
-# add on top of this base weight rather than replacing it.
-_PROVIDER_CONFIDENCE_WEIGHT = {
-    "hardcover": 0.4,
-    "google_books": 0.3,
-    "openlibrary": 0.25,
-    # Structured Amazon-product-page extraction -- trusted above
-    # web_search's LLM-parsed-snippet guesses, but below the three catalog
-    # APIs until proven stable in production (Apify integration design
-    # chat's consensus). See _fetch_apify_discovery for how Apify
-    # candidates also get positional (not just weight) primacy over
-    # web_search inside _fuse_and_score_candidates.
-    "apify": 0.20,
-    "web_search": 0.15,
-}
-
-
-class UnifiedCandidate(BaseModel):
-    """One real-world book, after _fuse_and_score_candidates has merged
-    every raw provider hit that plausibly refers to it -- matched by the
-    same isbn13 -> title_key -> normalized-title identity chain
-    _filter_and_merge's own seen_keys dedupe already uses -- into a single
-    representation.
-
-    This does not replace _filter_and_merge's author/language/placeholder/
-    bundle-title/series-index/already-owned filtering. See
-    _fuse_and_score_candidates and _unified_candidate_to_raw_dict, which
-    converts instances of this back into the exact flat dict shape every
-    _fetch_* provider (and _filter_and_merge) already expects, so that
-    filtering keeps running completely unchanged on the fused result.
-    confidence_score/metadata_completeness_score/source_provenance are new,
-    additive fields -- nothing downstream reads them yet, but they're
-    carried through the dict conversion so a later phase can.
-    """
-
-    title: str
-    authors: list[str] = Field(default_factory=list)
-    series_name: str | None = None
-    series_number: float | None = None
-    isbn13: str | None = None
-    edition_type: str = "unknown"
-    published_date: str | None = None
-    source_provenance: list[dict] = Field(default_factory=list)
-    confidence_score: float = 0.0
-    metadata_completeness_score: float = 0.0
-    upcoming_hint: bool | None = None
-
-
-def _first_present_field(members: list[dict], field: str, *, exclude_sources: set[str] | None = None):
-    """First non-empty value for `field` across a group of raw candidate
-    dicts already confirmed to be the same real book (see
-    _fuse_and_score_candidates) -- used to backfill a gap in the group's
-    primary/representative member from one of its duplicates. `exclude_sources`
-    lets a caller withhold a specific provider from being trusted as a
-    backfill source for one particular field (see isbn13 handling below)
-    without affecting any other field.
-    """
-    for member in members:
-        if exclude_sources and str(member.get("source") or "") in exclude_sources:
-            continue
-        value = member.get(field)
-        if isinstance(value, list):
-            if value:
-                return value
-        elif value not in (None, ""):
-            return value
-    return None
-
-
-def _fuse_and_score_candidates(
-    provider_results: dict,
-    author: str,
-    series_name: str | None,
-) -> list[UnifiedCandidate]:
-    """Groups every raw candidate _fetch_all_providers_parallel returned --
-    across all four providers -- by real-world-book identity (the same
-    isbn13 -> title_key -> normalized-title chain _filter_and_merge's own
-    seen_keys dedupe already uses), then fuses each group into one
-    UnifiedCandidate: a representative dict (the highest-priority member --
-    hardcover > google_books > openlibrary > web_search, the same priority
-    order callers already concatenate provider_results in) with any
-    *missing* fields backfilled from the other members of that same
-    confirmed-duplicate group, plus a confidence_score and
-    metadata_completeness_score.
-
-    Deliberately leaves ALL of _filter_and_merge's own filtering untouched --
-    this only pre-deduplicates and enriches what _filter_and_merge receives,
-    it doesn't decide what survives.
-
-    `authors`/`language` are backfilled slightly differently from every
-    other field: instead of always preferring the primary member's own
-    value, they prefer whichever group member's value would actually pass
-    _filter_and_merge's author-match/language checks (falling back to the
-    primary's own value if none do). Without this, collapsing straight to
-    the primary member's fields could make a group *more* likely to be
-    dropped than before fusion existed -- pre-fusion, _filter_and_merge
-    evaluated every duplicate separately and any single one of them passing
-    was enough for that identity key to survive; post-fusion there's only
-    one fused dict per identity, so it needs the best-available author/
-    language value among the group, not just whichever provider happened to
-    sort first.
-
-    isbn13 is also handled differently from the other backfilled fields:
-    web_search's isbn13 is an LLM's guess parsed out of unstructured
-    search-result text (see _fetch_web_search), not a catalog-verified
-    identifier like the other three providers'. It's trusted the same as
-    any provider for *identity grouping* (a wrong guess there just fails to
-    group, it doesn't wrongly merge two different books), but it is not
-    trusted to *backfill* an ISBN onto a duplicate that arrived from a
-    different, ISBN-less provider, since a wrong backfilled ISBN would
-    directly change that candidate's dedupe key and stub-listing check
-    inside _filter_and_merge.
-    """
-    ordered_raw: list[dict] = [
-        *(provider_results.get("hardcover") or []),
-        *(provider_results.get("google") or []),
-        *(provider_results.get("openlibrary") or []),
-        *(provider_results.get("web") or []),
-    ]
-
-    groups: dict[str, list[dict]] = {}
-    group_order: list[str] = []
-    for raw in ordered_raw:
-        title = str(raw.get("title") or "").strip()
-        if not title:
-            continue
-        isbn13 = str(raw.get("isbn13") or "").strip()
-        identity_key = isbn13 or core_title_key(title) or normalize_text(title)
-        if identity_key not in groups:
-            groups[identity_key] = []
-            group_order.append(identity_key)
-        groups[identity_key].append(raw)
-
-    fused: list[UnifiedCandidate] = []
-    for identity_key in group_order:
-        members = groups[identity_key]
-        primary = members[0]
-
-        author_matching_authors = next(
-            (member.get("authors") for member in members if _author_matches(member.get("authors") or [], author)),
-            None,
-        )
-        merged_authors = list(author_matching_authors or _first_present_field(members, "authors") or [])
-
-        language_ok_member = next(
-            (member for member in members if is_english_or_unknown(member.get("language"))), primary
-        )
-        merged_language = language_ok_member.get("language")
-
-        merged_isbn13 = str(primary.get("isbn13") or "").strip() or None
-        if not merged_isbn13:
-            backfilled_isbn = _first_present_field(members, "isbn13", exclude_sources={"web_search"})
-            merged_isbn13 = str(backfilled_isbn).strip() if backfilled_isbn else None
-
-        merged_published_date = str(
-            primary.get("published_date") or _first_present_field(members, "published_date") or ""
-        ).strip()
-        merged_description = primary.get("description") or _first_present_field(members, "description")
-        merged_series_name_hint = primary.get("series_name_hint") or _first_present_field(members, "series_name_hint")
-        merged_series_number_hint = primary.get("series_number_hint") or _first_present_field(
-            members, "series_number_hint"
-        )
-        merged_series_total_hint = primary.get("series_total_hint") or _first_present_field(
-            members, "series_total_hint"
-        )
-        merged_upcoming_hint = primary.get("upcoming_hint")
-        if merged_upcoming_hint is None:
-            merged_upcoming_hint = _first_present_field(members, "upcoming_hint")
-        merged_source_url = primary.get("source_url") or _first_present_field(members, "source_url")
-
-        unique_sources = list(dict.fromkeys(str(member.get("source") or "unknown") for member in members))
-        confidence = sum(_PROVIDER_CONFIDENCE_WEIGHT.get(source, 0.1) for source in unique_sources)
-        if len(unique_sources) > 1:
-            confidence += 0.1
-        if merged_isbn13:
-            confidence += 0.1
-        if merged_authors and _author_matches(merged_authors, author):
-            confidence += 0.1
-
-        # Series-name agreement: the same kind of provider-disagreement
-        # signal _candidate_has_provenance_disagreement checks for
-        # number/ISBN, applied to series identity, plus a down-score for
-        # candidates that carry no series-name signal at all or explicitly
-        # point at a different series than the one being searched for --
-        # both weaker/contradicting evidence that this candidate actually
-        # belongs to the target series (see _is_cross_series_contamination,
-        # which hard-excludes explicit mismatches only on the fallback
-        # pass -- this applies more broadly, as a soft penalty, to every
-        # fused candidate regardless of which pass produced it). Uses
-        # _series_names_compatible rather than strict equality so a
-        # differently-branded-but-real hint for this same series (e.g.
-        # Hardcover's bare "Jonathan Hunt" against a target tracked as
-        # "Jonathan Hunt Thriller Series") isn't penalized as a mismatch.
-        raw_provenance_series_names = [
-            str(member.get("series_name_hint") or "")
-            for member in members
-            if member.get("series_name_hint")
-        ]
-        if any(
-            not _series_names_compatible(a, b)
-            for i, a in enumerate(raw_provenance_series_names)
-            for b in raw_provenance_series_names[i + 1 :]
-        ):
-            confidence -= 0.1
-        if not merged_series_name_hint:
-            confidence -= 0.05
-        elif series_name and not _series_names_compatible(merged_series_name_hint, series_name):
-            confidence -= 0.1
-        confidence_score = round(min(max(confidence, 0.0), 1.0), 4)
-
-        completeness_values = {
-            "title": primary.get("title"),
-            "authors": merged_authors,
-            "series_name_hint": merged_series_name_hint,
-            "series_number_hint": merged_series_number_hint,
-            "isbn13": merged_isbn13,
-            "published_date": merged_published_date,
-            "description": merged_description,
-        }
-        present_count = sum(
-            1
-            for field in _METADATA_COMPLETENESS_FIELDS
-            for value in (completeness_values.get(field),)
-            if (value if not isinstance(value, list) else bool(value)) not in (None, "", False)
-        )
-        metadata_completeness_score = round(present_count / len(_METADATA_COMPLETENESS_FIELDS), 4)
-
-        try:
-            series_number_value = float(merged_series_number_hint) if merged_series_number_hint is not None else None
-        except (TypeError, ValueError):
-            series_number_value = None
-
-        # Carry the backfilled (not just the primary's raw) hint fields
-        # forward via the provenance entries themselves, so
-        # _unified_candidate_to_raw_dict can recover them without needing
-        # extra non-spec fields on the model -- see its own docstring.
-        provenance = [dict(member) for member in members]
-        provenance[0] = {
-            **provenance[0],
-            "authors": merged_authors,
-            "language": merged_language,
-            "isbn13": merged_isbn13,
-            "published_date": merged_published_date,
-            "description": merged_description,
-            "series_name_hint": merged_series_name_hint,
-            "series_number_hint": merged_series_number_hint,
-            "series_total_hint": merged_series_total_hint,
-            "upcoming_hint": merged_upcoming_hint,
-            "source_url": merged_source_url,
-        }
-
-        fused.append(
-            UnifiedCandidate(
-                title=str(primary.get("title") or "").strip(),
-                authors=merged_authors,
-                series_name=(str(merged_series_name_hint).strip() if merged_series_name_hint else None) or series_name,
-                series_number=series_number_value,
-                isbn13=merged_isbn13,
-                edition_type="unknown",
-                published_date=merged_published_date or None,
-                source_provenance=provenance,
-                confidence_score=confidence_score,
-                metadata_completeness_score=metadata_completeness_score,
-                upcoming_hint=bool(merged_upcoming_hint) if merged_upcoming_hint is not None else None,
-            )
-        )
-
-    return fused
-
-
-def _unified_candidate_to_raw_dict(candidate: UnifiedCandidate) -> dict:
-    """Converts a fused UnifiedCandidate back into the flat dict shape every
-    _fetch_* provider (and _filter_and_merge) already expects, so fusion is
-    a drop-in step in front of unchanged merge/filter logic.
-
-    Starts from the fused/backfilled representative dict fusion already
-    built (source_provenance[0] -- see _fuse_and_score_candidates, which
-    overwrites that entry's own author/language/isbn13/hint fields with the
-    group's backfilled values while leaving source/source_id/source_url on
-    it) and overlays the UnifiedCandidate's own title/authors/isbn13/
-    published_date/upcoming_hint on top, since those are the fields fusion
-    computed with the extra author-match/isbn-trust care described in
-    _fuse_and_score_candidates.
-    """
-    provenance = candidate.source_provenance or [{}]
-    base = dict(provenance[0])
-    base.update(
-        {
-            "title": candidate.title,
-            "authors": list(candidate.authors),
-            "isbn13": candidate.isbn13,
-            "published_date": candidate.published_date or "",
-            "upcoming_hint": candidate.upcoming_hint,
-            # New, additive fields -- _filter_and_merge doesn't read these
-            # today (nothing downstream does yet), but they ride along on
-            # the dict unchanged since _filter_and_merge spreads **raw into
-            # its own output.
-            "confidence_score": candidate.confidence_score,
-            "metadata_completeness_score": candidate.metadata_completeness_score,
-            "source_provenance": candidate.source_provenance,
-            "edition_type": candidate.edition_type,
-        }
-    )
-    return base
-
 
 # Bounds how many gap numbers _reconstruct_series_skeleton will fire a
 # targeted web-search lookahead query for in one call -- a series with a
@@ -2610,19 +211,6 @@ def _unified_candidate_to_raw_dict(candidate: UnifiedCandidate) -> dict:
 # (one shared web-search loop + one LLM structuring pass), same as the
 # existing highest-owned-number lookahead in _fetch_all_providers_parallel.
 MAX_MISSING_VOLUME_LOOKAHEAD_QUERIES = 6
-
-
-def _resolve_candidate_number(candidate: "UnifiedCandidate", series_name: str | None) -> float | None:
-    """A candidate's own fused series_number (from series_number_hint, see
-    _fuse_and_score_candidates) is preferred; title-text inference is only
-    a fallback for a candidate whose contributing providers never supplied
-    a structured number at all -- the same trust ordering
-    discover_candidates_for_series/series_agent already use elsewhere.
-    """
-    if candidate.series_number is not None:
-        return candidate.series_number
-    inferred = infer_number_from_title(candidate.title, series_name)
-    return float(inferred) if inferred is not None else None
 
 
 def _reconstruct_series_skeleton(
@@ -2781,877 +369,6 @@ def _reconstruct_series_skeleton(
     }
 
 
-# Thresholds gating _reconcile_candidates_with_llm -- deliberately
-# conservative so the (comparatively expensive, latency-adding) LLM pass
-# only runs when the cheap, deterministic fusion above actually left
-# something messy behind, not on every Check Now run.
-RECONCILIATION_SERIES_COMPLETENESS_THRESHOLD = 0.8
-RECONCILIATION_METADATA_COMPLETENESS_THRESHOLD = 0.5
-RECONCILIATION_DISAGREEMENT_RATIO_THRESHOLD = 0.2
-
-# Bounds how many candidates get sent into one reconciliation prompt --
-# keeps the call's cost/latency bounded for an unusually noisy fetch.
-# Anything beyond this is passed through untouched rather than dropped.
-RECONCILIATION_MAX_CANDIDATES = 40
-
-
-def _candidate_has_provenance_disagreement(candidate: "UnifiedCandidate") -> bool:
-    """True if the raw members _fuse_and_score_candidates grouped into this
-    one candidate don't actually agree with each other on book number,
-    ISBN, or series name -- i.e. fusion picked *a* value (the first
-    non-null one it found), but the providers disagreed about what that
-    value should be. That's exactly the kind of conflict a deterministic
-    "first non-null wins" backfill can't adjudicate well, and is one of the
-    signals _needs_llm_reconciliation uses to decide the fused set is worth
-    a second, LLM-driven look.
-    """
-    if len(candidate.source_provenance) < 2:
-        return False
-    numbers = {
-        round(float(member["series_number_hint"]), 2)
-        for member in candidate.source_provenance
-        if member.get("series_number_hint") is not None
-    }
-    if len(numbers) > 1:
-        return True
-    isbns = {
-        str(member["isbn13"]).strip() for member in candidate.source_provenance if str(member.get("isbn13") or "").strip()
-    }
-    if len(isbns) > 1:
-        return True
-    # Providers disagreeing on which series a book belongs to (e.g. one
-    # source tagging a candidate under a different Wagner thriller series
-    # than another) is just as real a fusion conflict as disagreeing on
-    # number/ISBN, and the same "first non-null wins" backfill can't
-    # adjudicate it either. Compared via _series_names_compatible rather
-    # than strict equality, so two members merely branding the SAME series
-    # differently (e.g. "Jonathan Hunt" vs. "Jonathan Hunt Thriller
-    # Series") don't register as a disagreement -- only genuinely
-    # different series names do.
-    series_names = [
-        str(member.get("series_name_hint") or "")
-        for member in candidate.source_provenance
-        if member.get("series_name_hint")
-    ]
-    return any(
-        not _series_names_compatible(a, b)
-        for i, a in enumerate(series_names)
-        for b in series_names[i + 1 :]
-    )
-
-
-def _needs_llm_reconciliation(unified_candidates: list["UnifiedCandidate"], series_name: str | None) -> bool:
-    """Gates _reconcile_candidates_with_llm. Only worth the extra LLM call
-    when the deterministic fusion pass actually left something messy: the
-    series looks incomplete (few distinct book numbers relative to the
-    highest one seen), providers actively disagreed with each other on some
-    candidates, or the fused metadata is thin across the board. A clean,
-    complete, well-agreed-upon result skips this entirely -- fusion alone
-    is enough.
-    """
-    if len(unified_candidates) < 2:
-        return False
-
-    numbers = sorted(
-        {
-            int(number)
-            for candidate in unified_candidates
-            for number in (_resolve_candidate_number(candidate, series_name),)
-            if number is not None and float(number).is_integer()
-        }
-    )
-    if numbers:
-        expected_total = numbers[-1]
-        series_completeness = len(numbers) / expected_total
-        if series_completeness < RECONCILIATION_SERIES_COMPLETENESS_THRESHOLD:
-            _log(f"LLM reconciliation triggered: series completeness {series_completeness:.0%} below threshold")
-            return True
-
-    disagreement_count = sum(1 for candidate in unified_candidates if _candidate_has_provenance_disagreement(candidate))
-    if disagreement_count / len(unified_candidates) > RECONCILIATION_DISAGREEMENT_RATIO_THRESHOLD:
-        _log(
-            f"LLM reconciliation triggered: provider disagreement on "
-            f"{disagreement_count}/{len(unified_candidates)} candidates"
-        )
-        return True
-
-    avg_completeness = sum(candidate.metadata_completeness_score for candidate in unified_candidates) / len(
-        unified_candidates
-    )
-    if avg_completeness < RECONCILIATION_METADATA_COMPLETENESS_THRESHOLD:
-        _log(f"LLM reconciliation triggered: average metadata completeness {avg_completeness:.0%} below threshold")
-        return True
-
-    return False
-
-
-def _format_candidate_for_reconciliation(index: int, candidate: "UnifiedCandidate") -> str:
-    sources = list(dict.fromkeys(str(member.get("source") or "unknown") for member in candidate.source_provenance))
-    return (
-        f"[{index}] title={candidate.title!r} authors={candidate.authors!r} "
-        f"series_name={candidate.series_name!r} "
-        f"series_number={candidate.series_number} isbn13={candidate.isbn13 or 'null'} "
-        f"published_date={candidate.published_date or 'null'!r} sources={sources} "
-        f"metadata_completeness={candidate.metadata_completeness_score}"
-    )
-
-
-def _coerce_reconciled_float(value) -> float | None:
-    try:
-        return float(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _coerce_reconciled_str(value) -> str | None:
-    cleaned = str(value or "").strip()
-    return cleaned or None
-
-
-def _reconciled_completeness_score(
-    title: str, authors: list[str], series_name: str | None, series_number: float | None, isbn13: str | None,
-    published_date: str | None, description,
-) -> float:
-    # Mirrors _fuse_and_score_candidates' own present-field-count approach
-    # (same _METADATA_COMPLETENESS_FIELDS) so a reconciled candidate's score
-    # stays comparable to one that only ever went through plain fusion.
-    completeness_values = {
-        "title": title,
-        "authors": authors,
-        "series_name_hint": series_name,
-        "series_number_hint": series_number,
-        "isbn13": isbn13,
-        "published_date": published_date,
-        "description": description,
-    }
-    present_count = sum(
-        1
-        for field in _METADATA_COMPLETENESS_FIELDS
-        for value in (completeness_values.get(field),)
-        if (value if not isinstance(value, list) else bool(value)) not in (None, "", False)
-    )
-    return round(present_count / len(_METADATA_COMPLETENESS_FIELDS), 4)
-
-
-def _apply_reconciliation_entry(entry: dict, members: list["UnifiedCandidate"]) -> "UnifiedCandidate":
-    """Turns one entry of _reconcile_candidates_with_llm's response (plus
-    the UnifiedCandidate(s) it references) into a single resolved
-    UnifiedCandidate.
-
-    A single-member entry (the model found nothing to merge it with) only
-    ever *backfills* a field that candidate was missing -- it never
-    overwrites a value the candidate already had, so one LLM misread can't
-    quietly corrupt a candidate that didn't actually need reconciling. A
-    multi-member entry is a real merge: the model's own resolved values are
-    trusted first (that's the point of asking it to pick the best value
-    across disagreeing sources), falling back to whichever merged member
-    has a non-null value if the model left a field null.
-    """
-    primary = members[0]
-
-    if len(members) == 1:
-        title = primary.title
-        authors = primary.authors
-        series_name = primary.series_name
-        series_number = primary.series_number
-        isbn13 = primary.isbn13
-        published_date = primary.published_date
-
-        if series_number is None:
-            series_number = _coerce_reconciled_float(entry.get("series_number"))
-        if series_name is None:
-            series_name = _coerce_reconciled_str(entry.get("series_name"))
-        if not isbn13:
-            candidate_isbn = _coerce_reconciled_str(entry.get("isbn13"))
-            if candidate_isbn and len(candidate_isbn) == 13 and candidate_isbn.isdigit():
-                isbn13 = candidate_isbn
-        if not published_date:
-            published_date = _coerce_reconciled_str(entry.get("published_date"))
-
-        provenance = [dict(item) for item in primary.source_provenance] or [{}]
-        provenance[0] = {
-            **provenance[0],
-            "series_number_hint": series_number if series_number is not None else provenance[0].get("series_number_hint"),
-            "series_name_hint": series_name or provenance[0].get("series_name_hint"),
-            "isbn13": isbn13 or provenance[0].get("isbn13"),
-            "published_date": published_date or provenance[0].get("published_date"),
-        }
-
-        completeness = _reconciled_completeness_score(
-            title, authors, series_name, series_number, isbn13, published_date, provenance[0].get("description")
-        )
-
-        return UnifiedCandidate(
-            title=title,
-            authors=authors,
-            series_name=series_name,
-            series_number=series_number,
-            isbn13=isbn13,
-            edition_type="bundle" if entry.get("is_bundle") else primary.edition_type,
-            published_date=published_date,
-            source_provenance=provenance,
-            confidence_score=primary.confidence_score,
-            metadata_completeness_score=max(primary.metadata_completeness_score, completeness),
-            upcoming_hint=primary.upcoming_hint,
-        )
-
-    title = _coerce_reconciled_str(entry.get("title")) or primary.title
-    author_names = entry.get("author_names")
-    authors = list(author_names) if isinstance(author_names, list) and author_names else None
-    if not authors:
-        authors = next((member.authors for member in members if member.authors), [])
-    series_name = _coerce_reconciled_str(entry.get("series_name")) or next(
-        (member.series_name for member in members if member.series_name), None
-    )
-    series_number = _coerce_reconciled_float(entry.get("series_number"))
-    if series_number is None:
-        series_number = next((member.series_number for member in members if member.series_number is not None), None)
-    isbn13_candidate = _coerce_reconciled_str(entry.get("isbn13"))
-    if isbn13_candidate and len(isbn13_candidate) == 13 and isbn13_candidate.isdigit():
-        isbn13 = isbn13_candidate
-    else:
-        isbn13 = next((member.isbn13 for member in members if member.isbn13), None)
-    published_date = _coerce_reconciled_str(entry.get("published_date")) or next(
-        (member.published_date for member in members if member.published_date), None
-    )
-
-    provenance: list[dict] = []
-    for member in members:
-        provenance.extend(dict(item) for item in member.source_provenance)
-    if not provenance:
-        provenance = [{}]
-    provenance[0] = {
-        **provenance[0],
-        "authors": authors,
-        "isbn13": isbn13,
-        "published_date": published_date,
-        "series_name_hint": series_name,
-        "series_number_hint": series_number,
-    }
-
-    unique_sources = list(dict.fromkeys(str(item.get("source") or "unknown") for item in provenance))
-    confidence_score = round(
-        min(max(member.confidence_score for member in members) + (0.1 if len(unique_sources) > 1 else 0.0), 1.0), 4
-    )
-    completeness = _reconciled_completeness_score(
-        title, authors, series_name, series_number, isbn13, published_date, provenance[0].get("description")
-    )
-
-    return UnifiedCandidate(
-        title=title,
-        authors=list(authors or []),
-        series_name=series_name,
-        series_number=series_number,
-        isbn13=isbn13,
-        edition_type="bundle" if entry.get("is_bundle") else "unknown",
-        published_date=published_date,
-        source_provenance=provenance,
-        confidence_score=confidence_score,
-        metadata_completeness_score=max(completeness, max(member.metadata_completeness_score for member in members)),
-        upcoming_hint=next((member.upcoming_hint for member in members if member.upcoming_hint is not None), None),
-    )
-
-
-# Deliberately a completely separate prompt from _WEB_SEARCH_STRUCTURING_PROMPT
-# -- that one extracts book data from raw web-search snippets; this one takes
-# already-structured UnifiedCandidates and reconciles disagreements between
-# them. Changing one should never risk affecting the other.
-_LLM_RECONCILIATION_PROMPT = """You are reconciling a messy, possibly-duplicated list of book candidates for one series, assembled from several different data providers (catalog APIs and web search) that don't always agree with each other.
-
-Series: "{series_name}"
-
-Below are {count} candidates. Each may be missing information, and two or more entries may actually describe the SAME real book (e.g. one provider has "Book Three" as the title with no ISBN, another has the real subtitle and an ISBN but no book number). Some candidates may also not actually belong to this series at all -- a prolific author often has several different series, and a same-author candidate can slip in here even though it's really from one of those other series.
-
-Candidates:
-{candidate_listing}
-
-For EACH candidate above, first decide whether it actually belongs to the series named above, "{series_name}". If a candidate clearly belongs to a different, distinct series by the same author (or to a different series entirely), put its index in "excluded_indices" instead of a resolved entry -- do not guess an exclusion just because a field is missing or a series name is slightly differently worded/branded; only exclude when the candidate's own title/series_name clearly point to a genuinely different series.
-
-For every remaining candidate (the ones that do belong to this series), decide which other such candidates (if any) describe the same real book, and merge them into one resolved entry. Every candidate index 0-{max_index} must appear in EXACTLY ONE of: a resolved entry's "source_indices", or "excluded_indices" -- never both, and never omitted entirely. A candidate that belongs to the series but doesn't match any other is still its own resolved entry with just its own index. For each resolved entry, normalize the book number to a plain number (e.g. "Three"/"Vol. 3"/"#3" -> 3) and pick the most complete/likely-correct value for each field across whichever candidates you merged into it, resolving any disagreement (e.g. two different book numbers) by picking the value supported by more of the merged candidates, or the more specific/authoritative-looking one if it's a tie. If a candidate appears to be a bundle/omnibus of multiple existing volumes rather than a single new one, set "is_bundle" to true.
-
-Respond with ONLY a JSON object (no prose, no markdown code fences) of this exact shape:
-{{"resolved_candidates": [{{"source_indices": [<int>, ...], "title": <string>, "series_name": <string or null>, "series_number": <number or null>, "isbn13": <string or null>, "author_names": [<string>, ...], "published_date": <string or null>, "is_bundle": <bool>, "notes": <short string explaining what changed, or "" if nothing did>}}, ...], "excluded_indices": [<int, index of a candidate that does NOT belong to this series>, ...], "missing_volume_suggestions": [<int, a book number you suspect exists but isn't in the candidate list above, based on the candidates' own text>, ...]}}"""
-
-
-def _reconcile_candidates_with_llm(
-    unified_candidates: list["UnifiedCandidate"],
-    series_name: str | None,
-    *,
-    diagnostics: list[dict] | None = None,
-    telemetry: "DiscoveryTelemetry | None" = None,
-) -> list["UnifiedCandidate"]:
-    """Single conditional LLM pass over an already-fused candidate set for
-    one series -- normalizes series names/book numbers, merges candidates
-    that plain identity-key fusion couldn't recognize as the same book
-    (different title formatting, one has an ISBN the other lacks, etc.),
-    excludes candidates it judges to actually belong to a different series
-    by the same author, flags suspected bundles, and surfaces (but does not
-    itself act on -- see _reconstruct_series_skeleton for actually
-    searching for them) suspected missing volume numbers. Gated by
-    _needs_llm_reconciliation; only called when fusion alone left the set
-    looking incomplete, internally disagreeing, or thin on metadata.
-
-    Deliberately conservative on failure: a missing API key, empty input,
-    a network/parse error, or a response that doesn't cleanly partition
-    every input candidate exactly once between a resolved entry's
-    source_indices and excluded_indices (no gaps, no overlaps, nothing
-    claimed by both) all fall back to returning unified_candidates
-    completely unchanged -- this is an enrichment step, never allowed to
-    lose or corrupt a candidate fusion already produced. An excluded
-    candidate is simply dropped from the returned list -- there is no
-    separate "other books by this author" output for it to land in
-    instead.
-    """
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not api_key or len(unified_candidates) < 2:
-        return unified_candidates
-
-    # Anything beyond the cap was never sent to the model and is passed
-    # through untouched below, rather than silently dropped.
-    candidates = unified_candidates[:RECONCILIATION_MAX_CANDIDATES]
-
-    import anthropic
-
-    candidate_listing = "\n".join(
-        _format_candidate_for_reconciliation(index, candidate) for index, candidate in enumerate(candidates)
-    )
-    prompt = _LLM_RECONCILIATION_PROMPT.format(
-        series_name=series_name or "unknown",
-        count=len(candidates),
-        candidate_listing=candidate_listing,
-        max_index=len(candidates) - 1,
-    )
-
-    with maybe_pass_scope(telemetry, "reconciliation"):
-        started = time.monotonic()
-        response = None
-        try:
-            client = anthropic.Anthropic(api_key=api_key)
-            response = client.messages.create(
-                model=ANTHROPIC_MODEL,
-                max_tokens=3000,
-                # Deterministic normalize/merge/flag task, not generative writing --
-                # see _structure_web_results_with_llm's temperature=0 for the same
-                # rationale.
-                temperature=0,
-                messages=[{"role": "user", "content": prompt}],
-                timeout=WEB_SEARCH_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:  # a reconciliation failure should never sink the candidates fusion already found
-            _log(f"LLM reconciliation call failed: {exc}")
-            return unified_candidates
-        finally:
-            if telemetry is not None:
-                usage = getattr(response, "usage", None)
-                telemetry.record_llm_call(
-                    duration_s=time.monotonic() - started,
-                    tokens_in=getattr(usage, "input_tokens", 0) or 0,
-                    tokens_out=getattr(usage, "output_tokens", 0) or 0,
-                )
-
-    text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text").strip()
-    if text.startswith("```"):
-        text = text.strip("`").strip()
-        if text.lower().startswith("json"):
-            text = text[4:].strip()
-
-    try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return unified_candidates
-
-    if not isinstance(parsed, dict):
-        return unified_candidates
-
-    resolved_entries = parsed.get("resolved_candidates")
-    if not isinstance(resolved_entries, list) or not resolved_entries:
-        return unified_candidates
-
-    missing_volume_suggestions = parsed.get("missing_volume_suggestions")
-    if isinstance(missing_volume_suggestions, list) and missing_volume_suggestions:
-        _log(f"LLM reconciliation suspects missing volume(s): {missing_volume_suggestions}")
-
-    # Every original index must be claimed by exactly one entry, OR listed
-    # in excluded_indices, and never both -- anything else means the model
-    # didn't cleanly partition the input (overlap, gap, garbage index, or
-    # an index silently missing from both), and trusting a
-    # partial/overlapping response risks silently dropping or duplicating a
-    # candidate fusion already handled correctly. Excluding a candidate
-    # (because it belongs to a different series) is the one allowed way for
-    # an index to leave "resolved_candidates" -- it must still be accounted
-    # for, just via excluded_indices instead of a resolved entry.
-    all_indices = set(range(len(candidates)))
-    seen_indices: set[int] = set()
-    valid_entries: list[dict] = []
-    for entry in resolved_entries:
-        if not isinstance(entry, dict):
-            return unified_candidates
-        indices = entry.get("source_indices")
-        if not isinstance(indices, list) or not indices:
-            return unified_candidates
-        try:
-            indices = [int(index) for index in indices]
-        except (TypeError, ValueError):
-            return unified_candidates
-        if any(index < 0 or index >= len(candidates) or index in seen_indices for index in indices):
-            return unified_candidates
-        seen_indices.update(indices)
-        valid_entries.append({**entry, "source_indices": indices})
-
-    raw_excluded = parsed.get("excluded_indices", [])
-    if raw_excluded and not isinstance(raw_excluded, list):
-        return unified_candidates
-    try:
-        excluded_indices = {int(index) for index in (raw_excluded or [])}
-    except (TypeError, ValueError):
-        return unified_candidates
-    if not excluded_indices.issubset(all_indices):
-        return unified_candidates
-    if seen_indices & excluded_indices:
-        return unified_candidates
-    if excluded_indices:
-        _log(f"LLM reconciliation excluded {len(excluded_indices)} candidate(s) as belonging to a different series")
-        for index in excluded_indices:
-            excluded_candidate = candidates[index]
-            _record_drop_diagnostic(
-                "llm_reconciliation",
-                {
-                    "title": excluded_candidate.title,
-                    "isbn13": excluded_candidate.isbn13,
-                    "series_number": _to_int_or_none(excluded_candidate.series_number),
-                },
-                "excluded_by_llm",
-                diagnostics,
-            )
-
-    if seen_indices | excluded_indices != all_indices:
-        return unified_candidates
-
-    reconciled = [_apply_reconciliation_entry(entry, [candidates[i] for i in entry["source_indices"]]) for entry in valid_entries]
-
-    return reconciled + unified_candidates[len(candidates):]
-
-
-# Complements _normalize_title_for_identity (services/identity.py), which
-# *strips* these same bracketed/trailing format qualifiers when comparing
-# titles for identity -- this is the extractive counterpart, used only to
-# rank same-book candidates by _edition_priority once _finalize_candidates
-# has already decided two of them are the same underlying book. Order
-# matters: the more specific "mass market paperback" is checked before the
-# more general "paperback" it contains.
-_EDITION_TITLE_MARKERS: tuple[tuple[str, str], ...] = (
-    (r"\b(?:audible(?:\s+audio)?|audio\s*cd|audiobook)\b", "audio"),
-    (r"\bkindle(?:\s+edition)?\b", "ebook"),
-    (r"\bmass\s+market\s+paperback\b", "paperback"),
-    (r"\bpaperback\b", "paperback"),
-    (r"\bhardcover\b", "hardcover"),
-)
-
-
-def _infer_edition_type_from_title(title: str | None) -> str:
-    text = str(title or "").lower()
-    for pattern, edition in _EDITION_TITLE_MARKERS:
-        if re.search(pattern, text):
-            return edition
-    return "unknown"
-
-
-def _resolved_edition_type(candidate: "UnifiedCandidate") -> str:
-    if candidate.edition_type and candidate.edition_type not in ("unknown", "bundle"):
-        return candidate.edition_type
-    return _infer_edition_type_from_title(candidate.title)
-
-
-def _same_underlying_book(a: "UnifiedCandidate", b: "UnifiedCandidate") -> bool:
-    """True if a and b are plausibly two different editions of the exact
-    same real book, rather than two different books.
-
-    Plain identity-key fusion (_fuse_and_score_candidates) already grouped
-    strictly by isbn13 -> title_key -> normalized title, so a and b (two
-    already-distinct UnifiedCandidates) got here precisely *because*
-    neither their ISBNs nor their exact title text matched. This is a
-    looser second check using _normalize_title_for_identity (services/
-    identity.py), which strips format/edition qualifiers -- "(Kindle
-    Edition)", "(Audible Audio)", "SIGNED", etc. -- that a plain exact-title
-    match doesn't, so "Iron Flame" and "Iron Flame (Audible Audio Edition)"
-    normalize to the same identity even though fusion's own stricter key
-    kept them apart.
-
-    A mismatched series_number (when BOTH sides actually have one) blocks
-    the match regardless of title -- two genuinely different volumes can
-    share a generic normalized title, and a real number disagreement is a
-    stronger signal than a title-text coincidence. When only one (or
-    neither) side has a resolved number, that can't rule anything out, so
-    the title match alone decides.
-    """
-    normalized_a = _normalize_title_for_identity(a.title)
-    normalized_b = _normalize_title_for_identity(b.title)
-    if not normalized_a or normalized_a != normalized_b:
-        return False
-    if a.series_number is not None and b.series_number is not None and a.series_number != b.series_number:
-        return False
-    return True
-
-
-def _edition_strength(candidate: "UnifiedCandidate") -> tuple[int, float, float]:
-    return (
-        _edition_priority(_resolved_edition_type(candidate)),
-        candidate.metadata_completeness_score,
-        candidate.confidence_score,
-    )
-
-
-def _strictly_better_metadata(a: "UnifiedCandidate", b: "UnifiedCandidate") -> bool:
-    """True if a's metadata is unambiguously better than b's: at least as
-    good on every one of edition priority / metadata completeness /
-    confidence, and strictly better on at least one. This is genuine Pareto
-    dominance, not a simple tuple/lexicographic comparison -- lexicographic
-    ordering would let a single-dimension edge (e.g. a slightly higher
-    edition priority) declare a winner even while b is clearly better on
-    every other measure, which is exactly the "different, not better"
-    situation _finalize_candidates is supposed to leave alone. Only when a
-    is at least tied everywhere and ahead somewhere does one edition count
-    as "strictly better metadata" rather than merely a different edition.
-    """
-    a_values = _edition_strength(a)
-    b_values = _edition_strength(b)
-    return all(x >= y for x, y in zip(a_values, b_values)) and any(x > y for x, y in zip(a_values, b_values))
-
-
-def _collapse_edition_group(ranked_group: list["UnifiedCandidate"]) -> "UnifiedCandidate":
-    """Merges a group of same-underlying-book candidates (see
-    _same_underlying_book) that _finalize_candidates has already confirmed
-    has one unambiguous best edition (ranked_group[0], by _edition_strength)
-    into a single UnifiedCandidate -- the winning edition's own fields take
-    priority, backfilled with whichever field a losing edition has that the
-    winner lacks, exactly the same "never lose information just because a
-    row scored lower overall" philosophy series_check_engine.py's own
-    _merge_loser_fields_into_keeper already applies on the DB-write side.
-    """
-    keeper, losers = ranked_group[0], ranked_group[1:]
-
-    title = keeper.title
-    authors = keeper.authors or next((loser.authors for loser in losers if loser.authors), [])
-    series_name = keeper.series_name or next((loser.series_name for loser in losers if loser.series_name), None)
-    series_number = (
-        keeper.series_number
-        if keeper.series_number is not None
-        else next((loser.series_number for loser in losers if loser.series_number is not None), None)
-    )
-    isbn13 = keeper.isbn13 or next((loser.isbn13 for loser in losers if loser.isbn13), None)
-    published_date = keeper.published_date or next((loser.published_date for loser in losers if loser.published_date), None)
-    upcoming_hint = (
-        keeper.upcoming_hint
-        if keeper.upcoming_hint is not None
-        else next((loser.upcoming_hint for loser in losers if loser.upcoming_hint is not None), None)
-    )
-
-    provenance: list[dict] = [dict(item) for item in keeper.source_provenance]
-    for loser in losers:
-        provenance.extend(dict(item) for item in loser.source_provenance)
-    if not provenance:
-        provenance = [{}]
-    provenance[0] = {
-        **provenance[0],
-        "authors": authors,
-        "isbn13": isbn13,
-        "published_date": published_date,
-        "series_name_hint": series_name,
-        "series_number_hint": series_number,
-    }
-
-    unique_sources = list(dict.fromkeys(str(item.get("source") or "unknown") for item in provenance))
-    confidence_score = round(
-        min(max(member.confidence_score for member in ranked_group) + (0.1 if len(unique_sources) > 1 else 0.0), 1.0), 4
-    )
-    completeness = _reconciled_completeness_score(
-        title, authors, series_name, series_number, isbn13, published_date, provenance[0].get("description")
-    )
-
-    return UnifiedCandidate(
-        title=title,
-        authors=list(authors or []),
-        series_name=series_name,
-        series_number=series_number,
-        isbn13=isbn13,
-        edition_type=_resolved_edition_type(keeper),
-        published_date=published_date,
-        source_provenance=provenance,
-        confidence_score=confidence_score,
-        metadata_completeness_score=max(completeness, max(member.metadata_completeness_score for member in ranked_group)),
-        upcoming_hint=upcoming_hint,
-    )
-
-
-def _finalize_candidates(unified_candidates: list["UnifiedCandidate"]) -> list["UnifiedCandidate"]:
-    """Final edition-aware pass over an already-fused (and, if
-    _needs_llm_reconciliation triggered it, already-reconciled) candidate
-    list, run immediately before the candidates are handed back to
-    series_agent.py.
-
-    Plain identity-key fusion (_fuse_and_score_candidates) groups strictly
-    by isbn13 -> title_key -> normalized title, so two different editions of
-    the exact same book -- a hardcover with its own ISBN and a completely
-    different-ISBN audiobook, say "Iron Flame" and "Iron Flame (Audible
-    Audio Edition)" -- survive fusion as two SEPARATE UnifiedCandidates,
-    since neither their ISBNs nor their exact titles match. Left alone, the
-    same real, already-discovered book could be reported as two different
-    "new" candidates.
-
-    Multiple editions are deliberately kept apart until this point --
-    _fuse_and_score_candidates and _reconcile_candidates_with_llm both
-    still see them as distinct, so their own scoring (confidence,
-    completeness) is computed per-edition, not prematurely averaged
-    together. Here, candidates are grouped a second, looser time by
-    _same_underlying_book, and a group is only ever collapsed into one
-    candidate when _edition_strength (edition priority, then metadata
-    completeness, then confidence) gives a single, unambiguous best edition
-    -- no tie at the top. If two editions in a group are genuinely
-    ambiguous (e.g. one has a better edition type but the other has richer
-    metadata), every edition in that group is kept as a separate candidate
-    rather than guessing which one the user would actually want --
-    "collapse only when one edition has strictly better metadata", not
-    merely a different one.
-
-    This is a separate, discovery-side concept from the DB-write-path
-    edition collapse in services/series_check_engine.py (which decides
-    keeper vs. loser against rows already *owned* in the library, during
-    persistence) and does not change that logic at all -- by the time a
-    candidate here reaches series_check_engine.py, it has already been
-    through this pass, so that logic still only ever needs to know how to
-    compare one incoming candidate against existing DB rows, exactly as
-    before.
-    """
-    groups: list[list[UnifiedCandidate]] = []
-    for candidate in unified_candidates:
-        for group in groups:
-            if any(_same_underlying_book(candidate, member) for member in group):
-                group.append(candidate)
-                break
-        else:
-            groups.append([candidate])
-
-    finalized: list[UnifiedCandidate] = []
-    for group in groups:
-        if len(group) == 1:
-            finalized.append(group[0])
-            continue
-
-        # A collapse requires one member to dominate every OTHER member of
-        # the group (see _strictly_better_metadata) -- not just outrank the
-        # group's own runner-up, since a mixed group of 3+ editions could
-        # have a clear #1-vs-#2 gap while still disagreeing with a #3 on
-        # some dimension.
-        winner = next(
-            (candidate for candidate in group if all(_strictly_better_metadata(candidate, other) for other in group if other is not candidate)),
-            None,
-        )
-        if winner is not None:
-            ranked_group = [winner] + [candidate for candidate in group if candidate is not winner]
-            finalized.append(_collapse_edition_group(ranked_group))
-        else:
-            # No single edition dominates every other -- genuinely
-            # ambiguous which one is "better", so keep every edition in
-            # the group separate rather than guessing.
-            finalized.extend(group)
-
-    return finalized
-
-
-# Gates the author-bibliography fallback in discover_candidates_for_series --
-# replaces the old binary "only if the targeted pass found absolutely
-# nothing" trigger. An empty targeted pass still triggers it (0.0 scores on
-# both signals below, well under either threshold) but so does a targeted
-# pass that found *something*, just not enough of it or not confidently
-# enough -- e.g. a series where only book 1 of a known 5 turned up, or
-# every hit came from a single low-trust source with no ISBN. Deliberately
-# less aggressive than _needs_llm_reconciliation's own thresholds (0.8/0.5):
-# broadening the search author-wide is a bigger, costlier escalation than an
-# LLM reconciliation pass over data already in hand, so it's reserved for
-# cases that look more seriously incomplete/unreliable, not just messy.
-FALLBACK_SERIES_COMPLETENESS_THRESHOLD = 0.5
-FALLBACK_CONFIDENCE_THRESHOLD = 0.35
-
-
-def _series_completeness_and_confidence(
-    fused_candidates: list["UnifiedCandidate"],
-    series_name: str | None,
-    highest_owned_book_number: int | None,
-) -> tuple[float, float]:
-    """Cheap, discovery-side-only proxy for "did the targeted pass give us a
-    complete, confident picture of this series" -- feeds
-    _should_trigger_author_fallback. Deliberately simpler than
-    _reconstruct_series_skeleton's own completeness math (that one also has
-    the caller's full owned_books list to work with, and is used to decide
-    which *specific* volumes to search for -- this only has
-    highest_owned_book_number on hand, and only needs a rough signal to
-    decide whether broadening the search author-wide is worth it at all).
-    """
-    if not fused_candidates:
-        return 0.0, 0.0
-
-    known_numbers: set[int] = set()
-    if highest_owned_book_number:
-        known_numbers.add(int(highest_owned_book_number))
-    for candidate in fused_candidates:
-        number = _resolve_candidate_number(candidate, series_name)
-        if number is not None and float(number).is_integer():
-            known_numbers.add(int(number))
-
-    expected_total = max(known_numbers) if known_numbers else 0
-    series_completeness = (len(known_numbers) / expected_total) if expected_total > 0 else 1.0
-    avg_confidence = sum(candidate.confidence_score for candidate in fused_candidates) / len(fused_candidates)
-    return series_completeness, avg_confidence
-
-
-def _should_trigger_author_fallback(
-    fused_candidates: list["UnifiedCandidate"],
-    series_name: str | None,
-    highest_owned_book_number: int | None,
-) -> bool:
-    series_completeness, avg_confidence = _series_completeness_and_confidence(
-        fused_candidates, series_name, highest_owned_book_number
-    )
-    triggered = (
-        series_completeness < FALLBACK_SERIES_COMPLETENESS_THRESHOLD or avg_confidence < FALLBACK_CONFIDENCE_THRESHOLD
-    )
-    if triggered:
-        _log(
-            f"Author-fallback triggered: series completeness {series_completeness:.0%}, "
-            f"avg confidence {avg_confidence:.0%}"
-        )
-    return triggered
-
-
-def _is_cross_series_contamination(
-    raw: dict, target_series_name: str | None, other_known_series_names: set[str] | None
-) -> bool:
-    """True only when a fallback candidate is EXPLICITLY tagged -- by its
-    own series_name_hint, whether from Hardcover's structured field, the
-    web-search LLM pass, or _filter_and_merge's own title-text fallback --
-    as belonging to a DIFFERENT series than the one actually being checked.
-    A candidate with no series_name_hint at all is never excluded here:
-    "unless EXPLICIT cross-series contamination is detected" means an
-    absence of information is not itself evidence of contamination.
-    Compatibility is judged via _series_names_compatible rather than exact
-    text equality, so a real, differently-branded hint for the SAME series
-    (e.g. Hardcover's bare "Jonathan Hunt" against a target tracked as
-    "Jonathan Hunt Thriller Series") isn't misread as contamination -- but
-    a real, distinct sub-series/rebrand with only superficial overlap still
-    is (see _series_names_compatible's own docstring for the token-overlap
-    guard that keeps this narrow).
-
-    other_known_series_names is accepted for call-site compatibility but no
-    longer gates or narrows this check (regression: an author tracked under
-    only ONE series -- e.g. George Wagner's "Jonathan Hunt Thriller
-    Series" -- had contamination detection effectively disabled entirely,
-    since there were no "other tracked series" to compare against, even
-    though the hint on a contaminating candidate was plainly a different
-    series). Any explicit, incompatible series_name_hint is contamination
-    regardless of whether the user happens to track that other series too.
-    """
-    hint = str(raw.get("series_name_hint") or "").strip()
-    if not hint:
-        return False
-    if _series_names_compatible(hint, target_series_name):
-        return False
-    return True
-
-
-def _filter_cross_series_contamination(
-    fetch_results: dict,
-    target_series_name: str | None,
-    other_known_series_names: set[str] | None,
-    *,
-    diagnostics: list[dict] | None = None,
-) -> dict:
-    filtered = dict(fetch_results)
-    for provider in ("google", "openlibrary", "hardcover", "web"):
-        kept: list[dict] = []
-        for raw in fetch_results.get(provider) or []:
-            if _is_cross_series_contamination(raw, target_series_name, other_known_series_names):
-                _record_drop_diagnostic(
-                    "cross_series_filter",
-                    {
-                        "title": raw.get("title"),
-                        "isbn13": raw.get("isbn13"),
-                        "series_number": _to_int_or_none(raw.get("series_number_hint")),
-                    },
-                    "series_name_mismatch",
-                    diagnostics,
-                )
-                continue
-            kept.append(raw)
-        filtered[provider] = kept
-    return filtered
-
-
-# Explicit provider trust ranking, as an ordinal rather than a float weight
-# -- mirrors _PROVIDER_CONFIDENCE_WEIGHT's own hardcover > google_books >
-# openlibrary > web_search ordering, but only used here to break a sort
-# tie between two candidates that share the exact same resolved series
-# number and title (which _filter_and_merge's own dedupe should mostly
-# already prevent, but isn't guaranteed to for every code path feeding
-# finalize_discovery_output -- e.g. a targeted-pass hit and a fallback-pass
-# hit that plain title-key dedupe didn't recognize as the same book). Any
-# other/unrecognized source sorts last.
-_PROVIDER_SORT_RANK = {"hardcover": 0, "google_books": 1, "openlibrary": 2, "apify": 3, "web_search": 4}
-
-_TRANSIENT_CANDIDATE_FIELDS = ("confidence_score", "metadata_completeness_score", "source_provenance")
-
-
-def _candidate_sort_key(candidate: dict) -> tuple:
-    title = str(candidate.get("title") or "")
-    number = candidate.get("series_number_hint")
-    if number is None:
-        number = infer_number_from_title(title, candidate.get("series_name_hint"))
-    try:
-        numeric_number = float(number) if number is not None else None
-    except (TypeError, ValueError):
-        numeric_number = None
-
-    # Numbered candidates sort ahead of unnumbered ones (tier 0 vs. 1) and
-    # ascending by number within that tier; unnumbered candidates fall back
-    # to title alone within their own tier.
-    number_tier = (0, numeric_number) if numeric_number is not None else (1, 0.0)
-    provider_rank = _PROVIDER_SORT_RANK.get(str(candidate.get("source") or ""), len(_PROVIDER_SORT_RANK))
-    return (number_tier, normalize_text(title), provider_rank)
-
-
-def finalize_discovery_output(candidates: list[dict]) -> list[dict]:
-    """Last step before a candidate list -- whether from
-    discover_candidates_for_series/discover_candidates_for_author directly,
-    or from series_agent.py's own missing-volume-enriched re-merge (see
-    _reconstruct_series_skeleton) -- is handed off for belongs_to_series
-    filtering, so the shape series_agent.py (and anything downstream of
-    it -- API responses, logs, tests) sees is always the same regardless of
-    run-to-run timing.
-
-    Sorts by series number (when resolvable, else title-only), then title,
-    then provider priority as a final tie-breaker. This matters because
-    _fetch_all_providers_parallel runs Google/OpenLibrary/Hardcover/web
-    search concurrently (see its own docstring) -- any of the four can
-    finish first depending on network timing, so without an explicit sort
-    here the exact same underlying set of discovered books could come back
-    in a different order between two otherwise-identical runs, which would
-    make output diffing/testing unreliable and could subtly change which
-    duplicate "wins" in any downstream logic that processes candidates in
-    list order.
-
-    Also strips the transient, fusion-internal fields
-    _unified_candidate_to_raw_dict rode along on every raw dict --
-    confidence_score, metadata_completeness_score, source_provenance --
-    which are useful *during* the fuse/reconcile/finalize pipeline itself
-    but were never meant to leak into series_agent.py's own candidate shape
-    or anything built on top of it.
-    """
-    sorted_candidates = sorted(candidates, key=_candidate_sort_key)
-    return [
-        {key: value for key, value in candidate.items() if key not in _TRANSIENT_CANDIDATE_FIELDS}
-        for candidate in sorted_candidates
-    ]
-
-
 def precheck_for_new_volumes(
     series_name: str,
     author: str,
@@ -3722,6 +439,333 @@ def precheck_for_new_volumes(
             if number > ceiling:
                 return True
     return False
+
+
+def _run_web_search_diagnostic_probe(
+    targeted_query_text: str, telemetry: "DiscoveryTelemetry | None"
+) -> dict | None:
+    """PB-4 sub-step of discover_candidates_for_series: the diagnostic-only
+    coverage probe that fires when a Serper key is configured but no
+    Anthropic key is -- there's no way to structure raw hits into real
+    candidates in that case, so don't try.
+
+    This exists purely so Serper's own indie/LitRPG/web-serial coverage --
+    unverified, and possibly quite different from Brave's -- can be checked
+    by hand against a real query before being relied on for anything (see
+    discovery_agentic_migration_decision_log.md). No other provider/pass
+    runs, nothing is fused/filtered, and nothing here can ever be added to
+    the library: this is a standalone coverage probe, not a partial
+    discovery run.
+
+    This one lone Serper call has none of _fetch_web_search's own
+    per-query error handling -- a bare probe was fine for its original
+    "check by hand" purpose, but this branch runs unconditionally in the
+    real Check Now path whenever Serper is configured with no Anthropic
+    key, so an unhandled 4xx/5xx here used to crash the ENTIRE check in
+    under a second, before Hardcover/Google/OpenLibrary ever got a chance
+    to run at all (see the Apify integration design chat's follow-up
+    finding). Caught and logged instead now -- on failure, skip the probe
+    entirely and fall through to the normal pipeline below, which still
+    runs Hardcover/Google/OpenLibrary (web search stays off, exactly as it
+    already is whenever no Anthropic key is present).
+
+    Returns the diagnostic-mode result dict to return immediately, or None
+    if the caller should fall through to the normal discovery pipeline
+    (either the probe isn't applicable here, or it failed).
+    """
+    if not (_web_search_enabled() and not _llm_structuring_enabled()):
+        return None
+
+    try:
+        probe_snippets = _fetch_serper_web_search(targeted_query_text, telemetry=telemetry)
+    except Exception as exc:
+        _log(f"web-search coverage probe failed, falling through to normal discovery: {exc}")
+        return None
+
+    return {
+        "candidates": [],
+        "unified_candidates": [],
+        "provider_failures": [],
+        "all_providers_failed": False,
+        "used_author_fallback": False,
+        "drop_diagnostics": [],
+        "diagnostic_mode": "web_search_coverage_probe",
+        "diagnostic_raw_web_snippets": probe_snippets,
+    }
+
+
+def _fetch_targeted_series_providers(
+    query_author: str,
+    series_name: str,
+    targeted_query_text: str,
+    highest_owned_book_number: int | None,
+    author: str,
+    *,
+    discovery_drop_diagnostics: list[dict],
+    telemetry: "DiscoveryTelemetry | None",
+    cache: "DiscoveryCache | None",
+    apify_budget: "ApifyCallBudget",
+) -> tuple[dict, list[dict], bool]:
+    """PB-4 sub-step of discover_candidates_for_series: the primary
+    targeted "<series name> <author>" pass.
+
+    Google/OpenLibrary/Hardcover/web-search are fetched concurrently (see
+    _fetch_all_providers_parallel) instead of one after another -- query
+    construction and per-provider error handling are unchanged, only the
+    scheduling is. Live web search fills the coverage gap the catalog APIs
+    have for indie/self-published titles and pure announcements -- only
+    runs when both a web-search key (Serper) and an Anthropic key are
+    configured, since it needs both to search and to structure the
+    results. (Just a web-search key with no Anthropic key never reaches
+    this far -- see _run_web_search_diagnostic_probe.)
+
+    Returns (fetch_results, provider_failures, any_provider_succeeded):
+    fetch_results feeds straight into
+    _fuse_reconcile_and_filter_candidates; provider_failures/
+    any_provider_succeeded are this pass's contribution to the caller's
+    running totals across both the targeted and (if triggered)
+    author-fallback passes.
+    """
+    fetch_results = _fetch_all_providers_parallel(
+        query_author,
+        series_name,
+        targeted_query_text,
+        highest_owned_book_number,
+        author=author,
+        diagnostics=discovery_drop_diagnostics,
+        telemetry=telemetry,
+        cache=cache,
+        pass_label="targeted",
+        apify_budget=apify_budget,
+    )
+    failures = fetch_results["_failures"]
+    provider_failures: list[dict] = []
+    any_provider_succeeded = False
+
+    google_raw = fetch_results["google"]
+    if "google" in failures:
+        provider_failures.append({"provider": "google_books", "error": str(failures["google"])})
+    else:
+        any_provider_succeeded = True
+
+    openlibrary_raw = fetch_results["openlibrary"]
+    if "openlibrary" in failures:
+        provider_failures.append({"provider": "openlibrary", "error": str(failures["openlibrary"])})
+    else:
+        any_provider_succeeded = True
+
+    hardcover_raw = fetch_results["hardcover"]
+    if "hardcover" in failures:
+        provider_failures.append({"provider": "hardcover", "error": str(failures["hardcover"])})
+    elif hardcover_raw or os.environ.get("HARDCOVER_API_KEY", "").strip():
+        any_provider_succeeded = True
+
+    web_search_raw = fetch_results["web"]
+    if _web_search_enabled() and _llm_structuring_enabled():
+        if "web" in failures:
+            provider_failures.append({"provider": "web_search", "error": str(failures["web"])})
+        else:
+            any_provider_succeeded = True
+        # Surfaces Serper's health here even though "web" not in failures
+        # no longer implies Serper itself succeeded -- see
+        # _promote_web_search_health_diagnostics's own docstring.
+        _promote_web_search_health_diagnostics(
+            discovery_drop_diagnostics, provider_failures, "targeted", "web_search"
+        )
+
+    return fetch_results, provider_failures, any_provider_succeeded
+
+
+def _fetch_fallback_series_providers(
+    query_author: str,
+    series_name: str,
+    highest_owned_book_number: int | None,
+    author: str,
+    *,
+    other_known_series_names: set[str] | None,
+    enable_fallback_web_search: bool,
+    discovery_drop_diagnostics: list[dict],
+    telemetry: "DiscoveryTelemetry | None",
+    cache: "DiscoveryCache | None",
+    apify_budget: "ApifyCallBudget",
+) -> tuple[dict, list[dict], bool]:
+    """PB-4 sub-step of discover_candidates_for_series: the author-fallback
+    pass, triggered by _should_trigger_author_fallback -- the targeted
+    pass looking seriously incomplete or low-confidence, not just literally
+    empty.
+
+    Scoped by series_name, not a bare author sweep: a plain author-wide
+    query has no way to tell this series' books apart from a prolific
+    author's other, unrelated series (regression: falling back to plain
+    "George Wagner" pulled in higher-numbered books from his other
+    thriller series alongside the Jonathan Hunt books). Passing
+    series_name through -- and building the OpenLibrary/web-search queries
+    around it the same way the targeted (primary) pass already does --
+    keeps the fallback pass able to trigger on low completeness/confidence
+    without it being author-wide in scope. Web search still stays off by
+    default (enable_fallback_web_search opts in) since web-search+LLM
+    structuring here is a noisier, costlier signal than the catalog APIs
+    already provide.
+
+    Explicit cross-series contamination -- a fallback hit tagged with one
+    of this author's OTHER tracked series' names -- is dropped before
+    fusion ever sees it, rather than disabling the whole pass just because
+    other series exist (see discover_candidates_for_series's own docstring
+    and _is_cross_series_contamination).
+
+    Returns (fallback_results, provider_failures, any_provider_succeeded),
+    same shape as _fetch_targeted_series_providers.
+    """
+    fallback_results = _fetch_all_providers_parallel(
+        query_author,
+        series_name,
+        f"{series_name} {query_author}",
+        highest_owned_book_number,
+        author=author,
+        openlibrary_query=f'"{series_name}" "{query_author}"',
+        web_search_queries=[
+            f"{series_name} {query_author} books",
+            f"{series_name} {query_author} series",
+        ],
+        enable_web_search=enable_fallback_web_search,
+        diagnostics=discovery_drop_diagnostics,
+        telemetry=telemetry,
+        cache=cache,
+        pass_label="author_fallback",
+        apify_budget=apify_budget,
+    )
+    fallback_results = _filter_cross_series_contamination(
+        fallback_results, series_name, other_known_series_names, diagnostics=discovery_drop_diagnostics
+    )
+    fallback_failures = fallback_results["_failures"]
+    provider_failures: list[dict] = []
+    any_provider_succeeded = False
+
+    google_fallback = fallback_results["google"]
+    if "google" in fallback_failures:
+        provider_failures.append({"provider": "google_books_fallback", "error": str(fallback_failures["google"])})
+    else:
+        any_provider_succeeded = True
+
+    openlibrary_fallback = fallback_results["openlibrary"]
+    if "openlibrary" in fallback_failures:
+        provider_failures.append(
+            {"provider": "openlibrary_fallback", "error": str(fallback_failures["openlibrary"])}
+        )
+    else:
+        any_provider_succeeded = True
+
+    hardcover_fallback = fallback_results["hardcover"]
+    if "hardcover" in fallback_failures:
+        provider_failures.append({"provider": "hardcover_fallback", "error": str(fallback_failures["hardcover"])})
+    elif hardcover_fallback or os.environ.get("HARDCOVER_API_KEY", "").strip():
+        any_provider_succeeded = True
+
+    if enable_fallback_web_search:
+        web_fallback = fallback_results["web"]
+        if _web_search_enabled() and _llm_structuring_enabled():
+            if "web" in fallback_failures:
+                provider_failures.append(
+                    {"provider": "web_search_fallback", "error": str(fallback_failures["web"])}
+                )
+            else:
+                any_provider_succeeded = True
+            _promote_web_search_health_diagnostics(
+                discovery_drop_diagnostics, provider_failures, "author_fallback", "web_search_fallback"
+            )
+
+    return fallback_results, provider_failures, any_provider_succeeded
+
+
+def _fuse_reconcile_and_filter_candidates(
+    fetch_results: dict,
+    author: str,
+    series_name: str,
+    exclude_title_keys: set[str],
+    *,
+    confidence: str,
+    diagnostics: list[dict],
+    telemetry: "DiscoveryTelemetry | None",
+) -> tuple[list[dict], list]:
+    """PB-4 sub-step of discover_candidates_for_series, shared by both the
+    targeted pass and the (optional) author-fallback pass: fuse each real
+    book's raw hits (across all four providers) into one enriched
+    candidate, conditionally reconcile with the LLM, collapse duplicate
+    editions, then filter/merge into the flat dict shape series_agent.py
+    expects.
+
+    Hardcover is listed first inside _fuse_and_score_candidates (and
+    inside fetch_results itself): when multiple sources return the same
+    book, fusion's own backfill keeps whichever copy appears first as the
+    base, and Hardcover's explicit series-position/release-status fields
+    are more trustworthy than Google Books/OpenLibrary free-text for
+    indie/self-published LitRPG, which both of those APIs tend to index/
+    cover poorly. Web search is listed last since it's the least
+    structured of the four sources.
+
+    Conditional LLM reconciliation only runs when fusion alone left the
+    set looking incomplete, internally disagreeing, or thin on metadata
+    (see _needs_llm_reconciliation) -- and runs before _filter_and_merge so
+    any normalized/merged candidate it produces still goes through the
+    exact same filtering every other candidate does. Edition-aware
+    collapse (_finalize_candidates) runs last, immediately before
+    candidates are converted to the dict shape _filter_and_merge expects.
+
+    Returns (combined, fused_candidates): `combined` is what
+    discover_candidates_for_series accumulates into its "candidates"
+    return value (via finalize_discovery_output); `fused_candidates` is the
+    richer pre-filter UnifiedCandidate list it also returns as
+    "unified_candidates" (see _reconstruct_series_skeleton).
+    """
+    fused_candidates = _fuse_and_score_candidates(fetch_results, author, series_name)
+    if _needs_llm_reconciliation(fused_candidates, series_name):
+        fused_candidates = _reconcile_candidates_with_llm(
+            fused_candidates, series_name, diagnostics=diagnostics, telemetry=telemetry
+        )
+    fused_candidates = _finalize_candidates(fused_candidates)
+    combined = _filter_and_merge(
+        [_unified_candidate_to_raw_dict(candidate) for candidate in fused_candidates],
+        author,
+        exclude_title_keys,
+        confidence=confidence,
+        series_name=series_name,
+    )
+    return combined, fused_candidates
+
+
+def _build_series_discovery_result(
+    combined: list[dict],
+    final_fused_candidates: list,
+    provider_failures: list[dict],
+    all_providers_failed: bool,
+    used_author_fallback: bool,
+    discovery_drop_diagnostics: list[dict],
+) -> dict:
+    """PB-4 sub-step of discover_candidates_for_series: assemble its final
+    return dict, once both the targeted and (if triggered) author-fallback
+    passes have already been fetched, fused, and merged together."""
+    return {
+        # Deterministically sorted and stripped of transient fusion-internal
+        # fields -- see finalize_discovery_output. Runs after both the
+        # targeted and (if triggered) fallback passes have already been
+        # merged together above, so it's the true last step on this list.
+        "candidates": finalize_discovery_output(combined),
+        # Pre-filter fused candidates -- additive, existing "candidates" key
+        # unchanged -- so a caller that needs the richer UnifiedCandidate
+        # objects (confidence_score, metadata_completeness_score,
+        # source_provenance, resolved series_number) doesn't have to redo
+        # the fetch+fuse work itself. See _reconstruct_series_skeleton.
+        # Deliberately NOT passed through finalize_discovery_output --
+        # that strips exactly the fields _reconstruct_series_skeleton needs.
+        "unified_candidates": final_fused_candidates,
+        "provider_failures": provider_failures,
+        "all_providers_failed": all_providers_failed,
+        "used_author_fallback": used_author_fallback,
+        # Phase 3.5, PURE SHADOW MODE -- see _record_drop_diagnostic. Logged
+        # only (series_agent.py merges this with its own agent_drop_diagnostics);
+        # nothing here changes "candidates" above.
+        "drop_diagnostics": discovery_drop_diagnostics,
+    }
 
 
 def discover_candidates_for_series(
@@ -3817,45 +861,9 @@ def discover_candidates_for_series(
         f"apify={'on' if apify_enabled() else 'OFF (APIFY_API_TOKEN not set)'}"
     )
 
-    if _web_search_enabled() and not _llm_structuring_enabled():
-        # Diagnostic-only mode: a Serper key with no Anthropic key means
-        # there's no way to structure raw hits into real candidates, so
-        # don't try. This exists purely so Serper's own indie/LitRPG/
-        # web-serial coverage -- unverified, and possibly quite different
-        # from Brave's -- can be checked by hand against a real query
-        # before being relied on for anything (see
-        # discovery_agentic_migration_decision_log.md). No other
-        # provider/pass runs, nothing is fused/filtered, and nothing here
-        # can ever be added to the library: this is a standalone coverage
-        # probe, not a partial discovery run.
-        #
-        # This one lone Serper call has none of _fetch_web_search's own
-        # per-query error handling -- a bare probe was fine for its
-        # original "check by hand" purpose, but this branch runs
-        # unconditionally in the real Check Now path whenever Serper is
-        # configured with no Anthropic key, so an unhandled 4xx/5xx here
-        # used to crash the ENTIRE check in under a second, before
-        # Hardcover/Google/OpenLibrary ever got a chance to run at all
-        # (see the Apify integration design chat's follow-up finding).
-        # Caught and logged instead now -- on failure, skip the probe
-        # entirely and fall through to the normal pipeline below, which
-        # still runs Hardcover/Google/OpenLibrary (web search stays off,
-        # exactly as it already is whenever no Anthropic key is present).
-        try:
-            probe_snippets = _fetch_serper_web_search(targeted_query_text, telemetry=telemetry)
-        except Exception as exc:
-            _log(f"web-search coverage probe failed, falling through to normal discovery: {exc}")
-        else:
-            return {
-                "candidates": [],
-                "unified_candidates": [],
-                "provider_failures": [],
-                "all_providers_failed": False,
-                "used_author_fallback": False,
-                "drop_diagnostics": [],
-                "diagnostic_mode": "web_search_coverage_probe",
-                "diagnostic_raw_web_snippets": probe_snippets,
-            }
+    probe_result = _run_web_search_diagnostic_probe(targeted_query_text, telemetry)
+    if probe_result is not None:
+        return probe_result
 
     any_provider_succeeded = False
 
@@ -3866,97 +874,28 @@ def discover_candidates_for_series(
     # not per pass. See apify_provider.ApifyCallBudget's own docstring.
     apify_budget = ApifyCallBudget()
 
-    # Google/OpenLibrary/Hardcover/web-search fetched concurrently (see
-    # _fetch_all_providers_parallel) instead of one after another -- query
-    # construction and per-provider error handling are unchanged, only the
-    # scheduling is. Default query formulas there match this targeted pass
-    # exactly (Google gets "<series>" inauthor:"<author>", OpenLibrary/
-    # Hardcover both get the bare targeted_query_text, and the web-search
-    # query list is the lookahead-aware "<series> book <N>" set below).
-    fetch_results = _fetch_all_providers_parallel(
+    fetch_results, targeted_provider_failures, targeted_any_succeeded = _fetch_targeted_series_providers(
         query_author,
         series_name,
         targeted_query_text,
         highest_owned_book_number,
-        author=author,
-        diagnostics=discovery_drop_diagnostics,
+        author,
+        discovery_drop_diagnostics=discovery_drop_diagnostics,
         telemetry=telemetry,
         cache=cache,
-        pass_label="targeted",
         apify_budget=apify_budget,
     )
-    failures = fetch_results["_failures"]
+    provider_failures.extend(targeted_provider_failures)
+    any_provider_succeeded = any_provider_succeeded or targeted_any_succeeded
 
-    google_raw = fetch_results["google"]
-    if "google" in failures:
-        provider_failures.append({"provider": "google_books", "error": str(failures["google"])})
-    else:
-        any_provider_succeeded = True
-
-    openlibrary_raw = fetch_results["openlibrary"]
-    if "openlibrary" in failures:
-        provider_failures.append({"provider": "openlibrary", "error": str(failures["openlibrary"])})
-    else:
-        any_provider_succeeded = True
-
-    hardcover_raw = fetch_results["hardcover"]
-    if "hardcover" in failures:
-        provider_failures.append({"provider": "hardcover", "error": str(failures["hardcover"])})
-    elif hardcover_raw or os.environ.get("HARDCOVER_API_KEY", "").strip():
-        any_provider_succeeded = True
-
-    # Live web search fills the coverage gap the catalog APIs above have for
-    # indie/self-published titles and pure announcements -- only runs when
-    # both a web-search key (Serper) and an Anthropic key are configured,
-    # since it needs both to search and to structure the results. (Just a
-    # web-search key with no Anthropic key never reaches this far --
-    # see the diagnostic-only short-circuit above.)
-    web_search_raw = fetch_results["web"]
-    if _web_search_enabled() and _llm_structuring_enabled():
-        if "web" in failures:
-            provider_failures.append({"provider": "web_search", "error": str(failures["web"])})
-        else:
-            any_provider_succeeded = True
-        # Surfaces Serper's health here even though "web" not in failures
-        # no longer implies Serper itself succeeded -- see
-        # _promote_web_search_health_diagnostics's own docstring.
-        _promote_web_search_health_diagnostics(
-            discovery_drop_diagnostics, provider_failures, "targeted", "web_search"
-        )
-
-    # Fuse each real book's raw hits (across all four providers) into one
-    # enriched candidate before merging/filtering -- see
-    # _fuse_and_score_candidates. Hardcover listed first inside it (and
-    # inside fetch_results itself): when multiple sources return the same
-    # book, fusion's own backfill keeps whichever copy appears first as the
-    # base, and Hardcover's explicit series-position/release-status fields
-    # are more trustworthy than Google Books/OpenLibrary free-text for
-    # indie/self-published LitRPG, which both of those APIs tend to index/
-    # cover poorly. Web search is listed last since it's the least
-    # structured of the four sources. _filter_and_merge itself is
-    # unchanged -- it still receives the same flat dict shape it always
-    # has, just pre-fused/enriched instead of four raw lists concatenated.
-    fused_candidates = _fuse_and_score_candidates(fetch_results, author, series_name)
-    # Conditional LLM reconciliation -- only when fusion alone left the set
-    # looking incomplete, internally disagreeing, or thin on metadata (see
-    # _needs_llm_reconciliation). Runs before _filter_and_merge so any
-    # normalized/merged candidate it produces still goes through the exact
-    # same filtering every other candidate does.
-    if _needs_llm_reconciliation(fused_candidates, series_name):
-        fused_candidates = _reconcile_candidates_with_llm(
-            fused_candidates, series_name, diagnostics=discovery_drop_diagnostics, telemetry=telemetry
-        )
-    # Edition-aware collapse -- see _finalize_candidates -- runs last,
-    # immediately before candidates are converted to the dict shape
-    # returned to series_agent.py, so it sees whatever fusion/reconciliation
-    # above already produced.
-    fused_candidates = _finalize_candidates(fused_candidates)
-    combined = _filter_and_merge(
-        [_unified_candidate_to_raw_dict(candidate) for candidate in fused_candidates],
+    combined, fused_candidates = _fuse_reconcile_and_filter_candidates(
+        fetch_results,
         author,
+        series_name,
         exclude_title_keys,
         confidence="targeted",
-        series_name=series_name,
+        diagnostics=discovery_drop_diagnostics,
+        telemetry=telemetry,
     )
     # Tracks whichever fused candidate set actually produced `combined` --
     # reassigned below if the fallback pass runs -- so callers that want the
@@ -3970,81 +909,21 @@ def discover_candidates_for_series(
         if progress_callback:
             progress_callback({"current_pass": f"Broadening search to all books by {author}"})
 
-        # Scoped by series_name, not a bare author sweep: a plain
-        # author-wide query has no way to tell this series' books apart from
-        # a prolific author's other, unrelated series (regression: falling
-        # back to plain "George Wagner" pulled in higher-numbered books from
-        # his other thriller series alongside the Jonathan Hunt books).
-        # Passing series_name through -- and building the OpenLibrary/
-        # web-search queries around it the same way the targeted (primary)
-        # pass already does -- keeps the fallback pass able to trigger on
-        # low completeness/confidence without it being author-wide in scope.
-        # Web search still stays off by default (enable_fallback_web_search
-        # opts in) since web-search+LLM structuring here is a noisier,
-        # costlier signal than the catalog APIs already provide.
-        fallback_results = _fetch_all_providers_parallel(
+        fallback_results, fallback_provider_failures, fallback_any_succeeded = _fetch_fallback_series_providers(
             query_author,
             series_name,
-            f"{series_name} {query_author}",
             highest_owned_book_number,
-            author=author,
-            openlibrary_query=f'"{series_name}" "{query_author}"',
-            web_search_queries=[
-                f"{series_name} {query_author} books",
-                f"{series_name} {query_author} series",
-            ],
-            enable_web_search=enable_fallback_web_search,
-            diagnostics=discovery_drop_diagnostics,
+            author,
+            other_known_series_names=other_known_series_names,
+            enable_fallback_web_search=enable_fallback_web_search,
+            discovery_drop_diagnostics=discovery_drop_diagnostics,
             telemetry=telemetry,
             cache=cache,
-            pass_label="author_fallback",
             apify_budget=apify_budget,
         )
-        # Explicit cross-series contamination -- a fallback hit tagged with
-        # one of this author's OTHER tracked series' names -- is dropped
-        # before fusion ever sees it, rather than disabling the whole pass
-        # just because other series exist (see this function's docstring
-        # and _is_cross_series_contamination).
-        fallback_results = _filter_cross_series_contamination(
-            fallback_results, series_name, other_known_series_names, diagnostics=discovery_drop_diagnostics
-        )
-        fallback_failures = fallback_results["_failures"]
+        provider_failures.extend(fallback_provider_failures)
+        any_provider_succeeded = any_provider_succeeded or fallback_any_succeeded
 
-        google_fallback = fallback_results["google"]
-        if "google" in fallback_failures:
-            provider_failures.append({"provider": "google_books_fallback", "error": str(fallback_failures["google"])})
-        else:
-            any_provider_succeeded = True
-
-        openlibrary_fallback = fallback_results["openlibrary"]
-        if "openlibrary" in fallback_failures:
-            provider_failures.append({"provider": "openlibrary_fallback", "error": str(fallback_failures["openlibrary"])})
-        else:
-            any_provider_succeeded = True
-
-        hardcover_fallback = fallback_results["hardcover"]
-        if "hardcover" in fallback_failures:
-            provider_failures.append({"provider": "hardcover_fallback", "error": str(fallback_failures["hardcover"])})
-        elif hardcover_fallback or os.environ.get("HARDCOVER_API_KEY", "").strip():
-            any_provider_succeeded = True
-
-        if enable_fallback_web_search:
-            web_fallback = fallback_results["web"]
-            if _web_search_enabled() and _llm_structuring_enabled():
-                if "web" in fallback_failures:
-                    provider_failures.append({"provider": "web_search_fallback", "error": str(fallback_failures["web"])})
-                else:
-                    any_provider_succeeded = True
-                _promote_web_search_health_diagnostics(
-                    discovery_drop_diagnostics, provider_failures, "author_fallback", "web_search_fallback"
-                )
-
-        fused_fallback_candidates = _fuse_and_score_candidates(fallback_results, author, series_name)
-        if _needs_llm_reconciliation(fused_fallback_candidates, series_name):
-            fused_fallback_candidates = _reconcile_candidates_with_llm(
-                fused_fallback_candidates, series_name, diagnostics=discovery_drop_diagnostics, telemetry=telemetry
-            )
-        fused_fallback_candidates = _finalize_candidates(fused_fallback_candidates)
         # Additive, not a replacement: the targeted pass above may have
         # already found real matches even while still triggering fallback
         # for looking incomplete, so the targeted pass's own title keys are
@@ -4054,12 +933,14 @@ def discover_candidates_for_series(
         # "targeted" -- series_agent.py's belongs_to_series leans on that
         # distinction) rather than the two passes' results being conflated.
         already_found_title_keys = {core_title_key(str(candidate.get("title") or "")) for candidate in combined}
-        fallback_combined = _filter_and_merge(
-            [_unified_candidate_to_raw_dict(candidate) for candidate in fused_fallback_candidates],
+        fallback_combined, fused_fallback_candidates = _fuse_reconcile_and_filter_candidates(
+            fallback_results,
             author,
+            series_name,
             exclude_title_keys | already_found_title_keys,
             confidence="author_fallback",
-            series_name=series_name,
+            diagnostics=discovery_drop_diagnostics,
+            telemetry=telemetry,
         )
         combined = combined + fallback_combined
         final_fused_candidates = fused_candidates + fused_fallback_candidates
@@ -4073,33 +954,21 @@ def discover_candidates_for_series(
     if progress_callback:
         progress_callback({"current_pass": "Done", "total": 1, "completed": 1})
 
-    return {
-        # Deterministically sorted and stripped of transient fusion-internal
-        # fields -- see finalize_discovery_output. Runs after both the
-        # targeted and (if triggered) fallback passes have already been
-        # merged together above, so it's the true last step on this list.
-        "candidates": finalize_discovery_output(combined),
-        # Pre-filter fused candidates -- additive, existing "candidates" key
-        # unchanged -- so a caller that needs the richer UnifiedCandidate
-        # objects (confidence_score, metadata_completeness_score,
-        # source_provenance, resolved series_number) doesn't have to redo
-        # the fetch+fuse work itself. See _reconstruct_series_skeleton.
-        # Deliberately NOT passed through finalize_discovery_output --
-        # that strips exactly the fields _reconstruct_series_skeleton needs.
-        "unified_candidates": final_fused_candidates,
-        "provider_failures": provider_failures,
-        "all_providers_failed": all_providers_failed,
-        "used_author_fallback": used_author_fallback,
-        # Phase 3.5, PURE SHADOW MODE -- see _record_drop_diagnostic. Logged
-        # only (series_agent.py merges this with its own agent_drop_diagnostics);
-        # nothing here changes "candidates" above.
-        "drop_diagnostics": discovery_drop_diagnostics,
-    }
+    return _build_series_discovery_result(
+        combined,
+        final_fused_candidates,
+        provider_failures,
+        all_providers_failed,
+        used_author_fallback,
+        discovery_drop_diagnostics,
+    )
 
 
 # Bounds the number of extra per-candidate lookups _enrich_missing_series_hints
 # performs -- keeps a "More by this author" run from ballooning into dozens
 # of sequential API calls for a very prolific author.
+
+
 MAX_SERIES_HINT_LOOKUPS = 25
 
 
@@ -4304,191 +1173,3 @@ def discover_candidates_for_author(
         "all_providers_failed": all_providers_failed,
     }
 
-
-# ---------------------------------------------------------------------------
-# Phase 4 of agentic discovery, PURE SHADOW MODE.
-#
-# Pure functions only -- no I/O, no ORM, no module state. series_agent.py
-# calls them after its candidate loop has finished and logs the results into
-# the same consolidated series_external_reality entry Phase 3.5 already
-# emits; nothing here can reach candidate acceptance, the skeleton, the
-# delta, confidence scoring, or the lookahead. Kept as standalone helpers
-# (rather than inline in series_agent) so a later phase can reuse the exact
-# same logic without going through the log.
-# ---------------------------------------------------------------------------
-
-MAX_DROP_EXPLANATIONS = 50
-
-_DROP_EXPLANATIONS = {
-    # web_structuring's diagnostic covers a whole provider batch (its
-    # candidate_identity is all-None by construction -- see
-    # _structure_web_results_with_llm), not one candidate, so its wording
-    # deliberately says "structuring pass" rather than "candidate".
-    ("web_structuring", "json_parse_failure"): (
-        "Provider returned unstructured or invalid JSON; the entire structuring pass was discarded."
-    ),
-    ("cross_series_filter", "series_name_mismatch"): (
-        "Candidate dropped because its series name did not match the target series."
-    ),
-    ("llm_reconciliation", "excluded_by_llm"): (
-        "LLM reconciliation excluded this candidate as inconsistent or low-confidence."
-    ),
-    ("already_known", "suppressed_as_known"): (
-        "Candidate suppressed because it matches an already-owned book."
-    ),
-}
-
-_DEFAULT_DROP_EXPLANATION = "Candidate dropped for an unclassified reason."
-
-
-def compute_external_missing_vs_owned(
-    external_expected_total: int | None, owned_books: list[dict]
-) -> list[int]:
-    """Externally-expected volume numbers the library does not own --
-    deliberately owned-only, unlike Phase 3.5's external_missing_numbers,
-    which also subtracts every discovered candidate.
-
-    That difference is the whole point: because Phase 3.5 subtracts the
-    candidates too, no discovered candidate's number can ever appear in
-    external_missing_numbers, so "does this candidate fill an externally-
-    expected gap" is unanswerable from it. Subtracting only owned books
-    leaves exactly the slots a candidate could be filling.
-
-    owned_books is the same list[dict] shape _reconstruct_series_skeleton
-    takes (series_agent passes its owned_books_for_skeleton straight
-    through), so this stays free of any ORM dependency.
-
-    Guarantees external_missing_numbers is a subset of what this returns:
-    Phase 3.5 subtracts a superset of the numbers subtracted here.
-    """
-    if external_expected_total is None or external_expected_total <= 0:
-        return []
-    owned_integral = {
-        number
-        for number in (_integral_or_none(book.get("book_number")) for book in owned_books)
-        if number is not None
-    }
-    return sorted(set(range(1, external_expected_total + 1)) - owned_integral)
-
-
-def compute_inferred_number(raw: dict, series_name: str | None):
-    """The series number series_agent's own candidate loop resolves for a
-    raw candidate dict, reproduced exactly: the provider's structured hint
-    when present, else a title-text inference.
-
-    Kept byte-for-byte in step with the loop (including the `or` rather
-    than an `is None` check, so a falsy hint still falls through to
-    inference, and including series_name, without which the bare
-    "<Series Name> <N>" pattern in infer_number_from_title never fires).
-    Returns the resolved value as-is -- int, float (a 3.5 novella), or None.
-    """
-    title = str(raw.get("title") or "").strip()
-    return raw.get("series_number_hint") or infer_number_from_title(title, series_name)
-
-
-def compute_owned_number_coverage(owned_books: list[dict]) -> dict:
-    """How much of the owned library carries a usable integer book number.
-
-    external_gap_ratio silently overstates how incomplete a series is when
-    owned books have a NULL/fractional book_number, since those contribute
-    nothing to the owned side of the subtraction. Logging the coverage
-    alongside the ratio is what lets a reader tell "genuinely missing
-    volumes" from "our own numbering is patchy".
-    """
-    return {
-        "owned_books_total": len(owned_books),
-        "owned_books_with_numbers": sum(
-            1 for book in owned_books if _integral_or_none(book.get("book_number")) is not None
-        ),
-    }
-
-
-def compute_new_volume_flags(
-    candidates: list[dict],
-    series_name: str | None,
-    external_missing_vs_owned: list[int],
-    belongs_indices: set[int],
-    known_indices: set[int],
-) -> list[dict]:
-    """One diagnostic entry per scanned candidate: the number it resolved
-    to, whether that number is an externally-expected volume the library
-    doesn't own, and which of the candidate loop's two gates it passed.
-
-    belongs_indices/known_indices are positional into `candidates` and are
-    captured by the loop itself -- belongs_to_series only reaches its final
-    value after the universe-tie-in and compilation downgrades, so it can't
-    be recomputed here.
-
-    Emits the resolved number exactly as the loop saw it (a 3.5 novella
-    stays 3.5) while is_new_volume stays integral-only, so this list and
-    candidate_diagnostics never disagree about a candidate's number.
-    Phase 5 derives "proposed" as belongs_to_series and not
-    suppressed_as_known.
-    """
-    missing_set = set(external_missing_vs_owned)
-    flags: list[dict] = []
-    for index, raw in enumerate(candidates):
-        inferred = compute_inferred_number(raw, series_name)
-        number = _integral_or_none(inferred)
-        flags.append(
-            {
-                "title": str(raw.get("title") or "").strip(),
-                "isbn13": str(raw.get("isbn13") or "").strip() or None,
-                "series_number": inferred,
-                "is_new_volume": number is not None and number in missing_set,
-                "belongs_to_series": index in belongs_indices,
-                "suppressed_as_known": index in known_indices,
-            }
-        )
-    return flags
-
-
-def compute_external_gap_ratio(
-    external_expected_total: int | None, external_missing_vs_owned: list[int]
-) -> float | None:
-    """How incomplete the owned library looks against the external series
-    total, as a 0..1 scalar. None (rather than 0.0) whenever there's no
-    usable external total, so "no external data" stays distinguishable
-    from "owns everything".
-    """
-    if external_expected_total is None or external_expected_total <= 0:
-        return None
-    return round(len(external_missing_vs_owned) / external_expected_total, 4)
-
-
-def compute_drop_explanations(drop_diagnostics: list[dict]) -> dict:
-    """Flattens Phase 3.5's drop diagnostics (which nest the candidate's
-    identity, and allow it to be absent entirely) into one flat entry per
-    drop, each carrying a human-readable explanation of the stage/reason
-    pair that produced it.
-
-    Returns the explanation list capped at MAX_DROP_EXPLANATIONS, the
-    pre-cap total, and a per-"stage:reason" count map computed over *every*
-    entry rather than just the retained ones -- the aggregate shape is the
-    part worth keeping when a run drops more than the cap, and it's what
-    makes truncating the list safe. Entries stay in pipeline order; the cap
-    keeps the first N.
-    """
-    explanations: list[dict] = []
-    counts: dict[str, int] = {}
-    for entry in drop_diagnostics:
-        identity = entry.get("candidate_identity") or {}
-        stage = entry.get("stage")
-        reason = entry.get("reason")
-        key = f"{stage}:{reason}"
-        counts[key] = counts.get(key, 0) + 1
-        explanations.append(
-            {
-                "stage": stage,
-                "reason": reason,
-                "title": identity.get("title"),
-                "isbn13": identity.get("isbn13"),
-                "series_number": identity.get("series_number"),
-                "explanation": _DROP_EXPLANATIONS.get((stage, reason), _DEFAULT_DROP_EXPLANATION),
-            }
-        )
-    return {
-        "drop_explanations": explanations[:MAX_DROP_EXPLANATIONS],
-        "drop_explanations_total": len(explanations),
-        "drop_explanation_counts": counts,
-    }
