@@ -57,6 +57,19 @@ SERIES_CHECK_MAX_ROUNDS = 3
 # recurring sweep cadence -- only on genuinely redundant close-together
 # re-checks.
 SERIES_CHECK_PRECHECK_STALENESS_DAYS = 3
+# Temporarily OFF while actively developing/debugging discovery itself
+# (2026-08-23): this cost optimization is exactly what made a manual Check
+# Now on an already-recently-checked series (e.g. Jonathan Hunt, the
+# hardest-to-discover series found so far and the one being used to verify
+# discovery end-to-end) silently skip the entire web-search/Apify/LLM
+# pipeline and return in ~1-2s -- indistinguishable from a real failure
+# when the whole point of re-running is to check whether discovery itself
+# now works. Series.last_checked is still written normally on every full
+# run (see agents/series_agent.py) -- only this pre-check's use of that
+# timestamp to skip re-running discovery is disabled here. Flip back to
+# True once discovery is confirmed working end-to-end and repeated manual
+# re-checks of the same series are no longer the primary dev workflow.
+SERIES_CHECK_PRECHECK_ENABLED = False
 
 
 def _parse_candidate_date(value: str | None) -> date | None:
@@ -259,7 +272,7 @@ def run_series_check_job_full(series_id: int) -> None:
         # very first Check Now click right after adding it) always runs
         # the full loop; there's no prior baseline to compare against.
         run_full_loop = True
-        if db_series and db_series.last_checked is not None:
+        if SERIES_CHECK_PRECHECK_ENABLED and db_series and db_series.last_checked is not None:
             days_since_checked = (date.today() - db_series.last_checked).days
             if 0 <= days_since_checked <= SERIES_CHECK_PRECHECK_STALENESS_DAYS:
                 known_active_books = (

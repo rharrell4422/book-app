@@ -455,12 +455,18 @@ class SeriesCheckPrecheckTest(unittest.TestCase):
         return series
 
     def test_recently_checked_series_short_circuits_when_precheck_finds_nothing(self):
+        # SERIES_CHECK_PRECHECK_ENABLED is temporarily off by default (see
+        # its own comment) while discovery itself is under active
+        # development -- explicitly re-enabled here so this mechanism's own
+        # behavior stays covered for whenever it's flipped back on.
         from datetime import date
 
         series = self._make_series(last_checked=date.today())
 
         with patch.object(series_check_engine, "SessionLocal", self.SessionLocal), patch.object(
             library_sync, "SessionLocal", self.SessionLocal
+        ), patch.object(
+            series_check_engine, "SERIES_CHECK_PRECHECK_ENABLED", True
         ), patch.object(
             series_check_engine.discovery_engine, "precheck_for_new_volumes", return_value=False
         ) as mock_precheck, patch.object(
@@ -490,6 +496,8 @@ class SeriesCheckPrecheckTest(unittest.TestCase):
         with patch.object(series_check_engine, "SessionLocal", self.SessionLocal), patch.object(
             library_sync, "SessionLocal", self.SessionLocal
         ), patch.object(
+            series_check_engine, "SERIES_CHECK_PRECHECK_ENABLED", True
+        ), patch.object(
             series_check_engine.discovery_engine, "precheck_for_new_volumes", return_value=True
         ) as mock_precheck, patch.object(
             series_check_engine.series_agent, "run_series_check", return_value=mocked_result
@@ -497,6 +505,39 @@ class SeriesCheckPrecheckTest(unittest.TestCase):
             series_check_engine.run_series_check_job_full(series.id)
 
         mock_precheck.assert_called_once()
+        mock_run_series_check.assert_called()
+
+        job = series_check_engine.series_check_jobs[series.id]
+        self.assertFalse(job["result"]["idle_check"])
+        self.assertGreaterEqual(job["result"]["rounds_run"], 1)
+
+    def test_precheck_disabled_by_default_always_runs_full_loop_even_when_recently_checked(self):
+        # Regression guard for the temporary dev-mode disable: a
+        # recently-checked series (which would have short-circuited if the
+        # precheck were on) must still run the real full discovery loop
+        # while SERIES_CHECK_PRECHECK_ENABLED is False, and must never call
+        # precheck_for_new_volumes at all.
+        from datetime import date
+
+        self.assertFalse(series_check_engine.SERIES_CHECK_PRECHECK_ENABLED)
+        series = self._make_series(last_checked=date.today())
+        mocked_result = {
+            "series_id": series.id,
+            "added_books": [],
+            "provider_failures": [],
+            "all_providers_failed": False,
+        }
+
+        with patch.object(series_check_engine, "SessionLocal", self.SessionLocal), patch.object(
+            library_sync, "SessionLocal", self.SessionLocal
+        ), patch.object(
+            series_check_engine.discovery_engine, "precheck_for_new_volumes"
+        ) as mock_precheck, patch.object(
+            series_check_engine.series_agent, "run_series_check", return_value=mocked_result
+        ) as mock_run_series_check:
+            series_check_engine.run_series_check_job_full(series.id)
+
+        mock_precheck.assert_not_called()
         mock_run_series_check.assert_called()
 
         job = series_check_engine.series_check_jobs[series.id]

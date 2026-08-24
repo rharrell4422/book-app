@@ -830,6 +830,27 @@ class WebSearchDiagnosticModeTest(unittest.TestCase):
         # not a partial discovery run.
         mock_parallel.assert_not_called()
 
+    def test_probe_failure_is_caught_and_falls_through_to_normal_pipeline(self):
+        # Regression: this lone Serper call used to have zero error
+        # handling, so any 4xx/5xx from Serper crashed the entire Check
+        # Now in under a second, before Hardcover/Google/OpenLibrary ever
+        # got a chance to run -- see the Apify integration design chat's
+        # follow-up finding. Now it's caught and falls through to the
+        # normal pipeline instead (web search stays off either way, since
+        # there's still no Anthropic key here).
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": ""}), patch.object(
+            discovery_engine, "_fetch_serper_web_search", side_effect=RuntimeError("403 Forbidden")
+        ) as mock_serper, patch.object(
+            discovery_engine, "_fetch_hardcover", return_value=[]
+        ), patch.object(
+            discovery_engine, "_fetch_google_books", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]):
+            result = discovery_engine.discover_candidates_for_series("Some Series", "Some Author")
+
+        mock_serper.assert_called_once()
+        self.assertNotIn("diagnostic_mode", result)
+        self.assertFalse(result["all_providers_failed"])
+
     def test_both_keys_present_runs_the_normal_pipeline_not_diagnostic_mode(self):
         with patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
             discovery_engine, "_fetch_serper_web_search"

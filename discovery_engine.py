@@ -3610,16 +3610,34 @@ def discover_candidates_for_series(
         # provider/pass runs, nothing is fused/filtered, and nothing here
         # can ever be added to the library: this is a standalone coverage
         # probe, not a partial discovery run.
-        return {
-            "candidates": [],
-            "unified_candidates": [],
-            "provider_failures": [],
-            "all_providers_failed": False,
-            "used_author_fallback": False,
-            "drop_diagnostics": [],
-            "diagnostic_mode": "web_search_coverage_probe",
-            "diagnostic_raw_web_snippets": _fetch_serper_web_search(targeted_query_text, telemetry=telemetry),
-        }
+        #
+        # This one lone Serper call has none of _fetch_web_search's own
+        # per-query error handling -- a bare probe was fine for its
+        # original "check by hand" purpose, but this branch runs
+        # unconditionally in the real Check Now path whenever Serper is
+        # configured with no Anthropic key, so an unhandled 4xx/5xx here
+        # used to crash the ENTIRE check in under a second, before
+        # Hardcover/Google/OpenLibrary ever got a chance to run at all
+        # (see the Apify integration design chat's follow-up finding).
+        # Caught and logged instead now -- on failure, skip the probe
+        # entirely and fall through to the normal pipeline below, which
+        # still runs Hardcover/Google/OpenLibrary (web search stays off,
+        # exactly as it already is whenever no Anthropic key is present).
+        try:
+            probe_snippets = _fetch_serper_web_search(targeted_query_text, telemetry=telemetry)
+        except Exception as exc:
+            _log(f"web-search coverage probe failed, falling through to normal discovery: {exc}")
+        else:
+            return {
+                "candidates": [],
+                "unified_candidates": [],
+                "provider_failures": [],
+                "all_providers_failed": False,
+                "used_author_fallback": False,
+                "drop_diagnostics": [],
+                "diagnostic_mode": "web_search_coverage_probe",
+                "diagnostic_raw_web_snippets": probe_snippets,
+            }
 
     any_provider_succeeded = False
 
