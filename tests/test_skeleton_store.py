@@ -131,9 +131,9 @@ class AsymmetricMergeTest(SkeletonStoreTestBase):
             self.series.id,
             skeleton_updates=[{"book_number": 7.0, "title": "Cherry Blossom Girls Book 7", "status": "confirmed", "confidence": "medium"}],
         )
-        self.assertEqual(
-            self._skeleton_row_number(7.0)["source_class"], "discovered"
-        )
+        discovered_entry = self._skeleton_row_number(7.0)
+        self.assertEqual(discovered_entry["source_class"], "discovered")
+        original_first_seen_at = discovered_entry["first_seen_at"]
 
         self.db.add(
             Book(
@@ -152,6 +152,13 @@ class AsymmetricMergeTest(SkeletonStoreTestBase):
         entry = self._skeleton_row_number(7.0)
         self.assertEqual(entry["source_class"], "library")
         self.assertEqual(entry["confidence"], "high")
+        # CR-5 regression: an "upgrade" from discovered to owned must
+        # preserve the original discovery's first_seen_at ("when did we
+        # first find this") instead of resetting it to the moment of the
+        # upgrade -- the prior behavior lost that provenance entirely by
+        # dropping the discovered entry and rebuilding a brand-new library
+        # entry with a fresh timestamp.
+        self.assertEqual(entry["first_seen_at"], original_first_seen_at)
 
     def _skeleton_row_number(self, number):
         row = self._skeleton_row()
@@ -216,6 +223,54 @@ class RetentionPolicyTest(SkeletonStoreTestBase):
         backfill_skeleton_for_series(self.db, self.series.id)
         numbers = {e["book_number"] for e in self._skeleton_row().skeleton_json}
         self.assertNotIn(9.0, numbers)
+
+    def test_discovered_entry_exactly_at_ttl_boundary_is_expired(self):
+        # CR-6 regression: the boundary comparison used strict `>`, so an
+        # entry exactly DISCOVERED_ENTRY_TTL_DAYS old survived one extra
+        # rebuild past its intended expiry. Must now use `>=`.
+        apply_skeleton_updates(
+            self.db,
+            self.series.id,
+            skeleton_updates=[{"book_number": 9.0, "title": "Exactly At Boundary"}],
+        )
+        row = self._skeleton_row()
+        boundary_timestamp = (datetime.utcnow() - timedelta(days=DISCOVERED_ENTRY_TTL_DAYS)).isoformat()
+        entries = copy.deepcopy(row.skeleton_json)
+        for entry in entries:
+            if entry["book_number"] == 9.0:
+                entry["first_seen_at"] = boundary_timestamp
+                entry["last_confirmed_at"] = boundary_timestamp
+        row.skeleton_json = entries
+        self.db.commit()
+
+        backfill_skeleton_for_series(self.db, self.series.id)
+        numbers = {e["book_number"] for e in self._skeleton_row().skeleton_json}
+        self.assertNotIn(9.0, numbers)
+
+    def test_missing_or_malformed_timestamp_expiry_is_logged(self):
+        # CR-7 regression: dropping a discovered entry for a missing or
+        # unparseable timestamp is a data-loss path that previously left no
+        # trace anywhere -- it must now be logged.
+        apply_skeleton_updates(
+            self.db,
+            self.series.id,
+            skeleton_updates=[{"book_number": 9.0, "title": "No Timestamp"}],
+        )
+        row = self._skeleton_row()
+        entries = copy.deepcopy(row.skeleton_json)
+        for entry in entries:
+            if entry["book_number"] == 9.0:
+                entry["first_seen_at"] = "not-a-real-timestamp"
+                entry["last_confirmed_at"] = "not-a-real-timestamp"
+        row.skeleton_json = entries
+        self.db.commit()
+
+        with self.assertLogs("services.skeleton_store", level="WARNING") as logs:
+            backfill_skeleton_for_series(self.db, self.series.id)
+
+        numbers = {e["book_number"] for e in self._skeleton_row().skeleton_json}
+        self.assertNotIn(9.0, numbers)
+        self.assertTrue(any("malformed timestamp" in message for message in logs.output))
 
     def test_reconfirming_a_discovered_entry_extends_its_ttl(self):
         apply_skeleton_updates(

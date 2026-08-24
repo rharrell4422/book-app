@@ -757,7 +757,7 @@ def run_series_check_job_full(series_id: int) -> None:
                     db.refresh(db_series)
 
                 logger.info("LIBRARY_SYNC_TRIGGERED series_id=%s", series_id)
-                library_sync.update_from_series(series_id)
+                library_sync.update_from_series(series_id, profile_id=db_series.profile_id)
 
                 # Phase 0 write call site #2 for SeriesSkeleton (see
                 # discovery_agentic_replacement_recommendation.md §0.1 and

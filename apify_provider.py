@@ -362,7 +362,19 @@ def _normalize_product_item(item: dict) -> dict | None:
         "series_total_hint": series_total_hint,
         "asin": str(asin).strip() if asin else None,
         "cover_image": str(cover_image).strip() if cover_image else None,
-        "confidence": "medium",
+        # Deliberately NOT a hardcoded value here (regression, CR-1): every
+        # other provider omits this key entirely so discovery_engine.py's
+        # _filter_and_merge stamps it with the current fetch pass's real
+        # confidence ("targeted"/"author_fallback"/"missing_volume_recovery").
+        # _filter_and_merge preserves an already-present "confidence" value
+        # to protect candidates being re-merged after already being fused
+        # once (e.g. skeleton-recovery re-merges) -- a hardcoded "medium"
+        # here defeated that entirely by always winning, which could
+        # prevent an Apify-sourced candidate from ever being recognized as
+        # "came_from_targeted_search" in series_agent.py's
+        # targeted_with_number gate, since "medium" is not one of the
+        # values that check looks for.
+        "confidence": None,
     }
 
 

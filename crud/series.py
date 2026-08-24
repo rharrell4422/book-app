@@ -64,10 +64,15 @@ def delete_series(db: Session, series_id: int, profile_id: str):
     if not db_series:
         return None
 
-    # Hard-delete all books linked to this series so Library and Series views stay in sync.
+    # Hard-delete all books linked to this series so Library and Series views
+    # stay in sync. CR-9: profile_id is included here too, not just on the
+    # Series lookup above -- filtering by series_id alone would also
+    # delete/mutate any "ghost" cross-profile Book row that happened to
+    # share this series_id, which the Series-row check above never
+    # protects against.
     deleted_books = (
         db.query(Book)
-        .filter(Book.series_id == series_id)
+        .filter(Book.series_id == series_id, Book.profile_id == profile_id)
         .delete(synchronize_session=False)
     )
     db.delete(db_series)

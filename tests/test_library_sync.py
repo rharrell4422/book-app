@@ -161,6 +161,29 @@ class LibrarySyncUpcomingHealingTest(unittest.TestCase):
         self.assertEqual(book.read_status, "available")
         self.assertEqual(result["updated_rows"], 0)
 
+    def test_profile_id_scoping_excludes_a_ghost_cross_profile_book(self):
+        # CR-9 regression: series_id alone doesn't guarantee a Book row
+        # belongs to the series' own profile -- a "ghost" cross-profile row
+        # sharing this series_id used to get silently mutated by whichever
+        # profile's Check Now happened to trigger this sync.
+        past_date = date.today() - timedelta(days=30)
+        ghost_book = self._add_book(
+            title="Ghost Book From Another Profile",
+            book_number=13.0,
+            read_status="upcoming",
+            is_upcoming_auto=True,
+            release_date=past_date,
+            profile_id="daughter",
+        )
+
+        with patch.object(library_sync, "SessionLocal", self.SessionLocal):
+            result = library_sync.update_from_series(self.series.id, profile_id="robbie")
+        self.db.refresh(ghost_book)
+
+        self.assertEqual(result["mirrored_rows"], 0)
+        self.assertEqual(ghost_book.read_status, "upcoming")
+        self.assertTrue(ghost_book.is_upcoming_auto)
+
 
 if __name__ == "__main__":
     unittest.main()

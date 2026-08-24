@@ -11,7 +11,12 @@ from sqlalchemy.orm import sessionmaker
 
 import crud
 import discovery_engine
-from agents.series_agent import SeriesIntelligenceAgent, discover_more_by_author, discover_series_by_name
+from agents.series_agent import (
+    SeriesIntelligenceAgent,
+    _needs_review_to_skeleton_updates,
+    discover_more_by_author,
+    discover_series_by_name,
+)
 from database import Base
 from models import Book, Series, SeriesSkeleton
 from services.discovery_cache import DiscoveryCache
@@ -647,6 +652,23 @@ class GenerateSeriesOverviewTest(unittest.TestCase):
 
         self.assertIn("Book one premise text.", captured["prompt"])
         self.assertNotIn("Untitled Draft", captured["prompt"])
+
+    def test_returns_none_instead_of_raising_when_the_llm_call_fails(self):
+        # CR-2 regression: this function had no try/except at all around the
+        # LLM call -- a raised exception (timeout, API error, etc.) would
+        # propagate all the way up to the "Series Overview" button's request
+        # handler as an unhandled 500 instead of degrading to "no overview
+        # available", which is this function's own documented contract for
+        # every other failure mode (missing key, no descriptions).
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = RuntimeError("boom")
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), patch(
+            "anthropic.Anthropic", return_value=mock_client
+        ):
+            result = discovery_engine.generate_series_overview(
+                "Exile", "Glynn Stewart", [{"title": "Exile", "description": "A shackled Earth..."}]
+            )
+        self.assertIsNone(result)
 
 
 class PrecheckForNewVolumesTest(unittest.TestCase):
@@ -1829,6 +1851,24 @@ class WebSearchProviderTest(unittest.TestCase):
             )
         self.assertEqual(result, [])
 
+    def test_structure_web_results_returns_empty_instead_of_raising_when_the_llm_call_fails(self):
+        # CR-2 regression: the try/finally around this call had no except
+        # clause, so a raised exception (timeout, API error, etc.) left
+        # `response` at its initial None and the very next line
+        # (`response.content`) raised AttributeError instead of degrading
+        # gracefully the way a JSON-parse failure already does a few lines
+        # down -- see _reconcile_candidates_with_llm for the pattern this
+        # now matches.
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = RuntimeError("boom")
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), patch(
+            "anthropic.Anthropic", return_value=mock_client
+        ):
+            result = discovery_engine._structure_web_results_with_llm(
+                "Some Series", "Some Author", [{"title": "t", "description": "d", "url": "u"}]
+            )
+        self.assertEqual(result, [])
+
     def test_fetch_web_search_combines_serper_and_llm_structuring(self):
         raw_results = [{"title": "Peacemaker Book 8 Announced", "description": "snippet", "url": "https://example.com/8"}]
         structured = [
@@ -1855,6 +1895,33 @@ class WebSearchProviderTest(unittest.TestCase):
         self.assertEqual(candidate["upcoming_hint"], False)
         self.assertEqual(candidate["source_url"], "https://example.com/8")
         self.assertEqual(candidate["authors"], ["Some Author"])
+
+    def test_fetch_web_search_preserves_fractional_book_numbers(self):
+        # CR-3 regression: `int(book_number)` silently truncated a
+        # companion/novella entry's fractional position (e.g. 3.5) from
+        # LLM-structured web results to a whole number, while Hardcover's
+        # own hint keeps the float (see _fetch_hardcover's series_position
+        # for the identical rationale) -- an asymmetric loss of legitimate
+        # fractional entries depending on which provider surfaced them.
+        raw_results = [{"title": "Interlude", "description": "snippet", "url": "https://example.com/3.5"}]
+        structured = [
+            {
+                "result_index": 0,
+                "title": "Interlude",
+                "book_number": 3.5,
+                "author_names": ["Some Author"],
+                "published_date": "2026-08-09",
+                "is_upcoming": False,
+                "isbn13": None,
+            }
+        ]
+        with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
+            discovery_engine, "_structure_web_results_with_llm", return_value=structured
+        ):
+            results = discovery_engine._fetch_web_search(["query"], "Some Series", "Some Author")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["series_number_hint"], 3.5)
 
     def test_fetch_web_search_treats_undated_result_as_upcoming_even_if_llm_says_not(self):
         # Regression (live bug): a retailer listing existing (no date in the
@@ -2956,6 +3023,43 @@ class DiscoveryCacheTest(unittest.TestCase):
             self.assertNotIn("cache", call.kwargs)
 
 
+class NeedsReviewToSkeletonUpdatesTest(unittest.TestCase):
+    """Unit tests for the pure PB-1 mapping function in isolation, separate
+    from the full run_series_check integration coverage below."""
+
+    def test_maps_series_number_to_book_number_and_carries_confidence(self):
+        needs_review = [
+            {
+                "title": "Desert Protocol",
+                "series_number": "7",
+                "overall_confidence": "medium",
+                "date_iso": "2024-02-20",
+                "provider": "hardcover",
+                "url": "https://example.com/desert-protocol",
+            }
+        ]
+        updates = _needs_review_to_skeleton_updates(needs_review)
+        self.assertEqual(len(updates), 1)
+        update = updates[0]
+        self.assertEqual(update["book_number"], 7.0)
+        self.assertEqual(update["title"], "Desert Protocol")
+        self.assertEqual(update["status"], "unconfirmed")
+        self.assertEqual(update["confidence"], "medium")
+        self.assertEqual(update["release_date"], "2024-02-20")
+
+    def test_fractional_series_number_is_preserved(self):
+        needs_review = [{"title": "Novella", "series_number": "3.5", "overall_confidence": "unverified"}]
+        updates = _needs_review_to_skeleton_updates(needs_review)
+        self.assertEqual(updates[0]["book_number"], 3.5)
+
+    def test_unparseable_series_number_is_skipped(self):
+        needs_review = [{"title": "Untitled", "series_number": "", "overall_confidence": "medium"}]
+        self.assertEqual(_needs_review_to_skeleton_updates(needs_review), [])
+
+    def test_empty_input_returns_empty_list(self):
+        self.assertEqual(_needs_review_to_skeleton_updates([]), [])
+
+
 class SeriesCheckIntegrationTest(unittest.TestCase):
     """Integration tests for SeriesIntelligenceAgent.run_series_check against
     an in-memory database, with discovery_engine mocked so behavior is
@@ -3122,6 +3226,76 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         self.assertEqual(review_entry["series_name_hint"], "Cherry Blossom Girls")
         self.assertTrue(review_entry["needs_review"])
         self.assertTrue(review_entry["low_confidence_ambiguous"])
+
+    def test_needs_review_candidate_populates_skeleton_updates(self):
+        # PB-1 regression: a needs_review candidate (the only "found but not
+        # persisted" evidence Phase 0 computes) must be wired through to
+        # result["skeleton_updates"] so apply_skeleton_updates (called by
+        # services/series_check_engine.py after persistence) actually has
+        # something to write. Same scenario as
+        # test_medium_confidence_candidate_routes_to_needs_review_with_series_name_hint.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "Desert Protocol",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": "https://example.com/desert-protocol",
+                "language": "",
+                "confidence": "author_fallback",
+                "series_number_hint": 7,
+                "series_name_hint": "Cherry Blossom Girls",
+                "upcoming_hint": False,
+            }
+        ]
+        unified_candidate = discovery_engine.UnifiedCandidate(
+            title="Desert Protocol",
+            authors=["Harmon Cooper"],
+            series_name="Cherry Blossom Girls",
+            series_number=7.0,
+            metadata_completeness_score=1.0,
+            source_provenance=[{"source": "hardcover"}],
+        )
+        with self._mock_discovery(candidates, unified_candidates=[unified_candidate]):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertEqual(len(result["skeleton_updates"]), 1)
+        update = result["skeleton_updates"][0]
+        self.assertEqual(update["book_number"], 7.0)
+        self.assertEqual(update["status"], "unconfirmed")
+        self.assertEqual(update["confidence"], "medium")
+        self.assertEqual(result["probes"], [])
+
+    def test_available_missing_and_upcoming_books_do_not_leak_into_skeleton_updates(self):
+        # available_missing/upcoming_books get persisted as real Book rows
+        # this same round and become `library`-class skeleton entries on
+        # the next backfill -- routing them through skeleton_updates too
+        # would be a redundant, immediately-stale duplicate (see
+        # _needs_review_to_skeleton_updates's docstring).
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "Cherry Blossom Girls Book 7",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 7,
+                "upcoming_hint": False,
+            }
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertEqual(len(result["available_missing"]), 1)
+        self.assertEqual(result["skeleton_updates"], [])
 
     def test_high_confidence_candidate_still_auto_accepts(self):
         # A skeleton entry that already agrees with the discovered title

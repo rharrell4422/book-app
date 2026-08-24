@@ -14,11 +14,29 @@ write paths," not one function with two callers):
    only inputs are the series' current owned `Book` rows.
 2. `apply_skeleton_updates` -- apply-agent-findings-post-persistence.
    Called from `services/series_check_engine.py` after each round's
-   persistence. Phase 0 has no agent yet, so `skeleton_updates`/`probes`
-   are always empty today (see that call site) -- this function exists now
-   so the concurrency protection below is exercised at both real call
-   sites before Phase 1 needs either one live under real concurrency, and
-   so the retention sweep (below) runs on every check, not only at boot.
+   persistence, with `agents/series_agent.py`'s `needs_review` candidates
+   mapped onto `skeleton_updates` (PB-1) -- see
+   `_needs_review_to_skeleton_updates` there. `probes` is still always
+   empty; no probe schema exists yet (Phase 1). This function's
+   concurrency protection is exercised at both real call sites (this one
+   and the boot backfill) either way, and the retention sweep (below)
+   runs on every check, not only at boot.
+
+PB-6 (doc-only, no behavior change): a *third*, unrelated "skeleton"
+concept also exists -- `discovery_engine._reconstruct_series_skeleton`,
+called from `agents/series_agent.py`'s discovery loop (not this module).
+That one is an ephemeral, recomputed-from-scratch-every-call 1..N
+expected-volume-numbers model used only to decide which interior gap
+numbers deserve a targeted lookahead search *during* one discovery pass --
+it is never persisted and has nothing to do with the durable
+`models.SeriesSkeleton` row this module owns, despite the shared name.
+The duplication (both derive "which numbers are owned/known" from
+overlapping inputs) is real and tracked
+(`discovery_agentic_migration_architecture_map.md`'s call for
+`_reconstruct_series_skeleton` to eventually read the durable skeleton
+instead of recomputing), but consolidating them is a structural change
+out of scope here -- see `_reconstruct_series_skeleton`'s own docstring
+for the cross-reference.
 
 Both paths merge asymmetrically rather than overwrite, and both funnel
 through the same `_upsert_skeleton_row` core for single-writer-per-row
@@ -103,12 +121,21 @@ _UPSERT_MAX_ATTEMPTS = 5
 _UPSERT_RETRY_BASE_DELAY_SECONDS = 0.05
 
 
-def _book_to_skeleton_entry(book: "models.Book", now_iso: str) -> dict:
+def _book_to_skeleton_entry(book: "models.Book", now_iso: str, *, first_seen_at: str | None = None) -> dict:
     """Deterministic, LLM-free mapping from an owned Book row to a skeleton
     entry. An owned row is the strongest possible evidence a book exists,
     so it's always high confidence -- confidence/status only get
     interesting once Phase 2+ starts folding in provider/LLM-derived
     entries that aren't already in the library.
+
+    `first_seen_at`: CR-5 -- when this Book row is the "upgrade" of a prior
+    `discovered` skeleton entry for the same `book_number` (an agent's
+    predicted-but-unowned find has now actually been added to the library),
+    pass that entry's original `first_seen_at` through here so the
+    freshly-rebuilt library entry preserves "when this was first found"
+    provenance instead of resetting it to now, as if it were a brand-new
+    discovery. Defaults to `now_iso` for a genuinely new library entry with
+    no prior discovered record.
     """
     is_upcoming = bool(book.is_upcoming_auto or book.is_upcoming_final)
     release_date = book.publication_date or book.release_date
@@ -127,7 +154,7 @@ def _book_to_skeleton_entry(book: "models.Book", now_iso: str) -> dict:
                 "fetched_at": now_iso,
             }
         ],
-        "first_seen_at": now_iso,
+        "first_seen_at": first_seen_at or now_iso,
         "last_confirmed_at": now_iso,
     }
 
@@ -138,15 +165,31 @@ def _is_expired_discovered_entry(entry: dict, now: datetime) -> bool:
     DAYS above). Missing/unparseable `last_confirmed_at` is treated as
     expired -- a discovered entry with no resolvable confirmation timestamp
     should not survive indefinitely just because the check couldn't run.
+
+    CR-7: both of those cases are logged (not just silently returned) --
+    this is a data-loss path (a discovered entry is about to be dropped on
+    the next merge) and previously left no trace anywhere to diagnose it
+    from.
     """
     raw = entry.get("last_confirmed_at") or entry.get("first_seen_at")
     if not raw:
+        logger.warning(
+            "Dropping discovered skeleton entry with no last_confirmed_at/first_seen_at timestamp: book_number=%s",
+            entry.get("book_number"),
+        )
         return True
     try:
         last_confirmed = datetime.fromisoformat(str(raw))
     except (TypeError, ValueError):
+        logger.warning(
+            "Dropping discovered skeleton entry with malformed timestamp %r: book_number=%s",
+            raw,
+            entry.get("book_number"),
+        )
         return True
-    return (now - last_confirmed) > timedelta(days=DISCOVERED_ENTRY_TTL_DAYS)
+    # CR-6: >=, not > -- an entry exactly at the TTL boundary (down to the
+    # second) was surviving one extra cycle past its intended expiry.
+    return (now - last_confirmed) >= timedelta(days=DISCOVERED_ENTRY_TTL_DAYS)
 
 
 def _merge_discovered_entries(existing_entries: list, library_numbers: set, now: datetime) -> list[dict]:
@@ -273,10 +316,26 @@ def backfill_skeleton_for_series(db: Session, series_id: int) -> "models.SeriesS
 
     now = datetime.utcnow()
     now_iso = now.isoformat()
-    library_entries = [_book_to_skeleton_entry(book, now_iso) for book in active_books]
-    library_numbers = {entry["book_number"] for entry in library_entries}
 
     def merge_fn(existing_entries: list) -> list:
+        # CR-5: a discovered entry being upgraded to a real owned Book row
+        # (the recommendation doc's "upgrade" case) preserves its original
+        # first_seen_at instead of losing that provenance to a fresh
+        # "now" timestamp -- see _book_to_skeleton_entry's first_seen_at
+        # parameter. Read fresh from existing_entries on every attempt,
+        # same as the rest of this merge, so it stays correct under retry.
+        discovered_first_seen_by_number = {
+            entry.get("book_number"): entry.get("first_seen_at")
+            for entry in (existing_entries or [])
+            if isinstance(entry, dict) and entry.get("source_class") == "discovered" and entry.get("first_seen_at")
+        }
+        library_entries = [
+            _book_to_skeleton_entry(
+                book, now_iso, first_seen_at=discovered_first_seen_by_number.get(book.book_number)
+            )
+            for book in active_books
+        ]
+        library_numbers = {entry["book_number"] for entry in library_entries}
         discovered_survivors = _merge_discovered_entries(existing_entries, library_numbers, now)
         return sorted(library_entries + discovered_survivors, key=_sort_key)
 
@@ -298,20 +357,22 @@ def apply_skeleton_updates(
     candidate/finding input at all"). This function takes findings as
     input and never touches `Book` rows or library-sourced entries.
 
-    No agent exists yet in Phase 0, so `skeleton_updates`/`probes` are
-    always empty at this call site today (see
-    `services/series_check_engine.py`, which calls this once per round with
-    whatever `result.get("skeleton_updates")`/`result.get("probes")`
-    happen to be -- currently always `None`, since nothing produces them).
-    Called anyway, every round, so that:
+    No true agentic engine exists yet in Phase 0 (see the recommendation
+    doc), but as of PB-1, `SeriesIntelligenceAgent.run_series_check`
+    (`agents/series_agent.py`) does populate `skeleton_updates` from this
+    round's `needs_review` candidates -- see
+    `_needs_review_to_skeleton_updates` there for why that bucket and not
+    `available_missing`/`upcoming_books`. `probes` is still always `[]`;
+    no probe schema exists yet (Phase 1). `services/series_check_engine.py`
+    calls this once per round with whatever
+    `result.get("skeleton_updates")`/`result.get("probes")` happen to be.
+    Called every round regardless of whether either is non-empty, so that:
       (1) the single-writer-per-row protection in `_upsert_skeleton_row` is
           exercised at *both* real call sites (this one and `main.py`'s
-          boot backfill) before Phase 1 needs either one live under real
-          concurrency, and
+          boot backfill), and
       (2) the retention sweep below runs on every check, not only at boot,
-          so a `discovered` entry actually ages out on schedule once
-          Phase 1 starts writing them, rather than only at the next
-          server restart.
+          so a `discovered` entry actually ages out on schedule rather
+          than only at the next server restart.
 
     `skeleton_updates`: list of dicts shaped like a skeleton entry (at
     minimum `book_number`; anything else -- `title`, `status`,

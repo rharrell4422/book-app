@@ -84,5 +84,10 @@ def get_full_auto_discovery_status(job_id: str, profile_id: str = Depends(get_cu
         updated_at=job.get("updated_at"),
         results=job.get("results"),
         new_books_found=job.get("new_books_found"),
+        # CR-11: the job dict has carried this since services/auto_discovery.py
+        # started computing it, but the status response never forwarded it --
+        # the frontend polls this endpoint and always saw 0 regardless of the
+        # actual value (book-app-ui/app/settings/page.tsx).
+        discovery_delta_count=job.get("discovery_delta_count"),
         message=job.get("error"),
     )

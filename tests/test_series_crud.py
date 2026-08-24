@@ -6,7 +6,7 @@ from sqlalchemy.orm import sessionmaker
 import crud
 import schemas
 from database import Base
-from models import Series
+from models import Book, Series
 
 
 class SeriesCrudTest(unittest.TestCase):
@@ -65,6 +65,42 @@ class SeriesCrudTest(unittest.TestCase):
         self.assertEqual(updated.name, "Renamed")
         self.assertEqual(updated.author, "Someone Else")
         self.assertTrue(updated.is_finished)
+
+    def test_delete_series_cascade_does_not_touch_a_ghost_cross_profile_book(self):
+        # CR-9 regression: the Series row lookup was profile-checked, but
+        # the cascade delete of its Book rows filtered by series_id alone
+        # -- a "ghost" Book row that somehow ended up pointed at this
+        # series_id under a *different* profile_id would be silently
+        # deleted as a side effect of deleting someone else's series.
+        series = Series(name="Robbie's Series", author="Someone", profile_id="robbie")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+
+        owned_book = Book(
+            title="Robbie's Book",
+            author="Someone",
+            series_id=series.id,
+            profile_id="robbie",
+            record_status="active",
+        )
+        ghost_book = Book(
+            title="Ghost Book From Another Profile",
+            author="Someone",
+            series_id=series.id,
+            profile_id="daughter",
+            record_status="active",
+        )
+        self.db.add_all([owned_book, ghost_book])
+        self.db.commit()
+        self.db.refresh(ghost_book)
+
+        result = crud.delete_series(self.db, series.id, profile_id="robbie")
+
+        self.assertEqual(result["deleted_books"], 1)
+        surviving_ghost = self.db.query(Book).filter(Book.id == ghost_book.id).first()
+        self.assertIsNotNone(surviving_ghost)
+        self.assertEqual(surviving_ghost.record_status, "active")
 
 
 if __name__ == "__main__":

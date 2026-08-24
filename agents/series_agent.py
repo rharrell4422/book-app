@@ -77,6 +77,56 @@ def _normalize_identity_number(value) -> str:
     return str(number).strip()
 
 
+def _needs_review_to_skeleton_updates(needs_review: list[dict]) -> list[dict]:
+    """PB-1: the only bucket of "found this round but not persisted"
+    evidence the deterministic (Phase 0) pipeline already computes is
+    `needs_review` -- ambiguous/low-confidence candidates a human still has
+    to triage. Mapping it onto `skeleton_store.apply_skeleton_updates`'s
+    input shape gives that unconfirmed finding a durable trace
+    (`source_class: "discovered"`) instead of it vanishing the moment this
+    request ends, so a later run's confidence/gap computations have a
+    memory of "already surfaced, still unresolved" for this book_number.
+
+    `available_missing`/`upcoming_books` are deliberately NOT a source
+    here: both get persisted as real `Book` rows this same round (see
+    `services/series_check_engine.py`'s `added_books` handling) and so
+    become `library`-class skeleton entries on the very next backfill --
+    routing them through here too would just be an immediately-stale
+    duplicate of that.
+
+    Conservative by design: `status` is "unconfirmed", never "confirmed"
+    -- unlike the recommendation doc's example of an actual Phase 1 agent
+    finding, nothing here has verified this book exists, only that a
+    low-confidence candidate surfaced it. `apply_skeleton_updates` fills
+    in `source_class`/`first_seen_at`/`last_confirmed_at` itself, so those
+    are intentionally omitted here.
+    """
+    updates: list[dict] = []
+    for entry in needs_review:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            book_number = float(entry.get("series_number"))
+        except (TypeError, ValueError):
+            continue
+        updates.append(
+            {
+                "book_number": book_number,
+                "title": entry.get("title"),
+                "status": "unconfirmed",
+                "confidence": entry.get("overall_confidence"),
+                "release_date": entry.get("date_iso"),
+                "sources": [
+                    {
+                        "provider": entry.get("provider"),
+                        "url": entry.get("url"),
+                    }
+                ],
+            }
+        )
+    return updates
+
+
 _UNIVERSE_TIE_IN_PATTERN = re.compile(r"\buniverse\s+(novel|novella|book|story)\b", re.IGNORECASE)
 
 
@@ -278,6 +328,13 @@ def _empty_result(series_id: int | None, series_name: str | None, reason: str) -
         "upcoming_books": [],
         "needs_review": [],
         "validated_candidates": [],
+        # PB-1: always present (never absent/None) so
+        # services/series_check_engine.py's apply_skeleton_updates call has
+        # a real, empty list to reason about instead of relying on
+        # `result.get(...)` silently defaulting -- see
+        # _needs_review_to_skeleton_updates for the populated case.
+        "skeleton_updates": [],
+        "probes": [],
         "found": False,
         "candidate": None,
         "provider_failures": [],
@@ -970,9 +1027,11 @@ class SeriesIntelligenceAgent:
                 # confidence_engine._title_confidence). Gating on it
                 # unconditionally was verified live (Jonathan Hunt/Georgia
                 # Wagner, 2026-08-22) to silently route every legitimate new
-                # discovery to needs_review -- which nothing outside this
-                # function reads yet (see the review-list TODO above) --
-                # making "Check Now" report "no books found" even when
+                # discovery to needs_review -- which at the time nothing
+                # outside this function read (now also feeds
+                # skeleton_updates via _needs_review_to_skeleton_updates,
+                # PB-1) -- making "Check Now" report "no books found" even
+                # when
                 # discovery worked correctly. So a clean belongs_to_series
                 # pass auto-accepts on medium/unverified/missing-confidence
                 # the same as it always did before this feature existed;
@@ -1158,6 +1217,14 @@ class SeriesIntelligenceAgent:
                 "upcoming_books": upcoming_books,
                 "needs_review": needs_review,
                 "validated_candidates": [],
+                # PB-1: wire this round's needs_review evidence through to
+                # skeleton_store.apply_skeleton_updates (called by
+                # services/series_check_engine.py after persistence, once
+                # per round). `probes` stays [] -- no probe schema exists
+                # yet (Phase 1, see apply_skeleton_updates' docstring), so
+                # nothing invents one here.
+                "skeleton_updates": _needs_review_to_skeleton_updates(needs_review),
+                "probes": [],
                 "found": found,
                 "candidate": (available_missing[0] if available_missing else (upcoming_books[0] if upcoming_books else None)),
                 "provider_failures": provider_failures,

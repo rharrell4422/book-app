@@ -325,6 +325,28 @@ class AutoDiscoveryEndpointTest(unittest.TestCase):
         self.assertEqual(body["status"], "completed")
         self.assertEqual(body["new_books_found"], 3)
 
+    def test_status_response_includes_discovery_delta_count(self):
+        # CR-11 regression: the job dict has always carried this field (see
+        # services/auto_discovery.py), but the status endpoint's response
+        # never forwarded it -- the frontend polling this endpoint always
+        # saw 0/null regardless of the job's actual value.
+        discovery_batch_jobs["robbie"] = {
+            "job_id": "job-a",
+            "status": "completed",
+            "total": 2,
+            "completed": 2,
+            "new_books_found": 3,
+            "discovery_delta_count": 5,
+            "results": [],
+        }
+        response = self.client.get(
+            "/discovery/auto_run_mvp/status",
+            params={"job_id": "job-a"},
+            headers={"Authorization": f"Bearer {self.token}"},
+        )
+        body = response.json()
+        self.assertEqual(body["discovery_delta_count"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()

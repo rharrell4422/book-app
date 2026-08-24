@@ -1400,6 +1400,18 @@ def _structure_web_results_with_llm(
             messages=[{"role": "user", "content": prompt}],
             timeout=WEB_SEARCH_TIMEOUT_SECONDS,
         )
+    except Exception as exc:  # CR-2: a failed structuring call must degrade to
+        # "no candidates from this pass" like a JSON-parse failure below,
+        # not raise AttributeError from `response` staying None on the next
+        # line -- see _reconcile_candidates_with_llm for the same pattern.
+        _log(f"LLM web-search structuring call failed: {exc}")
+        _record_drop_diagnostic(
+            "web_structuring",
+            {"title": None, "isbn13": None, "series_number": None},
+            "llm_call_failure",
+            diagnostics,
+        )
+        return []
     finally:
         if telemetry is not None:
             usage = getattr(response, "usage", None)
@@ -1473,12 +1485,19 @@ def generate_series_overview(series_name: str, author: str, books: list[dict]) -
     )
 
     client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=400,
-        messages=[{"role": "user", "content": prompt}],
-        timeout=WEB_SEARCH_TIMEOUT_SECONDS,
-    )
+    try:
+        response = client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=WEB_SEARCH_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:  # CR-2: on-demand, best-effort call -- a failure
+        # here must surface as "no overview available" (this function's own
+        # documented "not during discovery" contract), not a 500 from the
+        # "Series Overview" button.
+        _log(f"LLM series overview call failed: {exc}")
+        return None
     text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text").strip()
     return text or None
 
@@ -1917,7 +1936,15 @@ def _fetch_web_search(
 
         book_number = item.get("book_number")
         try:
-            book_number = int(book_number) if book_number is not None else None
+            # CR-3: float, not int -- a fractional position (0.5/0.7-style
+            # companion/novella entries) from LLM-structured web results
+            # used to get silently truncated to an int (or to None, if
+            # truncation produced 0 where the caller only checked truthiness
+            # elsewhere), while Hardcover's own hint keeps the float (see
+            # _fetch_hardcover's series_position above for the identical
+            # rationale) -- an asymmetric loss of legitimate fractional
+            # entries depending on which provider happened to surface them.
+            book_number = float(book_number) if book_number is not None else None
         except (TypeError, ValueError):
             book_number = None
 
@@ -2584,6 +2611,21 @@ def _reconstruct_series_skeleton(
     sequential numbering sense a skeleton like this reconstructs (mirrors
     _fetch_hardcover's own reasoning for keeping series_position as a float
     instead of rounding it).
+
+    PB-6 (doc-only note, no behavior change here): despite the shared name,
+    this "skeleton" is unrelated to the durable `models.SeriesSkeleton` row
+    that `services/skeleton_store.py` reads/writes -- this one is a
+    same-call, in-memory 1..N gap model, recomputed from scratch on every
+    invocation and never persisted, used only to decide which interior
+    numbers deserve a lookahead search *during this one discovery pass*.
+    The two do overlap in what they derive (both infer "which numbers are
+    owned/known" from owned books + discovered candidates), which is real,
+    tracked duplication (`discovery_agentic_migration_architecture_map.md`:
+    this function's search half is a candidate for replacement by an agent
+    tool-call informed by the durable skeleton instead), but merging them
+    is a structural change deferred to a later wave -- see
+    `services/skeleton_store.py`'s module docstring for the reverse
+    cross-reference.
 
     Any newly-recovered candidates are fused back into unified_candidates
     via _fuse_and_score_candidates (existing candidates given top priority,

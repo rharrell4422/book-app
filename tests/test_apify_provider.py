@@ -280,6 +280,17 @@ class NormalizeProductItemTest(unittest.TestCase):
     def test_returns_none_without_a_title(self):
         self.assertIsNone(apify_provider._normalize_product_item({"asin": "B0AAA1111"}))
 
+    def test_confidence_is_not_hardcoded(self):
+        # CR-1 regression: a hardcoded "confidence" value here always won
+        # over discovery_engine._filter_and_merge's pass-level
+        # "targeted"/"author_fallback" stamp (that function preserves any
+        # already-present confidence value), which could permanently strand
+        # an Apify-sourced candidate at a confidence value
+        # series_agent.py's targeted_with_number gate doesn't recognize.
+        # Every other provider omits this key entirely; Apify must too.
+        normalized = apify_provider._normalize_product_item({"title": "Desert Protocol"})
+        self.assertIsNone(normalized["confidence"])
+
     def test_cover_image_list_field_takes_first_item(self):
         normalized = apify_provider._normalize_product_item({"title": "T", "image": ["https://a.example/1.jpg", "https://a.example/2.jpg"]})
         self.assertEqual(normalized["cover_image"], "https://a.example/1.jpg")

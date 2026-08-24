@@ -8,15 +8,24 @@ import models
 from database import SessionLocal
 
 
-def update_from_series(series_id: int) -> dict:
+def update_from_series(series_id: int, profile_id: str | None = None) -> dict:
+    """`profile_id`: CR-9 -- when given, scopes the Book query to it in
+    addition to `series_id`. `series_id` alone would also silently mutate
+    any "ghost" cross-profile Book row that happens to carry this
+    `series_id` (the owning Series row is checked by its caller, but a
+    stray Book row is not implicitly protected by that check). Optional
+    (default `None`, meaning unscoped) only for backward compatibility with
+    call sites/tests that predate profile scoping; every real production
+    call site should pass it.
+    """
     db = SessionLocal()
     try:
-        canonical_books = (
-            db.query(models.Book)
-            .filter(models.Book.series_id == series_id)
-            .filter(or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted"))
-            .all()
-        )
+        query = db.query(models.Book).filter(models.Book.series_id == series_id)
+        if profile_id is not None:
+            query = query.filter(models.Book.profile_id == profile_id)
+        canonical_books = query.filter(
+            or_(models.Book.record_status.is_(None), models.Book.record_status != "deleted")
+        ).all()
 
         updated_rows = 0
         inserted_rows = 0
