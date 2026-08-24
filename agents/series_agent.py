@@ -441,23 +441,25 @@ class SeriesIntelligenceAgent:
             # in.
             series_confidence: dict = {"confidence": []}
             try:
-                # Rebuilt here rather than just read, and rather than relying
-                # on a boot-time backfill: nothing calls
-                # skeleton_store.backfill_all_skeletons() at startup today,
-                # so a SeriesSkeleton row would otherwise never exist and
-                # title_confidence would grade every candidate "unverified"
-                # forever, capping overall confidence at "medium" even for
-                # books the library already owns adjacent numbers of (see
-                # confidence_engine's own docstring on why "unverified" caps
-                # rather than fails, and _title_confidence for the "high"
-                # grade this starves without a populated skeleton). This is
-                # currently a full rebuild from ground-truth Book rows every
-                # run (see backfill_skeleton_for_series's own docstring) --
-                # lossless today because nothing yet writes a non-library
-                # entry into the skeleton, so there is nothing an overwrite
-                # could lose. Not committed here: it shares the single
-                # db.commit() at the end of this function alongside
-                # series.has_new_books/last_checked.
+                # Rebuilt here rather than just read, so a stale/missing
+                # SeriesSkeleton row (e.g. between boot and the first Check
+                # Now, or after this run's own persistence changed the
+                # owned Book rows) never starves title_confidence of a
+                # skeleton entry to compare against -- see
+                # confidence_engine's own docstring on why "unverified"
+                # caps rather than fails, and _title_confidence for the
+                # "high" grade this starves without a populated skeleton.
+                # This is now an asymmetric merge, not a destructive
+                # rebuild (see skeleton_store.py's module docstring for the
+                # full rule) -- library-sourced entries are rebuilt fresh
+                # from Book rows every call, but any `discovered` entries
+                # a future agentic pass writes survive it. Commits
+                # internally (see `_upsert_skeleton_row`) rather than
+                # sharing this function's own single db.commit() below --
+                # required for its upsert-with-retry concurrency
+                # protection to actually work, and safe here since nothing
+                # above this point in the function has written anything
+                # else to `db` yet.
                 backfill_skeleton_for_series(db, series_id)
                 skeleton_row = (
                     db.query(SeriesSkeleton).filter(SeriesSkeleton.series_id == series_id).first()

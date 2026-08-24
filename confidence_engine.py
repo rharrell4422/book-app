@@ -297,21 +297,69 @@ def _overall_confidence(levels: list[str]) -> str:
     title's "unverified" -- see below) only, then any remaining low pulls
     the whole thing down to low.
 
-    "unverified" (title-only, see module docstring) is treated as
-    medium-or-better for this ceiling check, but deliberately can never by
-    itself produce "high": the `all(level == "high" ...)` branch requires
-    the literal string "high", so a genuinely new book (provider high,
-    title unverified, number medium-for-a-new-number, alignment high) caps
-    at "medium" rather than falling all the way to "low" the way a plain
-    four-grade reading of "not all high" would have produced. That
-    four-grade reading was the original defect: it meant compute_confidence
-    could never score a book the skeleton has never seen above "low", i.e.
-    it could only ever corroborate already-owned books, never usefully
-    route a brand-new discovery to needs_review instead of auto-dropping
-    it. A skeleton-disagreement ("low") among the other three dimensions
-    still pulls the result down to "low" even with title "unverified",
-    same as it always has -- "unverified" only relaxes the ceiling, it
-    never raises the floor.
+    Complete decision table for "unverified" (Phase 0 fix, finalized in
+    the discovery-agentic-replacement review loop -- see
+    discovery_agentic_replacement_recommendation.md §0.2 and
+    discovery_agentic_replacement_evaluation.md §4/§6/§8, which flagged the
+    single-worked-example version of this rule as underspecified). Only
+    `title_confidence` ever produces "unverified" (see module docstring),
+    so it appears in at most one of the four `levels` at a time; the table
+    below is therefore a full enumeration of every *reachable* pairing,
+    not a partial one:
+
+        title=unverified, other 3 dims (provider/number/alignment)  -> overall  -> routing
+        --------------------------------------------------------------------------------
+        any of the other 3 == "zero"  (unverified + zero)           -> zero     -> auto-reject
+        no zero; any of the other 3 == "low"  (unverified + low)    -> low      -> auto-reject
+        no zero/low; any of the other 3 == "medium"  (unverified + medium) -> medium -> accept / escalate*
+        no zero/low; all of the other 3 == "high"  (unverified + high)      -> medium -> accept / escalate*
+        (title=unverified can never alone reach "high" -- see below)
+
+    "unverified + zero" is listed for completeness per the review loop's
+    explicit ask, but resolves via the *first* rule below ("any zero wins
+    outright") rather than needing a dedicated branch -- it was already
+    correct before this table was written down; this just documents why.
+
+    The identical total order also governs every combination that does
+    not involve "unverified" at all (every dimension a real high/medium/
+    low/zero grade), and every mixed combination across all four
+    dimensions collapses onto one of the same four rows, because the
+    logic below is dimension-count-agnostic, not a hardcoded 4-tuple
+    lookup:
+
+        any dimension == "zero"                    -> zero    -> auto-reject
+        all dimensions == "high"                    -> high    -> auto-accept
+        no zero, not all high, no "low" present     -> medium  -> accept / escalate*
+        no zero, any remaining "low"                -> low     -> auto-reject
+
+    Acceptance / escalation / rejection rules, as actually consumed by
+    `agents/series_agent.py`'s manual-override routing (see that module's
+    routing comment for the authoritative behavior; this restates it here
+    so the rule is defined in exactly one other place, not re-derived):
+      - "zero"  -> always auto-reject (dropped), regardless of whether
+        `belongs_to_series` independently accepted the candidate. A
+        confirmed skeleton-disagreement or author mismatch is real
+        negative information that overrides a cruder textual heuristic.
+      - "low"   -> always auto-reject (dropped), same reasoning as "zero".
+      - "medium" (including every "unverified"-ceiling case above, which
+        can only ever produce "medium", never "high") -> *auto-accept*
+        when `belongs_to_series` already confirmed series membership;
+        *escalate to needs_review* only when `belongs_to_series` could
+        not confirm it (`low_confidence_ambiguous=True`). "unverified" is
+        the expected, permanent state of title_confidence for every
+        genuinely new book (nothing not already owned can have a
+        skeleton entry to compare against), so it is not itself a red
+        flag -- only an independent `belongs_to_series` failure escalates
+        it to review.
+      - "high"  -> always auto-accept. Only reachable when every
+        dimension, including title, is a real "high" -- i.e. never for a
+        book absent from the skeleton, by construction (see
+        `_title_confidence`).
+
+    *"accept / escalate" means the accept-vs-escalate choice is made by
+    the caller based on a signal `_overall_confidence` does not have
+    (`belongs_to_series`), not by this function -- see routing rules
+    above.
     """
     if any(level == "zero" for level in levels):
         return "zero"

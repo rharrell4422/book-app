@@ -34,6 +34,7 @@ from services.identity import (
     _series_book_identity_key,
 )
 from services.notifications import create_series_discovery_notification
+from services.skeleton_store import apply_skeleton_updates
 
 logger = logging.getLogger(__name__)
 
@@ -757,6 +758,36 @@ def run_series_check_job_full(series_id: int) -> None:
 
                 logger.info("LIBRARY_SYNC_TRIGGERED series_id=%s", series_id)
                 library_sync.update_from_series(series_id)
+
+                # Phase 0 write call site #2 for SeriesSkeleton (see
+                # discovery_agentic_replacement_recommendation.md §0.1 and
+                # discovery_agentic_replacement_evaluation.md §4/§8). No
+                # agent exists yet, so result.get("skeleton_updates")/
+                # ("probes") are always None today -- this call is a
+                # documented no-op beyond running the discovered-entry
+                # retention sweep (see services/skeleton_store.py). It's
+                # wired here now so: (1) the single-writer-per-row
+                # upsert-with-retry protection is exercised at both real
+                # write call sites (this one and main.py's boot backfill)
+                # before Phase 1 needs either one live under real
+                # concurrency, and (2) Phase 1 can start populating
+                # `result["skeleton_updates"]`/`["probes"]` in
+                # agents/series_agent.py without any change needed here.
+                # Never allowed to fail the round itself -- a stale/
+                # un-swept skeleton is a staleness issue the next run (or
+                # next boot) self-heals, not a reason to lose otherwise-
+                # successful persistence.
+                try:
+                    apply_skeleton_updates(
+                        db,
+                        series_id,
+                        skeleton_updates=result.get("skeleton_updates"),
+                        probes=result.get("probes"),
+                    )
+                except Exception:
+                    logger.exception(
+                        "Post-persistence skeleton update failed for series_id=%s", series_id
+                    )
             except Exception:
                 db.rollback()
                 raise

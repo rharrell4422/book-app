@@ -315,16 +315,23 @@ class SeriesSkeleton(Base):
     Check Now run -- the piece the old discovery pipeline never had (its
     only durable state was the summary fields on Series itself, like
     missing_books/last_checked, not a per-book record with confidence or
-    provenance). Phase 1 only: this table is deterministically backfilled
-    from existing Book rows (see services/skeleton_store.py) with zero LLM
-    involvement and no behavior change anywhere else yet.
+    provenance).
 
-    skeleton_json entries already carry confidence/status/sources fields
-    that Phase 1 only ever sets to "confirmed"/"high"/a "library" source,
-    ahead of when later phases (delta checks, agentic Tier 2 discovery)
-    actually need them -- reshaping this JSON structure once real rows
-    exist would otherwise require migrating every row's content, not just
-    adding a column.
+    Two write paths, both in services/skeleton_store.py, merge into this
+    row asymmetrically rather than overwrite it (see that module's
+    docstring for the full rule and the retention/concurrency policy):
+    `backfill_skeleton_for_series` rebuilds the library-sourced entries
+    fresh from Book rows every call, and `apply_skeleton_updates` applies
+    agent-returned findings post-persistence (Phase 1; a no-op today since
+    no agent exists yet in Phase 0, but the call site and its concurrency
+    protection are already live -- see series_check_engine.py).
+
+    skeleton_json entries carry confidence/status/sources/source_class
+    fields -- for a library-sourced entry these are always
+    "confirmed"/"high"/a "library" source/"library"; a `source_class:
+    "discovered"` entry (Phase 1, agent-written) additionally carries
+    first_seen_at/last_confirmed_at timestamps used by the TTL retention
+    policy for entries never upgraded to owned.
 
     One row per series (series_id is the primary key) since there's
     exactly one skeleton per series -- no separate surrogate id needed.
@@ -338,6 +345,8 @@ class SeriesSkeleton(Base):
     #   book_number, title, status ("confirmed" | "unconfirmed" | "upcoming"),
     #   confidence ("high" | "medium" | "low"), release_date (ISO string or
     #   None), edition_hints, sources ([{provider, url, fetched_at}]),
+    #   source_class ("library" | "discovered" -- see skeleton_store.py's
+    #   asymmetric merge rule; missing on schema_version 1 rows == "library"),
     #   first_seen_at, last_confirmed_at (both ISO strings).
     skeleton_json = Column(JSON, nullable=False, default=list)
 
