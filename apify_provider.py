@@ -192,10 +192,20 @@ def _run_actor_sync(actor_id: str, run_input: dict[str, Any], budget: "ApifyCall
             run_timeout=timedelta(seconds=APIFY_REQUEST_TIMEOUT_SECONDS),
             timeout=timedelta(seconds=APIFY_REQUEST_TIMEOUT_SECONDS),
         )
-        if not run or not run.get("defaultDatasetId"):
+        # apify-client 3.x's .call() returns a typed Run object (attribute
+        # access, e.g. run.default_dataset_id), not a dict -- unlike almost
+        # every other provider response in this codebase. A live regression
+        # (2026-08-24) traced "Check Now finds nothing from Apify" all the
+        # way through a real, successfully-billed actor run (confirmed via
+        # Apify's own run logs showing real scraped products) to this one
+        # line still using dict-style run.get("defaultDatasetId"), which
+        # raised AttributeError on every single call, silently discarding
+        # the entire run's results into this same except block below.
+        dataset_id = getattr(run, "default_dataset_id", None) if run else None
+        if not dataset_id:
             _log(f"actor={actor_id} run produced no dataset")
             return None
-        dataset = client.dataset(run["defaultDatasetId"])
+        dataset = client.dataset(dataset_id)
         items = list(dataset.list_items().items)
         _log(f"actor={actor_id} input={run_input} -> {len(items)} item(s)")
         return items
@@ -218,7 +228,12 @@ def _first_of(item: dict, *keys: str) -> Any:
 # the key itself, not a separate field, and there's no fixed key name to
 # look up (unlike every other field this module reads via _first_of), so
 # this needs its own regex scan -- see _extract_series_hints_from_attributes.
-_SERIES_POSITION_ATTRIBUTE_PATTERN = re.compile(r"^Book\s+(\d+)\s+of\s+\d+$", re.IGNORECASE)
+# Both numbers are captured: group 1 is this book's position, group 2 is
+# the series-wide total, which feeds series_total_hint below (the same
+# field Hardcover already populates from its own API -- see
+# discovery_engine.py's series_total_hint handling) so a series' known
+# length surfaces in the UI even when Hardcover has no data for it at all.
+_SERIES_POSITION_ATTRIBUTE_PATTERN = re.compile(r"^Book\s+(\d+)\s+of\s+(\d+)$", re.IGNORECASE)
 
 
 def _extract_from_attributes(item: dict, *want_keys: str) -> str | None:
@@ -243,17 +258,17 @@ def _extract_from_attributes(item: dict, *want_keys: str) -> str | None:
     return None
 
 
-def _extract_series_hints_from_attributes(item: dict) -> tuple[str | None, str | None]:
-    """Returns (series_number_hint, series_name_hint) from this actor's
-    `attributes` field, or (None, None) if this listing has no series-
-    position attribute at all (standalone books, or series info Amazon
-    simply didn't attach to this particular ASIN) -- see
-    _SERIES_POSITION_ATTRIBUTE_PATTERN for why this can't be a plain
+def _extract_series_hints_from_attributes(item: dict) -> tuple[str | None, str | None, int | None]:
+    """Returns (series_number_hint, series_name_hint, series_total_hint)
+    from this actor's `attributes` field, or (None, None, None) if this
+    listing has no series-position attribute at all (standalone books, or
+    series info Amazon simply didn't attach to this particular ASIN) --
+    see _SERIES_POSITION_ATTRIBUTE_PATTERN for why this can't be a plain
     _extract_from_attributes lookup.
     """
     attributes = item.get("attributes")
     if not isinstance(attributes, list):
-        return None, None
+        return None, None, None
     for attribute in attributes:
         if not isinstance(attribute, dict):
             continue
@@ -264,8 +279,8 @@ def _extract_series_hints_from_attributes(item: dict) -> tuple[str | None, str |
         if match:
             value = attribute.get("value")
             series_name_hint = str(value).strip() if value else None
-            return match.group(1), series_name_hint
-    return None, None
+            return match.group(1), series_name_hint, int(match.group(2))
+    return None, None, None
 
 
 def _normalize_product_item(item: dict) -> dict | None:
@@ -302,7 +317,7 @@ def _normalize_product_item(item: dict) -> dict | None:
     if isinstance(cover_image, dict):
         cover_image = cover_image.get("url") or cover_image.get("src")
 
-    series_number_hint, series_name_hint = _extract_series_hints_from_attributes(item)
+    series_number_hint, series_name_hint, series_total_hint = _extract_series_hints_from_attributes(item)
 
     return {
         "source": "apify",
@@ -317,6 +332,7 @@ def _normalize_product_item(item: dict) -> dict | None:
         "series_number_hint": series_number_hint,
         "upcoming_hint": None,
         "series_name_hint": series_name_hint,
+        "series_total_hint": series_total_hint,
         "asin": str(asin).strip() if asin else None,
         "cover_image": str(cover_image).strip() if cover_image else None,
         "confidence": "medium",
