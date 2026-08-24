@@ -142,54 +142,40 @@ def update_series(
     return updated
 
 
-@router.post("/{series_id}/mark_unfinished")
-def mark_series_unfinished(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
+def _set_series_finished_state(series_id: int, is_finished: bool, db: Session, profile_id: str):
+    """Shared body for mark_finished/mark_unfinished -- DC-11: the two
+    endpoints differed only by this boolean literal."""
     db_series = crud.get_series(db, series_id, profile_id)
     if not db_series:
         raise HTTPException(status_code=404, detail="Series not found")
 
     books = crud.get_books_by_series(db, series_id, profile_id)
     for book in books:
-        book.is_series_finished = False
+        book.is_series_finished = is_finished
 
-    db_series.is_finished = False
-    db_series.series_status = "ongoing"
+    db_series.is_finished = is_finished
+    db_series.series_status = "finished" if is_finished else "ongoing"
 
     db.commit()
     recalculate_intelligence(db, series_id)
-    is_finished = bool((crud.get_series(db, series_id, profile_id) or db_series).is_finished)
+    resolved_is_finished = bool((crud.get_series(db, series_id, profile_id) or db_series).is_finished)
 
     return {
         "series_id": series_id,
         "updated_books": len(books),
-        "is_finished": is_finished,
-        "series_status": "finished" if is_finished else "ongoing",
+        "is_finished": resolved_is_finished,
+        "series_status": "finished" if resolved_is_finished else "ongoing",
     }
+
+
+@router.post("/{series_id}/mark_unfinished")
+def mark_series_unfinished(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
+    return _set_series_finished_state(series_id, False, db, profile_id)
 
 
 @router.post("/{series_id}/mark_finished")
 def mark_series_finished(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
-    db_series = crud.get_series(db, series_id, profile_id)
-    if not db_series:
-        raise HTTPException(status_code=404, detail="Series not found")
-
-    books = crud.get_books_by_series(db, series_id, profile_id)
-    for book in books:
-        book.is_series_finished = True
-
-    db_series.is_finished = True
-    db_series.series_status = "finished"
-
-    db.commit()
-    recalculate_intelligence(db, series_id)
-    is_finished = bool((crud.get_series(db, series_id, profile_id) or db_series).is_finished)
-
-    return {
-        "series_id": series_id,
-        "updated_books": len(books),
-        "is_finished": is_finished,
-        "series_status": "finished" if is_finished else "ongoing",
-    }
+    return _set_series_finished_state(series_id, True, db, profile_id)
 
 
 @router.post("/{series_id}/check")
@@ -239,43 +225,6 @@ async def check_series_for_new_books(
         "progress": 0,
         "current_pass": "exact match",
     }
-
-
-@router.get("/{series_id}/check")
-def get_series_check_status(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
-    db_series = crud.get_series(db, series_id, profile_id)
-    if not db_series:
-        raise HTTPException(status_code=404, detail="Series not found")
-
-    job = series_check_jobs.get(series_id)
-    if not job:
-        return {
-            "series_id": series_id,
-            "status": "idle",
-        }
-
-    payload = {
-        "series_id": series_id,
-        "session_id": job.get("session_id"),
-        "status": job.get("status", "idle"),
-        "updated_at": job.get("updated_at"),
-        "progress_total": job.get("progress_total", 0),
-        "progress_completed": job.get("progress_completed", 0),
-        "progress": int(job.get("progress_percent") or 0),
-        "current_book_number": job.get("current_book_number"),
-        "current_pass": job.get("current_pass"),
-        "current_asin": job.get("current_asin"),
-        "asins_discovered": int(job.get("asins_discovered") or 0),
-        "asins_processed": int(job.get("asins_processed") or 0),
-        "asin_fetch_success": int(job.get("asin_fetch_success") or 0),
-        "asin_fetch_failed": int(job.get("asin_fetch_failed") or 0),
-    }
-    if job.get("status") == "completed":
-        payload.update(job.get("completion") or {"status": "complete"})
-        payload["result"] = job.get("result")
-    if job.get("error"):
-        payload["error"] = job.get("error")
-    return payload
 
 
 @router.get("/{series_id}/check/status")

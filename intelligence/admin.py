@@ -6,8 +6,12 @@ Split out of intelligence.py (RT-4). Independent of core.py/external.py --
 see intelligence/core.py's module docstring.
 
 intelligence/__init__.py re-exports everything below, so existing external
-callers (routers/admin.py, scripts/repair_ghost_profile_books.py, tests,
-etc.) are unaffected by this split.
+callers (routers/admin.py, tests, etc.) are unaffected by this split.
+
+DC-13: the one-time standalone CLI script that used to also call into this
+module (scripts/repair_ghost_profile_books.py) was removed as redundant
+with the live GET/POST /admin/ghost_profile_books endpoints below, which
+apply the same repair directly with no download/upload round trip.
 """
 from __future__ import annotations
 
