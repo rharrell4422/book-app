@@ -45,6 +45,14 @@ class DiscoveryTelemetry:
         # cost/quality comparison across discovery runs.
         self.provider_calls: list[dict] = []
         self.gate_outcomes: list[dict] = []
+        # RT-1b: agentic_hooks.py's side-channel record of a tool/provider
+        # call, kept as its own list rather than folded into
+        # `provider_calls` -- deliberately not "ok"/"duration_s" shaped
+        # like that PB-9 counter (it doesn't have a pass/fail outcome, just
+        # a query + result size), and additive-only: nothing here reads or
+        # mutates `provider_calls`/`gate_outcomes`, so this can never change
+        # PB-9's existing counts.
+        self.tool_calls: list[dict] = []
 
     @contextmanager
     def pass_scope(self, name: str):
@@ -98,6 +106,23 @@ class DiscoveryTelemetry:
                 {"pass": self._current_pass, "provider": provider, "ok": bool(ok), "duration_s": round(duration_s, 3)}
             )
 
+    def record_tool_call(self, *, provider: str, query: str, result_size: int) -> None:
+        """RT-1b: called by `agentic_hooks.record_tool_call` -- one entry
+        per agentic-substrate-observed provider/tool invocation. Purely
+        additive bookkeeping for the agentic tracing layer; nothing in the
+        existing PB-9 `record_provider_call`/`record_gate_outcome` counters
+        or their `by_provider`/`by_gate` summary breakdowns reads this.
+        """
+        with self._lock:
+            self.tool_calls.append(
+                {
+                    "pass": self._current_pass,
+                    "provider": str(provider),
+                    "query": str(query),
+                    "result_size": int(result_size),
+                }
+            )
+
     def record_gate_outcome(self, gate: str, outcome: str) -> None:
         """PB-9: a labeled decision point resolved to `outcome` --
         e.g. record_gate_outcome("confidence_grade", "high"),
@@ -118,6 +143,7 @@ class DiscoveryTelemetry:
             llm_calls = list(self.llm_calls)
             provider_calls = list(self.provider_calls)
             gate_outcomes = list(self.gate_outcomes)
+            tool_calls = list(self.tool_calls)
 
         by_pass: dict[str, dict] = {}
 
@@ -171,6 +197,10 @@ class DiscoveryTelemetry:
             "total_llm_calls": len(llm_calls),
             "total_tokens_in": sum(c["tokens_in"] for c in llm_calls),
             "total_tokens_out": sum(c["tokens_out"] for c in llm_calls),
+            # RT-1b: additive-only counter for agentic_hooks.py's tool-call
+            # tracing -- not consumed by anything routing/confidence-related,
+            # purely informational.
+            "total_tool_calls": len(tool_calls),
         }
 
 

@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 
 from sqlalchemy.orm import Session
 
+import agentic_hooks
 import confidence_engine
 import delta_engine
 import discovery_engine
@@ -399,6 +400,21 @@ class SeriesIntelligenceAgent:
 
         _console_log(f"CHECK NOW triggered for series: {series.name}")
 
+        # RT-1b (Phase 1 agentic substrate, see agentic_hooks.py): a
+        # turn-scoped trace covering this whole run_series_check call.
+        # Side-channel only -- agentic_context is threaded through this
+        # function purely for logging/telemetry; nothing below ever
+        # branches on anything read back out of it.
+        agentic_context = agentic_hooks.begin_turn(
+            {
+                "series_id": series.id,
+                "series_name": series.name,
+                "user_id": getattr(series, "profile_id", None),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "telemetry": telemetry,
+            }
+        )
+
         try:
             series_author = str(series.author or "").strip()
 
@@ -419,6 +435,11 @@ class SeriesIntelligenceAgent:
             if not series_author:
                 result = _empty_result(series.id, series.name, "series-missing-author")
                 result["highest_owned_book_number"] = highest_owned_book_number
+                agentic_hooks.record_reasoning_step(
+                    agentic_context,
+                    {"phase": "precheck", "decision": "stop", "reason": "series-missing-author"},
+                )
+                agentic_hooks.end_turn(agentic_context)
                 if emit_summary:
                     log_discovery_summary(result=result, terminal_error="series-missing-author")
                 return result
@@ -459,17 +480,15 @@ class SeriesIntelligenceAgent:
             # this author has other tracked series -- rather than disabling
             # the whole pass just because other series exist,
             # discover_candidates_for_series itself drops any fallback hit
-            # explicitly tagged as belonging to one of those other series
-            # (see other_known_series_names / _is_cross_series_contamination
-            # there) while still allowing it to surface anything new for
-            # *this* series.
-            other_known_series_names = {other.name for other in other_series_by_author if other.name}
+            # explicitly tagged (via its own series_name_hint) as belonging
+            # to a different series than this one, unconditionally (see
+            # _is_cross_series_contamination there) -- while still allowing
+            # it to surface anything new for *this* series.
 
             discovery = discovery_engine.discover_candidates_for_series(
                 series.name,
                 series_author,
                 exclude_title_keys=author_owned_titles,
-                other_known_series_names=other_known_series_names,
                 progress_callback=progress_callback,
                 highest_owned_book_number=highest_owned_book_number,
                 telemetry=telemetry,
@@ -478,6 +497,31 @@ class SeriesIntelligenceAgent:
             candidates = discovery["candidates"]
             provider_failures = discovery["provider_failures"]
             all_providers_failed = discovery["all_providers_failed"]
+
+            # RT-1b: from this function's vantage point, discover_candidates_
+            # for_series *is* the call to the provider stack -- it fans out
+            # to the individual Serper/Apify/catalog adapters itself (see
+            # provider_protocol.py), so this records one aggregate tool call
+            # here rather than reaching into that module's internals, which
+            # is out of scope for this instrumentation-only change.
+            agentic_hooks.record_tool_call(
+                agentic_context,
+                "discovery_stack",
+                f"{series.name} | {series_author}",
+                {
+                    "candidate_count": len(candidates),
+                    "provider_failures": provider_failures,
+                    "all_providers_failed": all_providers_failed,
+                },
+            )
+            agentic_hooks.record_reasoning_step(
+                agentic_context,
+                {
+                    "phase": "provider_selection",
+                    "chosen": "author_fallback" if discovery.get("used_author_fallback") else "targeted",
+                    "reason": "primary_search_strategy",
+                },
+            )
             if telemetry is not None:
                 # PB-9: how often a whole run comes back with genuinely no
                 # usable provider data at all, for cost/quality comparison
@@ -595,6 +639,15 @@ class SeriesIntelligenceAgent:
                 author=series_author,
                 telemetry=telemetry,
                 cache=cache,
+            )
+            agentic_hooks.record_reasoning_step(
+                agentic_context,
+                {
+                    "phase": "re_query",
+                    "decision": "recovered_missing_volumes" if skeleton["recovered_numbers"] else "stop",
+                    "missing_numbers": skeleton["missing_numbers"],
+                    "recovered_numbers": skeleton["recovered_numbers"],
+                },
             )
             if skeleton["recovered_numbers"]:
                 # _filter_and_merge stamps every candidate it's given with
@@ -1025,14 +1078,24 @@ class SeriesIntelligenceAgent:
                 # candidates that pass belongs_to_series via a textual title
                 # match still need to be caught here.
                 #
-                # "medium"/"unverified" only route to needs_review when
+                # "medium" only routes to needs_review when
                 # low_confidence_ambiguous is True, i.e. belongs_to_series
-                # itself couldn't confirm series membership. For a candidate
-                # that already passed belongs_to_series cleanly (explicit
-                # title match, targeted-with-number, etc.), "unverified" is
-                # not a red flag -- it is the *expected*, permanent state
-                # for title_confidence on every genuinely new book, because
-                # SeriesSkeleton only ever contains books already owned (see
+                # itself couldn't confirm series membership. `overall_grade`
+                # itself is never literally "unverified" -- that's only a
+                # per-dimension title_confidence value that _overall_confidence
+                # folds into an overall "medium" ceiling (see that function's
+                # docstring) -- but the title dimension being "unverified" is
+                # exactly why so many genuinely new books land here as
+                # "medium" rather than "high" in the first place. For a
+                # candidate that already passed belongs_to_series cleanly
+                # (explicit title match, targeted-with-number, etc.), that's
+                # not a red flag -- it is the *expected* state for
+                # title_confidence on every genuinely new book: SeriesSkeleton
+                # entries persist independent of ownership (a prior round's
+                # discovered-but-not-yet-owned prediction can already be in
+                # there), but a book nobody -- owner or agent -- has ever
+                # seen before this run still has no skeleton entry at its
+                # number to corroborate against (see
                 # confidence_engine._title_confidence). Gating on it
                 # unconditionally was verified live (Jonathan Hunt/Georgia
                 # Wagner, 2026-08-22) to silently route every legitimate new
@@ -1042,19 +1105,23 @@ class SeriesIntelligenceAgent:
                 # PB-1) -- making "Check Now" report "no books found" even
                 # when
                 # discovery worked correctly. So a clean belongs_to_series
-                # pass auto-accepts on medium/unverified/missing-confidence
-                # the same as it always did before this feature existed;
-                # only the genuinely ambiguous (belongs_to_series=False)
-                # case is gated by confidence at all.
+                # pass auto-accepts on medium/missing-confidence the same as
+                # it always did before this feature existed; only the
+                # genuinely ambiguous (belongs_to_series=False) case is
+                # gated by confidence at all.
                 confidence_entry = confidence_lookup.get(confidence_engine.correlation_key(raw))
                 overall_grade = confidence_entry.get("overall") if confidence_entry else None
                 if telemetry is not None:
                     telemetry.record_gate_outcome("confidence_grade", str(overall_grade or "none"))
 
                 if overall_grade in ("low", "zero"):
+                    agentic_hooks.record_reasoning_step(
+                        agentic_context,
+                        {"phase": "routing", "decision": "drop", "confidence": overall_grade, "title": title},
+                    )
                     continue
 
-                if low_confidence_ambiguous and (overall_grade in ("medium", "unverified") or overall_grade is None):
+                if low_confidence_ambiguous and (overall_grade == "medium" or overall_grade is None):
                     # Same-author/different-series candidates with valid
                     # numbering can land here permanently -- confidence_engine
                     # has no series-identity dimension, so it can score
@@ -1083,12 +1150,26 @@ class SeriesIntelligenceAgent:
                             ),
                         }
                     )
+                    agentic_hooks.record_reasoning_step(
+                        agentic_context,
+                        {"phase": "routing", "decision": "needs_review", "confidence": overall_grade, "title": title},
+                    )
                     continue
 
                 if is_upcoming:
                     upcoming_books.append(canonical)
                 else:
                     available_missing.append(canonical)
+                agentic_hooks.record_reasoning_step(
+                    agentic_context,
+                    {
+                        "phase": "routing",
+                        "decision": "accept",
+                        "confidence": overall_grade,
+                        "status": "upcoming" if is_upcoming else "available",
+                        "title": title,
+                    },
+                )
 
             # Phase 3.5 of agentic discovery, PURE SHADOW MODE: one
             # consolidated log entry combining the external-series-reality
@@ -1205,6 +1286,32 @@ class SeriesIntelligenceAgent:
 
             _console_log(f"CHECK NOW completed successfully for series: {series.name}")
 
+            # PB-1: computed once here (rather than inline in `result`
+            # below) purely so RT-1b's world-model-update trace and the
+            # actual `skeleton_updates` result field are guaranteed to
+            # describe the exact same list -- _needs_review_to_skeleton_
+            # updates is a pure function of `needs_review`, so calling it
+            # once vs. twice changes nothing about its output.
+            skeleton_updates_this_round = _needs_review_to_skeleton_updates(needs_review)
+            agentic_hooks.record_world_model_update(
+                agentic_context,
+                {
+                    "series_id": series.id,
+                    "books_changed": len(added_books),
+                    "numbers_changed": sorted(
+                        {
+                            entry.get("book_number")
+                            for entry in skeleton_updates_this_round
+                            if entry.get("book_number") is not None
+                        }
+                    ),
+                    "confidence_changes": [
+                        {"book_number": entry.get("book_number"), "confidence": entry.get("confidence")}
+                        for entry in skeleton_updates_this_round
+                    ],
+                },
+            )
+
             result = {
                 "series_id": series.id,
                 "series_name": series.name,
@@ -1234,7 +1341,7 @@ class SeriesIntelligenceAgent:
                 # per round). `probes` stays [] -- no probe schema exists
                 # yet (Phase 1, see apply_skeleton_updates' docstring), so
                 # nothing invents one here.
-                "skeleton_updates": _needs_review_to_skeleton_updates(needs_review),
+                "skeleton_updates": skeleton_updates_this_round,
                 "probes": [],
                 "found": found,
                 "candidate": (available_missing[0] if available_missing else (upcoming_books[0] if upcoming_books else None)),
@@ -1253,10 +1360,16 @@ class SeriesIntelligenceAgent:
                 "telemetry": telemetry.summary() if telemetry is not None else None,
                 "cache": cache.summary() if cache is not None else None,
             }
+            agentic_hooks.end_turn(agentic_context)
             if emit_summary:
                 log_discovery_summary(result=result)
             return result
         except Exception as exc:
+            agentic_hooks.record_reasoning_step(
+                agentic_context,
+                {"phase": "error", "decision": "stop", "reason": type(exc).__name__},
+            )
+            agentic_hooks.end_turn(agentic_context)
             if emit_summary:
                 log_discovery_summary(
                     result=_empty_result(series_id, getattr(series, "name", None), "error"),
