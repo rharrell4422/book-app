@@ -36,6 +36,15 @@ class DiscoveryTelemetry:
         self.passes: list[dict] = []
         self.web_search_calls: list[dict] = []
         self.llm_calls: list[dict] = []
+        # PB-9: per-provider call/failure counts (google/openlibrary/
+        # hardcover/web/apify/fixture -- whatever `provider_protocol.py`
+        # adapter name is passed) and named decision-point outcomes
+        # (confidence-grade distribution, all_providers_failed occurrences,
+        # author-fallback trigger rate, precheck short-circuit vs full-loop
+        # rate, FIX-PB-7's skeleton-update-failure counter, etc), for
+        # cost/quality comparison across discovery runs.
+        self.provider_calls: list[dict] = []
+        self.gate_outcomes: list[dict] = []
 
     @contextmanager
     def pass_scope(self, name: str):
@@ -75,11 +84,40 @@ class DiscoveryTelemetry:
                 }
             )
 
+    def record_provider_call(self, provider: str, *, ok: bool, duration_s: float) -> None:
+        """PB-9: one entry per `provider_protocol.py` adapter call --
+        `ok` mirrors that adapter's own `ProviderFetchResult.ok` (see
+        provider_protocol.py's module docstring for why that's the sole
+        failure signal now), independent of this pass's per-query
+        `record_web_search_call` bookkeeping below (that one already
+        existed for Serper specifically; this one is the general,
+        every-provider counterpart PP-2/PP-3 made possible).
+        """
+        with self._lock:
+            self.provider_calls.append(
+                {"pass": self._current_pass, "provider": provider, "ok": bool(ok), "duration_s": round(duration_s, 3)}
+            )
+
+    def record_gate_outcome(self, gate: str, outcome: str) -> None:
+        """PB-9: a labeled decision point resolved to `outcome` --
+        e.g. record_gate_outcome("confidence_grade", "high"),
+        record_gate_outcome("all_providers_failed", "true"),
+        record_gate_outcome("author_fallback", "triggered"),
+        record_gate_outcome("precheck", "short_circuited"),
+        record_gate_outcome("skeleton_update", "failed"). Purely additive
+        counting -- callers choose their own gate/outcome vocabulary, this
+        module just tallies it in summary()'s by_gate breakdown.
+        """
+        with self._lock:
+            self.gate_outcomes.append({"pass": self._current_pass, "gate": str(gate), "outcome": str(outcome)})
+
     def summary(self) -> dict:
         with self._lock:
             passes = list(self.passes)
             web_search_calls = list(self.web_search_calls)
             llm_calls = list(self.llm_calls)
+            provider_calls = list(self.provider_calls)
+            gate_outcomes = list(self.gate_outcomes)
 
         by_pass: dict[str, dict] = {}
 
@@ -111,8 +149,24 @@ class DiscoveryTelemetry:
             bucket["tokens_in"] += call["tokens_in"]
             bucket["tokens_out"] += call["tokens_out"]
 
+        by_provider: dict[str, dict] = {}
+        for call in provider_calls:
+            bucket = by_provider.setdefault(
+                call["provider"], {"calls": 0, "ok": 0, "failed": 0, "duration_s": 0.0}
+            )
+            bucket["calls"] += 1
+            bucket["ok" if call["ok"] else "failed"] += 1
+            bucket["duration_s"] = round(bucket["duration_s"] + call["duration_s"], 3)
+
+        by_gate: dict[str, dict[str, int]] = {}
+        for entry in gate_outcomes:
+            outcomes = by_gate.setdefault(entry["gate"], {})
+            outcomes[entry["outcome"]] = outcomes.get(entry["outcome"], 0) + 1
+
         return {
             "by_pass": by_pass,
+            "by_provider": by_provider,
+            "by_gate": by_gate,
             "total_web_search_calls": len(web_search_calls),
             "total_llm_calls": len(llm_calls),
             "total_tokens_in": sum(c["tokens_in"] for c in llm_calls),

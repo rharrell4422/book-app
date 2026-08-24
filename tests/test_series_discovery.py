@@ -1068,6 +1068,71 @@ class DiscoverCandidatesForSeriesTest(unittest.TestCase):
 
         self.assertEqual(result["candidates"], [])
 
+    def test_providers_succeed_but_every_candidate_gets_filtered_is_not_all_providers_failed(self):
+        # TG-2: every provider returning real (non-empty) data that then
+        # gets entirely filtered out (already-owned here) is a normal,
+        # successful "nothing new" outcome -- not the same signal as every
+        # provider call itself failing. all_providers_failed must mean "we
+        # got no usable data at all", never "filtering left zero
+        # candidates" (see _fetch_all_providers_parallel's own docstring).
+        owned_title = "Cherry Blossom Girls Book 7"
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[
+                {
+                    "source": "hardcover",
+                    "source_id": "hc-1",
+                    "title": owned_title,
+                    "authors": ["Harmon Cooper"],
+                    "published_date": "2024-02-20",
+                    "isbn13": None,
+                    "source_url": None,
+                    "language": "",
+                    "series_number_hint": 7,
+                    "upcoming_hint": False,
+                }
+            ],
+        ), patch.object(
+            discovery_engine,
+            "_fetch_google_books",
+            return_value=[
+                {
+                    "source": "google_books",
+                    "source_id": "gb-1",
+                    "title": owned_title,
+                    "authors": ["Harmon Cooper"],
+                    "published_date": "2024-02-20",
+                    "isbn13": None,
+                    "source_url": None,
+                    "language": "",
+                }
+            ],
+        ), patch.object(
+            discovery_engine,
+            "_fetch_openlibrary",
+            return_value=[
+                {
+                    "source": "openlibrary",
+                    "source_id": "ol-1",
+                    "title": owned_title,
+                    "authors": ["Harmon Cooper"],
+                    "published_date": "2024-02-20",
+                    "isbn13": None,
+                    "source_url": None,
+                    "language": "",
+                }
+            ],
+        ):
+            owned_key = discovery_engine.core_title_key(owned_title)
+            result = discovery_engine.discover_candidates_for_series(
+                "Cherry Blossom Girls", "Harmon Cooper", exclude_title_keys={owned_key}, allow_author_fallback=False
+            )
+
+        self.assertEqual(result["candidates"], [])
+        self.assertFalse(result["all_providers_failed"])
+        self.assertEqual(result["provider_failures"], [])
+
     def test_all_providers_failing_is_reported_distinctly_from_no_results(self):
         with patch.object(discovery_engine, "_fetch_hardcover", side_effect=RuntimeError("boom")), patch.object(
             discovery_engine, "_fetch_google_books", side_effect=RuntimeError("boom")
@@ -1089,6 +1154,71 @@ class DiscoverCandidatesForSeriesTest(unittest.TestCase):
 
         self.assertFalse(result["all_providers_failed"])
         self.assertEqual(len(result["provider_failures"]), 1)
+
+
+class FilterAndMergeConfidenceTagTest(unittest.TestCase):
+    """TG-8: direct unit test on _filter_and_merge -- a candidate's already-
+    assigned confidence tag must survive being re-merged into a later,
+    lower-trust pass, rather than getting unconditionally overwritten by
+    that later call's blanket `confidence` argument. Regression this
+    guards: Georgia Wagner's "Jonathan Hunt Thriller Series" -- author-
+    fallback always triggers because providers under-index it, and an
+    earlier version of this merge unconditionally re-stamped every
+    candidate (including already-"targeted" ones) with "author_fallback",
+    silently defeating series_agent.py's targeted_with_number acceptance
+    check for the whole series.
+    """
+
+    def _raw(self, title: str = "Some Book", **overrides) -> dict:
+        raw = {
+            "source": "hardcover",
+            "source_id": "hc-1",
+            "title": title,
+            "authors": ["Some Author"],
+            "published_date": "2024-01-01",
+            "isbn13": None,
+            "source_url": None,
+            "language": "",
+            "series_number_hint": 5,
+        }
+        raw.update(overrides)
+        return raw
+
+    def test_targeted_confidence_survives_a_later_author_fallback_merge(self):
+        first_pass = discovery_engine._filter_and_merge(
+            [self._raw()], "Some Author", set(), confidence="targeted", series_name="Some Series"
+        )
+        self.assertEqual(len(first_pass), 1)
+        self.assertEqual(first_pass[0]["confidence"], "targeted")
+
+        second_pass = discovery_engine._filter_and_merge(
+            first_pass, "Some Author", set(), confidence="author_fallback", series_name="Some Series"
+        )
+        self.assertEqual(len(second_pass), 1)
+        self.assertEqual(second_pass[0]["confidence"], "targeted")
+
+    def test_a_fresh_candidate_with_no_prior_confidence_gets_the_calls_blanket_tag(self):
+        merged = discovery_engine._filter_and_merge(
+            [self._raw()], "Some Author", set(), confidence="author_fallback", series_name="Some Series"
+        )
+        self.assertEqual(merged[0]["confidence"], "author_fallback")
+
+    def test_growing_candidate_set_preserves_each_candidates_own_tag(self):
+        already_targeted = self._raw(title="Book A", source_id="hc-a")
+        already_targeted["confidence"] = "targeted"
+        fresh_fallback_candidate = self._raw(title="Book B", source_id="hc-b")
+
+        merged = discovery_engine._filter_and_merge(
+            [already_targeted, fresh_fallback_candidate],
+            "Some Author",
+            set(),
+            confidence="author_fallback",
+            series_name="Some Series",
+        )
+
+        by_title = {c["title"]: c["confidence"] for c in merged}
+        self.assertEqual(by_title["Book A"], "targeted")
+        self.assertEqual(by_title["Book B"], "author_fallback")
 
 
 class DiscoverCandidatesForAuthorTest(unittest.TestCase):
@@ -1756,6 +1886,66 @@ class VerifyMissingVolumeRecoveryDatesTest(unittest.TestCase):
             discovery_engine.verify_missing_volume_recovery_dates(candidates, "Georgia Wagner")
 
         mock_fetch.assert_not_called()
+
+
+class UrlKeyedResolutionTest(unittest.TestCase):
+    """TG-9: _structure_with_verdict_cache resolves the LLM's result_index
+    against uncached_raw (the exact subset actually sent to the LLM), then
+    immediately converts to a URL-keyed map -- never a raw, positional
+    index into the original raw_results list. This is a real misattachment
+    risk, not just a naming nuance: whenever some URLs are already cached,
+    uncached_raw is a *different* list (shorter, differently ordered) than
+    raw_results, so a result_index that's valid against uncached_raw would
+    silently resolve to the wrong book under naive global-index resolution.
+    """
+
+    def test_result_index_resolves_against_uncached_subset_not_the_original_list(self):
+        cache = DiscoveryCache()
+        # url_a is already cached (accepted) -- excluded from uncached_raw.
+        # Key is "some" (not "some series") -- FIX-LB-KEY: this cache is
+        # keyed by _normalize_series_name_for_identity, which strips the
+        # trailing "series" word.
+        cache.set_llm_verdict("series", "some", "https://example.com/a", {"title": "Book A (cached)"})
+
+        raw_results = [
+            {"title": "Book A", "description": "", "url": "https://example.com/a"},
+            {"title": "Book B", "description": "", "url": "https://example.com/b"},
+            {"title": "Book C", "description": "", "url": "https://example.com/c"},
+        ]
+
+        # The LLM only ever sees uncached_raw == [Book B, Book C] (url_a
+        # excluded) -- result_index=0 here means Book B. Under a naive
+        # resolution against the ORIGINAL raw_results list, index 0 would
+        # instead wrongly resolve to Book A.
+        with patch.object(
+            discovery_engine,
+            "_structure_web_results_with_llm",
+            return_value=[{"result_index": 0, "title": "Book B", "series_name": "Some Series", "book_number": 2}],
+        ):
+            verdicts = discovery_engine._structure_with_verdict_cache(
+                raw_results, "Some Series", "Some Author", cache=cache, scope_type="series"
+            )
+
+        self.assertIn("https://example.com/b", verdicts)
+        self.assertEqual(verdicts["https://example.com/b"]["title"], "Book B")
+        # Book C got no verdict from the LLM (only index 0 was returned)
+        # and was never cached, so it's simply absent -- not misattached.
+        self.assertNotIn("https://example.com/c", verdicts)
+        # Book A's pre-existing cached verdict survives untouched.
+        self.assertIn("https://example.com/a", verdicts)
+        self.assertEqual(verdicts["https://example.com/a"]["title"], "Book A (cached)")
+
+    def test_a_result_index_out_of_range_for_the_uncached_subset_is_dropped_not_misattached(self):
+        raw_results = [{"title": "Book A", "description": "", "url": "https://example.com/a"}]
+        with patch.object(
+            discovery_engine,
+            "_structure_web_results_with_llm",
+            return_value=[{"result_index": 5, "title": "Nonexistent", "series_name": "Some Series"}],
+        ):
+            verdicts = discovery_engine._structure_with_verdict_cache(
+                raw_results, "Some Series", "Some Author", cache=None
+            )
+        self.assertEqual(verdicts, {})
 
 
 class WebSearchProviderTest(unittest.TestCase):
@@ -2873,10 +3063,11 @@ class DiscoveryCacheTest(unittest.TestCase):
         # but a cached acceptance must still be trusted as-is (no need to
         # redo confirmed-correct work).
         cache = DiscoveryCache()
-        cache.set_llm_verdict("series", "some series", "https://example.com/rejected", None)
+        # Key is "some" (not "some series") -- FIX-LB-KEY.
+        cache.set_llm_verdict("series", "some", "https://example.com/rejected", None)
         cache.set_llm_verdict(
             "series",
-            "some series",
+            "some",
             "https://example.com/accepted",
             {"title": "Already Confirmed", "book_number": 2, "author_names": ["Some Author"]},
         )
@@ -2918,7 +3109,8 @@ class DiscoveryCacheTest(unittest.TestCase):
         # every other pass_label (targeted, author_fallback, the default,
         # etc.) must keep trusting a cached rejection exactly as before.
         cache = DiscoveryCache()
-        cache.set_llm_verdict("series", "some series", "https://example.com/rejected", None)
+        # Key is "some" (not "some series") -- FIX-LB-KEY.
+        cache.set_llm_verdict("series", "some", "https://example.com/rejected", None)
         raw_results = [{"title": "Rejected listing", "description": "snippet", "url": "https://example.com/rejected"}]
 
         with patch.object(discovery_engine, "_fetch_serper_web_search", return_value=raw_results), patch.object(
@@ -2959,9 +3151,10 @@ class DiscoveryCacheTest(unittest.TestCase):
         # Reassembly must follow raw_results' own order, not "fresh then
         # cached" or vice versa.
         cache = DiscoveryCache()
+        # Key is "some" (not "some series") -- FIX-LB-KEY.
         cache.set_llm_verdict(
             "series",
-            "some series",
+            "some",
             "https://example.com/cached",
             {
                 "title": "Cached Book",
@@ -4068,6 +4261,78 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         mock_discover.assert_not_called()
         self.assertEqual(result["reason"], "series-missing-author")
         self.assertFalse(result["found"])
+
+    def test_run_series_check_never_writes_book_rows_itself(self):
+        # TG-3: persistence of newly-discovered books is
+        # services/series_check_engine.py's job, invoked only AFTER
+        # run_series_check returns its in-memory `added_books` list --
+        # run_series_check itself (discovery + classification) must be a
+        # pure read against the Book table.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "Cherry Blossom Girls Book 7",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 7,
+                "upcoming_hint": False,
+            }
+        ]
+        books_before = [
+            (b.id, b.title, b.book_number, b.record_status) for b in self.db.query(Book).order_by(Book.id).all()
+        ]
+
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        # Confirms discovery genuinely found something -- otherwise an
+        # unchanged Book table would be a vacuous pass.
+        self.assertTrue(result["found"])
+        self.assertEqual(len(result["available_missing"]), 1)
+
+        books_after = [
+            (b.id, b.title, b.book_number, b.record_status) for b in self.db.query(Book).order_by(Book.id).all()
+        ]
+        self.assertEqual(books_before, books_after)
+
+    def test_highest_owned_book_number_reflects_a_fresh_db_read_across_calls(self):
+        # TG-4: highest_owned_book_number must come from a fresh DB read on
+        # every run_series_check call, never a value cached/carried over
+        # from an earlier one -- services/series_check_engine.py's round
+        # loop persists each round's new Book rows before invoking
+        # run_series_check again, and round N+1 must see round N's inserts
+        # (see that module's own comment on SERIES_CHECK_MAX_ROUNDS).
+        with self._mock_discovery([]):
+            agent = SeriesIntelligenceAgent()
+            first_result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+        self.assertEqual(first_result["highest_owned_book_number"], 9)  # setUp's highest owned book
+
+        # Simulate series_check_engine persisting a newly-discovered book
+        # between rounds (the round loop commits before looping again).
+        self.db.add(
+            Book(
+                title="Cherry Blossom Girls Book 12",
+                author="Harmon Cooper",
+                series_id=self.series.id,
+                profile_id=self.series.profile_id,
+                series_order=12,
+                book_number=12.0,
+                record_status="active",
+                is_read=False,
+            )
+        )
+        self.db.commit()
+
+        with self._mock_discovery([]):
+            agent2 = SeriesIntelligenceAgent()
+            second_result = agent2.run_series_check(self.db, self.series.id, emit_summary=False)
+        self.assertEqual(second_result["highest_owned_book_number"], 12)
 
 
 class Phase4DiagnosticsTest(unittest.TestCase):

@@ -1,0 +1,39 @@
+{
+  "id": "jonathan_hunt",
+  "description": "Recorded web-search-shaped provider responses for Georgia Wagner's 'Jonathan Hunt' series -- pairs with fixtures/eval_regressions/jonathan_hunt.json's pure-function fixtures, but at the provider-response layer (PB-3b) rather than the classification-function layer (PB-3a), for end-to-end network-free eval runs.",
+  "recordings": [
+    {
+      "query": "Jonathan Hunt Georgia Wagner",
+      "items": [
+        {
+          "source": "web_search",
+          "source_id": "https://example.com/jonathan-hunt-9",
+          "title": "The Jericho Siege",
+          "authors": ["Georgia Wagner"],
+          "published_date": "2025-03-11",
+          "description": "Book 9 of the Jonathan Hunt Thriller series.",
+          "isbn13": null,
+          "source_url": "https://example.com/jonathan-hunt-9",
+          "language": "",
+          "series_number_hint": 9,
+          "upcoming_hint": false,
+          "series_name_hint": "Jonathan Hunt"
+        },
+        {
+          "source": "web_search",
+          "source_id": "https://example.com/jonathan-hunt-thriller-tagline",
+          "title": "A Jonathan Hunt Thriller",
+          "authors": ["Georgia Wagner"],
+          "published_date": "",
+          "description": "A Jonathan Hunt Thriller.",
+          "isbn13": null,
+          "source_url": "https://example.com/jonathan-hunt-thriller-tagline",
+          "language": "",
+          "series_number_hint": null,
+          "upcoming_hint": null,
+          "series_name_hint": "Jonathan Hunt"
+        }
+      ]
+    }
+  ]
+}

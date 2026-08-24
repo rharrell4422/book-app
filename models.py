@@ -358,7 +358,10 @@ class SeriesSkeleton(Base):
     #   first_seen_at, last_confirmed_at (both ISO strings).
     skeleton_json = Column(JSON, nullable=False, default=list)
 
-    schema_version = Column(Integer, nullable=False, default=1)
+    # FIX-SS-ENUM: matches services/skeleton_store.SCHEMA_VERSION (bumped
+    # when source_class was added); see the 5414264c11af migration for the
+    # server-side default + backfill of pre-existing schema_version=1 rows.
+    schema_version = Column(Integer, nullable=False, default=2)
 
     # CR-4: optimistic-concurrency token. `_upsert_skeleton_row`
     # (services/skeleton_store.py) reads this alongside skeleton_json,

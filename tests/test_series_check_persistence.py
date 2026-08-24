@@ -600,5 +600,235 @@ class SeriesCheckPrecheckTest(unittest.TestCase):
         mock_run_series_check.assert_called()
 
 
+class SkeletonUpdateFailureVisibilityTest(unittest.TestCase):
+    """FIX-PB-7: a failure inside apply_skeleton_updates must (1) never
+    roll back the already-committed Book persistence for that round, and
+    (2) be visible outside server logs -- on the job dict's result and
+    completion payloads (what services/series.py's status endpoint
+    forwards verbatim) -- rather than only reaching logger.exception.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=cls.engine)
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        Base.metadata.drop_all(bind=cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        self.db = self.SessionLocal()
+        series = Series(name="Some Series", author="Some Author", profile_id="robbie")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+        self.series = series
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_skeleton_update_failure_is_surfaced_without_rolling_back_the_new_book(self):
+        mocked_result = {
+            "series_id": self.series.id,
+            "added_books": [
+                {
+                    "title": "Some New Book",
+                    "author": "Some Author",
+                    "series_name": "Some Series",
+                    "book_number": 2,
+                    "source_url": None,
+                    "provider": "web_search",
+                    "publication_date": "2026-01-01",
+                    "expected_date": None,
+                    "status_hint": "available",
+                    "asin_or_id": "web_search:https://example.com/book-2",
+                    "is_missing": True,
+                    "status": "available",
+                    "canonical_metadata": {
+                        "title_normalized": "Some New Book",
+                        "series_name_normalized": "Some Series",
+                        "book_number_normalized": 2,
+                        "publish_date_normalized": "2026-01-01",
+                        "upcoming_date_normalized": None,
+                        "availability": "available",
+                        "edition_type": "unknown",
+                        "title_selector": None,
+                    },
+                }
+            ],
+            "provider_failures": [],
+            "all_providers_failed": False,
+        }
+
+        with patch.object(series_check_engine, "SessionLocal", self.SessionLocal), patch.object(
+            library_sync, "SessionLocal", self.SessionLocal
+        ), patch.object(
+            series_check_engine.series_agent, "run_series_check", return_value=mocked_result
+        ), patch.object(
+            series_check_engine, "apply_skeleton_updates", side_effect=RuntimeError("skeleton boom")
+        ):
+            series_check_engine.run_series_check_job_full(self.series.id)
+
+        # The new Book row still persisted -- no rollback of that
+        # already-committed work.
+        book = self.db.query(Book).filter(Book.series_id == self.series.id, Book.book_number == 2.0).first()
+        self.assertIsNotNone(book)
+
+        job = series_check_engine.series_check_jobs[self.series.id]
+        # The mocked discovery result is identical every round (a
+        # persistent stub), so the loop runs more than one round before its
+        # own "nothing new persisted" stop condition kicks in -- every one
+        # of those rounds' skeleton-update attempts still fails and gets
+        # recorded, so this asserts "at least one", not an exact count tied
+        # to the round loop's own unrelated stop-condition timing.
+        failures = job["result"]["skeleton_update_failures"]
+        self.assertGreaterEqual(len(failures), 1)
+        self.assertTrue(all("skeleton boom" in f for f in failures))
+        # completion is what the /check status endpoint forwards verbatim.
+        self.assertEqual(job["completion"]["skeleton_update_failures"], failures)
+
+    def test_no_failure_means_an_empty_list_not_a_missing_key(self):
+        mocked_result = {
+            "series_id": self.series.id,
+            "added_books": [],
+            "provider_failures": [],
+            "all_providers_failed": False,
+        }
+        with patch.object(series_check_engine, "SessionLocal", self.SessionLocal), patch.object(
+            library_sync, "SessionLocal", self.SessionLocal
+        ), patch.object(series_check_engine.series_agent, "run_series_check", return_value=mocked_result):
+            series_check_engine.run_series_check_job_full(self.series.id)
+
+        job = series_check_engine.series_check_jobs[self.series.id]
+        self.assertEqual(job["result"]["skeleton_update_failures"], [])
+        self.assertEqual(job["completion"]["skeleton_update_failures"], [])
+
+
+class CrossProfileCheckNowIsolationTest(unittest.TestCase):
+    """TG-5: two profiles independently tracking a same-named series (a
+    realistic multi-profile scenario, not a contrived id collision) must
+    stay fully isolated through a real Check Now job run -- profile B's
+    Series/Book rows are untouched by profile A's job, even though both
+    series share a name/author and overlapping book numbers.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=cls.engine)
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        Base.metadata.drop_all(bind=cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        self.db = self.SessionLocal()
+
+        self.series_a = Series(name="Cherry Blossom Girls", author="Harmon Cooper", profile_id="robbie")
+        self.series_b = Series(name="Cherry Blossom Girls", author="Harmon Cooper", profile_id="other_profile")
+        self.db.add(self.series_a)
+        self.db.add(self.series_b)
+        self.db.commit()
+        self.db.refresh(self.series_a)
+        self.db.refresh(self.series_b)
+
+        for series in (self.series_a, self.series_b):
+            for number in (1, 2, 3):
+                self.db.add(
+                    Book(
+                        title=f"Cherry Blossom Girls Book {number}",
+                        author="Harmon Cooper",
+                        series_id=series.id,
+                        profile_id=series.profile_id,
+                        series_order=number,
+                        book_number=float(number),
+                        record_status="active",
+                        is_read=False,
+                    )
+                )
+        self.db.commit()
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_check_now_for_profile_a_never_touches_profile_bs_rows(self):
+        mocked_result = {
+            "series_id": self.series_a.id,
+            "added_books": [
+                {
+                    "title": "Cherry Blossom Girls Book 4",
+                    "author": "Harmon Cooper",
+                    "series_name": "Cherry Blossom Girls",
+                    "book_number": 4,
+                    "source_url": None,
+                    "provider": "web_search",
+                    "publication_date": "2026-01-01",
+                    "expected_date": None,
+                    "status_hint": "available",
+                    "asin_or_id": "web_search:https://example.com/book-4",
+                    "is_missing": True,
+                    "status": "available",
+                    "canonical_metadata": {
+                        "title_normalized": "Cherry Blossom Girls Book 4",
+                        "series_name_normalized": "Cherry Blossom Girls",
+                        "book_number_normalized": 4,
+                        "publish_date_normalized": "2026-01-01",
+                        "upcoming_date_normalized": None,
+                        "availability": "available",
+                        "edition_type": "unknown",
+                        "title_selector": None,
+                    },
+                }
+            ],
+            "provider_failures": [],
+            "all_providers_failed": False,
+        }
+
+        profile_b_books_before = [
+            (b.id, b.title, b.book_number, b.record_status)
+            for b in self.db.query(Book).filter(Book.profile_id == "other_profile").order_by(Book.id).all()
+        ]
+        profile_b_last_checked_before = self.series_b.last_checked
+        profile_b_has_new_books_before = self.series_b.has_new_books
+
+        with patch.object(series_check_engine, "SessionLocal", self.SessionLocal), patch.object(
+            library_sync, "SessionLocal", self.SessionLocal
+        ), patch.object(
+            series_check_engine.series_agent, "run_series_check", return_value=mocked_result
+        ):
+            series_check_engine.run_series_check_job_full(self.series_a.id)
+
+        # Profile A got its new book.
+        new_book = (
+            self.db.query(Book)
+            .filter(Book.series_id == self.series_a.id, Book.book_number == 4.0)
+            .first()
+        )
+        self.assertIsNotNone(new_book)
+        self.assertEqual(new_book.profile_id, "robbie")
+
+        # Profile B's books are byte-for-byte unchanged -- no phantom
+        # "Book 4" leaked into the other profile's series, and none of its
+        # existing rows were touched.
+        profile_b_books_after = [
+            (b.id, b.title, b.book_number, b.record_status)
+            for b in self.db.query(Book).filter(Book.profile_id == "other_profile").order_by(Book.id).all()
+        ]
+        self.assertEqual(profile_b_books_before, profile_b_books_after)
+
+        self.db.refresh(self.series_b)
+        self.assertEqual(self.series_b.last_checked, profile_b_last_checked_before)
+        self.assertEqual(self.series_b.has_new_books, profile_b_has_new_books_before)
+
+        # The job itself is keyed/scoped to profile A's series_id only.
+        job = series_check_engine.series_check_jobs[self.series_a.id]
+        self.assertEqual(job["result"]["series_id"], self.series_a.id)
+
+
 if __name__ == "__main__":
     unittest.main()

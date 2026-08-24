@@ -1,0 +1,25 @@
+{
+  "id": "starships_mage",
+  "description": "Recorded web-search-shaped provider responses for Glynn Stewart's 'Starship's Mage' series, pairing with fixtures/eval_regressions/starships_mage.json at the provider-response layer (PB-3b).",
+  "recordings": [
+    {
+      "query": "Starship's Mage Glynn Stewart",
+      "items": [
+        {
+          "source": "web_search",
+          "source_id": "https://example.com/starships-mage-1",
+          "title": "Starship's Mage",
+          "authors": ["Glynn Stewart"],
+          "published_date": "2015-02-01",
+          "description": "Book 1 of Starship's Mage.",
+          "isbn13": "9781988035034",
+          "source_url": "https://example.com/starships-mage-1",
+          "language": "",
+          "series_number_hint": 1,
+          "upcoming_hint": false,
+          "series_name_hint": "Starship's Mage"
+        }
+      ]
+    }
+  ]
+}

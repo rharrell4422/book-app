@@ -261,6 +261,13 @@ def run_series_check_job_full(series_id: int) -> None:
         timed_out = False
         idle_check = False
         last_result: dict = {}
+        # FIX-PB-7: apply_skeleton_updates below is deliberately never
+        # allowed to fail the round (a stale/un-swept skeleton self-heals
+        # on the next run) -- but a silently-swallowed failure was only
+        # ever visible in server logs. Accumulated here and surfaced on the
+        # job dict / status endpoint response instead, still with NO
+        # rollback of the already-committed Book persistence.
+        skeleton_update_failures: list[str] = []
 
         # ---- Cheap pre-check for a recently-checked series (architecture
         # spec #7.2) ----
@@ -295,6 +302,9 @@ def run_series_check_job_full(series_id: int) -> None:
                 # reuse it against), and its own results shouldn't seed the
                 # full loop's cache for a *different* purpose (confirming
                 # "nothing new" vs. exhaustively enumerating candidates).
+                telemetry.record_gate_outcome(
+                    "precheck", "short_circuited" if not found_something_new else "fell_through_to_full_loop"
+                )
                 if not found_something_new:
                     run_full_loop = False
                     idle_check = True
@@ -787,10 +797,13 @@ def run_series_check_job_full(series_id: int) -> None:
                         skeleton_updates=result.get("skeleton_updates"),
                         probes=result.get("probes"),
                     )
-                except Exception:
+                    telemetry.record_gate_outcome("skeleton_update", "succeeded")
+                except Exception as exc:
                     logger.exception(
                         "Post-persistence skeleton update failed for series_id=%s", series_id
                     )
+                    telemetry.record_gate_outcome("skeleton_update", "failed")
+                    skeleton_update_failures.append(f"round {rounds_run}: {exc}")
             except Exception:
                 db.rollback()
                 raise
@@ -847,6 +860,7 @@ def run_series_check_job_full(series_id: int) -> None:
         result["idle_check"] = idle_check
         result["telemetry"] = telemetry.summary()
         result["cache"] = discovery_cache.summary()
+        result["skeleton_update_failures"] = skeleton_update_failures
 
         db_series = db.query(models.Series).filter(models.Series.id == series_id).first()
         if not db_series:
@@ -922,6 +936,7 @@ def run_series_check_job_full(series_id: int) -> None:
             "discovery_engine": result.get("discovery_engine") or "new_book_checker",
             "rounds_run": rounds_run,
             "idle_check": idle_check,
+            "skeleton_update_failures": skeleton_update_failures,
             "asin_discovery": result.get("asin_discovery") or {
                 "discovered": 0,
                 "processed": 0,

@@ -478,6 +478,15 @@ class SeriesIntelligenceAgent:
             candidates = discovery["candidates"]
             provider_failures = discovery["provider_failures"]
             all_providers_failed = discovery["all_providers_failed"]
+            if telemetry is not None:
+                # PB-9: how often a whole run comes back with genuinely no
+                # usable provider data at all, for cost/quality comparison
+                # against confidence-grade distribution and gate outcomes
+                # recorded further down this function.
+                telemetry.record_gate_outcome("all_providers_failed", "true" if all_providers_failed else "false")
+                telemetry.record_gate_outcome(
+                    "author_fallback", "triggered" if discovery.get("used_author_fallback") else "not_triggered"
+                )
 
             # Phase 2 + 3 of agentic discovery: computes a deterministic
             # delta between the Phase 1 SeriesSkeleton baseline and this
@@ -1039,6 +1048,8 @@ class SeriesIntelligenceAgent:
                 # case is gated by confidence at all.
                 confidence_entry = confidence_lookup.get(confidence_engine.correlation_key(raw))
                 overall_grade = confidence_entry.get("overall") if confidence_entry else None
+                if telemetry is not None:
+                    telemetry.record_gate_outcome("confidence_grade", str(overall_grade or "none"))
 
                 if overall_grade in ("low", "zero"):
                     continue

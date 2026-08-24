@@ -111,6 +111,13 @@ SCHEMA_VERSION = 2
 # docstring for the full rationale and the two alternatives it rejects.
 DISCOVERED_ENTRY_TTL_DAYS = 90
 
+# FIX-SS-ENUM: the documented enum for a skeleton entry's `status` field
+# (see models.SeriesSkeleton's docstring). Nothing at the DB level enforces
+# this today -- skeleton_json is an untyped JSON blob -- so
+# `apply_skeleton_updates` validates agent-supplied updates against it
+# explicitly rather than persisting an unrecognized value silently.
+VALID_SKELETON_STATUSES = {"confirmed", "unconfirmed", "upcoming"}
+
 # Single-writer-per-row protection (see `_upsert_skeleton_row`). SQLite has
 # no real row-level locking, so retries are the actual protection; these
 # bounds are generous enough to absorb a boot-time backfill sweep racing a
@@ -489,6 +496,25 @@ def apply_skeleton_updates(
                 continue
             previous = by_number.get(number)
             merged_entry = dict(update)
+
+            # FIX-SS-ENUM: reject/drop an unrecognized status instead of
+            # silently persisting it -- fall back to the previous entry's
+            # status (if any) rather than inventing one.
+            status_value = merged_entry.get("status")
+            if status_value is not None and status_value not in VALID_SKELETON_STATUSES:
+                logger.warning(
+                    "apply_skeleton_updates: dropping unrecognized status %r for "
+                    "series_id=%s book_number=%s (valid: %s)",
+                    status_value,
+                    series_id,
+                    number,
+                    sorted(VALID_SKELETON_STATUSES),
+                )
+                if previous is not None and previous.get("status") in VALID_SKELETON_STATUSES:
+                    merged_entry["status"] = previous["status"]
+                else:
+                    merged_entry.pop("status", None)
+
             merged_entry["source_class"] = "discovered"
             merged_entry["first_seen_at"] = (previous or {}).get("first_seen_at") or update.get("first_seen_at") or now_iso
             merged_entry["last_confirmed_at"] = now_iso

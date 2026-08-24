@@ -41,10 +41,20 @@ from pydantic import BaseModel, Field
 # already uses for its DB-write-path edition collapse (see
 # _finalize_candidates), so a "which edition wins" decision means the same
 # thing on both the discovery side and the persistence side.
-from services.identity import _edition_priority, _normalize_title_for_identity
+from services.identity import _edition_priority, _normalize_title_for_identity, _normalize_series_name_for_identity
 from services.discovery_telemetry import DiscoveryTelemetry, maybe_pass_scope
-from services.discovery_cache import DiscoveryCache, CACHE_MISS, _normalize_query_text
+from services.discovery_cache import DiscoveryCache, CACHE_MISS
 from apify_provider import ApifyCallBudget, apify_enabled, fetch_apify_candidates
+# PP-2/PP-3: _fetch_all_providers_parallel calls providers through these
+# adapters (never-raising, uniform ProviderFetchResult contract) instead of
+# calling _fetch_google_books/_fetch_openlibrary/_fetch_hardcover/
+# _fetch_web_search directly -- see provider_protocol.py's module docstring.
+from provider_protocol import (
+    GoogleBooksProvider,
+    OpenLibraryProvider,
+    HardcoverProvider,
+    WebDiscoveryProvider,
+)
 
 # Loaded here (rather than relying on the entry point having done it first)
 # so this module reads the right API key regardless of import order.
@@ -1672,7 +1682,20 @@ def _structure_with_verdict_cache(
     if not raw_results:
         return {}
 
-    series_name_key = _normalize_query_text(series_name) if series_name else ""
+    # FIX-LB-KEY: this cache key used to be built with _normalize_query_text
+    # (the same normalizer Layer A's provider-fetch cache uses for raw query
+    # text), which doesn't match the normalizer used everywhere else a
+    # series' identity is compared/deduped (services/identity.py's
+    # _normalize_series_name_for_identity -- e.g. it strips a trailing
+    # "series"/"book series" suffix, which _normalize_query_text does not).
+    # Two spellings of the same series that only differ in a way
+    # _normalize_series_name_for_identity treats as identical but
+    # _normalize_query_text does not would silently miss each other's
+    # cached verdicts within the same job. Low-risk to change:
+    # DiscoveryCache is created fresh per Check Now job and discarded at job
+    # end (see services/discovery_cache.py's own docstring), so this only
+    # affects within-job cache hit/miss consistency, not any persisted key.
+    series_name_key = _normalize_series_name_for_identity(series_name) if series_name else ""
     cached_by_url: dict[str, dict | None] = {}
     uncached_raw: list[dict] = []
     for item in raw_results:
@@ -2153,9 +2176,25 @@ def _fetch_all_providers_parallel(
     Returns {"google": [...], "openlibrary": [...], "hardcover": [...],
     "web": [...]} exactly like the four raw lists the sequential calls used
     to produce, plus "_failures": {provider_key: exception} for any provider
-    whose call raised -- callers use that to build the same
+    whose call failed -- callers use that to build the same
     provider_failures/any_provider_succeeded bookkeeping they always have,
     unchanged.
+
+    PP-2/PP-3: each provider is now called through a `provider_protocol.py`
+    adapter (`GoogleBooksProvider`/`OpenLibraryProvider`/`HardcoverProvider`/
+    `WebDiscoveryProvider`), so none of the four `_fetch_*` calls below can
+    raise out of this function any more -- every adapter's `.fetch()` always
+    returns a `ProviderFetchResult(items, ok, error)`; failure is signaled by
+    `ok=False`, not by a propagated exception. This function still builds
+    the same `results`/`failures` dicts as before (`results[provider]` stays
+    a plain `list[dict]` via `.to_legacy_dict()`, `failures[provider]` stays
+    an object `str()`-able into the same message), so every existing
+    downstream consumer (`_fuse_and_score_candidates`,
+    `discover_candidates_for_series`'s provider_failures bookkeeping) is
+    unaffected by this internal change. The outer `try/except` around
+    `future.result()` is kept anyway as a belt-and-suspenders guard against a
+    bug *inside* an adapter itself, not because a provider is expected to
+    raise through it.
     """
     google_query = f'"{series_name}" inauthor:"{query_author}"' if series_name else f'inauthor:"{query_author}"'
     resolved_openlibrary_query = openlibrary_query if openlibrary_query is not None else targeted_query_text
@@ -2196,20 +2235,20 @@ def _fetch_all_providers_parallel(
 
     tasks: dict[str, tuple] = {}
     catalog_fetchers = {
-        "google": _fetch_google_books,
-        "openlibrary": _fetch_openlibrary,
-        "hardcover": _fetch_hardcover,
+        "google": GoogleBooksProvider(),
+        "openlibrary": OpenLibraryProvider(),
+        "hardcover": HardcoverProvider(),
     }
     for provider, query in catalog_queries.items():
         cache_hit = cache.get_provider_fetch(provider, query) if cache is not None else CACHE_MISS
         if cache_hit is not CACHE_MISS:
             results[provider] = cache_hit
         else:
-            tasks[provider] = (catalog_fetchers[provider], (query,), {})
+            tasks[provider] = (catalog_fetchers[provider].fetch, (query,), {"telemetry": telemetry})
 
     if run_web_search:
         tasks["web"] = (
-            _fetch_web_search,
+            WebDiscoveryProvider().fetch,
             (resolved_web_queries, series_name, author),
             {
                 "diagnostics": diagnostics,
@@ -2227,11 +2266,16 @@ def _fetch_all_providers_parallel(
             }
             for future, provider in future_to_provider.items():
                 try:
-                    results[provider] = future.result()
+                    fetch_result = future.result()
+                except Exception as exc:  # belt-and-suspenders only -- see docstring
+                    failures[provider] = exc
+                    continue
+                if fetch_result.ok:
+                    results[provider] = [item.to_legacy_dict() for item in fetch_result.items]
                     if cache is not None and provider in catalog_queries:
                         cache.set_provider_fetch(provider, catalog_queries[provider], results[provider])
-                except Exception as exc:  # one provider's failure shouldn't sink the others
-                    failures[provider] = exc
+                else:
+                    failures[provider] = RuntimeError(fetch_result.error or f"{provider} provider failed")
 
     results["_failures"] = failures
     return results

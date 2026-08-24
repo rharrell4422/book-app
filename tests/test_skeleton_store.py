@@ -200,6 +200,78 @@ class AsymmetricMergeTest(SkeletonStoreTestBase):
         self.assertEqual(entry["title"], "Cherry Blossom Girls Book 1")
 
 
+class StatusEnumValidationTest(SkeletonStoreTestBase):
+    """FIX-SS-ENUM: `status` is documented (models.SeriesSkeleton's
+    docstring) as one of "confirmed" | "unconfirmed" | "upcoming", but
+    skeleton_json is an untyped JSON blob with no DB-level enforcement.
+    `apply_skeleton_updates` must validate agent-supplied updates against
+    this enum itself rather than persisting an unrecognized value silently.
+    """
+
+    def _skeleton_row_number(self, number):
+        row = self._skeleton_row()
+        by_number = {e["book_number"]: e for e in row.skeleton_json}
+        return by_number[number]
+
+    def test_valid_status_values_pass_through_unchanged(self):
+        for status in ("confirmed", "unconfirmed", "upcoming"):
+            with self.subTest(status=status):
+                book_number = {"confirmed": 11.0, "unconfirmed": 12.0, "upcoming": 13.0}[status]
+                apply_skeleton_updates(
+                    self.db,
+                    self.series.id,
+                    skeleton_updates=[{"book_number": book_number, "title": "Some Title", "status": status}],
+                )
+                entry = self._skeleton_row_number(book_number)
+                self.assertEqual(entry["status"], status)
+
+    def test_unrecognized_status_is_dropped_not_persisted(self):
+        with self.assertLogs("services.skeleton_store", level="WARNING") as cm:
+            apply_skeleton_updates(
+                self.db,
+                self.series.id,
+                skeleton_updates=[{"book_number": 9.0, "title": "Bogus Status Book", "status": "definitely_not_real"}],
+            )
+        self.assertTrue(any("unrecognized status" in message for message in cm.output))
+
+        entry = self._skeleton_row_number(9.0)
+        # The bad value must never land in skeleton_json -- no status key
+        # at all, since there was no previous entry to fall back to.
+        self.assertNotIn("status", entry)
+
+    def test_unrecognized_status_on_reconfirmation_falls_back_to_previous_valid_status(self):
+        apply_skeleton_updates(
+            self.db,
+            self.series.id,
+            skeleton_updates=[{"book_number": 9.0, "title": "First Look", "status": "unconfirmed"}],
+        )
+        self.assertEqual(self._skeleton_row_number(9.0)["status"], "unconfirmed")
+
+        with self.assertLogs("services.skeleton_store", level="WARNING"):
+            apply_skeleton_updates(
+                self.db,
+                self.series.id,
+                skeleton_updates=[{"book_number": 9.0, "title": "Reconfirmed Look", "status": "bogus"}],
+            )
+
+        entry = self._skeleton_row_number(9.0)
+        # The prior valid status survives; only the bad new value is dropped.
+        self.assertEqual(entry["status"], "unconfirmed")
+        self.assertEqual(entry["title"], "Reconfirmed Look")
+
+    def test_missing_status_is_left_absent_not_treated_as_an_error(self):
+        # status is optional on an update -- omitting it entirely is not
+        # the same as supplying an invalid value, and must not warn.
+        with self.assertNoLogs("services.skeleton_store", level="WARNING"):
+            apply_skeleton_updates(
+                self.db,
+                self.series.id,
+                skeleton_updates=[{"book_number": 9.0, "title": "No Status Given"}],
+            )
+        entry = self._skeleton_row_number(9.0)
+        self.assertNotIn("status", entry)
+
+
 class RetentionPolicyTest(SkeletonStoreTestBase):
     def test_fresh_discovered_entry_is_not_expired(self):
         apply_skeleton_updates(
