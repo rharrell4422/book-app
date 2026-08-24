@@ -1599,14 +1599,15 @@ def _fetch_apify_discovery(
     Apify integration design chat's consensus):
 
     - If the already-LLM-structured web-search results include an Amazon
-      product URL, skip Apify's own search actor and go straight to the
-      product-extraction actor on that URL -- top 1 only (see the module
-      docstring on symmetric fan-out caps).
-    - Otherwise, fall back to Apify's search actor on `query`, then the
-      product actor on its top 1 result.
+      product URL, run Apify's single actor directly on that URL -- top 1
+      only (see the module docstring on symmetric fan-out caps).
+    - Otherwise, run the same actor on a search-results URL built from
+      `query` instead -- see apify_provider.py's module docstring for why
+      one actor call now covers both cases (single-actor design, replacing
+      an earlier two-actor search-then-product design).
 
     Returns [] with no error whenever Apify isn't configured/budget is
-    exhausted/either actor call fails -- see fetch_apify_candidates.
+    exhausted/the actor call fails -- see fetch_apify_candidates.
     """
     if budget is None or not apify_enabled():
         return []
@@ -1618,10 +1619,10 @@ def _fetch_apify_discovery(
         and any(domain in str(result["source_url"]).lower() for domain in _AMAZON_URL_DOMAINS)
     ]
     # Top 1 only, even when multiple Amazon URLs are already present in the
-    # structured web-search results -- symmetric with the top-1 cap on
-    # Apify's own search-actor results inside fetch_apify_candidates, so
-    # worst-case Apify usage per pass stays at exactly one search-or-
-    # direct-URL call plus one product-extraction call.
+    # structured web-search results -- worst-case Apify usage per pass
+    # stays at exactly one actor call either way (direct-URL lookup or
+    # built search-results URL), per apify_provider.py's single-actor
+    # design.
     top_amazon_urls = amazon_urls[:1]
 
     try:
@@ -1869,10 +1870,10 @@ def _fetch_web_search(
     # instead), but the LLM structured zero real candidates out of them.
     # That's the LLM legitimately deciding nothing here is a real book, a
     # softer/different failure mode than the raw fetch itself producing
-    # nothing -- an independent Apify search-actor call on the same query
-    # is more likely to introduce noise than signal here, so this
-    # deliberately does NOT fall back the way an empty/failed raw fetch
-    # does (see the Apify integration design chat's consensus).
+    # nothing -- an independent Apify search on the same query is more
+    # likely to introduce noise than signal here, so this deliberately
+    # does NOT fall back the way an empty/failed raw fetch does (see the
+    # Apify integration design chat's consensus).
     if not results:
         return results
     apify_candidates = _fetch_apify_discovery(queries[0] if queries else "", results, apify_budget)
@@ -3598,6 +3599,21 @@ def discover_candidates_for_series(
     # co-authored results still pass.
     query_author = primary_author_name(author)
     targeted_query_text = f"{series_name} {query_author}".strip()
+
+    # One unmissable line per Check Now showing exactly which provider
+    # gates are open, without ever printing the key values themselves --
+    # added specifically so a "nothing hit Serper"-type report can be
+    # confirmed/ruled out straight from Railway logs (env vars can be set
+    # on the wrong Railway service/environment, or not picked up without a
+    # redeploy, in a way that's otherwise invisible from the Check Now UI
+    # alone).
+    _log(
+        f"provider gates for series={series_name!r}: "
+        f"serper={'on' if _web_search_enabled() else 'OFF (SERPER_API_KEY not set)'}, "
+        f"anthropic={'on' if _llm_structuring_enabled() else 'OFF (ANTHROPIC_API_KEY not set)'}, "
+        f"hardcover={'on' if os.environ.get('HARDCOVER_API_KEY', '').strip() else 'off'}, "
+        f"apify={'on' if apify_enabled() else 'OFF (APIFY_API_TOKEN not set)'}"
+    )
 
     if _web_search_enabled() and not _llm_structuring_enabled():
         # Diagnostic-only mode: a Serper key with no Anthropic key means

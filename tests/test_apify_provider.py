@@ -3,6 +3,11 @@ own module (Check Now only, Phase 1 -- see the Apify integration design
 chat's consensus). Patches apify_client.ApifyClient directly (the same
 pattern test_series_discovery.py uses for anthropic.Anthropic) so this
 suite never depends on live Apify actors or a real APIFY_API_TOKEN.
+
+Single-actor design (2026-08-24): one actor
+(apify_provider.APIFY_AMAZON_ACTOR_ID) handles both the "search by query"
+and "look up a known Amazon URL" jobs in exactly one call -- see that
+module's docstring for why (and what two-actor design this replaced).
 """
 import os
 import unittest
@@ -12,33 +17,26 @@ import apify_provider
 from apify_provider import ApifyCallBudget, apify_enabled, fetch_apify_candidates
 
 
-def _mock_apify_client(dataset_items_by_actor: dict[str, list[dict]]):
+def _mock_apify_client(dataset_items: list[dict]):
     """Builds a fake ApifyClient whose .actor(id).call(...) always
     "succeeds" and whose .dataset(...).list_items().items returns
-    dataset_items_by_actor[actor_id] -- mirroring the real
-    ApifyClient.actor(...).call()/.dataset(...).list_items() call shape
-    apify_provider._run_actor_sync uses.
+    dataset_items -- mirroring the real ApifyClient.actor(...).call()/
+    .dataset(...).list_items() call shape apify_provider._run_actor_sync
+    uses. Since the single-actor design only ever calls one actor id per
+    fetch_apify_candidates() call, this doesn't need the old per-actor-id
+    dataset_items_by_actor mapping -- one dataset is enough.
 
-    Exposes the per-actor-id mock via client.actor_clients_by_id so tests
-    can inspect exactly what run_input each actor was called with (a plain
-    MagicMock().actor.call_args_list only records the actor id argument,
-    not each returned actor client's own .call() arguments).
+    Exposes the actor client via client.actor_client so tests can inspect
+    exactly what run_input it was called with.
     """
     client = MagicMock()
-    client.actor_clients_by_id = {}
+    client.actor_client = MagicMock()
+    client.actor_client.call.return_value = {"defaultDatasetId": "the-dataset"}
+    client.actor.return_value = client.actor_client
 
-    def fake_actor(actor_id):
-        actor_client = client.actor_clients_by_id.setdefault(actor_id, MagicMock())
-        actor_client.call.return_value = {"defaultDatasetId": actor_id}
-        return actor_client
-
-    def fake_dataset(dataset_id):
-        dataset_client = MagicMock()
-        dataset_client.list_items.return_value = MagicMock(items=dataset_items_by_actor.get(dataset_id, []))
-        return dataset_client
-
-    client.actor.side_effect = fake_actor
-    client.dataset.side_effect = fake_dataset
+    dataset_client = MagicMock()
+    dataset_client.list_items.return_value = MagicMock(items=dataset_items)
+    client.dataset.return_value = dataset_client
     return client
 
 
@@ -82,28 +80,28 @@ class FetchApifyCandidatesTest(unittest.TestCase):
             result = fetch_apify_candidates("Some Series Book 3", None, budget)
         self.assertEqual(result, [])
 
-    def test_direct_amazon_url_skips_search_actor_and_calls_product_actor_only(self):
+    def test_direct_amazon_url_calls_actor_once_with_that_url(self):
         mock_client = _mock_apify_client(
-            {
-                apify_provider.APIFY_AMAZON_PRODUCT_ACTOR_ID: [
-                    {
-                        "title": "Fourth Wing",
-                        "author": ["Rebecca Yarros"],
-                        "asin": "B0BXYZ1234",
-                        "publicationDate": "2023-05-02",
-                        "isbn13": "9781649374042",
-                        "thumbnailImage": "https://example.com/cover.jpg",
-                        "url": "https://amazon.com/dp/B0BXYZ1234",
-                    }
-                ]
-            }
+            [
+                {
+                    "title": "Fourth Wing",
+                    "author": ["Rebecca Yarros"],
+                    "asin": "B0BXYZ1234",
+                    "publicationDate": "2023-05-02",
+                    "isbn13": "9781649374042",
+                    "thumbnailImage": "https://example.com/cover.jpg",
+                    "url": "https://amazon.com/dp/B0BXYZ1234",
+                }
+            ]
         )
         with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch(
             "apify_client.ApifyClient", return_value=mock_client
         ):
             result = fetch_apify_candidates("Fourth Wing", ["https://amazon.com/dp/B0BXYZ1234"], ApifyCallBudget())
 
-        mock_client.actor.assert_called_once_with(apify_provider.APIFY_AMAZON_PRODUCT_ACTOR_ID)
+        mock_client.actor.assert_called_once_with(apify_provider.APIFY_AMAZON_ACTOR_ID)
+        run_input = mock_client.actor_client.call.call_args.kwargs["run_input"]
+        self.assertEqual(run_input["categoryUrls"], [{"url": "https://amazon.com/dp/B0BXYZ1234"}])
         self.assertEqual(len(result), 1)
         candidate = result[0]
         self.assertEqual(candidate["source"], "apify")
@@ -114,68 +112,65 @@ class FetchApifyCandidatesTest(unittest.TestCase):
         self.assertEqual(candidate["cover_image"], "https://example.com/cover.jpg")
         self.assertEqual(candidate["published_date"], "2023-05-02")
 
-    def test_no_url_falls_back_to_search_actor_then_product_actor(self):
+    def test_no_url_builds_amazon_search_url_from_query(self):
         mock_client = _mock_apify_client(
-            {
-                apify_provider.APIFY_AMAZON_SEARCH_ACTOR_ID: [
-                    {"asin": "B0AAA1111", "url": "https://amazon.com/dp/B0AAA1111"},
-                    {"asin": "B0BBB2222", "url": "https://amazon.com/dp/B0BBB2222"},
-                ],
-                apify_provider.APIFY_AMAZON_PRODUCT_ACTOR_ID: [
-                    {"title": "Iron Flame", "author": ["Rebecca Yarros"], "asin": "B0AAA1111"}
-                ],
-            }
+            [{"title": "Iron Flame", "author": ["Rebecca Yarros"], "asin": "B0AAA1111"}]
         )
         with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch(
             "apify_client.ApifyClient", return_value=mock_client
         ):
             result = fetch_apify_candidates("Iron Flame Rebecca Yarros", None, ApifyCallBudget())
 
-        self.assertEqual(mock_client.actor.call_count, 2)
-        called_actor_ids = [call.args[0] for call in mock_client.actor.call_args_list]
+        mock_client.actor.assert_called_once_with(apify_provider.APIFY_AMAZON_ACTOR_ID)
+        run_input = mock_client.actor_client.call.call_args.kwargs["run_input"]
         self.assertEqual(
-            called_actor_ids,
-            [apify_provider.APIFY_AMAZON_SEARCH_ACTOR_ID, apify_provider.APIFY_AMAZON_PRODUCT_ACTOR_ID],
+            run_input["categoryUrls"],
+            [{"url": "https://www.amazon.com/s?k=Iron+Flame+Rebecca+Yarros"}],
         )
+        self.assertEqual(run_input["maxItemsPerStartUrl"], apify_provider.APIFY_MAX_ITEMS_PER_START_URL)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["title"], "Iron Flame")
 
-    def test_only_top_1_asin_from_search_results_is_used_for_product_extraction(self):
+    def test_multiple_items_from_one_search_call_all_become_candidates(self):
         mock_client = _mock_apify_client(
-            {
-                apify_provider.APIFY_AMAZON_SEARCH_ACTOR_ID: [
-                    {"asin": "B0AAA1111", "url": "https://amazon.com/dp/B0AAA1111"},
-                    {"asin": "B0BBB2222", "url": "https://amazon.com/dp/B0BBB2222"},
-                ],
-                apify_provider.APIFY_AMAZON_PRODUCT_ACTOR_ID: [{"title": "Only First Result"}],
-            }
+            [
+                {"title": "Book Two", "asin": "B0AAA1111"},
+                {"title": "Book Five", "asin": "B0BBB2222"},
+                {"title": "Book Ten", "asin": "B0CCC3333"},
+            ]
         )
         with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch(
             "apify_client.ApifyClient", return_value=mock_client
         ):
-            fetch_apify_candidates("query", None, ApifyCallBudget())
+            result = fetch_apify_candidates("Some Series", None, ApifyCallBudget())
 
-        product_actor_client = mock_client.actor_clients_by_id[apify_provider.APIFY_AMAZON_PRODUCT_ACTOR_ID]
-        product_run_input = product_actor_client.call.call_args.kwargs["run_input"]
-        self.assertEqual(product_run_input, {"urls": ["https://amazon.com/dp/B0AAA1111"]})
+        self.assertEqual(mock_client.actor.call_count, 1)
+        self.assertEqual([c["title"] for c in result], ["Book Two", "Book Five", "Book Ten"])
 
-    def test_second_apify_call_denied_when_budget_exhausted_between_search_and_product(self):
-        budget = ApifyCallBudget(max_calls=1)
+    def test_error_typed_items_are_skipped(self):
         mock_client = _mock_apify_client(
-            {
-                apify_provider.APIFY_AMAZON_SEARCH_ACTOR_ID: [
-                    {"asin": "B0AAA1111", "url": "https://amazon.com/dp/B0AAA1111"}
-                ],
-            }
+            [
+                {"error": "no_results_found", "errorDescription": "No results were found."},
+                {"title": "Real Book", "asin": "B0AAA1111"},
+            ]
         )
+        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch(
+            "apify_client.ApifyClient", return_value=mock_client
+        ):
+            result = fetch_apify_candidates("Some Series", None, ApifyCallBudget())
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["title"], "Real Book")
+
+    def test_budget_exhausted_before_the_single_call_returns_empty(self):
+        budget = ApifyCallBudget(max_calls=0)
+        mock_client = _mock_apify_client([{"title": "Should Not Be Reached"}])
         with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch(
             "apify_client.ApifyClient", return_value=mock_client
         ):
             result = fetch_apify_candidates("query", None, budget)
 
-        # Search actor consumed the only budget slot; product actor must
-        # never even be attempted.
-        mock_client.actor.assert_called_once_with(apify_provider.APIFY_AMAZON_SEARCH_ACTOR_ID)
+        mock_client.actor.assert_not_called()
         self.assertEqual(result, [])
 
     def test_actor_exception_is_caught_and_returns_empty_list(self):
@@ -196,6 +191,8 @@ class NormalizeProductItemTest(unittest.TestCase):
         self.assertIsNone(normalized["isbn13"])
         self.assertIsNone(normalized["asin"])
         self.assertIsNone(normalized["cover_image"])
+        self.assertIsNone(normalized["series_number_hint"])
+        self.assertIsNone(normalized["series_name_hint"])
         self.assertEqual(normalized["authors"], [])
 
     def test_returns_none_without_a_title(self):
@@ -208,6 +205,33 @@ class NormalizeProductItemTest(unittest.TestCase):
     def test_cover_image_dict_field_extracts_url(self):
         normalized = apify_provider._normalize_product_item({"title": "T", "mainImage": {"url": "https://a.example/1.jpg"}})
         self.assertEqual(normalized["cover_image"], "https://a.example/1.jpg")
+
+    def test_series_position_parsed_from_dynamic_book_n_of_m_attribute_key(self):
+        normalized = apify_provider._normalize_product_item(
+            {
+                "title": "Desert Protocol",
+                "attributes": [
+                    {"key": "Publication date", "value": "January 1, 2026"},
+                    {"key": "Book 2 of 18", "value": "Jonathan Hunt Thriller Series"},
+                ],
+            }
+        )
+        self.assertEqual(normalized["published_date"], "January 1, 2026")
+        self.assertEqual(normalized["series_number_hint"], "2")
+        self.assertEqual(normalized["series_name_hint"], "Jonathan Hunt Thriller Series")
+
+    def test_series_position_absent_when_no_matching_attribute(self):
+        normalized = apify_provider._normalize_product_item(
+            {"title": "Standalone Book", "attributes": [{"key": "Publication date", "value": "2024"}]}
+        )
+        self.assertIsNone(normalized["series_number_hint"])
+        self.assertIsNone(normalized["series_name_hint"])
+        self.assertEqual(normalized["published_date"], "2024")
+
+    def test_attributes_field_of_wrong_type_does_not_raise(self):
+        normalized = apify_provider._normalize_product_item({"title": "T", "attributes": "not-a-list"})
+        self.assertIsNotNone(normalized)
+        self.assertIsNone(normalized["series_number_hint"])
 
 
 if __name__ == "__main__":

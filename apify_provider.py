@@ -10,16 +10,39 @@ to any other provider.
 
 Exposes a single entry point, `fetch_apify_candidates`, called from
 discovery_engine._fetch_apify_discovery as a sequential sub-flow attached
-to the existing Serper+Anthropic web-search pass -- see that function's
-docstring for how the two actors below (search vs. product) get chosen.
+to the existing Serper+Anthropic web-search pass.
 
-Two actors are used:
-- APIFY_AMAZON_SEARCH_ACTOR_ID: query -> a list of Amazon product
-  URLs/ASINs (used when we don't already have an Amazon URL from Serper).
-- APIFY_AMAZON_PRODUCT_ACTOR_ID: a single Amazon product URL/ASIN ->
-  structured product metadata.
+Single-actor design (as of 2026-08-24): one actor, APIFY_AMAZON_ACTOR_ID
+("junglee/free-amazon-product-scraper"), handles both the "search by
+free-text query" and "look up a known Amazon URL" jobs in exactly one
+call, given either:
+- a built Amazon search-results URL (https://www.amazon.com/s?k=<query>),
+  when we don't already have an Amazon URL from Serper, or
+- a direct Amazon product URL already surfaced by Serper.
 
-Both run through Apify's synchronous "call and wait" API
+This actor was verified experimentally (manual test calls against the
+real actor, both a fuzzy series-name-only search query and an exact known
+title) to return real, fully-structured product listings straight from a
+search-results URL -- title/asin/url/author plus, notably, Amazon's own
+series-position metadata (see _extract_series_hints_from_attributes) --
+with zero `error`-typed dataset items in either test. That means no
+separate "search actor -> take top result -> product actor" round trip
+is needed at all, unlike the two-actor design this replaced.
+
+That earlier two-actor design (APIFY_AMAZON_SEARCH_ACTOR_ID =
+"epctex/amazon-scraper" for search, APIFY_AMAZON_PRODUCT_ACTOR_ID =
+"apify/amazon-scraper" for product detail) was abandoned after debugging
+a "Check Now finds nothing" report traced it to two independent, unrelated
+problems: "apify/amazon-scraper" turned out to be a dead actor ID (404
+straight from Apify's own API -- its store page silently redirects
+browsers to junglee/free-amazon-product-scraper, but that redirect
+doesn't exist at the API level), and "epctex/amazon-scraper" turned out to
+be a $40/month-plus-usage rental actor that had never actually been
+activated on this account (Apify's generic auth-failure error for calling
+an unrented rental actor is indistinguishable from a genuinely bad API
+token, which is what made this so slow to pin down).
+
+Runs through Apify's synchronous "call and wait" API
 (ApifyClient.actor(...).call(...)), which blocks until the run finishes (or
 run_timeout/timeout elapses) and returns the run's dataset id, which we
 then read via ApifyClient.dataset(...).list_items(). There's no separate
@@ -29,19 +52,21 @@ call.
 
 Field names in the dataset items returned by third-party Apify Store
 actors aren't part of any formally versioned contract, so
-_normalize_product_item/_normalize_search_item deliberately check several
-plausible key spellings for each field rather than assuming one exact
-shape -- see their docstrings. If a field genuinely isn't present under
-any of the checked names, it's mapped to None (never left as a missing
-key or an accidental empty string), matching every other provider's own
-normalization convention in discovery_engine.py.
+_normalize_product_item deliberately checks several plausible key
+spellings for each field rather than assuming one exact shape -- see its
+docstring. If a field genuinely isn't present under any of the checked
+names, it's mapped to None (never left as a missing key or an accidental
+empty string), matching every other provider's own normalization
+convention in discovery_engine.py.
 """
 from __future__ import annotations
 
 import os
+import re
 import threading
 from datetime import timedelta
 from typing import Any
+from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 
@@ -49,24 +74,37 @@ from dotenv import load_dotenv
 # comment for why this is done here too rather than relying on import order.
 load_dotenv()
 
-APIFY_AMAZON_PRODUCT_ACTOR_ID = "apify/amazon-scraper"
-APIFY_AMAZON_SEARCH_ACTOR_ID = "epctex/amazon-scraper"
+APIFY_AMAZON_ACTOR_ID = "junglee/free-amazon-product-scraper"
+
+# How many Amazon listings to request per categoryUrls entry, whether it's
+# a direct product URL (which realistically only ever has 1 listing) or a
+# built search-results URL (which can have many). Chosen from manual
+# testing (2026-08-24): a fuzzy series-name-only search query returned 5
+# distinct real listings from the same series with zero `error`-typed
+# items at this cap -- good discovery coverage per call at this actor's
+# pay-per-event pricing (~$6.20/1,000 results).
+APIFY_MAX_ITEMS_PER_START_URL = 5
 
 # Apify actor runs are inherently slower than a plain HTTP call to a JSON
-# API (a real scrape, not just a lookup) -- 30s gives real runs a fair
+# API (a real scrape, not just a lookup) -- 30s gives a real run a fair
 # chance to finish while still fitting comfortably inside a Check Now job's
-# overall SERIES_CHECK_TIMEOUT_SECONDS budget (services/series_check_engine.py),
-# even in the worst case of one search call + one product call per pass.
+# overall SERIES_CHECK_TIMEOUT_SECONDS budget (services/series_check_engine.py).
 APIFY_REQUEST_TIMEOUT_SECONDS = 30
 
-# Worst case per series-check run: 1 search-or-direct-URL call + 1
-# product-extraction call (see ApifyCallBudget and
-# discovery_engine._fetch_apify_discovery's top-1 fan-out cap on both the
-# Apify-search-ASIN branch and the direct-Amazon-URL-from-Serper branch).
-# Shared across BOTH the targeted pass and the author-fallback pass of one
-# discover_candidates_for_series() call -- see that function -- so this is
-# a true per-run cap, not a per-pass one.
-APIFY_MAX_CALLS_PER_SERIES_RUN = 2
+# Worst case per series-check run: exactly one Apify actor call. The
+# single-actor design's whole point is that a search-or-direct-URL lookup
+# and structured product detail come back together in that one call (see
+# module docstring), unlike the two-actor design this replaced, which
+# needed a separate search call plus a separate product call to
+# accomplish the same round trip. This constant is still shared across
+# BOTH the targeted pass and the author-fallback pass of one
+# discover_candidates_for_series() call (see ApifyCallBudget), preserving
+# its original per-*run* (not per-pass) intent from the two-actor design:
+# at most one full Apify lookup attempt total, whichever pass reaches it
+# first -- the two-actor design's budget of 2 covered exactly one round
+# trip (1 search call + 1 product call) for that same reason, so 1 here
+# is the equivalent value for a round trip that's now a single call.
+APIFY_MAX_CALLS_PER_SERIES_RUN = 1
 
 
 class ApifyCallBudget:
@@ -174,18 +212,60 @@ def _first_of(item: dict, *keys: str) -> Any:
     return None
 
 
-def _normalize_search_item(item: dict) -> dict | None:
-    """Maps one Apify Amazon-search dataset item to {"asin", "url"}.
+# Matches "Book 2 of 18" as a whole attribute *key* -- junglee/free-
+# amazon-product-scraper (and Amazon generally) encodes series position
+# this way: the total book count (18 here) varies per book and is part of
+# the key itself, not a separate field, and there's no fixed key name to
+# look up (unlike every other field this module reads via _first_of), so
+# this needs its own regex scan -- see _extract_series_hints_from_attributes.
+_SERIES_POSITION_ATTRIBUTE_PATTERN = re.compile(r"^Book\s+(\d+)\s+of\s+\d+$", re.IGNORECASE)
 
-    Field names checked here (asin/ASIN, url/link/productUrl) cover the
-    common spellings seen across Apify Store Amazon-search actors; unknown
-    additional fields are simply ignored, not an error.
+
+def _extract_from_attributes(item: dict, *want_keys: str) -> str | None:
+    """Looks up a value inside this actor's `attributes` field -- a list
+    of {"key": ..., "value": ...} pairs (e.g. {"key": "Publication date",
+    "value": "January 1, 2026"}) -- rather than a flat top-level field,
+    which is why this needs its own helper distinct from _first_of.
+    Case-insensitive exact match against each candidate key in want_keys.
     """
-    asin = _first_of(item, "asin", "ASIN")
-    url = _first_of(item, "url", "link", "productUrl", "detailPageURL")
-    if not asin and not url:
+    attributes = item.get("attributes")
+    if not isinstance(attributes, list):
         return None
-    return {"asin": str(asin).strip() if asin else None, "url": str(url).strip() if url else None}
+    want_keys_lower = {key.lower() for key in want_keys}
+    for attribute in attributes:
+        if not isinstance(attribute, dict):
+            continue
+        key = attribute.get("key")
+        if isinstance(key, str) and key.strip().lower() in want_keys_lower:
+            value = attribute.get("value")
+            if value not in (None, ""):
+                return str(value).strip()
+    return None
+
+
+def _extract_series_hints_from_attributes(item: dict) -> tuple[str | None, str | None]:
+    """Returns (series_number_hint, series_name_hint) from this actor's
+    `attributes` field, or (None, None) if this listing has no series-
+    position attribute at all (standalone books, or series info Amazon
+    simply didn't attach to this particular ASIN) -- see
+    _SERIES_POSITION_ATTRIBUTE_PATTERN for why this can't be a plain
+    _extract_from_attributes lookup.
+    """
+    attributes = item.get("attributes")
+    if not isinstance(attributes, list):
+        return None, None
+    for attribute in attributes:
+        if not isinstance(attribute, dict):
+            continue
+        key = attribute.get("key")
+        if not isinstance(key, str):
+            continue
+        match = _SERIES_POSITION_ATTRIBUTE_PATTERN.match(key.strip())
+        if match:
+            value = attribute.get("value")
+            series_name_hint = str(value).strip() if value else None
+            return match.group(1), series_name_hint
+    return None, None
 
 
 def _normalize_product_item(item: dict) -> dict | None:
@@ -211,6 +291,8 @@ def _normalize_product_item(item: dict) -> dict | None:
         authors = []
 
     published_date = _first_of(item, "publicationDate", "releaseDate", "firstAvailable", "publishDate")
+    if not published_date:
+        published_date = _extract_from_attributes(item, "Publication date", "Release date")
     isbn13 = _first_of(item, "isbn13", "isbn", "ISBN")
     asin = _first_of(item, "asin", "ASIN")
     url = _first_of(item, "url", "link", "productUrl", "detailPageURL")
@@ -219,6 +301,8 @@ def _normalize_product_item(item: dict) -> dict | None:
         cover_image = cover_image[0] if cover_image else None
     if isinstance(cover_image, dict):
         cover_image = cover_image.get("url") or cover_image.get("src")
+
+    series_number_hint, series_name_hint = _extract_series_hints_from_attributes(item)
 
     return {
         "source": "apify",
@@ -230,9 +314,9 @@ def _normalize_product_item(item: dict) -> dict | None:
         "isbn13": str(isbn13).strip() if isbn13 else None,
         "source_url": str(url).strip() if url else None,
         "language": "",
-        "series_number_hint": None,
+        "series_number_hint": series_number_hint,
         "upcoming_hint": None,
-        "series_name_hint": None,
+        "series_name_hint": series_name_hint,
         "asin": str(asin).strip() if asin else None,
         "cover_image": str(cover_image).strip() if cover_image else None,
         "confidence": "medium",
@@ -247,17 +331,23 @@ def fetch_apify_candidates(
     """Returns Apify-sourced candidates in the standard discovery_engine.py
     provider dict shape (see _normalize_product_item).
 
-    Two paths, per Diff 2/3/4's agreed design:
-    - amazon_urls is non-empty: skip Apify's own search actor entirely and
-      go straight to the product actor on the single highest-priority URL
-      (top 1 -- see discovery_engine._fetch_apify_discovery for why only
-      one, and why it's the caller's job, not this function's, to decide
-      which URL that is).
-    - amazon_urls is empty/None: run the search actor on `query` first,
-      take its top 1 ASIN/URL result, then run the product actor on that.
+    Single-actor design (see module docstring for how this replaced an
+    earlier two-actor search-then-product design):
+    - amazon_urls is non-empty: run the actor directly on the single
+      highest-priority URL (top 1 -- see discovery_engine._fetch_apify_discovery
+      for why only one, and why it's the caller's job, not this
+      function's, to decide which URL that is).
+    - amazon_urls is empty/None: build an Amazon search-results URL from
+      `query` and run the actor on that instead. Verified experimentally
+      to return multiple real, fully-structured listings directly from a
+      search-results URL, not just a bare list of URLs needing a second
+      lookup -- see module docstring.
+
+    Either way this is exactly one Apify actor call, returning up to
+    APIFY_MAX_ITEMS_PER_START_URL structured listings from that one call.
 
     Returns [] (never raises) if APIFY_API_TOKEN isn't configured, the
-    call budget is exhausted, or either actor call fails/times out --
+    call budget is exhausted, or the actor call fails/times out --
     exactly like every other provider's own missing-key/failure behavior
     in discovery_engine.py, so a caller can always treat this the same way
     it treats _fetch_hardcover returning [].
@@ -265,28 +355,15 @@ def fetch_apify_candidates(
     if not apify_enabled():
         return []
 
-    target_url: str | None = None
-    if amazon_urls:
-        target_url = amazon_urls[0]
-    else:
-        search_items = _run_actor_sync(
-            APIFY_AMAZON_SEARCH_ACTOR_ID,
-            {"search": query, "maxItems": 1},
-            budget,
-        )
-        if not search_items:
-            return []
-        for raw in search_items:
-            normalized = _normalize_search_item(raw)
-            if normalized and (normalized.get("url") or normalized.get("asin")):
-                target_url = normalized.get("url") or normalized.get("asin")
-                break
-        if not target_url:
-            return []
+    target_url = amazon_urls[0] if amazon_urls else f"https://www.amazon.com/s?k={quote_plus(query)}"
 
     product_items = _run_actor_sync(
-        APIFY_AMAZON_PRODUCT_ACTOR_ID,
-        {"urls": [target_url]} if target_url.startswith("http") else {"asins": [target_url]},
+        APIFY_AMAZON_ACTOR_ID,
+        {
+            "categoryUrls": [{"url": target_url}],
+            "maxItemsPerStartUrl": APIFY_MAX_ITEMS_PER_START_URL,
+            "scrapeProductDetails": True,
+        },
         budget,
     )
     if not product_items:
@@ -294,6 +371,14 @@ def fetch_apify_candidates(
 
     candidates = []
     for raw in product_items:
+        # Error items (bad URL, product not found, no results, etc. --
+        # see this actor's documented error-item shape) are the actor's
+        # way of reporting a failed lookup inline in the dataset rather
+        # than failing the whole run; they have no title/asin/product
+        # fields worth normalizing, so skip them explicitly rather than
+        # relying on _normalize_product_item's missing-title check alone.
+        if raw.get("error"):
+            continue
         normalized = _normalize_product_item(raw)
         if normalized:
             candidates.append(normalized)
