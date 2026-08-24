@@ -2854,6 +2854,42 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         self.assertEqual(result["available_missing"][0]["series_number"], 7)
         self.assertEqual(result["upcoming_books"], [])
 
+    def test_string_series_number_hint_past_highest_owned_does_not_crash(self):
+        # Regression test for a live crash (2026-08-24): Apify's (and
+        # potentially other providers') series_number_hint comes back as
+        # a *string* (e.g. "10"), not an int. run_series_check's
+        # continues_numbering check used to compare that raw string
+        # directly against highest_owned_book_number (an int) with `>`,
+        # raising "TypeError: '>' not supported between instances of
+        # 'str' and 'int'" and aborting the entire Check Now job with a
+        # terminal_error -- even after already finding real candidates
+        # earlier in the same run. Book 9 is the series' highest owned
+        # number here, so a string "10" hint must clear continues_
+        # numbering (and, combined with the explicit title match, get
+        # added) without raising.
+        candidates = [
+            {
+                "source": "apify",
+                "source_id": "B0AAA1111",
+                "title": "Cherry Blossom Girls Book 10",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": "10",
+                "upcoming_hint": False,
+            }
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertTrue(result["found"])
+        self.assertEqual(len(result["available_missing"]), 1)
+        self.assertEqual(result["available_missing"][0]["series_number"], "10")
+
     def test_medium_confidence_candidate_routes_to_needs_review_with_series_name_hint(self):
         # Title has no textual tie to "Cherry Blossom Girls" at all, isn't
         # tagged "targeted"/"missing_volume_recovery" (so no

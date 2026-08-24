@@ -751,8 +751,28 @@ class SeriesIntelligenceAgent:
                 came_from_targeted_search = raw.get("confidence") in ("targeted", "missing_volume_recovery")
                 explicit_series_match = _title_pattern_match(title, series.name, known_series_titles)
                 partial_match = _partial_series_match(title, series.name)
+                # inferred_number is deliberately left as whatever type its
+                # source gave it (int from infer_number_from_title, but a
+                # *string* from a provider's series_number_hint, e.g.
+                # Apify's/Hardcover's "9") for the display/f-string uses
+                # further down -- but that means a bare `inferred_number >
+                # highest_owned_book_number` (int) here would raise
+                # TypeError: '>' not supported between instances of 'str'
+                # and 'int' the moment any candidate actually carries a
+                # string hint. Live regression (2026-08-24): fixing a
+                # separate Apify bug that had silently discarded every
+                # Apify result finally let an Apify candidate with a
+                # string series_number_hint reach this line, hard-crashing
+                # the whole Check Now run (terminal_error) despite already
+                # having found real new candidates earlier in the same
+                # run. _to_int_or_none gives both sides a real numeric type
+                # to compare regardless of which source inferred_number
+                # came from.
+                inferred_number_int = discovery_engine._to_int_or_none(inferred_number)
                 continues_numbering = bool(
-                    inferred_number and highest_owned_book_number and inferred_number > highest_owned_book_number
+                    inferred_number_int is not None
+                    and highest_owned_book_number
+                    and inferred_number_int > highest_owned_book_number
                 )
                 targeted_with_number = bool(came_from_targeted_search and inferred_number)
                 # continues_numbering alone is too weak a signal for a
