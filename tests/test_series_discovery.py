@@ -3079,7 +3079,7 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
 
     def setUp(self):
         self.db = self.SessionLocal()
-        series = Series(name="Cherry Blossom Girls", author="Harmon Cooper")
+        series = Series(name="Cherry Blossom Girls", author="Harmon Cooper", profile_id="robbie")
         self.db.add(series)
         self.db.commit()
         self.db.refresh(series)
@@ -3091,6 +3091,7 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
                     title=f"Cherry Blossom Girls Book {number}",
                     author="Harmon Cooper",
                     series_id=series.id,
+                    profile_id=series.profile_id,
                     series_order=number,
                     book_number=float(number),
                     record_status="active",
@@ -3482,6 +3483,7 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
                 title="Crown: A LitRPG: (Cherry Blossom Girls Book 9)",
                 author="Harmon Cooper",
                 series_id=self.series.id,
+                profile_id=self.series.profile_id,
                 series_order=9,
                 book_number=9.0,
                 record_status="active",
@@ -3723,7 +3725,7 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         # "By Heresies Distressed (Safehold Book 3)" slipped through and got
         # added as a second, duplicate "available" copy of an already-owned
         # book.
-        series = Series(name="Safehold", author="David Weber")
+        series = Series(name="Safehold", author="David Weber", profile_id="robbie")
         self.db.add(series)
         self.db.commit()
         self.db.refresh(series)
@@ -3733,6 +3735,7 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
                 title="Safehold Boxed Set 1: (Safehold Books 1-3)",
                 author="David Weber",
                 series_id=series.id,
+                profile_id=series.profile_id,
                 series_order=1,
                 book_number=1.0,
                 record_status="active",
@@ -3745,6 +3748,7 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
                     title=f"Safehold Book {number}",
                     author="David Weber",
                     series_id=series.id,
+                    profile_id=series.profile_id,
                     series_order=number,
                     book_number=float(number),
                     record_status="active",
@@ -3800,7 +3804,7 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         # compilation that has no bundle keyword at all, just several owned
         # titles strung together, so it had no parseable number and no
         # bundle keyword and slipped through as a new "available" book.
-        series = Series(name="Safehold", author="David Weber")
+        series = Series(name="Safehold", author="David Weber", profile_id="robbie")
         self.db.add(series)
         self.db.commit()
         self.db.refresh(series)
@@ -3818,6 +3822,7 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
                     title=f"{title}: (Safehold Book {index})",
                     author="David Weber",
                     series_id=series.id,
+                    profile_id=series.profile_id,
                     series_order=index,
                     book_number=float(index),
                     record_status="active",
@@ -4051,7 +4056,7 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         )
 
     def test_no_author_on_file_returns_empty_result_without_calling_apis(self):
-        series = Series(name="No Author Series")
+        series = Series(name="No Author Series", profile_id="robbie")
         self.db.add(series)
         self.db.commit()
         self.db.refresh(series)
@@ -4099,7 +4104,7 @@ class Phase4DiagnosticsTest(unittest.TestCase):
         self.addCleanup(setattr, agent_logger, "disabled", was_disabled)
 
         self.db = self.SessionLocal()
-        series = Series(name="Cherry Blossom Girls", author="Harmon Cooper")
+        series = Series(name="Cherry Blossom Girls", author="Harmon Cooper", profile_id="robbie")
         self.db.add(series)
         self.db.commit()
         self.db.refresh(series)
@@ -4111,6 +4116,7 @@ class Phase4DiagnosticsTest(unittest.TestCase):
                     title=f"Cherry Blossom Girls Book {number}",
                     author="Harmon Cooper",
                     series_id=series.id,
+                    profile_id=series.profile_id,
                     series_order=number,
                     book_number=float(number),
                     record_status="active",
@@ -4357,7 +4363,7 @@ class DiscoverMoreByAuthorTest(unittest.TestCase):
 
     def setUp(self):
         self.db = self.SessionLocal()
-        self.series = Series(name="Cherry Blossom Girls", author="Harmon Cooper")
+        self.series = Series(name="Cherry Blossom Girls", author="Harmon Cooper", profile_id="robbie")
         self.db.add(self.series)
         self.db.commit()
         self.db.refresh(self.series)
@@ -4367,6 +4373,7 @@ class DiscoverMoreByAuthorTest(unittest.TestCase):
                 title="Cherry Blossom Girls Book 7",
                 author="Harmon Cooper",
                 series_id=self.series.id,
+                profile_id=self.series.profile_id,
                 series_order=7,
                 book_number=7.0,
                 record_status="active",
@@ -4554,12 +4561,12 @@ class DiscoverSeriesByNameTest(unittest.TestCase):
         self.assertEqual(titles, {"Confederacy", "Conspiracy"})
 
     def test_excludes_a_book_already_owned_in_this_series(self):
-        series = Series(name="Scattered Stars", author="Glynn Stewart")
+        series = Series(name="Scattered Stars", author="Glynn Stewart", profile_id="robbie")
         self.db.add(series)
         self.db.commit()
         self.db.refresh(series)
         self.db.add(Book(
-            title="Conviction", author="Glynn Stewart", series_id=series.id, series_order=1,
+            title="Conviction", author="Glynn Stewart", series_id=series.id, profile_id=series.profile_id, series_order=1,
             book_number=1.0, record_status="active", is_read=True, isbn13="9780000000001",
         ))
         self.db.commit()
@@ -4617,7 +4624,7 @@ class DiscoverMoreByAuthorEditionNoiseRegressionTest(unittest.TestCase):
         Base.metadata.create_all(bind=self.engine)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         self.db = self.SessionLocal()
-        self.series = Series(name="Unbound", author="Nicoli Gonnella")
+        self.series = Series(name="Unbound", author="Nicoli Gonnella", profile_id="robbie")
         self.db.add(self.series)
         self.db.commit()
         self.db.refresh(self.series)
@@ -4633,6 +4640,7 @@ class DiscoverMoreByAuthorEditionNoiseRegressionTest(unittest.TestCase):
                     title=f"{bare_title}: (Unbound Book {number})",
                     author="Nicoli Gonnella",
                     series_id=self.series.id,
+                    profile_id=self.series.profile_id,
                     series_order=number,
                     book_number=float(number),
                     record_status="active",
@@ -4784,8 +4792,8 @@ class DiscoverMoreByAuthorAlternateBrandingRegressionTest(unittest.TestCase):
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         self.db = self.SessionLocal()
 
-        self.duchy = Series(name="Duchy of Terra", author="Glynn Stewart")
-        self.mage = Series(name="Starship's Mage", author="Glynn Stewart")
+        self.duchy = Series(name="Duchy of Terra", author="Glynn Stewart", profile_id="robbie")
+        self.mage = Series(name="Starship's Mage", author="Glynn Stewart", profile_id="robbie")
         self.db.add_all([self.duchy, self.mage])
         self.db.commit()
         self.db.refresh(self.duchy)
@@ -4798,7 +4806,7 @@ class DiscoverMoreByAuthorAlternateBrandingRegressionTest(unittest.TestCase):
             (4, "Darkness Beyond: (Duchy of Terra Book 4)"),
         ]:
             self.db.add(Book(
-                title=title, author="Glynn Stewart", series_id=self.duchy.id, series_order=number,
+                title=title, author="Glynn Stewart", series_id=self.duchy.id, profile_id=self.duchy.profile_id, series_order=number,
                 book_number=float(number), record_status="active", is_read=True,
             ))
 
@@ -4807,7 +4815,7 @@ class DiscoverMoreByAuthorAlternateBrandingRegressionTest(unittest.TestCase):
             (9, "The Service of Mars (Starship's Mage Book 9)"),
         ]:
             self.db.add(Book(
-                title=title, author="Glynn Stewart", series_id=self.mage.id, series_order=number,
+                title=title, author="Glynn Stewart", series_id=self.mage.id, profile_id=self.mage.profile_id, series_order=number,
                 book_number=float(number), record_status="active", is_read=True,
             ))
         self.db.commit()
@@ -5097,7 +5105,7 @@ class ManualDeleteRecalculationTest(unittest.TestCase):
 
     def setUp(self):
         self.db = self.SessionLocal()
-        series = Series(name="Cherry Blossom Girls", author="Harmon Cooper")
+        series = Series(name="Cherry Blossom Girls", author="Harmon Cooper", profile_id="robbie")
         self.db.add(series)
         self.db.commit()
         self.db.refresh(series)
@@ -5109,6 +5117,7 @@ class ManualDeleteRecalculationTest(unittest.TestCase):
                     title=f"Book {number}",
                     author="Harmon Cooper",
                     series_id=series.id,
+                    profile_id=series.profile_id,
                     series_order=number,
                     book_number=float(number),
                     record_status="active",

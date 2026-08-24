@@ -166,7 +166,7 @@ class SeriesCheckNotificationHooksTest(unittest.TestCase):
 
     def setUp(self):
         self.db = self.SessionLocal()
-        series = models.Series(name="The First Peacemaker", author="Some Author")
+        series = models.Series(name="The First Peacemaker", author="Some Author", profile_id="robbie")
         self.db.add(series)
         self.db.commit()
         self.db.refresh(series)
@@ -265,6 +265,7 @@ class SeriesCheckNotificationHooksTest(unittest.TestCase):
             title="Edge of Shadow",
             author="Some Author",
             series_id=self.series.id,
+            profile_id=self.series.profile_id,
             book_number=8.0,
             series_order=8,
             record_status="active",
@@ -290,6 +291,7 @@ class SeriesCheckNotificationHooksTest(unittest.TestCase):
             title="Edge of Shadow",
             author="Some Author",
             series_id=self.series.id,
+            profile_id=self.series.profile_id,
             book_number=8.0,
             series_order=8,
             record_status="active",
@@ -317,6 +319,7 @@ class SeriesCheckNotificationHooksTest(unittest.TestCase):
             title="Edge of Shadow",
             author="Some Author",
             series_id=self.series.id,
+            profile_id=self.series.profile_id,
             book_number=8.0,
             series_order=8,
             record_status="active",

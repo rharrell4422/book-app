@@ -29,6 +29,7 @@ def _make_eligible_series(**overrides) -> models.Series:
     defaults = dict(
         name="Clean Series",
         author="Real Author",
+        profile_id="robbie",
         is_finished=False,
         is_caught_up=True,
         has_unread_books=False,

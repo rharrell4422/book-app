@@ -12,13 +12,15 @@ class IntelligenceProfileScopingTest(unittest.TestCase):
     """Regression tests for a profile-isolation bug: a Book could end up
     linked to a series_id belonging to a *different* profile than the
     book's own profile_id (e.g. via a code path that forgot to set
-    profile_id explicitly, which defaults to "robbie" on the Book model --
-    see services/series_check_engine.py). Such a "ghost" book is invisible
-    to every profile-scoped books query, yet these two intelligence
-    functions used to query by series_id alone and would still count it,
-    inflating total_books/upcoming counts for a series with a book nobody
-    could actually see. Both functions must ignore books whose profile_id
-    doesn't match the series' own profile_id.
+    profile_id explicitly -- see services/series_check_engine.py; CR-10
+    removed the Book/Series model's implicit "robbie" fallback for exactly
+    this failure mode, so the ghost row below is now constructed
+    explicitly instead of relying on that default). Such a "ghost" book is
+    invisible to every profile-scoped books query, yet these two
+    intelligence functions used to query by series_id alone and would
+    still count it, inflating total_books/upcoming counts for a series
+    with a book nobody could actually see. Both functions must ignore
+    books whose profile_id doesn't match the series' own profile_id.
     """
 
     @classmethod
@@ -53,13 +55,14 @@ class IntelligenceProfileScopingTest(unittest.TestCase):
                     profile_id="mackenzie",
                 )
             )
-        # A ghost row: linked to mackenzie's series_id but tagged with the
-        # Book model's default profile_id ("robbie") -- reproduces the bug.
+        # A ghost row: linked to mackenzie's series_id but tagged with a
+        # different profile_id ("robbie") -- reproduces the bug.
         self.db.add(
             Book(
                 title="Some Future Book",
                 author="Rebecca Yarros",
                 series_id=self.series.id,
+                profile_id="robbie",
                 book_number=4.0,
                 series_order=4,
                 record_status="active",

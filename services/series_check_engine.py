@@ -560,17 +560,20 @@ def run_series_check_job_full(series_id: int) -> None:
                         continue
 
                     db_book = models.Book(
-                        # Book.profile_id defaults to "robbie" when not passed
-                        # explicitly (see models.py) -- this construction used to
-                        # omit it entirely, so every book discovered by "Check for
-                        # New" on any *other* profile's series silently got
-                        # profile_id="robbie" while staying linked to that other
-                        # profile's series_id. The result was an invisible ghost
-                        # row: excluded from every profile-scoped books query (so
-                        # neither profile could see or delete it), yet still
-                        # counted by series_id-only aggregates like
-                        # compute_series_intelligence_for_series, inflating that
-                        # series' total_books/upcoming flags with a "phantom" book.
+                        # This construction used to omit profile_id entirely,
+                        # which the Book model's now-removed default (CR-10;
+                        # see models.py) silently filled in as "robbie" -- so
+                        # every book discovered by "Check for New" on any
+                        # *other* profile's series silently got
+                        # profile_id="robbie" while staying linked to that
+                        # other profile's series_id. The result was an
+                        # invisible ghost row: excluded from every
+                        # profile-scoped books query (so neither profile could
+                        # see or delete it), yet still counted by
+                        # series_id-only aggregates like
+                        # compute_series_intelligence_for_series, inflating
+                        # that series' total_books/upcoming flags with a
+                        # "phantom" book.
                         profile_id=db_series.profile_id,
                         title=normalized_title,
                         # Check Now has no user-entered title to preserve, so

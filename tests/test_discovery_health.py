@@ -68,13 +68,13 @@ class SeriesDiscoveryHealthPropertyTest(unittest.TestCase):
         self.db.close()
 
     def test_never_checked_series_reports_never_checked(self):
-        series = Series(name="Untouched Series", author="Someone", last_checked=None)
+        series = Series(name="Untouched Series", author="Someone", profile_id="robbie", last_checked=None)
         self.db.add(series)
         self.db.commit()
         self.assertEqual(series.discovery_health, "never_checked")
 
     def test_recently_checked_series_reports_healthy(self):
-        series = Series(name="Fresh Series", author="Someone", last_checked=date.today())
+        series = Series(name="Fresh Series", author="Someone", profile_id="robbie", last_checked=date.today())
         self.db.add(series)
         self.db.commit()
         self.assertEqual(series.discovery_health, "healthy")

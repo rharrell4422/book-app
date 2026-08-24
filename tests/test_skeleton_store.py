@@ -5,6 +5,7 @@ protection shared by both write call sites.
 """
 
 import copy
+import logging
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import patch
@@ -36,8 +37,20 @@ class SkeletonStoreTestBase(unittest.TestCase):
         cls.engine.dispose()
 
     def setUp(self):
+        # Any test module that imports `main` runs Alembic on import, and
+        # Alembic's fileConfig() disables every logger that already exists
+        # -- including this one, which assertLogs (used by the CR-7
+        # regression test below) cannot see through. So whether that test
+        # passes would otherwise depend on which other files pytest
+        # happened to collect alongside this one (same fix already applied
+        # in tests/test_series_discovery.py for "agents.series_agent").
+        skeleton_logger = logging.getLogger("services.skeleton_store")
+        was_disabled = skeleton_logger.disabled
+        skeleton_logger.disabled = False
+        self.addCleanup(setattr, skeleton_logger, "disabled", was_disabled)
+
         self.db = self.SessionLocal()
-        series = Series(name="Cherry Blossom Girls", author="Harmon Cooper")
+        series = Series(name="Cherry Blossom Girls", author="Harmon Cooper", profile_id="robbie")
         self.db.add(series)
         self.db.commit()
         self.db.refresh(series)
@@ -49,6 +62,7 @@ class SkeletonStoreTestBase(unittest.TestCase):
                     title=f"Cherry Blossom Girls Book {number}",
                     author="Harmon Cooper",
                     series_id=series.id,
+                    profile_id=series.profile_id,
                     series_order=number,
                     book_number=float(number),
                     record_status="active",
@@ -140,6 +154,7 @@ class AsymmetricMergeTest(SkeletonStoreTestBase):
                 title="Cherry Blossom Girls Book 7",
                 author="Harmon Cooper",
                 series_id=self.series.id,
+                profile_id=self.series.profile_id,
                 series_order=7,
                 book_number=7.0,
                 record_status="active",
@@ -357,6 +372,58 @@ class ConcurrencyProtectionTest(SkeletonStoreTestBase):
         ):
             with self.assertRaises(RuntimeError):
                 backfill_skeleton_for_series(self.db, self.series.id)
+
+    def test_second_of_two_concurrent_updates_retries_against_a_fresh_read_instead_of_clobbering_the_first(self):
+        # CR-4 regression: exercises the actual optimistic-version check on
+        # a genuine concurrent UPDATE of the *same* series_id row (unlike
+        # test_concurrent_insert_race_retries_as_update above, which only
+        # forces a generic commit-time IntegrityError against a different
+        # series_id and never touches the real race). Session B writes to
+        # the row *after* session A has already read it but *before* A's
+        # own conditional UPDATE lands -- the exact lost-update window CR-4
+        # closes: pre-fix, A's UPDATE had no version guard and would
+        # silently overwrite B's already-committed write.
+        backfill_skeleton_for_series(self.db, self.series.id)
+        self.db.commit()
+
+        session_b = self.SessionLocal()
+        seen_existing_entries = []
+
+        def racing_merge_fn(existing_entries):
+            seen_existing_entries.append(copy.deepcopy(existing_entries))
+            if len(seen_existing_entries) == 1:
+                row_b = (
+                    session_b.query(SeriesSkeleton)
+                    .filter(SeriesSkeleton.series_id == self.series.id)
+                    .first()
+                )
+                row_b.skeleton_json = list(existing_entries) + [
+                    {"book_number": 99.0, "title": "From B", "source_class": "discovered"}
+                ]
+                row_b.version = row_b.version + 1
+                session_b.commit()
+            return list(existing_entries) + [{"book_number": 1.0, "title": "From A", "source_class": "discovered"}]
+
+        try:
+            with patch.object(skeleton_store, "_UPSERT_RETRY_BASE_DELAY_SECONDS", 0):
+                result = skeleton_store._upsert_skeleton_row(self.db, self.series.id, racing_merge_fn)
+        finally:
+            session_b.close()
+
+        # merge_fn must have been re-invoked after the version check caught
+        # B's intervening write -- a single call would mean no retry
+        # happened at all.
+        self.assertEqual(len(seen_existing_entries), 2)
+        # The retry's existing_entries must reflect B's committed write --
+        # if this were still the stale first read, that's the silent
+        # lost-update bug CR-4 fixes.
+        self.assertTrue(any(entry.get("title") == "From B" for entry in seen_existing_entries[1]))
+        titles = {entry["title"] for entry in result.skeleton_json}
+        self.assertIn("From B", titles)
+        self.assertIn("From A", titles)
+        # version started at 0 from the priming backfill above; B's write
+        # bumped it to 1, A's successful retry bumped it to 2.
+        self.assertEqual(result.version, 2)
 
 
 if __name__ == "__main__":

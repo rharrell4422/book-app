@@ -172,15 +172,18 @@ def repair_ghost_profile_books(db) -> dict:
     """Reassign every "ghost" book found by find_ghost_profile_books to its
     series' own profile_id.
 
-    Background: Book.profile_id defaults to "robbie" when not passed
-    explicitly (see models.py). A book-creation path that forgets to set it
-    explicitly -- e.g. the "Check for New" discovery job before it was fixed
-    in services/series_check_engine.py -- silently tags the new row
-    profile_id="robbie" while it stays linked to whichever profile's series
-    triggered the discovery. That row becomes invisible to every
-    profile-scoped books query for the series' *actual* owner, yet still
-    shows up in "robbie"'s flat library list (which only filters by
-    profile_id, not by whether the linked series also belongs to robbie).
+    Background: this repairs rows created before two fixes landed --
+    Book.profile_id used to default to "robbie" when not passed explicitly
+    (removed by CR-10; see models.py), and at least one book-creation path
+    (the "Check for New" discovery job, before it was fixed in
+    services/series_check_engine.py) forgot to set it explicitly, silently
+    tagging the new row profile_id="robbie" while it stayed linked to
+    whichever profile's series triggered the discovery. That row became
+    invisible to every profile-scoped books query for the series' *actual*
+    owner, yet still showed up in "robbie"'s flat library list (which only
+    filters by profile_id, not by whether the linked series also belongs
+    to robbie). Both root causes are fixed now, but this repair function
+    stays for any row a pre-fix run already left in that state.
     """
     ghosts = find_ghost_profile_books(db)
     if ghosts:
@@ -453,10 +456,11 @@ def recount_series_aggregates_for_series(db, series_id: int) -> dict:
     # Filtering by profile_id here too (not just series_id) is
     # defense-in-depth against a book ending up linked to this series_id
     # under a different profile_id than the series' own -- e.g. a bug in a
-    # book-creation path that forgets to set profile_id explicitly (it
-    # defaults to "robbie" on the Book model). Without this, such a "ghost"
-    # book is invisible in every profile-scoped books query yet still
-    # inflates this series' aggregates.
+    # book-creation path that forgets to set profile_id explicitly (CR-10
+    # removed the Book model's "robbie" fallback for exactly this failure
+    # mode, but this check stays as defense-in-depth against a future
+    # regression). Without this, such a "ghost" book is invisible in every
+    # profile-scoped books query yet still inflates this series' aggregates.
     series_profile_id = db.query(Series.profile_id).filter(Series.id == series_id).scalar()
     books_query = db.query(Book).filter(Book.series_id == series_id)
     if series_profile_id is not None:

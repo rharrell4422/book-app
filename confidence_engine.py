@@ -157,7 +157,27 @@ def _provider_confidence(candidate: dict) -> str:
     return max(levels, key=lambda level: _LEVEL_RANK[level])
 
 
-_TITLE_MALFORMED_REASONS = {"missing_title", "placeholder_title", "title_is_series_variant"}
+_TITLE_MALFORMED_REASONS = {
+    "missing_title",
+    "placeholder_title",
+    "title_is_series_variant",
+    # CR-8: delta_engine._malformed_reason also emits "insufficient_metadata"
+    # (metadata_completeness_score below RECONCILIATION_METADATA_COMPLETENESS_
+    # THRESHOLD) for a candidate whose title/number individually look
+    # well-formed but whose overall metadata is too sparse to trust. That
+    # reason was already landing in delta_reasons (compute_confidence reads
+    # every malformed_books entry, not a filtered subset), but neither
+    # malformed-reason check in this module tested for it, so a candidate
+    # delta had already flagged as malformed could still score confidently
+    # on every dimension here -- the exact bug this closes. Routed through
+    # title, not number: the signal is about overall candidate completeness
+    # (title+author+isbn+date combined), not the number field specifically,
+    # and title_confidence's "zero" path is the existing, already-proven
+    # mechanism for "delta already told us this candidate isn't real" (see
+    # the other three members of this set, each a different kind of
+    # delta-confirmed structural problem routed through the same place).
+    "insufficient_metadata",
+}
 _NUMBER_MALFORMED_REASON_PREFIXES = ("invalid_number", "negative_number", "duplicate_number")
 
 

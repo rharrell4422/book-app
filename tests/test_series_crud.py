@@ -53,7 +53,7 @@ class SeriesCrudTest(unittest.TestCase):
         self.assertEqual(series.unread_count, 0)
 
     def test_update_series_with_full_schema_dump_does_not_crash(self):
-        series = Series(name="Placeholder", author="Someone")
+        series = Series(name="Placeholder", author="Someone", profile_id="robbie")
         self.db.add(series)
         self.db.commit()
         self.db.refresh(series)

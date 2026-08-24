@@ -34,7 +34,7 @@ class LibrarySyncUpcomingHealingTest(unittest.TestCase):
 
     def setUp(self):
         self.db = self.SessionLocal()
-        series = Series(name="Axel Blaze", author="Some Author")
+        series = Series(name="Axel Blaze", author="Some Author", profile_id="robbie")
         self.db.add(series)
         self.db.commit()
         self.db.refresh(series)
@@ -48,6 +48,7 @@ class LibrarySyncUpcomingHealingTest(unittest.TestCase):
             title="Some Book",
             author="Some Author",
             series_id=self.series.id,
+            profile_id=self.series.profile_id,
             record_status="active",
             is_read=False,
         )

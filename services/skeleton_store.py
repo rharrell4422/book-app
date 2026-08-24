@@ -241,15 +241,30 @@ def _upsert_skeleton_row(
     can legitimately overlap in time (a boot-time backfill sweep racing an
     in-flight Check Now job's post-persistence update). SQLite has no real
     row-level locking -- `with_for_update()` compiles away to a no-op on
-    this dialect -- so the actual protection is upsert-with-retry: on a
-    concurrent-insert race (two writers both find no existing row and both
-    try to INSERT), the loser's commit fails with `IntegrityError` on the
-    `series_id` primary key; caught, rolled back, and retried as an UPDATE
-    against the winner's now-committed row. A transient `OperationalError`
-    ("database is locked", possible under SQLite WAL with concurrent
-    writers) is retried the same way. `with_for_update()` is kept anyway so
-    this degrades to real row-level locking for free if this app ever
-    moves to a database that supports it (e.g. Postgres).
+    this dialect -- so the actual protection is upsert-with-retry, covering
+    two distinct races:
+
+    - Concurrent INSERT (two writers both find no existing row and both
+      try to INSERT): the loser's commit fails with `IntegrityError` on the
+      `series_id` primary key; caught, rolled back, and retried as an
+      UPDATE against the winner's now-committed row.
+    - Concurrent UPDATE (CR-4): without a version check, two writers can
+      each read the row, each compute `merge_fn` against their own
+      (possibly already-stale) read, and both successfully UPDATE -- the
+      second commit silently overwrites the first's result with one that
+      never saw it. `version` (bumped by 1 on every successful write) is
+      read alongside `skeleton_json`, and the UPDATE is conditioned on
+      `version == <value just read>`. If another writer's UPDATE landed in
+      between, this UPDATE affects zero rows -- treated as a conflict,
+      rolled back, and retried against a fresh read, same as the
+      IntegrityError path above.
+
+    A transient `OperationalError` ("database is locked", possible under
+    SQLite WAL with concurrent writers) is retried the same way as both of
+    the above. `with_for_update()` is kept anyway so this degrades to real
+    row-level locking for free if this app ever moves to a database that
+    supports it (e.g. Postgres) -- the version check remains correct
+    either way, it just becomes a second, redundant layer of protection.
 
     Commits internally (one commit per successful attempt) rather than
     leaving that to the caller -- required for the retry loop to actually
@@ -269,12 +284,50 @@ def _upsert_skeleton_row(
             new_entries = merge_fn(existing_entries)
 
             if skeleton is None:
-                skeleton = models.SeriesSkeleton(series_id=series_id)
+                skeleton = models.SeriesSkeleton(
+                    series_id=series_id,
+                    skeleton_json=new_entries,
+                    schema_version=SCHEMA_VERSION,
+                    version=0,
+                )
                 db.add(skeleton)
+                db.commit()
+                return skeleton
 
-            skeleton.skeleton_json = new_entries
-            skeleton.schema_version = SCHEMA_VERSION
+            read_version = skeleton.version
+            updated_rowcount = (
+                db.query(models.SeriesSkeleton)
+                .filter(
+                    models.SeriesSkeleton.series_id == series_id,
+                    models.SeriesSkeleton.version == read_version,
+                )
+                .update(
+                    {
+                        "skeleton_json": new_entries,
+                        "schema_version": SCHEMA_VERSION,
+                        "version": read_version + 1,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if updated_rowcount == 0:
+                # Lost the race: some other writer already advanced
+                # `version` past what we read, so our merge_fn result was
+                # computed against stale data. Not an exception -- just a
+                # signal to retry against a fresh read, identical in effect
+                # to the IntegrityError/OperationalError handling below.
+                db.rollback()
+                last_error = RuntimeError(
+                    f"optimistic concurrency conflict on SeriesSkeleton series_id={series_id} "
+                    f"(expected version={read_version})"
+                )
+                if attempt == max_attempts:
+                    break
+                time.sleep(_UPSERT_RETRY_BASE_DELAY_SECONDS * attempt + random.uniform(0, 0.02))
+                continue
+
             db.commit()
+            db.refresh(skeleton)
             return skeleton
         except (IntegrityError, OperationalError) as exc:
             db.rollback()

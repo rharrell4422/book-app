@@ -29,7 +29,7 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
 
     def setUp(self):
         self.db = self.SessionLocal()
-        series = Series(name="The First Peacemaker", author="Some Author")
+        series = Series(name="The First Peacemaker", author="Some Author", profile_id="robbie")
         self.db.add(series)
         self.db.commit()
         self.db.refresh(series)
@@ -136,12 +136,13 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
         self.assertEqual(book.book_number_source, "provider")
 
     def test_new_book_inherits_series_profile_id_not_default(self):
-        # Regression test: Book.profile_id defaults to "robbie" when not set
-        # explicitly (see models.py). A newly discovered book must inherit
-        # the *series'* own profile_id instead of silently falling back to
-        # that default -- otherwise it becomes an invisible "ghost" row that
-        # no profile-scoped query can see, while still counting toward that
-        # series' aggregates (total_books, has_new_upcoming_books, etc.).
+        # Regression test (CR-10 removed the fallback this originally
+        # guarded against -- Book.profile_id used to default to "robbie"
+        # when not set explicitly). A newly discovered book must inherit
+        # the *series'* own profile_id -- otherwise it becomes an invisible
+        # "ghost" row that no profile-scoped query can see, while still
+        # counting toward that series' aggregates (total_books,
+        # has_new_upcoming_books, etc.).
         other_profile_series = Series(name="Mackenzie's Series", author="Some Author", profile_id="mackenzie")
         self.db.add(other_profile_series)
         self.db.commit()
@@ -236,6 +237,7 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
             title="Edge of Shadow",
             author="Some Author",
             series_id=self.series.id,
+            profile_id=self.series.profile_id,
             series_order=8,
             book_number=8.0,
             record_status="active",
@@ -293,6 +295,7 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
             title="Onyx Storm",
             author="Some Author",
             series_id=self.series.id,
+            profile_id=self.series.profile_id,
             book_number=3.0,
             series_order=3,
             record_status="active",
@@ -366,6 +369,7 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
             title="Quest Academy: Scavengers",
             author="Some Author",
             series_id=self.series.id,
+            profile_id=self.series.profile_id,
             book_number=2.0,
             series_order=2,
             record_status="active",
@@ -381,6 +385,7 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
             title="Scavengers: Quest Academy, Book 2",
             author="Some Author",
             series_id=self.series.id,
+            profile_id=self.series.profile_id,
             book_number=2.0,
             series_order=2,
             record_status="active",
@@ -437,7 +442,7 @@ class SeriesCheckPrecheckTest(unittest.TestCase):
         self.db.close()
 
     def _make_series(self, *, last_checked, book_number=1.0):
-        series = Series(name="Jonathan Hunt", author="Georgia Wagner", last_checked=last_checked)
+        series = Series(name="Jonathan Hunt", author="Georgia Wagner", profile_id="robbie", last_checked=last_checked)
         self.db.add(series)
         self.db.commit()
         self.db.refresh(series)
@@ -446,6 +451,7 @@ class SeriesCheckPrecheckTest(unittest.TestCase):
                 title="The Jericho Siege",
                 author="Georgia Wagner",
                 series_id=series.id,
+                profile_id=series.profile_id,
                 book_number=book_number,
                 record_status="active",
                 read_status="available",

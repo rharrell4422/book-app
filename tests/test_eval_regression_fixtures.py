@@ -109,7 +109,7 @@ class PipelineKindRegressionTest(unittest.TestCase):
 
     def _build_series(self, regression: RegressionFixture) -> Series:
         series_config = regression.series
-        series = Series(name=series_config["name"], author=series_config["author"])
+        series = Series(name=series_config["name"], author=series_config["author"], profile_id="robbie")
         self.db.add(series)
         self.db.commit()
         self.db.refresh(series)
@@ -120,6 +120,7 @@ class PipelineKindRegressionTest(unittest.TestCase):
                     title=owned["title"],
                     author=series_config["author"],
                     series_id=series.id,
+                    profile_id=series.profile_id,
                     series_order=owned["series_order"],
                     book_number=owned["book_number"],
                     record_status="active",
@@ -132,6 +133,7 @@ class PipelineKindRegressionTest(unittest.TestCase):
                     title=f"{series_config['name']} Book {number}",
                     author=series_config["author"],
                     series_id=series.id,
+                    profile_id=series.profile_id,
                     series_order=number,
                     book_number=float(number),
                     record_status="active",

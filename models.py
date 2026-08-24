@@ -67,14 +67,20 @@ class Series(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
-    # default="robbie" (not just the migration's backfill) so that any code
-    # path constructing a Series/Book without an explicit profile_id --
-    # notably the many pre-existing unit tests that build these rows
-    # directly -- still gets a valid row instead of a NOT NULL failure.
-    # Every real request path (routers/*, importer, agents/series_agent.py)
-    # always passes profile_id explicitly; this default only ever matters
-    # for code that predates profiles entirely.
-    profile_id = Column(String, ForeignKey("profiles.id"), nullable=False, index=True, default="robbie")
+    # CR-10: this used to also carry default="robbie", so any code path
+    # that omitted profile_id (a bug -- every real request path already
+    # passes it explicitly: routers/*, importer, agents/series_agent.py)
+    # silently attributed the row to Robbie's profile instead of failing
+    # loudly. That silent fallback masked at least one real production bug
+    # (see services/series_check_engine.py and
+    # tests/test_intelligence_profile_scoping.py's "ghost row" case) and is
+    # now gone -- an omitted profile_id is a NOT NULL failure (this column
+    # was already nullable=False at the DB level; only the ORM-side
+    # in-Python default is what's been removed here), same as any other
+    # required column. Test call sites that used to rely on the default
+    # now pass profile_id explicitly instead (see the call-site audit this
+    # ticket names).
+    profile_id = Column(String, ForeignKey("profiles.id"), nullable=False, index=True)
 
     # Core
     name = Column(String, nullable=False)
@@ -185,8 +191,10 @@ class Book(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
-    # See Series.profile_id above for why this has a default.
-    profile_id = Column(String, ForeignKey("profiles.id"), nullable=False, index=True, default="robbie")
+    # See Series.profile_id above (CR-10) for why this has no ORM-side
+    # default -- an omitted profile_id here is a NOT NULL failure now, not
+    # a silent fallback to Robbie's profile.
+    profile_id = Column(String, ForeignKey("profiles.id"), nullable=False, index=True)
 
     # Core identity
     title = Column(String, nullable=False)
@@ -351,6 +359,19 @@ class SeriesSkeleton(Base):
     skeleton_json = Column(JSON, nullable=False, default=list)
 
     schema_version = Column(Integer, nullable=False, default=1)
+
+    # CR-4: optimistic-concurrency token. `_upsert_skeleton_row`
+    # (services/skeleton_store.py) reads this alongside skeleton_json,
+    # then writes conditioned on `version == <value it read>`, incrementing
+    # it by 1. Two concurrent UPDATEs (e.g. a boot-time backfill sweep
+    # racing an in-flight Check Now's post-persistence apply) used to both
+    # succeed with no version check at all -- the second commit silently
+    # clobbered the first's merge_fn result with one computed from a
+    # now-stale read. A version mismatch now makes the losing writer's
+    # UPDATE affect zero rows, which is treated as a conflict and retried
+    # against a fresh read, same as the existing IntegrityError/
+    # OperationalError retry path.
+    version = Column(Integer, nullable=False, default=0, server_default="0")
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
