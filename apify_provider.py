@@ -99,10 +99,24 @@ APIFY_AMAZON_ACTOR_ID = "junglee/free-amazon-product-scraper"
 APIFY_MAX_ITEMS_PER_START_URL = 25
 
 # Apify actor runs are inherently slower than a plain HTTP call to a JSON
-# API (a real scrape, not just a lookup) -- 30s gives a real run a fair
-# chance to finish while still fitting comfortably inside a Check Now job's
-# overall SERIES_CHECK_TIMEOUT_SECONDS budget (services/series_check_engine.py).
-APIFY_REQUEST_TIMEOUT_SECONDS = 30
+# API (a real scrape, not just a lookup, and with scrapeProductDetails=True
+# every item is its own separate detail-page fetch on top of the initial
+# search-results page). 30s was fine at the old APIFY_MAX_ITEMS_PER_START_URL
+# = 5 -- a handful of detail pages easily finished in time -- but a live
+# regression (2026-08-24, right after raising the cap to 25) hit Apify's
+# own "reached the timeout of 30 seconds, aborting it" mid-run: raising the
+# item cap raised the search results to 2 list pages (18 + 16 organic
+# hits) and ~34 enqueued detail-page fetches, which this actor processes
+# at roughly 1-1.5s each (sequentially, going by the run's own timestamped
+# log lines) -- the run was only ~12 items in when the 30s wall hit,
+# aborting the whole call and returning nothing usable. 120s gives 25
+# items (this module's current cap) a real margin (an all-25 run should
+# finish in roughly 30-40s per that same per-item rate, well under this),
+# while still fitting comfortably inside a Check Now job's overall
+# SERIES_CHECK_TIMEOUT_SECONDS budget (300s -- see
+# services/series_check_engine.py) alongside every other provider call in
+# the same run.
+APIFY_REQUEST_TIMEOUT_SECONDS = 120
 
 # Worst case per series-check run: exactly one Apify actor call. The
 # single-actor design's whole point is that a search-or-direct-URL lookup
