@@ -1,0 +1,44 @@
+{
+  "id": "safehold_omnibus",
+  "kind": "pipeline",
+  "description": "Live bug: 'Safehold' is owned as a boxed set covering books 1-3 in one row ('Safehold Boxed Set 1: (Safehold Books 1-3)'), plus individually-owned books 4-7. Because that omnibus row's own book_number is just 1 (its shelf position, not a range), the discovery/dedupe identity sets didn't know books 2 and 3 were already covered -- so a reprint single-volume edition like 'By Heresies Distressed (Safehold Book 3)' slipped through and got added as a second, duplicate 'available' copy of an already-owned book. Frozen from tests/test_series_discovery.py::SeriesCheckIntegrationTest::test_owned_omnibus_range_prevents_individual_volume_reappearing_as_new.",
+  "series": { "name": "Safehold", "author": "David Weber" },
+  "owned_books": [
+    { "title": "Safehold Boxed Set 1: (Safehold Books 1-3)", "series_order": 1, "book_number": 1.0, "is_read": true },
+    { "title": "Safehold Book 4", "series_order": 4, "book_number": 4.0, "is_read": true },
+    { "title": "Safehold Book 5", "series_order": 5, "book_number": 5.0, "is_read": true },
+    { "title": "Safehold Book 6", "series_order": 6, "book_number": 6.0, "is_read": true },
+    { "title": "Safehold Book 7", "series_order": 7, "book_number": 7.0, "is_read": true }
+  ],
+  "candidates": [
+    {
+      "source": "google_books",
+      "source_id": "gb-heresies-reprint",
+      "title": "By Heresies Distressed (Safehold Book 3)",
+      "authors": ["David Weber"],
+      "published_date": "2010-01-01",
+      "isbn13": null,
+      "source_url": null,
+      "language": "",
+      "confidence": "targeted",
+      "series_number_hint": null,
+      "upcoming_hint": false
+    },
+    {
+      "source": "google_books",
+      "source_id": "gb-book8",
+      "title": "Safehold Book 8",
+      "authors": ["David Weber"],
+      "published_date": "2024-01-01",
+      "isbn13": null,
+      "source_url": null,
+      "language": "",
+      "confidence": "targeted",
+      "series_number_hint": null,
+      "upcoming_hint": false
+    }
+  ],
+  "expected": {
+    "available_missing_titles": ["Safehold Book 8"]
+  }
+}

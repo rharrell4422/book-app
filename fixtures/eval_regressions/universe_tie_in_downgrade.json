@@ -1,0 +1,78 @@
+{
+  "id": "universe_tie_in_downgrade",
+  "kind": "pipeline",
+  "description": "Live bug (modeled on the real case: checking 'Starship's Mage' by Glynn Stewart pulled in 'Interstellar Mage', 'Mage-Provocateur', and 'Agents of Mars' -- all real Glynn Stewart books, but from 'Starship's Mage: Red Falcon', an entirely separate 3-book spin-off series that just shares the same 'Starship's Mage Universe' branding). Each spin-off subtitle literally says 'A <Flagship Series> Universe Novel', so the flagship series name was textually present as a substring/token match -- but that's a spin-off marker, not proof of membership in the flagship series being checked, and none of the spin-off titles had a series-position number tying them to it either. The downgrade should only kick in when there is no other evidence tying the book to the series being checked -- a same-batch spin-off-labeled title that the provider tags with a real series-position number for the series being checked must still be accepted. Frozen from tests/test_series_discovery.py::SeriesCheckIntegrationTest::test_universe_tie_in_spinoff_series_is_not_pulled_into_flagship_series and ::test_universe_tie_in_is_still_accepted_with_a_real_series_position_number (test data uses the stand-in series name 'Cherry Blossom Girls' / author 'Harmon Cooper', as frozen in the live test suite, rather than the real-world 'Starship's Mage' names the bug was found under).",
+  "series": { "name": "Cherry Blossom Girls", "author": "Harmon Cooper" },
+  "owned_book_numbers": [1, 2, 3, 4, 5, 6, 8, 9],
+  "scenarios": [
+    {
+      "name": "spinoff_tie_ins_without_a_series_number_are_downgraded",
+      "candidates": [
+        {
+          "source": "hardcover",
+          "source_id": "hc-interstellar-mage",
+          "title": "Interstellar Mage: A Cherry Blossom Girls Universe Novel",
+          "authors": ["Harmon Cooper"],
+          "published_date": "2017-01-01",
+          "isbn13": null,
+          "source_url": null,
+          "language": "",
+          "confidence": "targeted",
+          "series_number_hint": null,
+          "upcoming_hint": false
+        },
+        {
+          "source": "hardcover",
+          "source_id": "hc-mage-provocateur",
+          "title": "Mage-Provocateur: A Cherry Blossom Girls Universe Novel",
+          "authors": ["Harmon Cooper"],
+          "published_date": "2018-01-01",
+          "isbn13": null,
+          "source_url": null,
+          "language": "",
+          "confidence": "targeted",
+          "series_number_hint": null,
+          "upcoming_hint": false
+        },
+        {
+          "source": "hardcover",
+          "source_id": "hc-book10",
+          "title": "Cherry Blossom Girls Book 10",
+          "authors": ["Harmon Cooper"],
+          "published_date": "2024-01-01",
+          "isbn13": null,
+          "source_url": null,
+          "language": "",
+          "confidence": "targeted",
+          "series_number_hint": null,
+          "upcoming_hint": false
+        }
+      ],
+      "expected": {
+        "added_count": 1,
+        "available_missing_titles": ["Cherry Blossom Girls Book 10"]
+      }
+    },
+    {
+      "name": "spinoff_tie_in_with_a_real_series_position_number_is_still_accepted",
+      "candidates": [
+        {
+          "source": "hardcover",
+          "source_id": "hc-tie-in-numbered",
+          "title": "Some Companion Tale: A Cherry Blossom Girls Universe Novel",
+          "authors": ["Harmon Cooper"],
+          "published_date": "2024-01-01",
+          "isbn13": null,
+          "source_url": null,
+          "language": "",
+          "confidence": "targeted",
+          "series_number_hint": 10,
+          "upcoming_hint": false
+        }
+      ],
+      "expected": {
+        "added_count": 1
+      }
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "id": "jonathan_hunt",
+  "kind": "function",
+  "target": "discovery_engine._title_is_series_variant",
+  "description": "Live bug: 'Check Now' on Georgia Wagner's 'Jonathan Hunt Thriller Series' admitted 'A Jonathan Hunt Thriller' -- no ISBN, no real subtitle, nothing but the series name plus a bare genre tagline -- as a new book. An earlier fix only caught this when the tracked series name itself already contained 'Thriller' (so the word cancelled out against the series name); it recurred once the series was tracked under the shorter name 'Jonathan Hunt', where 'thriller' no longer overlaps the series name and was treated as real, distinguishing content. Frozen from tests/test_series_discovery.py::DiscoveryEngineHelperTest::test_title_is_series_variant_rejects_bare_genre_tagline_regardless_of_series_wording.",
+  "cases": [
+    {
+      "name": "bare_tagline_under_short_series_name_is_rejected",
+      "title": "A Jonathan Hunt Thriller",
+      "series_name": "Jonathan Hunt",
+      "isbn13": null,
+      "structured_number_hint": null,
+      "expected_is_variant": true
+    },
+    {
+      "name": "bare_tagline_under_long_series_name_is_still_rejected",
+      "title": "A Jonathan Hunt Thriller",
+      "series_name": "Jonathan Hunt Thriller Series",
+      "isbn13": null,
+      "structured_number_hint": null,
+      "expected_is_variant": true
+    },
+    {
+      "name": "other_bare_genre_taglines_follow_the_same_idiom",
+      "title": "A Jonathan Hunt Mystery",
+      "series_name": "Jonathan Hunt",
+      "isbn13": null,
+      "structured_number_hint": null,
+      "expected_is_variant": true
+    },
+    {
+      "name": "isbn_present_short_circuits_the_rejection",
+      "title": "A Jonathan Hunt Thriller",
+      "series_name": "Jonathan Hunt",
+      "isbn13": "9781234567897",
+      "structured_number_hint": null,
+      "expected_is_variant": false
+    },
+    {
+      "name": "genre_word_alongside_genuine_additional_content_is_not_filler",
+      "title": "A Jonathan Hunt Thriller: The Reckoning",
+      "series_name": "Jonathan Hunt",
+      "isbn13": null,
+      "structured_number_hint": null,
+      "expected_is_variant": false
+    },
+    {
+      "name": "real_distinctly_titled_book_is_never_caught_just_for_sharing_the_series_name",
+      "title": "The Jericho Siege",
+      "series_name": "Jonathan Hunt",
+      "isbn13": null,
+      "structured_number_hint": null,
+      "expected_is_variant": false
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "id": "starships_mage",
+  "kind": "function",
+  "target": "discovery_engine.normalize_series_branding_name",
+  "description": "Live bug: conflating a flagship series with its branded spin-offs by stripping the spin-off's distinguishing subtitle caused cross-series contamination -- books from an entirely separate spin-off series got pulled into the flagship series being checked. 'Starship's Mage: Red Falcon' and 'Starship's Mage: UnArcana Rebellion' are real, distinct sub-series/rebranded editions of Glynn Stewart's 'Starship's Mage', not a cataloguer's generic branding suffix, and must NOT normalize to the same key as the bare 'Starship's Mage' flagship name. Frozen from tests/test_series_discovery.py::DiscoveryEngineHelperTest::test_normalize_series_branding_name_does_not_strip_distinctive_qualifiers.",
+  "cases": [
+    {
+      "name": "red_falcon_subseries_is_distinct_from_flagship",
+      "title_a": "Starship's Mage: Red Falcon",
+      "title_b": "Starship's Mage",
+      "expect_equal": false
+    },
+    {
+      "name": "unarcana_rebellion_subseries_is_distinct_from_flagship",
+      "title_a": "Starship's Mage: UnArcana Rebellion",
+      "title_b": "Starship's Mage",
+      "expect_equal": false
+    }
+  ]
+}
