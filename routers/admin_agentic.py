@@ -1,7 +1,10 @@
-"""Phase 1 agentic discovery, tenth implementation block: a read-only,
-owner-only admin router exposing everything `services/agentic_evaluation_
-harness.py`/`services/agentic_batch_orchestrator.py` already built, for
-manual triggering during evaluation -- not for end users.
+"""Phase 1 agentic discovery, tenth implementation block (extended in the
+eleventh block below with `/promotion`, `/series`, `/history`): a
+read-only, owner-only admin router exposing everything `services/agentic_
+evaluation_harness.py`/`services/agentic_batch_orchestrator.py`/
+`services/agentic_promotion_checklist.py`/`services/agentic_admin_ui_
+stubs.py` already built, for manual triggering during evaluation -- not
+for end users.
 
 Per `discovery_agentic_phase1_plan.md`/`discovery_agentic_phase1_evaluation.md`
 (settled architecture, not re-litigated here): every route below is a thin
@@ -23,8 +26,10 @@ from fastapi import APIRouter, Body, Depends
 from fastapi.responses import HTMLResponse
 
 from routers.deps import require_owner
+from services.agentic_admin_ui_stubs import get_agentic_history, list_agentic_series
 from services.agentic_batch_orchestrator import run_batch_agentic_evaluations
 from services.agentic_evaluation_harness import generate_full_agentic_html, generate_full_agentic_report
+from services.agentic_promotion_checklist import generate_promotion_readiness
 
 # Router-level dependency (not per-route): every route here is read-only
 # diagnostics, so unlike routers/admin.py (which has one route needing a
@@ -65,3 +70,35 @@ def admin_batch_evaluation(series_ids: list[int] = Body(...)) -> dict:
     report. Read-only -- no writes.
     """
     return run_batch_agentic_evaluations(series_ids)
+
+
+@router.get("/promotion/{series_id}")
+def admin_promotion_check(series_id: int) -> dict:
+    """Runs a full shadow-mode agentic evaluation for one series and
+    returns its Phase 2 promotion-readiness checklist
+    (`services.agentic_promotion_checklist.generate_promotion_
+    readiness`). NOT a promotion mechanism -- purely diagnostic.
+    Read-only -- no writes.
+    """
+    return generate_promotion_readiness(series_id)
+
+
+@router.get("/series")
+def admin_list_agentic_series() -> dict:
+    """Lists every series with a `SeriesSkeleton` row -- i.e. every
+    series that has discovery data an agentic evaluation could run
+    against (`services.agentic_admin_ui_stubs.list_agentic_series`).
+    Read-only -- no writes.
+    """
+    return list_agentic_series()
+
+
+@router.get("/history/{series_id}")
+def admin_agentic_history(series_id: int) -> dict:
+    """Returns historical agentic evaluation logs for one series
+    (`services.agentic_admin_ui_stubs.get_agentic_history`) -- currently
+    always empty with an explanatory note, since no persisted evaluation-
+    history store exists yet (see that function's docstring). Read-only
+    -- no writes.
+    """
+    return get_agentic_history(series_id)

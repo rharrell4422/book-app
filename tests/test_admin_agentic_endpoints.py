@@ -92,6 +92,54 @@ class AdminAgenticEndpointsTest(unittest.TestCase):
         response = self.client.post("/admin/agentic/batch", json={"not": "a list"}, headers=self.owner_headers)
         self.assertEqual(response.status_code, 422)
 
+    def test_admin_promotion_check_rejects_anonymous_requests(self):
+        response = self.client.get(f"/admin/agentic/promotion/{self.series_id}")
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_promotion_check(self):
+        response = self.client.get(f"/admin/agentic/promotion/{self.series_id}", headers=self.owner_headers)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["series_id"], self.series_id)
+        for key in (
+            "has_recent_agentic_trace",
+            "drift_within_threshold",
+            "ttl_clean",
+            "confidence_stable",
+            "gate_consistent",
+            "skeleton_preview_consistent",
+        ):
+            self.assertIn(key, body["checks"])
+        self.assertIn("ready_for_phase2", body["summary"])
+        self.assertIn("notes", body["summary"])
+
+    def test_admin_list_agentic_series_rejects_anonymous_requests(self):
+        response = self.client.get("/admin/agentic/series")
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_list_agentic_series(self):
+        response = self.client.get("/admin/agentic/series", headers=self.owner_headers)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn("series_ids", body)
+        self.assertIn("count", body)
+        self.assertEqual(body["count"], len(body["series_ids"]))
+
+    def test_admin_agentic_history_rejects_anonymous_requests(self):
+        response = self.client.get(f"/admin/agentic/history/{self.series_id}")
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_agentic_history(self):
+        response = self.client.get(f"/admin/agentic/history/{self.series_id}", headers=self.owner_headers)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["series_id"], self.series_id)
+        self.assertEqual(body["history"], [])
+        self.assertIn("note", body)
+
     # -- 3: route wiring introduces no new write path ------------------------
 
     def test_admin_agentic_routes_are_not_registered_under_any_other_prefix(self):

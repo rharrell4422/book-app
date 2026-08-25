@@ -54,7 +54,7 @@ skeleton-related; it exists purely for logging/diagnostics/evaluation.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
@@ -317,8 +317,21 @@ def run_agentic_turn(series_id: int, context: dict) -> dict:
         # compute_skeleton_updates_merge's own docstring. Never calls
         # apply_skeleton_updates/_upsert_skeleton_row, so this can never
         # write skeleton_json.
+        #
+        # Bugfix (found while implementing the promotion checklist, which
+        # is the first Phase 1 caller to exercise this against a skeleton
+        # that already has a real `discovered` entry): `now` must be a
+        # naive UTC datetime, matching every existing entry's own
+        # first_seen_at/last_confirmed_at (written via `datetime.utcnow()`
+        # -- see services/skeleton_store.py's own two call sites and
+        # services/agentic_ttl_validator.py's identical note) and
+        # `_is_expired_discovered_entry`'s subtraction against them. A
+        # tz-aware `datetime.now(timezone.utc)` here raised
+        # "can't subtract offset-naive and offset-aware datetimes" for any
+        # series with even one discovered entry -- previously untested
+        # because no earlier Phase 1 test fed one through this call site.
         preview_entries = compute_skeleton_updates_merge(
-            skeleton_entries, skeleton_updates_preview, now=datetime.now(timezone.utc), series_id=series_id
+            skeleton_entries, skeleton_updates_preview, now=datetime.utcnow(), series_id=series_id
         )
         agentic_hooks.shadow_skeleton_merge_trace(context, skeleton_entries, preview_entries)
         trace["skeleton_merge_previews"].append(
