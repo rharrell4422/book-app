@@ -315,6 +315,39 @@ MAX_PUBLICATION_DATE_BACKFILL_LOOKUPS = 8
 MAX_MISSING_VOLUME_DATE_VERIFICATION_LOOKUPS = 3
 
 
+def _find_matching_provider_date(
+    hits: list[dict], isbn13: str, title_key: str, author: str
+) -> tuple[str | None, str | None]:
+    """NS-6: the shared "does this provider hit match this candidate, and
+    if so what's its date/isbn13" loop body used by both
+    backfill_missing_publication_dates and
+    verify_missing_volume_recovery_dates below (the latter reuses it once
+    for its Hardcover lookup and once more, with isbn13 forced blank, for
+    its Apify fallback -- Apify hits are always matched by title+author
+    only, never by ISBN, regardless of whether the candidate itself has
+    one).
+
+    Returns (published_date, isbn13) for the first hit that matches by
+    ISBN (when isbn13 is given) or by core_title_key, and whose authors
+    match via _author_matches -- or (None, None) if nothing matches. Pure
+    lookup only; callers decide what to do with a match (fill only if
+    blank, always override, etc.).
+    """
+    for hit in hits:
+        if isbn13:
+            if str(hit.get("isbn13") or "").strip() != isbn13:
+                continue
+        elif core_title_key(str(hit.get("title") or "")) != title_key:
+            continue
+        if not _author_matches(hit.get("authors") or [], author):
+            continue
+        hit_date = str(hit.get("published_date") or "").strip()
+        if not hit_date:
+            continue
+        return hit_date, (str(hit.get("isbn13") or "").strip() or None)
+    return None, None
+
+
 def backfill_missing_publication_dates(candidates: list[dict], author: str) -> None:
     """Fills in a real published_date for candidates that don't have one,
     by issuing a dedicated Hardcover lookup per candidate (by ISBN when
@@ -366,23 +399,11 @@ def backfill_missing_publication_dates(candidates: list[dict], author: str) -> N
         lookups_done += 1
 
         title_key = core_title_key(title)
-        for hit in hits:
-            if isbn13:
-                if str(hit.get("isbn13") or "").strip() != isbn13:
-                    continue
-            elif core_title_key(str(hit.get("title") or "")) != title_key:
-                continue
-            if not _author_matches(hit.get("authors") or [], author):
-                continue
-            hit_date = str(hit.get("published_date") or "").strip()
-            if not hit_date:
-                continue
+        hit_date, hit_isbn13 = _find_matching_provider_date(hits, isbn13, title_key, author)
+        if hit_date:
             raw["published_date"] = hit_date
-            if not isbn13:
-                hit_isbn13 = str(hit.get("isbn13") or "").strip()
-                if hit_isbn13:
-                    raw["isbn13"] = hit_isbn13
-            break
+            if not isbn13 and hit_isbn13:
+                raw["isbn13"] = hit_isbn13
 
 
 def verify_missing_volume_recovery_dates(candidates: list[dict], author: str) -> None:
@@ -449,37 +470,25 @@ def verify_missing_volume_recovery_dates(candidates: list[dict], author: str) ->
                 hits = _fetch_hardcover(isbn13 or title)
             except Exception:
                 hits = []
-            for hit in hits:
-                if isbn13:
-                    if str(hit.get("isbn13") or "").strip() != isbn13:
-                        continue
-                elif core_title_key(str(hit.get("title") or "")) != title_key:
-                    continue
-                if not _author_matches(hit.get("authors") or [], author):
-                    continue
-                hit_date = str(hit.get("published_date") or "").strip()
-                if hit_date:
-                    verified_date = hit_date
-                    if not isbn13:
-                        verified_isbn13 = str(hit.get("isbn13") or "").strip() or None
-                    break
+            hardcover_date, hardcover_isbn13 = _find_matching_provider_date(hits, isbn13, title_key, author)
+            if hardcover_date:
+                verified_date = hardcover_date
+                if not isbn13:
+                    verified_isbn13 = hardcover_isbn13
 
         if verified_date is None and apify_budget is not None:
             try:
                 apify_hits = fetch_apify_candidates(f"{title} {author}".strip(), None, apify_budget)
             except Exception:
                 apify_hits = []
-            for hit in apify_hits:
-                if core_title_key(str(hit.get("title") or "")) != title_key:
-                    continue
-                if not _author_matches(hit.get("authors") or [], author):
-                    continue
-                hit_date = str(hit.get("published_date") or "").strip()
-                if hit_date:
-                    verified_date = hit_date
-                    if not isbn13 and not verified_isbn13:
-                        verified_isbn13 = str(hit.get("isbn13") or "").strip() or None
-                    break
+            # Apify hits are matched by title+author only, never by ISBN --
+            # forcing isbn13="" here reuses the shared helper's title-match
+            # branch regardless of whether this candidate itself has one.
+            apify_date, apify_isbn13 = _find_matching_provider_date(apify_hits, "", title_key, author)
+            if apify_date:
+                verified_date = apify_date
+                if not isbn13 and not verified_isbn13:
+                    verified_isbn13 = apify_isbn13
 
         if verified_date and verified_date != existing_date:
             _log(
@@ -1395,13 +1404,16 @@ def _fetch_all_providers_parallel(
     no series name), OpenLibrary/Hardcover both get the bare
     `targeted_query_text`, and the web-search query list is the
     lookahead-aware "<series> book <N>" set gated on highest_owned_book_number.
-    Callers whose query shape genuinely differs -- the author-bibliography
-    fallback pass and discover_candidates_for_author's plain author-wide
-    sweep, both of which use OpenLibrary's `author:"<name>"` field query and
-    (for the latter) a different web-search query -- pass
-    openlibrary_query/web_search_queries explicitly to reproduce their own
-    existing query text unchanged; the fallback pass also passes
-    enable_web_search=False since it never queries web search at all.
+    Callers whose query shape genuinely differs pass openlibrary_query/
+    web_search_queries explicitly to reproduce their own existing query
+    text unchanged: discover_candidates_for_author's plain author-wide
+    sweep uses OpenLibrary's `author:"<name>"` field query plus its own
+    "<author> new books" web-search query, while the series-scoped
+    author-fallback pass (_fetch_fallback_series_providers) stays
+    series-scoped even here -- its OpenLibrary query is `"<series>"
+    "<author>"` (quoted free-text, not the `author:` field form) and it
+    also passes enable_web_search=False by default since it never queries
+    web search unless a caller opts in.
 
     Returns {"google": [...], "openlibrary": [...], "hardcover": [...],
     "web": [...]} exactly like the four raw lists the sequential calls used
@@ -1455,6 +1467,18 @@ def _fetch_all_providers_parallel(
     # fresh on every round. A cache hit short-circuits the fetch entirely
     # (that provider is left out of `tasks` below and never submitted to
     # the executor).
+    #
+    # NS-2: below, this cache is keyed by the internal fetch_results
+    # vocabulary ("google"/"openlibrary"/"hardcover" -- see catalog_
+    # queries), while the web-search fetch functions cache under the
+    # literal "web_search" (see _fetch_brave_web_search and its structured
+    # variant) rather than "web". Not a collision or a bug -- web search's
+    # own cache calls are self-contained, keyed by query text within their
+    # own function and never cross-referenced against this dict's "web"
+    # key -- but it's the same google/openlibrary/hardcover-vs-web_search/
+    # web split documented on _PROVIDER_SORT_RANK in deterministic_
+    # fusion.py (NS-1), so don't expect the two cache namespaces to line
+    # up string-for-string with each other or with `results` below.
     catalog_queries = {
         "google": google_query,
         "openlibrary": resolved_openlibrary_query,

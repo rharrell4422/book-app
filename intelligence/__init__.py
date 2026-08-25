@@ -17,12 +17,18 @@ This module re-exports every public and private name the three submodules
 define, so existing external callers (agents/series_agent.py,
 routers/series.py, routers/admin.py, routers/books.py,
 services/series_check_engine.py, crud/books.py, bootstrap.py,
-importer/importer.py, tests, etc.) are unaffected by the split -- they can
+importer/pipeline.py, tests, etc.) are unaffected by the split -- they can
 keep doing `import intelligence; intelligence.recalculate_intelligence(...)`
 or `from intelligence import lookup_book_summary` exactly as before.
 `discovery_engine` is re-imported here too (not just inside external.py) so
 `intelligence.discovery_engine` keeps resolving to the same module object
 external.py calls into, which some tests patch directly at that path.
+
+DC-3: recompute_series_intelligence() (core.py) and _extract_series_position()
+(external.py) were removed from this package -- both had zero callers
+anywhere in the repo (the importer loops profile-scoped series IDs
+directly via recalculate_intelligence(), see importer/pipeline.py's
+run_import).
 """
 from __future__ import annotations
 
@@ -38,7 +44,6 @@ from intelligence.core import (
     extract_omnibus_ranges,
     recalculate_intelligence,
     recalculate_series_state_for_series,
-    recompute_series_intelligence,
     recount_series_aggregates_for_series,
 )
 from intelligence.admin import (
@@ -51,7 +56,6 @@ from intelligence.admin import (
     restore_soft_deleted_book,
 )
 from intelligence.external import (
-    _extract_series_position,
     logger,
     lookup_book_summary,
 )
@@ -67,7 +71,6 @@ __all__ = [
     "extract_omnibus_ranges",
     "recalculate_intelligence",
     "recalculate_series_state_for_series",
-    "recompute_series_intelligence",
     "recount_series_aggregates_for_series",
     "_truncated_identity_number",
     "find_fractional_identity_collisions",
@@ -76,7 +79,6 @@ __all__ = [
     "purge_orphaned_books",
     "repair_ghost_profile_books",
     "restore_soft_deleted_book",
-    "_extract_series_position",
     "logger",
     "lookup_book_summary",
 ]

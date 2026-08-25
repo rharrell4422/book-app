@@ -10,6 +10,13 @@
 
 ## 0. Two blocking defects in the existing scaffold
 
+**SD-12 / RESOLVED (Phase 0, commit `ea22d7b`):** both defects below have
+since been fixed and are covered by regression tests
+(`tests/test_skeleton_store.py`, `tests/test_confidence_engine.py`). This
+section is kept as historical design rationale -- *why* the merge-based
+skeleton rebuild and the `unverified` confidence grade exist -- not as an
+open item for Phase 1 planning.
+
 These are not design opinions; both are verifiable in the current code and both will silently break an agentic migration if not fixed first. They belong in Phase 0 of the migration plan (§5), before any agent code is written.
 
 ### 0.1 The boot-time skeleton rebuild destroys agent memory

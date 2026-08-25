@@ -81,6 +81,10 @@ def _normalize_series_name_for_identity(value: str | None) -> str:
 
 
 def _normalize_title_for_identity(value: str | None) -> str:
+    # NS-3: the persistence-time sibling of discovery_text.py's core_title_
+    # key/bare_title_key (discovery-time identity matching) -- see that
+    # module's docstring for the full three-way split, including
+    # services/title_normalization.py's separate UI-reformatting concern.
     text = str(value or "").strip()
     text = re.sub(
         r"\((?:audible|audible audio|audio cd|kindle|kindle edition|paperback|hardcover|mass market paperback)[^)]*\)",
@@ -149,16 +153,16 @@ def _canonical_title_identity_key(title: str | None) -> str | None:
 def owned_title_for_identity(book: "models.Book") -> str:
     """The title to use for identity/discovery matching against an existing
     owned book -- Book.canonical_title (provider-resolved) when present,
-    falling back to Book.title (the user's original entry). Every existing
-    row has canonical_title=NULL today, so this is a no-op until FIND
-    binding/Check Now/bulk re-resolution start populating it -- callers that
-    build title-key exclusion sets or dedupe against *existing* rows should
-    use this instead of reading `.title` directly, so a resolved title
-    (e.g. a corrected "Volume 4" -> "Book 4") is recognized under its
-    canonical identity rather than staying keyed off whatever the user
-    originally typed. Never used for the *incoming candidate* side of a
-    comparison -- a fresh FIND/discovery result has no canonical_title of
-    its own yet; that's exactly what Bind assigns.
+    falling back to Book.title (the user's original entry). FIND bind,
+    bulk re-resolution, and Check Now persistence now all populate
+    canonical_title, so this is a real fallback (not a permanent no-op) --
+    callers that build title-key exclusion sets or dedupe against
+    *existing* rows should use this instead of reading `.title` directly,
+    so a resolved title (e.g. a corrected "Volume 4" -> "Book 4") is
+    recognized under its canonical identity rather than staying keyed off
+    whatever the user originally typed. Never used for the *incoming
+    candidate* side of a comparison -- a fresh FIND/discovery result has no
+    canonical_title of its own yet; that's exactly what Bind assigns.
     """
     canonical = str(getattr(book, "canonical_title", None) or "").strip()
     return canonical or str(getattr(book, "title", None) or "")

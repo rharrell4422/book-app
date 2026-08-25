@@ -13,9 +13,14 @@ ranking does the hard work of figuring out which of an author's books
 belong to this series -- this is far more precise than pulling an author's
 entire bibliography and guessing from title text alone, since many authors
 (especially prolific indie/self-published authors) write multiple unrelated
-series or standalone works. If that targeted search returns nothing, we
-fall back to a plain author-bibliography sweep as a lower-confidence
-last resort.
+series or standalone works. If that targeted search looks seriously
+incomplete or low-confidence (not just literally empty), we fall back to
+a second, still series-scoped sweep -- built around the same "<series
+name> <author>" text, not a bare author-bibliography query -- as a
+lower-confidence widening of the same search rather than an unrelated
+one; see discover_candidates_for_series's own docstring for the full
+trigger condition and _fetch_fallback_series_providers for how the
+fallback query is built.
 
 Note: Google Books' unauthenticated (no API key) quota is a small pool
 shared globally across all callers without a key, so it may return 429s
@@ -107,6 +112,7 @@ from discovery_text import (
     primary_author_name,
     _author_matches,
     _to_int_or_none,
+    _to_float_or_none,
     _integral_or_none,
 )
 from provider_io import (
@@ -542,13 +548,16 @@ def _fetch_targeted_series_providers(
     provider_failures: list[dict] = []
     any_provider_succeeded = False
 
-    google_raw = fetch_results["google"]
+    # DC-9: google/openlibrary/web results are only read below via
+    # fetch_results[...] itself (through _fuse_and_score_candidates and
+    # _promote_web_search_health_diagnostics) -- unlike hardcover_raw,
+    # which this function's own missing-credential check reads directly,
+    # they don't need a local variable of their own.
     if "google" in failures:
         provider_failures.append({"provider": "google_books", "error": str(failures["google"])})
     else:
         any_provider_succeeded = True
 
-    openlibrary_raw = fetch_results["openlibrary"]
     if "openlibrary" in failures:
         provider_failures.append({"provider": "openlibrary", "error": str(failures["openlibrary"])})
     else:
@@ -560,7 +569,6 @@ def _fetch_targeted_series_providers(
     elif hardcover_raw or os.environ.get("HARDCOVER_API_KEY", "").strip():
         any_provider_succeeded = True
 
-    web_search_raw = fetch_results["web"]
     if _web_search_enabled() and _llm_structuring_enabled():
         if "web" in failures:
             provider_failures.append({"provider": "web_search", "error": str(failures["web"])})
@@ -582,7 +590,6 @@ def _fetch_fallback_series_providers(
     highest_owned_book_number: int | None,
     author: str,
     *,
-    other_known_series_names: set[str] | None,
     enable_fallback_web_search: bool,
     discovery_drop_diagnostics: list[dict],
     telemetry: "DiscoveryTelemetry | None",
@@ -607,11 +614,12 @@ def _fetch_fallback_series_providers(
     structuring here is a noisier, costlier signal than the catalog APIs
     already provide.
 
-    Explicit cross-series contamination -- a fallback hit tagged with one
-    of this author's OTHER tracked series' names -- is dropped before
-    fusion ever sees it, rather than disabling the whole pass just because
-    other series exist (see discover_candidates_for_series's own docstring
-    and _is_cross_series_contamination).
+    Explicit cross-series contamination -- a fallback hit whose own
+    series_name_hint is explicitly incompatible with this series -- is
+    dropped before fusion ever sees it, rather than disabling the whole
+    pass just because other series exist (see
+    discover_candidates_for_series's own docstring and
+    _is_cross_series_contamination).
 
     Returns (fallback_results, provider_failures, any_provider_succeeded),
     same shape as _fetch_targeted_series_providers.
@@ -635,7 +643,7 @@ def _fetch_fallback_series_providers(
         apify_budget=apify_budget,
     )
     fallback_results = _filter_cross_series_contamination(
-        fallback_results, series_name, other_known_series_names, diagnostics=discovery_drop_diagnostics
+        fallback_results, series_name, diagnostics=discovery_drop_diagnostics
     )
     fallback_failures = fallback_results["_failures"]
     provider_failures: list[dict] = []
@@ -774,7 +782,6 @@ def discover_candidates_for_series(
     *,
     exclude_title_keys: set[str] | None = None,
     allow_author_fallback: bool = True,
-    other_known_series_names: set[str] | None = None,
     enable_fallback_web_search: bool = False,
     progress_callback=None,
     highest_owned_book_number: int | None = None,
@@ -803,13 +810,14 @@ def discover_candidates_for_series(
     in one series, so a broad author sweep on top would be redundant).
 
     Having other tracked series by this author no longer disables the
-    fallback pass outright -- pass their names as other_known_series_names
-    and any fallback hit EXPLICITLY tagged as one of those (not simply
-    unlabeled) is dropped before it ever reaches fusion; see
-    _is_cross_series_contamination. The fallback's own results are additive
-    to the targeted pass's, not a replacement for them, since the targeted
-    pass may well have already found real, legitimate matches even while
-    still triggering fallback for being incomplete.
+    fallback pass outright: any fallback hit EXPLICITLY tagged (via its own
+    series_name_hint) as belonging to a different series than the one
+    being checked is dropped before it ever reaches fusion, regardless of
+    whether that other series happens to be one this profile tracks too --
+    see _is_cross_series_contamination. The fallback's own results are
+    additive to the targeted pass's, not a replacement for them, since the
+    targeted pass may well have already found real, legitimate matches
+    even while still triggering fallback for being incomplete.
 
     The fallback pass has never queried web search by default, since
     web-search+LLM structuring here is a noisier, costlier signal than the
@@ -914,7 +922,6 @@ def discover_candidates_for_series(
             series_name,
             highest_owned_book_number,
             author,
-            other_known_series_names=other_known_series_names,
             enable_fallback_web_search=enable_fallback_web_search,
             discovery_drop_diagnostics=discovery_drop_diagnostics,
             telemetry=telemetry,
@@ -1092,13 +1099,15 @@ def discover_candidates_for_author(
     )
     failures = fetch_results["_failures"]
 
-    google_raw = fetch_results["google"]
+    # DC-9: see _fetch_targeted_series_providers's matching comment --
+    # google/openlibrary/web results are only read below via
+    # fetch_results[...] itself, so (unlike hardcover_raw) they don't need
+    # a local variable of their own.
     if "google" in failures:
         provider_failures.append({"provider": "google_books", "error": str(failures["google"])})
     else:
         any_provider_succeeded = True
 
-    openlibrary_raw = fetch_results["openlibrary"]
     if "openlibrary" in failures:
         provider_failures.append({"provider": "openlibrary", "error": str(failures["openlibrary"])})
     else:
@@ -1110,7 +1119,6 @@ def discover_candidates_for_author(
     elif hardcover_raw or os.environ.get("HARDCOVER_API_KEY", "").strip():
         any_provider_succeeded = True
 
-    web_search_raw = fetch_results["web"]
     if _web_search_enabled() and _llm_structuring_enabled():
         if "web" in failures:
             provider_failures.append({"provider": "web_search", "error": str(failures["web"])})

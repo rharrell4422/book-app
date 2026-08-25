@@ -2,22 +2,32 @@
 
 **Purpose:** Repo-grounded reference for designing an agentic replacement of (or overlay on) the current deterministic multi-pass series-discovery pipeline. Every claim below is traceable to a specific file/function/line in this repo as of commit `fdbec65` (branch `main`, working tree clean). Companion document: `discovery_catchup_architecture_spec.md` (the deterministic pipeline's own design history — read that for *why* each piece exists; this document is organized for *where an agent would plug in*).
 
-**Load-bearing fact for the whole design exercise:** this repo already has a **shadow-mode agentic scaffold half-built**, running today, in production, on every Check Now click. It does nothing yet (nothing reads its output), but the seams it defines are almost certainly the seams a real migration should use. See §0.
+**Load-bearing fact for the whole design exercise:** this repo already has a **shadow-mode agentic scaffold half-built**, running today, in production, on every Check Now click. As of this map's commit it did nothing yet (nothing read its output); as of SD-12's update to §0 below, its delta/confidence phases now drive live routing. Either way, the seams it defines are almost certainly the seams a real migration should use. See §0.
 
 ---
 
 ## 0. Pre-existing agentic scaffold (read this first)
 
-Four modules already exist, explicitly phased, all shadow-mode (log-only, zero effect on behavior):
+**SD-12 / UPDATED since this map was written (commit `fdbec65`):** phases 2
+and 3 are no longer shadow-only -- delta now feeds `compute_confidence`,
+and `confidence_engine`'s `overall` grade now drives live accept/drop/
+needs-review routing in `agents/series_agent.py`'s manual-override
+routing block (see that comment for the authoritative behavior). Only
+phase 3.5/4 (external-reality diagnostics) remains pure shadow-mode
+logging. The table below is kept as-written for traceability of the
+scaffold's original design; treat the "Consumed by" column for phases 2-3
+as historical, not current-state.
+
+Four modules already exist, explicitly phased, all shadow-mode (log-only, zero effect on behavior) as of this map's commit:
 
 | Phase | Module | Trigger | What it does | Consumed by |
 |---|---|---|---|---|
 | 1 | `services/skeleton_store.py` (`backfill_skeleton_for_series`) | On boot (`main.py:13,30`, `backfill_all_skeletons`), and callable per-series | Deterministic rebuild of `models.SeriesSkeleton` (one row per series, `skeleton_json`: list of `{book_number, title, status, confidence, release_date, edition_hints, sources, first_seen_at, last_confirmed_at}`) purely from current owned `Book` rows | Phase 2 (delta_engine) reads it as ground truth |
-| 2 | `delta_engine.py` (`compute_series_delta`) | Every `run_series_check` call (`agents/series_agent.py:441-447`) | Pure function `(skeleton_entries, PRE-filter unified_candidates) -> {missing_books, malformed_books, numbering_gaps}` | Logged as `series_delta`; nothing reads it |
-| 3 | `confidence_engine.py` (`compute_confidence`) | Same call site (`agents/series_agent.py:449-457`) | Pure function scoring each candidate on 4 dimensions (provider/title/number/series-alignment confidence, each `zero\|low\|medium\|high`) → deterministic `overall` | Logged as `series_confidence`; nothing reads it |
-| 3.5/4 | Inline in `agents/series_agent.py:598-954` | Same call | External-total-vs-owned gap analysis (Hardcover `series_total_hint`), per-drop-reason diagnostics (`discovery_engine._record_drop_diagnostic`, threaded through nearly every filter point), `new_volume_flags` | Logged as `series_external_reality`; nothing reads it |
+| 2 | `delta_engine.py` (`compute_series_delta`) | Every `run_series_check` call (`agents/series_agent.py:441-447`) | Pure function `(skeleton_entries, PRE-filter unified_candidates) -> {missing_books, malformed_books, numbering_gaps}` | *(as of this map)* Logged as `series_delta`; nothing reads it. **Now:** feeds `confidence_engine.compute_confidence` directly. |
+| 3 | `confidence_engine.py` (`compute_confidence`) | Same call site (`agents/series_agent.py:449-457`) | Pure function scoring each candidate on 4 dimensions (provider/title/number/series-alignment confidence, each `zero\|low\|medium\|high`) → deterministic `overall` | *(as of this map)* Logged as `series_confidence`; nothing reads it. **Now:** drives live accept/drop/needs-review routing. |
+| 3.5/4 | Inline in `agents/series_agent.py:598-954` | Same call | External-total-vs-owned gap analysis (Hardcover `series_total_hint`), per-drop-reason diagnostics (`discovery_engine._record_drop_diagnostic`, threaded through nearly every filter point), `new_volume_flags` | Logged as `series_external_reality`; nothing reads it -- still true today. |
 
-**Why this matters for the migration design:** these four modules already define exactly the kind of structured, machine-readable "world model" (skeleton + delta + confidence + drop-reasons) an agent's tool-calling loop would want to consume. The migration doesn't need to invent this shape — it needs to decide when to stop treating it as shadow-only and start letting an agent read it, and eventually act on it. `_malformed_reason` in `delta_engine.py:48-79` and the confidence dimensions in `confidence_engine.py` are effectively pre-written "agent judgment" heuristics, deterministic-only today.
+**Why this matters for the migration design:** these four modules already define exactly the kind of structured, machine-readable "world model" (skeleton + delta + confidence + drop-reasons) an agent's tool-calling loop would want to consume. The migration doesn't need to invent this shape — it needs to decide when to stop treating it as shadow-only and start letting an agent read it, and eventually act on it (now already true for phases 2-3, per the update note above). `_malformed_reason` in `delta_engine.py:48-79` and the confidence dimensions in `confidence_engine.py` are effectively pre-written "agent judgment" heuristics, deterministic-only today.
 
 ---
 

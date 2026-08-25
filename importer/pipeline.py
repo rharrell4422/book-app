@@ -16,14 +16,13 @@ import os
 import re
 import csv
 import traceback
-from datetime import datetime
 from typing import List, Tuple, Dict, Any
 
 try:
     import pandas as pd
     from sqlalchemy.orm import Session
-    from sqlalchemy import func
 
+    import crud
     from database import SessionLocal
     from models import Series, Book
     from intelligence import recalculate_intelligence
@@ -103,34 +102,6 @@ def map_headers(raw_headers: List[str]) -> Tuple[Dict[str, str], List[str]]:
             unknown_headers.append(h)
 
     return mapping, unknown_headers
-
-
-# ------------------------------------------------------------
-# Date Parsing
-# ------------------------------------------------------------
-
-def parse_date(value: Any):
-    if value is None or value == "":
-        return None
-
-    # If it's already a datetime/date from pandas, just normalize
-    if isinstance(value, datetime):
-        return value.date()
-
-    # Try common string formats
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y"):
-        try:
-            return datetime.strptime(str(value), fmt).date()
-        except Exception:
-            pass
-
-    # Excel serial date (numeric)
-    try:
-        iv = int(value)
-        base = datetime(1899, 12, 30)
-        return (base + pd.to_timedelta(iv, unit="D")).date()
-    except Exception:
-        return None
 
 
 # ------------------------------------------------------------
@@ -292,57 +263,6 @@ def parse_series_finished_flag(value: Any) -> bool:
     return True
 
 
-def _normalize_series_or_title_text(value: Any) -> str:
-    text = str(value or "").strip().lower()
-    text = text.rstrip(":")
-    text = re.sub(r"\s+", " ", text)
-    return text
-
-
-def _should_create_series_link(book_data: Dict[str, Any]) -> bool:
-    """Require concrete evidence before attempting to link a series for a book row.
-
-    This prevents standalone books (e.g., a single title with the same series name)
-    from being auto-classified as a series.
-    """
-    series_name = str(book_data.get("series_name") or "").strip()
-    if not series_name:
-        return False
-
-    title = str(book_data.get("title") or "").strip()
-    normalized_series = _normalize_series_or_title_text(series_name)
-    normalized_title = _normalize_series_or_title_text(title)
-
-    # Evidence 1: explicit numbering for this row.
-    raw_book_number = book_data.get("book_number")
-    has_explicit_book_number = False
-    try:
-        has_explicit_book_number = raw_book_number is not None and str(raw_book_number).strip() != ""
-    except Exception:
-        has_explicit_book_number = False
-
-    # Evidence 2: explicit series total greater than 1.
-    raw_total = book_data.get("series_total_books") or book_data.get("series_total")
-    has_explicit_series_total = False
-    try:
-        has_explicit_series_total = raw_total is not None and int(raw_total) > 1
-    except Exception:
-        has_explicit_series_total = False
-
-    # Evidence 3: title contains common in-series marker.
-    title_has_series_marker = bool(re.search(r"\bbook\s*\d+", title, flags=re.IGNORECASE))
-
-    # Evidence 4: series name is clearly different from the title text.
-    name_differs_from_title = bool(normalized_series and normalized_title and normalized_series != normalized_title)
-
-    return bool(
-        has_explicit_book_number
-        or has_explicit_series_total
-        or title_has_series_marker
-        or name_differs_from_title
-    )
-
-
 def _find_existing_series_by_name(db: Session, series_name: str | None, profile_id: str) -> Series | None:
     """Return an existing canonical series record by name, scoped to one
     profile's library -- Robbie and Daughter can each track a same-named
@@ -351,6 +271,14 @@ def _find_existing_series_by_name(db: Session, series_name: str | None, profile_
     Import flow policy: do not auto-create new series from title-derived variations.
     A row links to series only when the provided series_name matches an existing
     canonical series name (exact, case-insensitive, after trim).
+
+    NS-8: the case-insensitive fallback reuses crud.get_series_by_name
+    directly rather than re-running the same func.lower(Series.name)==...
+    query a second time under a different name. The exact-case-first query
+    on top of it is a deliberate ordering guard (only relevant if two
+    differently-cased rows for the same profile/name ever existed), kept
+    here rather than folded into crud.get_series_by_name since every other
+    caller of that function has no such ambiguity to resolve.
     """
     cleaned = str(series_name or "").strip()
     if not cleaned:
@@ -360,11 +288,7 @@ def _find_existing_series_by_name(db: Session, series_name: str | None, profile_
     if existing:
         return existing
 
-    return (
-        db.query(Series)
-        .filter(func.lower(Series.name) == cleaned.lower(), Series.profile_id == profile_id)
-        .first()
-    )
+    return crud.get_series_by_name(db, cleaned, profile_id)
 
 
 _SERIES_NAME_LEADING_MARKER_PATTERN = re.compile(r"^[\s\-\u2010-\u2015_.:]+")

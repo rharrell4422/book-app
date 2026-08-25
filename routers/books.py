@@ -153,10 +153,12 @@ def read_book_by_id(book_id: int, db: Session = Depends(get_db), profile_id: str
     return db_book
 
 
-@router.put("/{book_id}", response_model=schemas.BookResponse)
-def put_book(
-    book_id: int, book: schemas.BookUpdate, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)
-):
+def _update_book_or_404(book_id: int, book: schemas.BookUpdate, db: Session, profile_id: str):
+    """Shared body for PUT/PATCH `/{book_id}` -- DC-11: both verbs are
+    exposed for REST-semantics reasons (full-replace vs. partial-update
+    clients), but crud.update_book() already treats every field as
+    optional/partial, so there's no actual behavior difference to keep
+    two copies of today."""
     try:
         updated = crud.update_book(db, book_id, book, profile_id)
     except InvalidSeriesForProfileError as exc:
@@ -166,6 +168,13 @@ def put_book(
     if not updated:
         raise HTTPException(status_code=404, detail="Book not found")
     return updated
+
+
+@router.put("/{book_id}", response_model=schemas.BookResponse)
+def put_book(
+    book_id: int, book: schemas.BookUpdate, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)
+):
+    return _update_book_or_404(book_id, book, db, profile_id)
 
 
 @router.post("/{book_id}/summary")
@@ -195,15 +204,7 @@ def fetch_and_save_book_summary(book_id: int, db: Session = Depends(get_db), pro
 def patch_book(
     book_id: int, book: schemas.BookUpdate, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)
 ):
-    try:
-        updated = crud.update_book(db, book_id, book, profile_id)
-    except InvalidSeriesForProfileError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    except BookNumberRequiresSeriesError:
-        raise HTTPException(status_code=400, detail="Book number requires a series.")
-    if not updated:
-        raise HTTPException(status_code=404, detail="Book not found")
-    return updated
+    return _update_book_or_404(book_id, book, db, profile_id)
 
 
 @router.delete("/{book_id}")

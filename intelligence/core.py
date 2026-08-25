@@ -330,17 +330,3 @@ def recalculate_intelligence(db, series_id: int, scan_result: dict | None = None
         **intelligence,
         **aggregates,
     }
-
-
-def recompute_series_intelligence(db):
-    """
-    Recompute intelligence for ALL series in the database.
-    This is the function the importer expects.
-    """
-
-    all_series = db.query(Series).all()
-
-    for series in all_series:
-        recalculate_intelligence(db, series.id)
-
-    return True

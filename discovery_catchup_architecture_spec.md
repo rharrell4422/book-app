@@ -32,8 +32,10 @@
 Worst case for a single Check Now on a long/gappy series (author-fallback + reconciliation + missing-volume pass all triggered): **~16 Brave calls, ~9 LLM calls, in one click.**
 
 **No caching layer exists anywhere in `discovery_engine.py`.** Every fetch function (`_fetch_google_books`, `_fetch_openlibrary`, `_fetch_hardcover`, `_fetch_brave_web_search`, and both Anthropic call sites) hits its live API fresh on every invocation — no memoization by query, URL, or series.
+**Resolved:** per the Status line at the top of this doc, the two-layer cache (§7.1, `services/discovery_cache.py`) has since shipped.
 
 **No instrumentation exists today** to count Brave/LLM calls per job — `services/discovery_logging.py`'s `log_discovery_summary` tracks provider ledger/candidate counts but not call volume.
+**Resolved:** `services/discovery_telemetry.py`'s `DiscoveryTelemetry` (§2.5) has since shipped and covers exactly this gap.
 
 ---
 

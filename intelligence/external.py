@@ -24,19 +24,6 @@ import discovery_engine
 logger = logging.getLogger(__name__)
 
 
-def _extract_series_position(text: str | None) -> int | None:
-    if not text:
-        return None
-
-    match = re.search(r"\b(?:book|volume|vol\.?|#)\s*(\d+)\b", text, flags=re.IGNORECASE)
-    if not match:
-        return None
-    try:
-        return int(match.group(1))
-    except (TypeError, ValueError):
-        return None
-
-
 def lookup_book_summary(
     title: str,
     author: str | None = None,

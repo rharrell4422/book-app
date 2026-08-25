@@ -1,5 +1,12 @@
 """Title normalization / re-formatting for the `/series/{id}/normalize_titles`
 endpoint.
+
+NS-3: this is UI-facing re-formatting (producing a title meant to be read
+by a person), not an identity key -- do not use this module's output for
+matching/dedup. See discovery_text.py's module docstring for how this
+relates to the two identity-matching normalizers it's deliberately kept
+separate from (discovery_text.core_title_key/bare_title_key and
+services/identity.py's _normalize_title_for_identity).
 """
 
 import re

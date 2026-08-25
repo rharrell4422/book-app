@@ -46,14 +46,3 @@ def provenance_for_declined_or_manual_entry() -> dict:
     legacy row whose origin was never recorded at all.
     """
     return {"metadata_source": "user", "needs_reresolution": None}
-
-
-def is_verified(metadata_source: str | None) -> bool:
-    """A row is "verified" iff metadata_source is "provider" or
-    "discovery" -- deliberately derived from metadata_source rather than a
-    separate stored boolean, so the two can never drift out of sync.
-    "provider" rows with needs_reresolution=True are still verified (see
-    provenance_for_find_bind above); needs_reresolution only means "queue
-    for a future re-check", not "not verified yet".
-    """
-    return metadata_source in ("provider", "discovery")

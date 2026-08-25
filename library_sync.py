@@ -28,7 +28,6 @@ def update_from_series(series_id: int, profile_id: str | None = None) -> dict:
         ).all()
 
         updated_rows = 0
-        inserted_rows = 0
         mirrored_rows = 0
 
         today = date.today()
@@ -95,7 +94,6 @@ def update_from_series(series_id: int, profile_id: str | None = None) -> dict:
         return {
             "series_id": series_id,
             "mirrored_rows": mirrored_rows,
-            "inserted_rows": inserted_rows,
             "updated_rows": updated_rows,
             "synced_at": date.today().isoformat(),
         }

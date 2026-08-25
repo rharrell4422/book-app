@@ -197,12 +197,13 @@ def find_book_candidates(
     candidates, scores each with a confidence tier, and returns them ranked
     (highest confidence first, ties broken by provider agreement count).
 
-    `book_number`/`series_name` are accepted and echoed back in the
-    response's `query` block for the caller's own display/context use, and
-    folded into the provider queries below to narrow results -- but (per
-    the consolidated spec's restored confidence-tier definition) are not
-    themselves part of the three-signal confidence formula, which is
-    author/ISBN/title only.
+    `book_number`/`series_name` are both accepted and echoed back in the
+    response's `query` block for the caller's own display/context use, but
+    only `series_name` is actually folded into the provider queries below
+    (see `plain_query_for`) to narrow results -- `book_number` plays no
+    role in query construction at all. Neither is part of the three-signal
+    confidence formula either way (per the consolidated spec's restored
+    confidence-tier definition), which is author/ISBN/title only.
     """
     clean_title = str(title or "").strip()
     clean_author = str(author or "").strip() or None

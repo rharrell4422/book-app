@@ -1,13 +1,14 @@
-"""Phase 2 of agentic discovery (see project design chat): a deterministic,
+"""Phase 0 of agentic discovery (see project design chat): a deterministic,
 side-effect-free comparison between a series' durable SeriesSkeleton
-baseline (Phase 1) and one Check Now run's discovered candidates.
+baseline and one Check Now run's discovered candidates.
 
-Shadow mode only. Nothing in this module touches the database, calls an
-LLM, makes a network request, or mutates its inputs -- it's a pure
-function of (skeleton_entries, provider_candidates) -> a delta dict. The
-only current caller (agents/series_agent.py) logs the result and discards
-it; nothing reads or acts on it yet, so this module cannot change any
-existing discovery/Check Now behavior.
+Nothing in this module touches the database, calls an LLM, makes a
+network request, or mutates its inputs -- it's a pure function of
+(skeleton_entries, provider_candidates) -> a delta dict. No longer
+shadow-only: its output feeds confidence_engine.compute_confidence, which
+drives live accept/drop/needs-review routing in
+agents/series_agent.py's "Manual-override routing" block (see that
+comment for the authoritative behavior).
 
 Deliberately reuses discovery_engine's own title/metadata guards
 (_title_is_series_variant, looks_like_placeholder_title,
@@ -28,15 +29,7 @@ resolved.
 from datetime import datetime
 
 import discovery_engine
-
-
-def _to_float_or_none(value) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+from discovery_text import _to_float_or_none  # NS-5: shared with confidence_engine.py
 
 
 def _candidate_providers(candidate: dict) -> list[str]:

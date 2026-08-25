@@ -350,22 +350,17 @@ def _fuse_and_score_candidates(
             confidence -= 0.1
         confidence_score = round(min(max(confidence, 0.0), 1.0), 4)
 
-        completeness_values = {
-            "title": primary.get("title"),
-            "authors": merged_authors,
-            "series_name_hint": merged_series_name_hint,
-            "series_number_hint": merged_series_number_hint,
-            "isbn13": merged_isbn13,
-            "published_date": merged_published_date,
-            "description": merged_description,
-        }
-        present_count = sum(
-            1
-            for field in _METADATA_COMPLETENESS_FIELDS
-            for value in (completeness_values.get(field),)
-            if (value if not isinstance(value, list) else bool(value)) not in (None, "", False)
+        metadata_completeness_score = _metadata_completeness_score(
+            {
+                "title": primary.get("title"),
+                "authors": merged_authors,
+                "series_name_hint": merged_series_name_hint,
+                "series_number_hint": merged_series_number_hint,
+                "isbn13": merged_isbn13,
+                "published_date": merged_published_date,
+                "description": merged_description,
+            }
         )
-        metadata_completeness_score = round(present_count / len(_METADATA_COMPLETENESS_FIELDS), 4)
 
         try:
             series_number_value = float(merged_series_number_hint) if merged_series_number_hint is not None else None
@@ -423,6 +418,17 @@ def _unified_candidate_to_raw_dict(candidate: UnifiedCandidate) -> dict:
     published_date/upcoming_hint on top, since those are the fields fusion
     computed with the extra author-match/isbn-trust care described in
     _fuse_and_score_candidates.
+
+    NS-9: this is the deliberate seam where this pipeline's two candidate
+    shapes meet -- the typed UnifiedCandidate dataclass fusion just built,
+    and the flat dict shape every downstream stage (_filter_and_merge,
+    reconciliation, series_agent.py) has always operated on. Rather than
+    migrate those stages to the dataclass, fusion converts back to a dict
+    immediately so the rest of the pipeline is unaffected; the extra
+    confidence_score/metadata_completeness_score/source_provenance fields
+    ride along on that dict only as far as finalize_discovery_output
+    (below), which strips them back off before anything outside this
+    pipeline ever sees a candidate.
     """
     provenance = candidate.source_provenance or [{}]
     base = dict(provenance[0])
@@ -460,22 +466,15 @@ def _resolve_candidate_number(candidate: "UnifiedCandidate", series_name: str | 
     return float(inferred) if inferred is not None else None
 
 
-def _reconciled_completeness_score(
-    title: str, authors: list[str], series_name: str | None, series_number: float | None, isbn13: str | None,
-    published_date: str | None, description,
-) -> float:
-    # Mirrors _fuse_and_score_candidates' own present-field-count approach
-    # (same _METADATA_COMPLETENESS_FIELDS) so a reconciled candidate's score
-    # stays comparable to one that only ever went through plain fusion.
-    completeness_values = {
-        "title": title,
-        "authors": authors,
-        "series_name_hint": series_name,
-        "series_number_hint": series_number,
-        "isbn13": isbn13,
-        "published_date": published_date,
-        "description": description,
-    }
+def _metadata_completeness_score(completeness_values: dict) -> float:
+    """NS-7: shared present-field-count scorer for _METADATA_COMPLETENESS_
+    FIELDS, extracted out from what used to be near-identical inline blocks
+    in both _fuse_and_score_candidates and _reconciled_completeness_score
+    (below) -- keeping a plain-fusion candidate's score and a reconciled
+    candidate's score computed by literally the same code, not just the
+    same field list, so the two stay comparable by construction rather
+    than by two implementations happening to agree.
+    """
     present_count = sum(
         1
         for field in _METADATA_COMPLETENESS_FIELDS
@@ -483,6 +482,23 @@ def _reconciled_completeness_score(
         if (value if not isinstance(value, list) else bool(value)) not in (None, "", False)
     )
     return round(present_count / len(_METADATA_COMPLETENESS_FIELDS), 4)
+
+
+def _reconciled_completeness_score(
+    title: str, authors: list[str], series_name: str | None, series_number: float | None, isbn13: str | None,
+    published_date: str | None, description,
+) -> float:
+    return _metadata_completeness_score(
+        {
+            "title": title,
+            "authors": authors,
+            "series_name_hint": series_name,
+            "series_number_hint": series_number,
+            "isbn13": isbn13,
+            "published_date": published_date,
+            "description": description,
+        }
+    )
 
 
 
@@ -771,9 +787,7 @@ def _should_trigger_author_fallback(
     return triggered
 
 
-def _is_cross_series_contamination(
-    raw: dict, target_series_name: str | None, other_known_series_names: set[str] | None
-) -> bool:
+def _is_cross_series_contamination(raw: dict, target_series_name: str | None) -> bool:
     """True only when a fallback candidate is EXPLICITLY tagged -- by its
     own series_name_hint, whether from Hardcover's structured field, the
     web-search LLM pass, or _filter_and_merge's own title-text fallback --
@@ -789,14 +803,16 @@ def _is_cross_series_contamination(
     is (see _series_names_compatible's own docstring for the token-overlap
     guard that keeps this narrow).
 
-    other_known_series_names is accepted for call-site compatibility but no
-    longer gates or narrows this check (regression: an author tracked under
+    DC-10: this used to also take an `other_known_series_names` parameter,
+    but any explicit, incompatible series_name_hint has always been treated
+    as contamination unconditionally (regression: an author tracked under
     only ONE series -- e.g. George Wagner's "Jonathan Hunt Thriller
-    Series" -- had contamination detection effectively disabled entirely,
-    since there were no "other tracked series" to compare against, even
-    though the hint on a contaminating candidate was plainly a different
-    series). Any explicit, incompatible series_name_hint is contamination
-    regardless of whether the user happens to track that other series too.
+    Series" -- had contamination detection effectively disabled entirely
+    under the older, narrower rule, since there were no "other tracked
+    series" to compare against, even though the hint on a contaminating
+    candidate was plainly a different series) -- so the parameter never
+    actually gated or narrowed this check and has been removed, along with
+    every call site that threaded it through.
     """
     hint = str(raw.get("series_name_hint") or "").strip()
     if not hint:
@@ -809,7 +825,6 @@ def _is_cross_series_contamination(
 def _filter_cross_series_contamination(
     fetch_results: dict,
     target_series_name: str | None,
-    other_known_series_names: set[str] | None,
     *,
     diagnostics: list[dict] | None = None,
 ) -> dict:
@@ -817,7 +832,7 @@ def _filter_cross_series_contamination(
     for provider in ("google", "openlibrary", "hardcover", "web"):
         kept: list[dict] = []
         for raw in fetch_results.get(provider) or []:
-            if _is_cross_series_contamination(raw, target_series_name, other_known_series_names):
+            if _is_cross_series_contamination(raw, target_series_name):
                 _record_drop_diagnostic(
                     "cross_series_filter",
                     {
@@ -834,6 +849,19 @@ def _filter_cross_series_contamination(
     return filtered
 
 
+# NS-1: this is one of two parallel provider-name vocabularies in this
+# pipeline, and they're deliberately NOT the same strings. The internal
+# fetch_results dict (_fetch_all_providers_parallel's return value, keyed
+# "google"/"openlibrary"/"hardcover"/"web") names providers by which raw
+# _fetch_* function produced them; the candidate-level "source" field
+# below (and on every UnifiedCandidate/raw dict from that point on) names
+# providers by their public catalog identity instead -- "google_books" not
+# "google", "web_search" not "web", plus "apify" (which has no key of its
+# own in fetch_results at all: Apify candidates are prepended into the
+# "web" list upstream, in provider_io.py's web-search sub-flow, before
+# they ever reach fusion). Once a raw dict has a "source" field, nothing
+# downstream of fusion should ever see the fetch_results spelling again.
+#
 # Explicit provider trust ranking, as an ordinal rather than a float weight
 # -- mirrors _PROVIDER_CONFIDENCE_WEIGHT's own hardcover > google_books >
 # openlibrary > web_search ordering, but only used here to break a sort

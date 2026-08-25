@@ -11,6 +11,12 @@ CLI argument parsing, preview, and database-reset logic. Split into:
   command-line entry point.
 - reset.py: reset_database/reset_profile_data.
 
+DC-4: parse_date() and _should_create_series_link() (plus its sole helper
+_normalize_series_or_title_text()) were removed during the RT-6 split --
+both had zero callers (import_row has its own local date-normalization
+closure; _should_create_series_link was already superseded by
+_series_link_decision).
+
 This module re-exports every public and private name the four submodules
 define, so existing external callers (routers/imports.py, tests, etc.) are
 unaffected by the split -- they can keep doing
@@ -35,11 +41,9 @@ from importer.pipeline import (
     SessionLocal,
     _find_existing_series_by_name,
     _is_meaningful_series_name,
-    _normalize_series_or_title_text,
     _NON_SERIES_PLACEHOLDER_VALUES,
     _series_link_decision,
     _SERIES_NAME_LEADING_MARKER_PATTERN,
-    _should_create_series_link,
     _to_float,
     _to_int,
     build_header_lookup,
@@ -51,7 +55,6 @@ from importer.pipeline import (
     load_file,
     map_headers,
     normalize_header,
-    parse_date,
     parse_series_finished_flag,
     read_csv_file,
     read_excel_file,

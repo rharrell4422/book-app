@@ -4,7 +4,6 @@ specification, restored architecture items A1/A2/R1-R3)."""
 import unittest
 
 from services.metadata_provenance import (
-    is_verified,
     provenance_for_declined_or_manual_entry,
     provenance_for_find_bind,
 )
@@ -37,7 +36,7 @@ class ProvenanceForFindBindTest(unittest.TestCase):
 
     def test_every_provider_bind_is_verified_regardless_of_tier(self):
         for tier in ("high", "medium", "low"):
-            self.assertTrue(is_verified(provenance_for_find_bind(tier)["metadata_source"]))
+            self.assertEqual(provenance_for_find_bind(tier)["metadata_source"], "provider")
 
 
 class ProvenanceForDeclinedOrManualEntryTest(unittest.TestCase):
@@ -48,18 +47,7 @@ class ProvenanceForDeclinedOrManualEntryTest(unittest.TestCase):
 
     def test_is_not_verified(self):
         result = provenance_for_declined_or_manual_entry()
-        self.assertFalse(is_verified(result["metadata_source"]))
-
-
-class IsVerifiedTest(unittest.TestCase):
-    def test_provider_and_discovery_are_verified(self):
-        self.assertTrue(is_verified("provider"))
-        self.assertTrue(is_verified("discovery"))
-
-    def test_user_import_and_none_are_not_verified(self):
-        self.assertFalse(is_verified("user"))
-        self.assertFalse(is_verified("import"))
-        self.assertFalse(is_verified(None))
+        self.assertEqual(result["metadata_source"], "user")
 
 
 if __name__ == "__main__":
