@@ -118,3 +118,20 @@ def admin_promotion_plan(series_id: int) -> dict:
     diagnostic. Read-only -- no writes.
     """
     return build_phase2_promotion_plan(series_id)
+
+
+@router.get("/dry-run/{series_id}")
+def admin_agentic_dry_run(series_id: int) -> dict:
+    """Returns the most recent dry-run agentic execution snapshot for one
+    series (`agents/series_agent.py`'s `run_series_check` now runs the
+    Phase 1 shadow loop once more, in parallel, on every live discovery
+    turn -- see that function's own comment for the Phase 2 dual
+    execution mode this powers). History is limited because `services/
+    discovery_telemetry.record_agentic_dry_run` is a log-only fallback,
+    not a queryable store (see `services.agentic_admin_ui_stubs.
+    get_agentic_history`'s identical gap) -- this endpoint returns
+    whatever that stub can honestly reconstruct today (an empty history
+    with an explanatory note), not a fabricated snapshot. Read-only --
+    no writes.
+    """
+    return get_agentic_history(series_id)

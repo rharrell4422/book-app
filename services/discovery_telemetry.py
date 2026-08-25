@@ -361,6 +361,32 @@ def record_agentic_promotion_plan(series_id: int, plan: dict) -> None:
         logger.exception("record_agentic_promotion_plan: failed to log plan for series_id=%s", series_id)
 
 
+def record_agentic_dry_run(series_id: int, payload: dict) -> None:
+    """Phase 2 dual execution mode (`agents/series_agent.py`'s `run_
+    series_check`): logs one live discovery turn's dry-run agentic
+    comparison -- the live snapshot alongside `agents/agentic_series_
+    agent.run_agentic_turn`'s freshly-computed shadow trace, or (on
+    failure) just the error -- for later inspection via `/admin/agentic/
+    dry-run/{series_id}`.
+
+    Purely diagnostic. No writes -- logging one more JSON blob is the
+    only side effect. Same log-only fallback as every other `record_
+    agentic_*` helper above (tagged `agentic_dry_run`), fail-soft: a
+    logging/serialization failure here must never propagate back into
+    `run_series_check`, which already wraps its own call to this in a
+    try/except, but this function guards itself too so it's safe to call
+    from anywhere.
+    """
+    try:
+        logger.info(
+            "agentic_dry_run series_id=%s payload=%s",
+            series_id,
+            json.dumps(payload, default=str),
+        )
+    except Exception:
+        logger.exception("record_agentic_dry_run: failed to log dry-run payload for series_id=%s", series_id)
+
+
 @contextmanager
 def maybe_pass_scope(telemetry: "DiscoveryTelemetry | None", name: str):
     """No-op passthrough when telemetry is None, so call sites don't need

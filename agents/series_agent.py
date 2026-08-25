@@ -1461,6 +1461,63 @@ class SeriesIntelligenceAgent:
                 "cache": cache.summary() if cache is not None else None,
             }
             agentic_hooks.end_turn(agentic_context)
+
+            # Phase 2 kickoff, dual execution mode (`discovery_agentic_
+            # phase1_plan.md`/`discovery_agentic_phase1_evaluation.md`,
+            # not re-litigated here): run the Phase 1 shadow loop
+            # (`agents/agentic_series_agent.run_agentic_turn`) once more,
+            # in parallel with -- never in place of -- the live result
+            # this function is about to return, and log the comparison
+            # for later inspection (`/admin/agentic/dry-run/{series_id}`).
+            # This does NOT change what `result` above already is; it
+            # runs strictly after `result` is fully built and after
+            # RT-1b's own `end_turn` above, purely as a side observation.
+            #
+            # Local imports (not module-level) are required, not just
+            # stylistic: `agents/agentic_series_agent.py` and `services/
+            # agentic_evaluation_harness.py` both import from this module
+            # (`agents.series_agent`) already (see their own module
+            # docstrings) -- a top-level import here would be a circular
+            # import. Deferring to call time, well after both modules
+            # have already finished loading, avoids that entirely.
+            #
+            # Same no-write, fail-soft guarantees as every other Phase 1/2
+            # diagnostic: `run_agentic_turn` never writes skeleton_json/
+            # probes_json or touches confidence/gate logic (see that
+            # module's own docstring), `_observe_live_pipeline` is a pure
+            # read, and any exception here -- from either call, or from
+            # logging itself -- is caught and logged via `record_agentic_
+            # dry_run` instead of ever propagating to this function's
+            # caller or affecting `result`.
+            from services.discovery_telemetry import record_agentic_dry_run
+
+            try:
+                from agents.agentic_series_agent import run_agentic_turn
+                from services.agentic_evaluation_harness import _observe_live_pipeline
+
+                dry_run_context = {"series_id": series_id, "timestamp": datetime.utcnow().isoformat()}
+                agentic_trace = run_agentic_turn(series_id, dry_run_context)
+                live_snapshot = _observe_live_pipeline(series_id, db)
+                record_agentic_dry_run(
+                    series_id,
+                    {
+                        "live_snapshot": live_snapshot,
+                        "agentic_trace": agentic_trace,
+                        "timestamp": dry_run_context["timestamp"],
+                    },
+                )
+            except Exception as dry_run_exc:
+                try:
+                    record_agentic_dry_run(
+                        series_id, {"error": str(dry_run_exc), "timestamp": datetime.utcnow().isoformat()}
+                    )
+                except Exception:
+                    logger.exception(
+                        "run_series_check: Phase 2 dry-run logging itself failed for series_id=%s; "
+                        "continuing (live result is unaffected)",
+                        series_id,
+                    )
+
             if emit_summary:
                 log_discovery_summary(result=result)
             return result

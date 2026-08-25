@@ -288,11 +288,21 @@ class SeriesAgentNoBehaviorChangeTest(unittest.TestCase):
             agent = SeriesIntelligenceAgent()
             result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
 
-        spy_begin.assert_called_once()
+        # Phase 2 dual execution mode (`agents/series_agent.py`'s
+        # run_series_check now also runs `agents/agentic_series_agent.
+        # run_agentic_turn` once, in parallel, right before returning --
+        # see that call site's own comment): that shadow turn calls
+        # `agentic_hooks.begin_turn`/`end_turn`/`record_world_model_
+        # update` a second time on the *same*, shared `agentic_hooks`
+        # module these spies patch, so each of those three now fires
+        # twice per run_series_check call -- once for the live RT-1b
+        # turn, once for the dry-run shadow turn -- rather than the
+        # single call this test previously expected.
+        self.assertEqual(spy_begin.call_count, 2)
         self.assertGreaterEqual(spy_tool_call.call_count, 1)
         self.assertGreaterEqual(spy_reasoning.call_count, 1)
-        spy_world_model.assert_called_once()
-        spy_end.assert_called_once()
+        self.assertEqual(spy_world_model.call_count, 2)
+        self.assertEqual(spy_end.call_count, 2)
 
         # Same outcome as the unpatched run in the previous test.
         self.assertTrue(result["found"])
