@@ -200,6 +200,69 @@ class AsymmetricMergeTest(SkeletonStoreTestBase):
         self.assertEqual(entry["title"], "Cherry Blossom Girls Book 1")
 
 
+class IsbnFieldTest(SkeletonStoreTestBase):
+    """LitRPG-discovery-plan addition: skeleton_json entries now carry an
+    `isbn13` field (see models.SeriesSkeleton's doc comment) -- additive,
+    no migration needed, absent/None wherever no ISBN was available.
+    """
+
+    def _skeleton_row_number(self, number):
+        row = self._skeleton_row()
+        by_number = {e["book_number"]: e for e in row.skeleton_json}
+        return by_number[number]
+
+    def test_library_entry_carries_the_owned_books_isbn13(self):
+        self.db.add(
+            Book(
+                title="Cherry Blossom Girls Book 4",
+                author="Harmon Cooper",
+                series_id=self.series.id,
+                profile_id=self.series.profile_id,
+                series_order=4,
+                book_number=4.0,
+                isbn13="9781234567897",
+                record_status="active",
+                is_read=False,
+            )
+        )
+        self.db.commit()
+
+        backfill_skeleton_for_series(self.db, self.series.id)
+        entry = self._skeleton_row_number(4.0)
+        self.assertEqual(entry["isbn13"], "9781234567897")
+
+    def test_library_entry_with_no_isbn13_gets_none_not_a_missing_key(self):
+        backfill_skeleton_for_series(self.db, self.series.id)
+        entry = self._skeleton_row_number(1.0)
+        self.assertIsNone(entry["isbn13"])
+
+    def test_discovered_entry_carries_isbn13_from_skeleton_updates(self):
+        apply_skeleton_updates(
+            self.db,
+            self.series.id,
+            skeleton_updates=[
+                {
+                    "book_number": 7.0,
+                    "title": "Cherry Blossom Girls Book 7",
+                    "status": "unconfirmed",
+                    "isbn13": "9789999999999",
+                }
+            ],
+        )
+        entry = self._skeleton_row_number(7.0)
+        self.assertEqual(entry["source_class"], "discovered")
+        self.assertEqual(entry["isbn13"], "9789999999999")
+
+    def test_discovered_entry_with_no_isbn13_in_the_update_is_none(self):
+        apply_skeleton_updates(
+            self.db,
+            self.series.id,
+            skeleton_updates=[{"book_number": 8.0, "title": "Cherry Blossom Girls Book 8", "status": "unconfirmed"}],
+        )
+        entry = self._skeleton_row_number(8.0)
+        self.assertIsNone(entry.get("isbn13"))
+
+
 class StatusEnumValidationTest(SkeletonStoreTestBase):
     """FIX-SS-ENUM: `status` is documented (models.SeriesSkeleton's
     docstring) as one of "confirmed" | "unconfirmed" | "upcoming", but

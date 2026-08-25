@@ -71,6 +71,22 @@ SERIES_CHECK_PRECHECK_STALENESS_DAYS = 3
 # timestamp to skip re-running discovery is disabled here. Flip back to
 # True once discovery is confirmed working end-to-end and repeated manual
 # re-checks of the same series are no longer the primary dev workflow.
+#
+# LitRPG-discovery-plan isolated validation (2026-08-25): re-checked
+# discovery_engine.precheck_for_new_volumes itself against every fusion/
+# gate/delta_engine/known-set fix made since this was disabled (fusion
+# grouping, per-number-slot gate confidence, delta_engine's duplicate_number
+# narrowing, the known-identity-sets poisoning fix) -- it calls none of
+# that code (no _fuse_and_score_candidates, no catalog_providers_are_
+# sufficient; enable_web_search=False means _fetch_all_providers_parallel's
+# own gate block is never even reached) and its existing test coverage
+# (PrecheckForNewVolumesTest) still passes unchanged, so its logic is
+# confirmed independent and safe to re-enable on its own merits. Left OFF
+# here anyway: the LitRPG test pass this validation was done for is itself
+# exactly the "repeated manual re-check to verify discovery" workflow the
+# comment above describes, so flipping this now would risk the same
+# silent-skip confusion on a LitRPG series checked twice in quick
+# succession. Flip to True once that test pass is done.
 SERIES_CHECK_PRECHECK_ENABLED = False
 
 

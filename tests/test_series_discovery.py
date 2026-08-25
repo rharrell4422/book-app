@@ -585,6 +585,171 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
         )
 
 
+class NormalizeSeriesNameForQueryTest(unittest.TestCase):
+    """discovery_text.normalize_series_name_for_query -- the LitRPG-
+    discovery-plan query normalizer. Strips a trailing LitRPG-style
+    genre-marketing subtitle from a series name for outgoing query text
+    only; every other identity use of series_name is untouched (see the
+    integration tests below and the function's own docstring).
+    """
+
+    def test_strips_a_litrpg_adventure_subtitle(self):
+        self.assertEqual(
+            discovery_engine.normalize_series_name_for_query(
+                "He Who Fights with Monsters: A LitRPG Adventure"
+            ),
+            "He Who Fights with Monsters",
+        )
+
+    def test_strips_a_litrpg_progression_fantasy_subtitle(self):
+        self.assertEqual(
+            discovery_engine.normalize_series_name_for_query(
+                "Ripple System: A LitRPG Progression Fantasy Adventure"
+            ),
+            "Ripple System",
+        )
+
+    def test_leaves_a_series_name_with_no_litrpg_subtitle_unchanged(self):
+        self.assertEqual(
+            discovery_engine.normalize_series_name_for_query("Percy Jackson and the Olympians"),
+            "Percy Jackson and the Olympians",
+        )
+
+    def test_none_and_empty_input_return_empty_string(self):
+        self.assertEqual(discovery_engine.normalize_series_name_for_query(None), "")
+        self.assertEqual(discovery_engine.normalize_series_name_for_query(""), "")
+        self.assertEqual(discovery_engine.normalize_series_name_for_query("   "), "")
+
+    def test_a_name_that_becomes_empty_after_stripping_falls_back_to_the_original(self):
+        # Defensive: the pattern can't actually reduce a real series name to
+        # nothing on its own (it always requires a non-LitRPG stem before
+        # the colon), but normalize_series_name_for_query still guards
+        # against returning an empty query string for any edge case that
+        # somehow strips everything.
+        self.assertEqual(
+            discovery_engine.normalize_series_name_for_query(": A LitRPG Adventure"),
+            ": A LitRPG Adventure",
+        )
+
+
+class LitRpgQueryNormalizationIntegrationTest(unittest.TestCase):
+    """Confirms normalize_series_name_for_query is actually wired into the
+    outgoing query strings at each of its real call sites -- not just
+    correct in isolation (see NormalizeSeriesNameForQueryTest above) -- and
+    that every other use of series_name at those same call sites (fusion/
+    contamination identity, gate/telemetry logging) still sees the
+    original, unstripped string.
+    """
+
+    def setUp(self):
+        self._env_patch = patch.dict(os.environ, {"SERPER_API_KEY": "", "ANTHROPIC_API_KEY": ""})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+
+    def test_fetch_all_providers_parallel_strips_subtitle_from_its_own_google_query_only(self):
+        # google_query is the one query string _fetch_all_providers_parallel
+        # builds internally from the raw `series_name` parameter -- everything
+        # else here (hardcover_query, the openlibrary default) is whatever
+        # the caller already passed in as targeted_query_text, deliberately
+        # left un-stripped in this call so the two behaviors don't get
+        # conflated with each other.
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]) as mock_hardcover, patch.object(
+            discovery_engine, "_fetch_google_books", return_value=[]
+        ) as mock_google, patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]) as mock_openlibrary:
+            discovery_engine._fetch_all_providers_parallel(
+                "Some Author",
+                "Ripple System: A LitRPG Progression Fantasy Adventure",
+                "Ripple System: A LitRPG Progression Fantasy Adventure Some Author",
+                None,
+                author="Some Author",
+                enable_web_search=False,
+            )
+
+        mock_google.assert_called_once()
+        self.assertEqual(mock_google.call_args[0][0], '"Ripple System" inauthor:"Some Author"')
+        # Hardcover/OpenLibrary use targeted_query_text/openlibrary_query
+        # verbatim -- normalizing those is each *caller's* responsibility
+        # (see discover_candidates_for_series/_fetch_fallback_series_
+        # providers/precheck_for_new_volumes tests below), not this
+        # function's.
+        self.assertEqual(
+            mock_hardcover.call_args[0][0], "Ripple System: A LitRPG Progression Fantasy Adventure Some Author"
+        )
+        self.assertEqual(
+            mock_openlibrary.call_args[0][0], "Ripple System: A LitRPG Progression Fantasy Adventure Some Author"
+        )
+
+    def test_discover_candidates_for_series_strips_subtitle_from_its_targeted_query_text(self):
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
+            discovery_engine, "_fetch_google_books", return_value=[]
+        ) as mock_google, patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]):
+            discovery_engine.discover_candidates_for_series(
+                "Ripple System: A LitRPG Progression Fantasy Adventure",
+                "Some Author",
+                allow_author_fallback=False,
+            )
+
+        self.assertEqual(mock_google.call_args[0][0], '"Ripple System" inauthor:"Some Author"')
+
+    def test_precheck_for_new_volumes_strips_subtitle_from_its_query(self):
+        with patch.object(discovery_engine, "_fetch_hardcover", return_value=[]), patch.object(
+            discovery_engine, "_fetch_google_books", return_value=[]
+        ) as mock_google, patch.object(discovery_engine, "_fetch_openlibrary", return_value=[]):
+            discovery_engine.precheck_for_new_volumes(
+                "Ripple System: A LitRPG Progression Fantasy Adventure", "Some Author", ceiling=3.0
+            )
+
+        self.assertEqual(mock_google.call_args[0][0], '"Ripple System" inauthor:"Some Author"')
+
+    def test_fallback_pass_strips_query_but_contamination_filtering_still_uses_the_real_series_name(self):
+        # _fetch_fallback_series_providers builds its own google/openlibrary/
+        # web-search query text from series_name (same as the targeted pass)
+        # -- normalized here too -- but also runs _filter_cross_series_
+        # contamination against series_name afterwards, which must keep
+        # seeing the original, unstripped string so a hit explicitly tagged
+        # for a *different* series is still dropped.
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+            discovery_engine, "_fetch_hardcover", return_value=[]
+        ), patch.object(discovery_engine, "_fetch_google_books", return_value=[]) as mock_google, patch.object(
+            discovery_engine, "_fetch_openlibrary", return_value=[]
+        ), patch.object(
+            provider_io,
+            "_fetch_serper_web_search",
+            return_value=[{"title": "Unrelated Book", "url": "https://example.com/1", "description": ""}],
+        ), patch.object(
+            provider_io,
+            "_structure_web_results_with_llm",
+            return_value=[
+                {
+                    "result_index": 0,
+                    "title": "Unrelated Book",
+                    "series_name": "A Completely Different Series",
+                    "book_number": 9,
+                    "author_names": ["Some Author"],
+                    "published_date": None,
+                    "is_upcoming": False,
+                    "isbn13": None,
+                }
+            ],
+        ):
+            fallback_results, _, _ = discovery_engine._fetch_fallback_series_providers(
+                "Some Author",
+                "Ripple System: A LitRPG Progression Fantasy Adventure",
+                None,
+                "Some Author",
+                enable_fallback_web_search=True,
+                discovery_drop_diagnostics=[],
+                telemetry=None,
+                cache=None,
+                apify_budget=discovery_engine.ApifyCallBudget(),
+            )
+
+        self.assertEqual(mock_google.call_args[0][0], '"Ripple System" inauthor:"Some Author"')
+        self.assertEqual(fallback_results["web"], [])
+
+
 def _mock_anthropic_client(response_text):
     mock_text_block = MagicMock()
     mock_text_block.type = "text"
@@ -3257,6 +3422,26 @@ class NeedsReviewToSkeletonUpdatesTest(unittest.TestCase):
     def test_empty_input_returns_empty_list(self):
         self.assertEqual(_needs_review_to_skeleton_updates([]), [])
 
+    def test_isbn13_is_carried_through_to_the_skeleton_update(self):
+        # LitRPG-discovery-plan addition -- canonical's isbn13 (added
+        # alongside the pre-existing "identifier" fallback field in
+        # agents/series_agent.py) flows through here into skeleton_json.
+        needs_review = [
+            {
+                "title": "Desert Protocol",
+                "series_number": "7",
+                "overall_confidence": "medium",
+                "isbn13": "9781111111111",
+            }
+        ]
+        updates = _needs_review_to_skeleton_updates(needs_review)
+        self.assertEqual(updates[0]["isbn13"], "9781111111111")
+
+    def test_missing_isbn13_maps_to_none_not_a_missing_key(self):
+        needs_review = [{"title": "Desert Protocol", "series_number": "7", "overall_confidence": "medium"}]
+        updates = _needs_review_to_skeleton_updates(needs_review)
+        self.assertIsNone(updates[0]["isbn13"])
+
 
 class SeriesCheckIntegrationTest(unittest.TestCase):
     """Integration tests for SeriesIntelligenceAgent.run_series_check against
@@ -3543,6 +3728,7 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
                 "url": None,
                 "provider": "hardcover",
                 "identifier": "9781111111111",
+                "isbn13": "9781111111111",
             }
         ])
         self.assertTrue(result["found"])

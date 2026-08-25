@@ -356,7 +356,10 @@ class SeriesSkeleton(Base):
     #   None), edition_hints, sources ([{provider, url, fetched_at}]),
     #   source_class ("library" | "discovered" -- see skeleton_store.py's
     #   asymmetric merge rule; missing on schema_version 1 rows == "library"),
-    #   first_seen_at, last_confirmed_at (both ISO strings).
+    #   first_seen_at, last_confirmed_at (both ISO strings), isbn13 (string or
+    #   None -- additive, LitRPG-discovery-plan field; absent on rows written
+    #   before it existed, so always read with .get("isbn13"), never assume
+    #   presence).
     skeleton_json = Column(JSON, nullable=False, default=list)
 
     # FIX-SS-ENUM: matches services/skeleton_store.SCHEMA_VERSION (bumped

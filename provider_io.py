@@ -45,6 +45,7 @@ from discovery_text import (
     _series_names_compatible,
     _to_int_or_none,
     core_title_key,
+    normalize_series_name_for_query,
     normalize_text,
 )
 from deterministic_fusion import (
@@ -1451,7 +1452,18 @@ def _fetch_all_providers_parallel(
     bug *inside* an adapter itself, not because a provider is expected to
     raise through it.
     """
-    google_query = f'"{series_name}" inauthor:"{query_author}"' if series_name else f'inauthor:"{query_author}"'
+    # query_series_name is series_name with any trailing LitRPG-style
+    # genre-marketing subtitle stripped -- used ONLY for the two outgoing
+    # query strings built directly from series_name below (google_query,
+    # the missing-volume lookahead queries). series_name itself is left
+    # untouched everywhere else in this function (catalog-sufficiency gate,
+    # fusion, WebDiscoveryProvider's LLM structuring context, logging) --
+    # see normalize_series_name_for_query's own docstring for why those
+    # must keep the original string.
+    query_series_name = normalize_series_name_for_query(series_name)
+    google_query = (
+        f'"{query_series_name}" inauthor:"{query_author}"' if query_series_name else f'inauthor:"{query_author}"'
+    )
     resolved_openlibrary_query = openlibrary_query if openlibrary_query is not None else targeted_query_text
     hardcover_query = targeted_query_text
 
@@ -1462,7 +1474,7 @@ def _fetch_all_providers_parallel(
         if series_name and highest_owned_book_number:
             lookahead_author = f" {query_author}" if query_author else ""
             resolved_web_queries += [
-                f'"{series_name}"{lookahead_author} book {number}'
+                f'"{query_series_name}"{lookahead_author} book {number}'
                 for number in range(
                     highest_owned_book_number + 1, highest_owned_book_number + 1 + WEB_SEARCH_LOOKAHEAD_BOOKS
                 )

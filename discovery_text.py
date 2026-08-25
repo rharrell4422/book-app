@@ -761,6 +761,63 @@ def primary_author_name(value: str | None) -> str:
     return names[0] if names else str(value or "").strip()
 
 
+# Detects a trailing genre-marketing subtitle mentioning "litrpg" (e.g.
+# "Dungeon Crawler Carl: An Epic Post-Apocalyptic LitRPG Adventure") on a
+# *series* name specifically so it can be stripped before that name becomes
+# a catalog/web-search query string -- LitRPG/GameLit/progression-fantasy
+# titles carry this marketing cruft unusually often, and it adds nothing
+# useful to a search (catalog listings rarely include it verbatim, so it
+# can only dilute relevance ranking, never sharpen it).
+#
+# This is a fourth, deliberately separate title-normalization system
+# alongside the three already documented in this module's own docstring
+# (core_title_key/bare_title_key here, services/identity.py's persistence-
+# time identity key, and services/title_normalization.py's UI-facing
+# reformatting) -- narrower in scope than any of those (query-string
+# shaping only) and NOT a shared implementation with services/title_
+# normalization.py's near-identical-looking _LITRPG_FILLER_SUBTITLE_RE,
+# even though the pattern looks similar. The two behave differently on
+# purpose: title_normalization's _strip_litrpg_filler_subtitle *replaces*
+# the subtitle with a normalized ": A LitRPG" tag (useful for a human
+# reading a book title), whereas a query gains nothing from even a
+# normalized "LitRPG" token, so this strips the whole trailing subtitle
+# down to nothing instead.
+_QUERY_GENRE_SUBTITLE_RE = re.compile(
+    r":\s*(?:a|an)?\s*"
+    r"(?:(?:epic|fantasy|adventures?|novels?|sagas?|apocalyptic|apocalypse|progression(?:\s+fantasy)?)\s+)*"
+    r"litrpg"
+    r"(?:\s+(?:adventures?|novels?|sagas?|apocalyptic|apocalypse|epic|fantasy|progression(?:\s+fantasy)?))*"
+    r":?(?=\s*(?:\([^)]*\))?\s*$)",
+    flags=re.IGNORECASE,
+)
+
+
+def normalize_series_name_for_query(series_name: str | None) -> str:
+    """Strips a trailing LitRPG-style genre-marketing subtitle from
+    `series_name` for use ONLY in building an outgoing catalog/web-search
+    query string -- see _QUERY_GENRE_SUBTITLE_RE's own comment for why this
+    exists as a narrow, separate concern.
+
+    Every other use of a series' name (fusion/contamination matching,
+    candidate tagging, display, skeleton bookkeeping, catalog-sufficiency-
+    gate identity, LLM structuring context, etc.) must keep using the
+    original, unmodified `series_name` -- callers should call this only at
+    the exact point a query string literal is being assembled, never store
+    its result under the name `series_name`, and never pass it into any
+    identity/matching/gate function.
+
+    Self-gating: a no-op whenever the pattern doesn't match, so it's safe
+    to call unconditionally for every series regardless of genre (Series.
+    genre is an unpopulated DB column today -- this deliberately never
+    needs it).
+    """
+    name = str(series_name or "").strip()
+    if not name:
+        return name
+    stripped = _QUERY_GENRE_SUBTITLE_RE.sub("", name).strip()
+    return stripped or name
+
+
 def _author_matches(candidate_authors: list[str], target_author: str) -> bool:
     target_names = split_author_names(target_author) or [target_author]
     for target_name in target_names:

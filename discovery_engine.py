@@ -110,6 +110,7 @@ from discovery_text import (
     classify_upcoming,
     split_author_names,
     primary_author_name,
+    normalize_series_name_for_query,
     _author_matches,
     _to_int_or_none,
     _to_float_or_none,
@@ -330,7 +331,8 @@ def _reconstruct_series_skeleton(
         return _result(missing_numbers, [], unified_candidates)
 
     targeted_missing = missing_numbers[:MAX_MISSING_VOLUME_LOOKAHEAD_QUERIES]
-    lookahead_queries = [f'"{resolved_series_name}" {resolved_author} book {number}' for number in targeted_missing]
+    query_series_name = normalize_series_name_for_query(resolved_series_name)
+    lookahead_queries = [f'"{query_series_name}" {resolved_author} book {number}' for number in targeted_missing]
 
     # PB-10 diagnostic pass (Copilot's override-path concern #4): this call
     # goes straight to _fetch_web_search, NOT through
@@ -428,7 +430,7 @@ def precheck_for_new_volumes(
     missed release.
     """
     query_author = primary_author_name(author)
-    targeted_query_text = f"{series_name} {query_author}".strip()
+    targeted_query_text = f"{normalize_series_name_for_query(series_name)} {query_author}".strip()
     with maybe_pass_scope(telemetry, "precheck"):
         fetch_results = _fetch_all_providers_parallel(
             query_author,
@@ -647,16 +649,17 @@ def _fetch_fallback_series_providers(
     Returns (fallback_results, provider_failures, any_provider_succeeded),
     same shape as _fetch_targeted_series_providers.
     """
+    query_series_name = normalize_series_name_for_query(series_name)
     fallback_results = _fetch_all_providers_parallel(
         query_author,
         series_name,
-        f"{series_name} {query_author}",
+        f"{query_series_name} {query_author}",
         highest_owned_book_number,
         author=author,
-        openlibrary_query=f'"{series_name}" "{query_author}"',
+        openlibrary_query=f'"{query_series_name}" "{query_author}"',
         web_search_queries=[
-            f"{series_name} {query_author} books",
-            f"{series_name} {query_author} series",
+            f"{query_series_name} {query_author} books",
+            f"{query_series_name} {query_author} series",
         ],
         enable_web_search=enable_fallback_web_search,
         diagnostics=discovery_drop_diagnostics,
@@ -875,7 +878,7 @@ def discover_candidates_for_series(
     # matching/filtering against the full original string so legitimate
     # co-authored results still pass.
     query_author = primary_author_name(author)
-    targeted_query_text = f"{series_name} {query_author}".strip()
+    targeted_query_text = f"{normalize_series_name_for_query(series_name)} {query_author}".strip()
 
     # One unmissable line per Check Now showing exactly which provider
     # gates are open, without ever printing the key values themselves --

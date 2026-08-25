@@ -297,6 +297,11 @@ def _needs_review_to_skeleton_updates(needs_review: list[dict]) -> list[dict]:
                 "status": "unconfirmed",
                 "confidence": entry.get("overall_confidence"),
                 "release_date": entry.get("date_iso"),
+                # LitRPG-discovery-plan addition: threads canonical's isbn13
+                # (None when the candidate had none) through to the durable
+                # skeleton entry -- see services/skeleton_store.py's
+                # SeriesSkeleton doc comment for the schema addition.
+                "isbn13": entry.get("isbn13"),
                 "sources": [
                     {
                         "provider": entry.get("provider"),
@@ -1320,6 +1325,13 @@ class SeriesIntelligenceAgent:
                     "url": raw.get("source_url"),
                     "provider": raw.get("source"),
                     "identifier": isbn13 or f"{raw.get('source')}:{raw.get('source_id')}",
+                    # LitRPG-discovery-plan addition: the real isbn13 (None,
+                    # not the "source:source_id" fallback "identifier" above)
+                    # so a needs_review candidate that reaches
+                    # _needs_review_to_skeleton_updates can carry it through
+                    # to skeleton_json -- see that function and
+                    # services/skeleton_store.py's matching addition.
+                    "isbn13": isbn13 or None,
                 }
 
                 # Manual-override routing. `confidence_entry` is None when

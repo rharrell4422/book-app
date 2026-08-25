@@ -154,6 +154,13 @@ def _book_to_skeleton_entry(book: "models.Book", now_iso: str, *, first_seen_at:
         "confidence": "high",
         "release_date": release_date.isoformat() if release_date else None,
         "edition_hints": [book.edition] if book.edition else [],
+        # LitRPG-discovery-plan addition: an owned Book row's isbn13 (when
+        # present) so a future run's discovery-time fusion/matching can
+        # reuse this durable identifier instead of only the loosely-typed
+        # title/author fields already here -- additive only, never read by
+        # the existing merge logic above (_merge_discovered_entries/
+        # compute_skeleton_updates_merge key off book_number, not isbn13).
+        "isbn13": book.isbn13 or None,
         "source_class": "library",
         "sources": [
             {
