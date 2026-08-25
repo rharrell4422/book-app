@@ -1,10 +1,11 @@
 """Phase 1 agentic discovery, tenth implementation block (extended in the
-eleventh block below with `/promotion`, `/series`, `/history`): a
-read-only, owner-only admin router exposing everything `services/agentic_
-evaluation_harness.py`/`services/agentic_batch_orchestrator.py`/
-`services/agentic_promotion_checklist.py`/`services/agentic_admin_ui_
-stubs.py` already built, for manual triggering during evaluation -- not
-for end users.
+eleventh block with `/promotion`, `/series`, `/history`, and in Phase
+2's kickoff block with `/promotion-plan`): a read-only, owner-only admin
+router exposing everything `services/agentic_evaluation_harness.py`/
+`services/agentic_batch_orchestrator.py`/`services/agentic_promotion_
+checklist.py`/`services/agentic_admin_ui_stubs.py`/`services/agentic_
+promotion_plan.py` already built, for manual triggering during
+evaluation -- not for end users.
 
 Per `discovery_agentic_phase1_plan.md`/`discovery_agentic_phase1_evaluation.md`
 (settled architecture, not re-litigated here): every route below is a thin
@@ -17,7 +18,10 @@ owner-auth-gated the same way every other `/admin/*` route already is
 pattern this mirrors), and never linked from any user-facing UI. Nothing
 here writes to the database, calls a live provider, or changes routing/
 confidence/gate/skeleton behavior -- it only ever triggers the existing
-read-only diagnostics and returns their output.
+read-only diagnostics and returns their output. `/promotion-plan` (Phase
+2 kickoff) is the same story: a diagnostic plan of what promotion would
+require, never a promotion mechanism itself -- there is still no Phase 2
+switch anywhere in this codebase.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ from services.agentic_admin_ui_stubs import get_agentic_history, list_agentic_se
 from services.agentic_batch_orchestrator import run_batch_agentic_evaluations
 from services.agentic_evaluation_harness import generate_full_agentic_html, generate_full_agentic_report
 from services.agentic_promotion_checklist import generate_promotion_readiness
+from services.agentic_promotion_plan import build_phase2_promotion_plan
 
 # Router-level dependency (not per-route): every route here is read-only
 # diagnostics, so unlike routers/admin.py (which has one route needing a
@@ -102,3 +107,14 @@ def admin_agentic_history(series_id: int) -> dict:
     -- no writes.
     """
     return get_agentic_history(series_id)
+
+
+@router.get("/promotion-plan/{series_id}")
+def admin_promotion_plan(series_id: int) -> dict:
+    """Returns the Phase 2 promotion plan for one series
+    (`services.agentic_promotion_plan.build_phase2_promotion_plan`) --
+    what a future live promotion would require and how close this
+    series currently is to that bar. NOT a promotion mechanism -- purely
+    diagnostic. Read-only -- no writes.
+    """
+    return build_phase2_promotion_plan(series_id)

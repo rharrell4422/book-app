@@ -340,6 +340,27 @@ def record_agentic_full_html(series_id: int, html: str) -> None:
         logger.exception("record_agentic_full_html: failed to log HTML report for series_id=%s", series_id)
 
 
+def record_agentic_promotion_plan(series_id: int, plan: dict) -> None:
+    """Phase 2 kickoff (`services/agentic_promotion_plan.py`): logs one
+    series' Phase 2 promotion plan for auditing -- what promotion would
+    require, the current alignment/requirement signals, and the derived
+    risk level, at the moment this plan was generated.
+
+    Same log-only fallback as the other `record_agentic_*` helpers above
+    (tagged `agentic_promotion_plan`), fail-soft. No structured/persisted
+    store exists yet -- see `record_agentic_evaluation`'s docstring for
+    why; wiring one in is explicit future work, not this ticket.
+    """
+    try:
+        logger.info(
+            "agentic_promotion_plan series_id=%s plan=%s",
+            series_id,
+            json.dumps(plan, default=str),
+        )
+    except Exception:
+        logger.exception("record_agentic_promotion_plan: failed to log plan for series_id=%s", series_id)
+
+
 @contextmanager
 def maybe_pass_scope(telemetry: "DiscoveryTelemetry | None", name: str):
     """No-op passthrough when telemetry is None, so call sites don't need
