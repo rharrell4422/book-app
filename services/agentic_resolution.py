@@ -33,6 +33,19 @@ resolution. Still never touches `SeriesSkeleton.skeleton_json`/
 `probes_json`, still never calls a provider, still fail-soft (any
 exception here falls back to the live snapshots verbatim, never raises
 into the caller).
+
+Phase 6 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_phase1_
+evaluation.md`, not re-litigated here) adds a determinism/ordering
+guarantee on top, with zero change to *which* value wins per book: this
+function resolves books in ascending-`book_number` order, and both
+returned dicts always have their keys inserted in ascending-`book_number`
+order too, regardless of what order `promotion_decisions`/the live
+snapshots were built in. That matters because a Python `set` (previously
+used to collect "every book_number seen") has no guaranteed iteration
+order at all -- two runs over the exact same input could resolve books in
+a different order even though every individual book's resolved value
+was already correct. The resolved *values* were never nondeterministic;
+only the *order* callers iterate over them in was.
 """
 
 from __future__ import annotations
@@ -42,6 +55,26 @@ import logging
 import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_sort_key(value) -> float:
+    """Phase 6: a book_number that isn't a real `int`/`float` sorts to
+    `+inf` -- last, deterministically -- rather than raising `TypeError`
+    when compared against a genuine number or another malformed value.
+    """
+    return value if isinstance(value, (int, float)) else float("inf")
+
+
+def _sorted_dict_by_key(raw: dict) -> dict:
+    """Phase 6: returns a new dict with `raw`'s same key/value pairs,
+    inserted in ascending-key order (via `_safe_sort_key`, so a
+    malformed/non-numeric key can never raise `TypeError` sorting
+    against a real book_number) -- never mutates `raw` itself.
+    """
+    try:
+        return {key: raw[key] for key in sorted(raw, key=_safe_sort_key)}
+    except Exception:
+        return dict(raw)
 
 
 def resolve_routing_decisions(
@@ -78,10 +111,17 @@ def resolve_routing_decisions(
     snapshot's books) simply passes its live value straight through --
     "no decision" is never treated as "use agentic".
 
+    Phase 6: both returned dicts have their keys in ascending-book_number
+    order (see module docstring) -- `promotion_decisions` is consulted in
+    that same sorted order while resolving, so this holds regardless of
+    the order `live_confidence_snapshot`/`live_gate_snapshot`/
+    `promotion_decisions` were themselves built in.
+
     Fail-soft: any exception (malformed input, `settings.
     is_agentic_activated` itself raising, etc.) is caught and logged,
-    and this returns the live snapshots verbatim rather than raising --
-    callers get the same live-only behavior as if the flag were off.
+    and this returns the live snapshots verbatim (still sorted) rather
+    than raising -- callers get the same live-only behavior as if the
+    flag were off.
 
     Pure aside from that logging: never writes to the database, never
     touches `skeleton_json`/`probes_json`, never calls a provider.
@@ -92,15 +132,15 @@ def resolve_routing_decisions(
         promotion_decisions = promotion_decisions or {}
 
         if not settings.AGENTIC_ROUTING_ENABLED:
-            return dict(live_confidence_snapshot), dict(live_gate_snapshot)
+            return _sorted_dict_by_key(live_confidence_snapshot), _sorted_dict_by_key(live_gate_snapshot)
 
         if not settings.is_agentic_activated(series_id):
-            return dict(live_confidence_snapshot), dict(live_gate_snapshot)
+            return _sorted_dict_by_key(live_confidence_snapshot), _sorted_dict_by_key(live_gate_snapshot)
 
         resolved_confidence: dict = {}
         resolved_gate: dict = {}
         all_book_numbers = set(live_confidence_snapshot) | set(live_gate_snapshot) | set(promotion_decisions)
-        for book_number in all_book_numbers:
+        for book_number in sorted(all_book_numbers, key=_safe_sort_key):
             decision = promotion_decisions.get(book_number) or {}
             live_conf = live_confidence_snapshot.get(book_number, decision.get("live_confidence"))
             live_gate_value = live_gate_snapshot.get(book_number, decision.get("live_gate"))
@@ -117,4 +157,4 @@ def resolve_routing_decisions(
         logger.exception(
             "resolve_routing_decisions failed for series_id=%s; falling back to live snapshots", series_id
         )
-        return dict(live_confidence_snapshot or {}), dict(live_gate_snapshot or {})
+        return _sorted_dict_by_key(live_confidence_snapshot or {}), _sorted_dict_by_key(live_gate_snapshot or {})

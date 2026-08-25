@@ -257,20 +257,21 @@ def build_activation_preview(series_id: int, *, db_session: Session | None = Non
     {series_id}`.
 
     Never calls `run_agentic_turn`/a live provider and never writes
-    anything -- it works entirely off `get_promotion_history`'s already-
-    recorded rows (one per traced book per past live-routing turn where
-    `settings.AGENTIC_ROUTING_ENABLED` was on), keeping only the most
-    recent row per `book_number` (history is oldest-first; last
-    occurrence wins). For each of those, it recomputes what
-    `agents/series_agent.py`'s live routing path would resolve to *if*
-    `settings.is_agentic_activated(series_id)` were `True` -- i.e. the
-    agentic side exactly when that row's own `promotion_outcome` was
+    anything -- it works entirely off `get_latest_promotion_decisions`
+    (Phase 6: the most recent stored row per `book_number`, itself built
+    on `get_promotion_history`'s now-deterministic `(book_number ASC,
+    timestamp ASC, id ASC)` ordering -- see that function's own
+    docstring). For each of those, it recomputes what `agents/series_
+    agent.py`'s live routing path would resolve to *if* `settings.
+    is_agentic_activated(series_id)` were `True` -- i.e. the agentic
+    side exactly when that row's own `promotion_outcome` was
     `"use_agentic"`, live otherwise -- regardless of whether this series
     is actually activated right now. Returns:
 
         {"activated": bool,  # the series' REAL current activation state
          "preview": {"<book_number>": {"outcome": ..., "resolved_confidence": ...,
                                          "resolved_gate": ...}, ...}}
+         # preview keys are inserted in ascending book_number order (Phase 6).
 
     Fail-soft: any exception (e.g. a broken `db_session`) yields
     `{"activated": False, "preview": {}}` rather than raising.
@@ -278,13 +279,7 @@ def build_activation_preview(series_id: int, *, db_session: Session | None = Non
     try:
         from settings import is_agentic_activated
 
-        history = get_promotion_history(series_id, db_session=db_session)
-        latest_by_book_number: dict = {}
-        for entry in history:
-            book_number = entry.get("book_number")
-            if book_number is None:
-                continue
-            latest_by_book_number[book_number] = entry
+        latest_by_book_number = get_latest_promotion_decisions(series_id, db_session=db_session)
 
         preview: dict = {}
         for book_number, entry in latest_by_book_number.items():
@@ -304,13 +299,57 @@ def build_activation_preview(series_id: int, *, db_session: Session | None = Non
         return {"activated": False, "preview": {}}
 
 
+def _safe_sort_key(value) -> float:
+    """Phase 6 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
+    phase1_evaluation.md`, not re-litigated here): a book_number that
+    isn't a real `int`/`float` sorts to `+inf` -- last, deterministically
+    -- rather than raising `TypeError` when compared against a genuine
+    number, or against another malformed value of a different type.
+    """
+    return value if isinstance(value, (int, float)) else float("inf")
+
+
+def _book_number_timestamp_sort_key(entry: dict) -> tuple:
+    """Phase 6: shared, fail-soft sort key for `get_promotion_history`'s
+    stability guarantee -- `(book_number ASC, timestamp ASC, id ASC)`.
+    `id` (this table's real, always-unique primary key) is an
+    intentional addition beyond the letter of the Phase 6 spec's
+    "book_number ASC, timestamp ASC": it's what actually makes ordering
+    fully deterministic even when two rows share an identical
+    `book_number`/`timestamp` pair (e.g. two writes in the same
+    transaction), rather than leaving that case to depend on Python's
+    merely-stable (not independently reproducible) sort against
+    whatever order the DB happened to return rows in.
+    """
+    book_number = entry.get("book_number")
+    timestamp = entry.get("timestamp")
+    return (
+        _safe_sort_key(book_number),
+        timestamp if isinstance(timestamp, str) else "",
+        entry.get("id") or 0,
+    )
+
+
 def get_promotion_history(series_id: int, *, db_session: Session | None = None) -> list[dict]:
     """Read-only: returns every stored `agentic_promotion_decisions` row
-    for `series_id`, oldest first, as plain dicts:
+    for `series_id`, sorted deterministically by
+    `(book_number ASC, timestamp ASC, id ASC)` (see
+    `_book_number_timestamp_sort_key`), as plain dicts:
 
         [{"id": ..., "series_id": ..., "book_number": ..., "timestamp": iso8601 | None,
           "live_confidence": ..., "agentic_confidence": ...,
           "live_gate": ..., "agentic_gate": ..., "promotion_outcome": ...}, ...]
+
+    Phase 6 note: prior to this, rows came back ordered by `id ASC` only
+    (i.e. insertion/chronological order across the whole series, not
+    grouped by book) -- callers that group by `book_number` (`build_
+    activation_preview`, `get_latest_promotion_decisions` below) now see
+    a stable, reproducible order regardless of which book's turn wrote a
+    decision first. Sorting happens in Python (after an unordered DB
+    fetch) rather than via `ORDER BY` so the exact same fail-soft
+    coercion in `_safe_sort_key` -- a malformed `book_number` sorts last
+    instead of raising -- applies uniformly regardless of database
+    backend.
 
     Pure read. Fails soft -- returns `[]` (logging the failure) rather
     than raising. `db_session`, when provided, is reused as-is and never
@@ -320,13 +359,8 @@ def get_promotion_history(series_id: int, *, db_session: Session | None = None) 
     caller_supplied_db = db_session is not None
     db: Session = db_session if caller_supplied_db else SessionLocal()
     try:
-        rows = (
-            db.query(AgenticPromotionDecision)
-            .filter(AgenticPromotionDecision.series_id == series_id)
-            .order_by(AgenticPromotionDecision.id.asc())
-            .all()
-        )
-        return [
+        rows = db.query(AgenticPromotionDecision).filter(AgenticPromotionDecision.series_id == series_id).all()
+        entries = [
             {
                 "id": row.id,
                 "series_id": row.series_id,
@@ -340,9 +374,50 @@ def get_promotion_history(series_id: int, *, db_session: Session | None = None) 
             }
             for row in rows
         ]
+        return sorted(entries, key=_book_number_timestamp_sort_key)
     except Exception:
         logger.exception("get_promotion_history failed for series_id=%s; returning empty list", series_id)
         return []
     finally:
         if not caller_supplied_db:
             db.close()
+
+
+def get_latest_promotion_decisions(series_id: int, *, db_session: Session | None = None) -> dict:
+    """Phase 6: `{book_number: latest_decision_dict}` -- the single most
+    recent `get_promotion_history` row per `book_number`, keyed by
+    `float` book_number and returned in ascending-book_number order.
+
+    "Most recent" means the row with the greatest `(timestamp,
+    promotion_outcome)` pair, per book -- `timestamp` is the primary
+    ordering (a strictly later write is always "more recent"
+    regardless of its outcome string), and `promotion_outcome`
+    (lexicographic) only breaks an exact `timestamp` tie, per the Phase
+    6 spec. Since `get_promotion_history` already sorts each book's own
+    rows by `(timestamp ASC, id ASC)`, a plain running-max reduction
+    over that per-book sequence is enough to land on the correct
+    "latest" row deterministically, independent of whatever order the
+    database itself returned rows in.
+
+    Fail-soft: any exception (including one raised by `get_promotion_
+    history` itself, though that function is already fail-soft) yields
+    `{}` rather than raising.
+    """
+    try:
+        history = get_promotion_history(series_id, db_session=db_session)
+        latest: dict = {}
+        for entry in history:
+            book_number = entry.get("book_number")
+            if book_number is None:
+                continue
+            candidate_key = (entry.get("timestamp") or "", str(entry.get("promotion_outcome") or ""))
+            existing = latest.get(book_number)
+            if existing is None or candidate_key >= (
+                existing.get("timestamp") or "",
+                str(existing.get("promotion_outcome") or ""),
+            ):
+                latest[book_number] = entry
+        return {book_number: latest[book_number] for book_number in sorted(latest, key=_safe_sort_key)}
+    except Exception:
+        logger.exception("get_latest_promotion_decisions failed for series_id=%s; returning empty dict", series_id)
+        return {}

@@ -32,6 +32,69 @@ def _normalize_author(value: str | None) -> str:
     return str(value or "").strip().lower()
 
 
+def _agentic_safe_sort_key(value) -> float:
+    """Phase 6 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
+    phase1_evaluation.md`, not re-litigated here): a book_number that
+    isn't a real `int`/`float` sorts to `+inf` -- last, deterministically
+    -- rather than raising `TypeError` when compared against a genuine
+    number or another malformed value of a different type.
+    """
+    return value if isinstance(value, (int, float)) else float("inf")
+
+
+def _sorted_book_number_dict(raw: dict | None) -> dict:
+    """Phase 6: deterministic normalization for a `{book_number: value}`
+    mapping used by the Phase 3/4/5 promotion block below -- coerces
+    every key to `float` (matching every other agentic book_number key
+    in this codebase, so `1` and `1.0` collide as the same book) and
+    returns a NEW dict with keys inserted in ascending order, so
+    downstream `.items()`/`.keys()` iteration is stable regardless of
+    `raw`'s own insertion order. Fail-soft: a key that can't be coerced
+    to `float` (not a genuine book_number) is dropped rather than
+    raising or corrupting the rest of the mapping; a non-dict `raw`
+    yields `{}`.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    coerced: dict[float, object] = {}
+    for key, value in raw.items():
+        try:
+            coerced[float(key)] = value
+        except (TypeError, ValueError):
+            continue
+    return {key: coerced[key] for key in sorted(coerced)}
+
+
+def _sorted_agentic_trace_list(raw, *, book_number_key: str = "book_number") -> list[dict]:
+    """Phase 6: deterministic normalization for one of `run_agentic_
+    turn`'s trace lists (`agentic_trace["confidence_traces"]`/
+    `["gate_traces"]`) before the Phase 3/4/5 promotion block below
+    reads them -- sorts dict entries by `book_number_key` ascending so
+    promotion evaluation/storage is stable regardless of the shadow
+    loop's own internal (provider/candidate) iteration order.
+
+    Fail-soft, per Phase 6 spec ("missing or malformed -> treat as
+    empty list"): anything that isn't a `list` at all yields `[]`.
+    Individual non-dict entries within an otherwise-valid list are
+    dropped rather than raising -- the loop this feeds already skips
+    any entry missing a usable `book_number_key`
+    (`agents/series_agent.py`'s promotion block continues past those),
+    so dropping a non-dict entry here changes nothing about which
+    books end up promoted; it just avoids an `AttributeError` from
+    calling `.get()` on something that isn't a dict.
+    """
+    if not isinstance(raw, list):
+        return []
+    try:
+        entries = [entry for entry in raw if isinstance(entry, dict)]
+        return sorted(
+            entries,
+            key=lambda entry: _agentic_safe_sort_key(entry.get(book_number_key)),
+        )
+    except Exception:
+        return []
+
+
 def _authors_match_exact(series_author: str | None, candidate_author: str | None) -> bool:
     series_norm = _normalize_author(series_author)
     candidate_norm = _normalize_author(candidate_author)
@@ -1474,6 +1537,19 @@ class SeriesIntelligenceAgent:
                     }
                     promotion_trace = run_agentic_turn(series_id, promotion_context)
 
+                    # Phase 6: normalize both trace lists into
+                    # deterministic, book_number-ascending order before
+                    # anything below reads them, so the decision-
+                    # authority pass and its shadow-table writes are
+                    # stable regardless of run_agentic_turn's own
+                    # internal (provider/candidate) iteration order.
+                    # Missing/malformed input fails soft to [] (see
+                    # _sorted_agentic_trace_list's own docstring).
+                    normalized_confidence_traces = _sorted_agentic_trace_list(
+                        promotion_trace.get("confidence_traces")
+                    )
+                    normalized_gate_traces = _sorted_agentic_trace_list(promotion_trace.get("gate_traces"))
+
                     # Same live snapshot shape services/agentic_
                     # confidence_gate_store.py's dry-run wiring already
                     # pairs against (services/agentic_evaluation_
@@ -1481,27 +1557,35 @@ class SeriesIntelligenceAgent:
                     # by hand rather than via that function's own DB
                     # query, since skeleton_entries above already read
                     # the exact same row this same call/transaction, and
-                    # nothing has changed it since.
-                    live_confidence_snapshot = {
-                        entry.get("book_number"): {
-                            "confidence": entry.get("confidence"),
-                            "status": entry.get("status"),
+                    # nothing has changed it since. Phase 6: wrapped in
+                    # _sorted_book_number_dict so both snapshots are
+                    # keyed by float book_number and iterate in
+                    # ascending order regardless of skeleton_entries'
+                    # own order.
+                    live_confidence_snapshot = _sorted_book_number_dict(
+                        {
+                            entry.get("book_number"): {
+                                "confidence": entry.get("confidence"),
+                                "status": entry.get("status"),
+                            }
+                            for entry in (skeleton_entries or [])
+                            if isinstance(entry, dict) and entry.get("book_number") is not None
                         }
-                        for entry in (skeleton_entries or [])
-                        if isinstance(entry, dict) and entry.get("book_number") is not None
-                    }
-                    live_gate_snapshot = {
-                        entry.get("book_number"): {
-                            "belongs_to_series": True,
-                            "source_class": entry.get("source_class", "library"),
+                    )
+                    live_gate_snapshot = _sorted_book_number_dict(
+                        {
+                            entry.get("book_number"): {
+                                "belongs_to_series": True,
+                                "source_class": entry.get("source_class", "library"),
+                            }
+                            for entry in (skeleton_entries or [])
+                            if isinstance(entry, dict) and entry.get("book_number") is not None
                         }
-                        for entry in (skeleton_entries or [])
-                        if isinstance(entry, dict) and entry.get("book_number") is not None
-                    }
+                    )
                     agentic_gate_by_number = {
                         trace_entry["book_number"]: trace_entry
-                        for trace_entry in promotion_trace.get("gate_traces", [])
-                        if isinstance(trace_entry, dict) and trace_entry.get("book_number") is not None
+                        for trace_entry in normalized_gate_traces
+                        if trace_entry.get("book_number") is not None
                     }
 
                     # Decision authority pass: unchanged from Phase 3/4
@@ -1510,8 +1594,11 @@ class SeriesIntelligenceAgent:
                     # (plus the live/agentic pair it was computed from)
                     # is kept here now, keyed by book_number, for the
                     # single resolve_routing_decisions call below.
+                    # Phase 6: iterates normalized_confidence_traces (
+                    # book_number-ascending), so promotion_decisions is
+                    # itself built in ascending book_number order.
                     promotion_decisions: dict = {}
-                    for confidence_trace_entry in promotion_trace.get("confidence_traces", []):
+                    for confidence_trace_entry in normalized_confidence_traces:
                         promo_book_number = confidence_trace_entry.get("book_number")
                         if promo_book_number is None:
                             continue
@@ -1559,15 +1646,25 @@ class SeriesIntelligenceAgent:
                         resolved_confidence = live_confidence_snapshot
                         resolved_gate = live_gate_snapshot
 
-                    promotions: list[dict] = [
-                        {
-                            "book_number": promo_book_number,
-                            "outcome": decision["outcome"],
-                            "resolved_confidence": resolved_confidence.get(promo_book_number),
-                            "resolved_gate": resolved_gate.get(promo_book_number),
-                        }
-                        for promo_book_number, decision in promotion_decisions.items()
-                    ]
+                    # Phase 6: promotion_decisions is already built in
+                    # ascending book_number order (normalized_
+                    # confidence_traces above), so this comprehension
+                    # would already be sorted -- the explicit sorted()
+                    # here is defense-in-depth, making the "promotions
+                    # is book_number-ascending" guarantee hold even if
+                    # that upstream ordering assumption ever changes.
+                    promotions: list[dict] = sorted(
+                        (
+                            {
+                                "book_number": promo_book_number,
+                                "outcome": decision["outcome"],
+                                "resolved_confidence": resolved_confidence.get(promo_book_number),
+                                "resolved_gate": resolved_gate.get(promo_book_number),
+                            }
+                            for promo_book_number, decision in promotion_decisions.items()
+                        ),
+                        key=lambda entry: _agentic_safe_sort_key(entry["book_number"]),
+                    )
 
                     agentic_promotion_payload = {
                         "enabled": True,

@@ -38,6 +38,61 @@ def _serialize_timestamp(value) -> str | None:
     return value.replace(tzinfo=timezone.utc).isoformat()
 
 
+def _safe_sort_key(value) -> float:
+    """Phase 6 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
+    phase1_evaluation.md`, not re-litigated here): a book_number that
+    isn't a real `int`/`float` sorts to `+inf` -- last, deterministically
+    -- rather than raising `TypeError` when compared against a genuine
+    number, or against another malformed value of a different type.
+    """
+    return value if isinstance(value, (int, float)) else float("inf")
+
+
+def _book_number_timestamp_sort_key(entry: dict) -> tuple:
+    """Phase 6: shared, fail-soft sort key for `get_agentic_confidence_
+    history`/`get_agentic_gate_history`'s stability guarantee --
+    `(book_number ASC, timestamp ASC, id ASC)`. `id` (each table's real,
+    always-unique primary key) is an intentional addition beyond the
+    letter of the Phase 6 spec's "book_number ASC, timestamp ASC": it's
+    what actually makes ordering fully deterministic even when two rows
+    share an identical `book_number`/`timestamp` pair, rather than
+    leaving that case to depend on Python's merely-stable (not
+    independently reproducible) sort against whatever order the
+    database happened to return rows in.
+    """
+    book_number = entry.get("book_number")
+    timestamp = entry.get("timestamp")
+    return (
+        _safe_sort_key(book_number),
+        timestamp if isinstance(timestamp, str) else "",
+        entry.get("id") or 0,
+    )
+
+
+def _latest_by_book_number(history: list[dict]) -> dict:
+    """Phase 6: shared reduction behind `get_latest_confidence_decisions`/
+    `get_latest_gate_decisions` -- given a history list already sorted
+    by `_book_number_timestamp_sort_key` (i.e. each book's own rows are
+    in ascending `(timestamp, id)` order), returns `{book_number:
+    latest_entry}` in ascending book_number order via a running-max
+    reduction per book. Ties are resolved by the already-baked-in `id`
+    tiebreak in that sort key, not re-litigated here.
+    """
+    latest: dict = {}
+    for entry in history:
+        book_number = entry.get("book_number")
+        if book_number is None:
+            continue
+        # history is already (book_number, timestamp, id) ascending, so
+        # the last entry seen for a given book_number is always its most
+        # recent -- an unconditional overwrite is sufficient (no need to
+        # re-compare keys the way get_latest_promotion_decisions does,
+        # since that one also breaks ties on a field -- promotion_
+        # outcome -- that isn't part of this sort key at all).
+        latest[book_number] = entry
+    return {book_number: latest[book_number] for book_number in sorted(latest, key=_safe_sort_key)}
+
+
 def store_agentic_confidence(
     series_id: int,
     book_number,
@@ -157,7 +212,9 @@ def store_agentic_gate(
 
 def get_agentic_confidence_history(series_id: int, *, db_session: Session | None = None) -> list[dict]:
     """Read-only: returns every stored `agentic_confidence_decisions` row
-    for `series_id`, oldest first, as plain dicts:
+    for `series_id`, sorted deterministically by `(book_number ASC,
+    timestamp ASC, id ASC)` (Phase 6 -- see `_book_number_timestamp_
+    sort_key`), as plain dicts:
 
         [{"id": ..., "series_id": ..., "book_number": ..., "timestamp": iso8601 | None,
           "live_confidence": ..., "agentic_confidence": ...}, ...]
@@ -171,13 +228,8 @@ def get_agentic_confidence_history(series_id: int, *, db_session: Session | None
     caller_supplied_db = db_session is not None
     db: Session = db_session if caller_supplied_db else SessionLocal()
     try:
-        rows = (
-            db.query(AgenticConfidenceDecision)
-            .filter(AgenticConfidenceDecision.series_id == series_id)
-            .order_by(AgenticConfidenceDecision.id.asc())
-            .all()
-        )
-        return [
+        rows = db.query(AgenticConfidenceDecision).filter(AgenticConfidenceDecision.series_id == series_id).all()
+        entries = [
             {
                 "id": row.id,
                 "series_id": row.series_id,
@@ -188,6 +240,7 @@ def get_agentic_confidence_history(series_id: int, *, db_session: Session | None
             }
             for row in rows
         ]
+        return sorted(entries, key=_book_number_timestamp_sort_key)
     except Exception:
         logger.exception("get_agentic_confidence_history failed for series_id=%s; returning empty list", series_id)
         return []
@@ -196,9 +249,27 @@ def get_agentic_confidence_history(series_id: int, *, db_session: Session | None
             db.close()
 
 
+def get_latest_confidence_decisions(series_id: int, *, db_session: Session | None = None) -> dict:
+    """Phase 6: `{book_number: latest_confidence_decision_dict}` -- the
+    single most recent `get_agentic_confidence_history` row per
+    `book_number`, keyed by `float` book_number, returned in ascending-
+    book_number order. Fail-soft: any exception yields `{}`.
+    """
+    try:
+        history = get_agentic_confidence_history(series_id, db_session=db_session)
+        return _latest_by_book_number(history)
+    except Exception:
+        logger.exception(
+            "get_latest_confidence_decisions failed for series_id=%s; returning empty dict", series_id
+        )
+        return {}
+
+
 def get_agentic_gate_history(series_id: int, *, db_session: Session | None = None) -> list[dict]:
     """Read-only: returns every stored `agentic_gate_decisions` row for
-    `series_id`, oldest first, as plain dicts:
+    `series_id`, sorted deterministically by `(book_number ASC,
+    timestamp ASC, id ASC)` (Phase 6 -- see `_book_number_timestamp_
+    sort_key`), as plain dicts:
 
         [{"id": ..., "series_id": ..., "book_number": ..., "timestamp": iso8601 | None,
           "live_gate": ..., "agentic_gate": ...}, ...]
@@ -211,13 +282,8 @@ def get_agentic_gate_history(series_id: int, *, db_session: Session | None = Non
     caller_supplied_db = db_session is not None
     db: Session = db_session if caller_supplied_db else SessionLocal()
     try:
-        rows = (
-            db.query(AgenticGateDecision)
-            .filter(AgenticGateDecision.series_id == series_id)
-            .order_by(AgenticGateDecision.id.asc())
-            .all()
-        )
-        return [
+        rows = db.query(AgenticGateDecision).filter(AgenticGateDecision.series_id == series_id).all()
+        entries = [
             {
                 "id": row.id,
                 "series_id": row.series_id,
@@ -228,9 +294,24 @@ def get_agentic_gate_history(series_id: int, *, db_session: Session | None = Non
             }
             for row in rows
         ]
+        return sorted(entries, key=_book_number_timestamp_sort_key)
     except Exception:
         logger.exception("get_agentic_gate_history failed for series_id=%s; returning empty list", series_id)
         return []
     finally:
         if not caller_supplied_db:
             db.close()
+
+
+def get_latest_gate_decisions(series_id: int, *, db_session: Session | None = None) -> dict:
+    """Phase 6: `{book_number: latest_gate_decision_dict}` -- the single
+    most recent `get_agentic_gate_history` row per `book_number`, keyed
+    by `float` book_number, returned in ascending-book_number order.
+    Fail-soft: any exception yields `{}`.
+    """
+    try:
+        history = get_agentic_gate_history(series_id, db_session=db_session)
+        return _latest_by_book_number(history)
+    except Exception:
+        logger.exception("get_latest_gate_decisions failed for series_id=%s; returning empty dict", series_id)
+        return {}
