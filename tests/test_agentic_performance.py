@@ -6,17 +6,17 @@ this system already makes.
 
 Per the Phase 8 spec, this file needs to prove:
 
-1. `services/agentic_cache.AgenticTurnCache` memoizes per-`book_number`,
-   and `services/agentic_promotion_evaluator.evaluate_promotion` computes
+1. `agentic/cache.AgenticTurnCache` memoizes per-`book_number`,
+   and `agentic/promotion_evaluator.evaluate_promotion` computes
    its decision at most once per `book_number` when a shared `cache` is
    passed across repeated calls.
-2. `services/agentic_resolution.resolve_routing_decisions` never re-reads
+2. `agentic/resolution.resolve_routing_decisions` never re-reads
    `promotion_decisions[book_number]` more than once per book across
    repeated calls sharing one `cache`.
-3. `services/agentic_promotion_evaluator.build_activation_preview` never
+3. `agentic/promotion_evaluator.build_activation_preview` never
    reconstructs a book's preview entry more than once across repeated
    calls sharing one `cache`.
-4. `services/agentic_confidence_gate_store.get_latest_confidence_
+4. `agentic/confidence_gate_store.get_latest_confidence_
    decisions`/`get_latest_gate_decisions` and `services/agentic_
    promotion_evaluator.get_latest_promotion_decisions` are each a single
    bulk query per `series_id` (never one query per book), and skip the
@@ -39,12 +39,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import settings
-import services.agentic_promotion_evaluator as agentic_promotion_evaluator_module
-from agents.series_agent import SeriesIntelligenceAgent, _run_agentic_turn_guarded
-from database import Base
-from models import Book, Series
-from services.agentic_cache import AgenticTurnCache
-from services.agentic_confidence_gate_store import (
+import agentic.promotion_evaluator as agentic_promotion_evaluator_module
+from agentic.cache import AgenticTurnCache
+from agentic.confidence_gate_store import (
     get_agentic_confidence_history,
     get_agentic_gate_history,
     get_latest_confidence_decisions,
@@ -52,14 +49,17 @@ from services.agentic_confidence_gate_store import (
     store_agentic_confidence,
     store_agentic_gate,
 )
-from services.agentic_promotion_evaluator import (
+from agentic.promotion_evaluator import (
     build_activation_preview,
     evaluate_promotion,
     get_latest_promotion_decisions,
     get_promotion_history,
     store_promotion_decision,
 )
-from services.agentic_resolution import resolve_routing_decisions
+from agentic.resolution import resolve_routing_decisions
+from agents.series_agent import SeriesIntelligenceAgent, _run_agentic_turn_guarded
+from database import Base
+from models import Book, Series
 
 
 class _InMemoryDbTestCase(unittest.TestCase):
@@ -138,7 +138,7 @@ class PromotionCachePreventsRecomputeTest(unittest.TestCase):
         agentic_gate = {"belongs_to_series": True}
 
         with patch(
-            "services.agentic_promotion_evaluator._evaluate_once",
+            "agentic.promotion_evaluator._evaluate_once",
             wraps=agentic_promotion_evaluator_module._evaluate_once,
         ) as spy_evaluate_once:
             first = evaluate_promotion(
@@ -170,7 +170,7 @@ class PromotionCachePreventsRecomputeTest(unittest.TestCase):
         live_gate = {"belongs_to_series": True}
         agentic_gate = {"belongs_to_series": True}
         with patch(
-            "services.agentic_promotion_evaluator._evaluate_once",
+            "agentic.promotion_evaluator._evaluate_once",
             wraps=agentic_promotion_evaluator_module._evaluate_once,
         ) as spy_evaluate_once:
             evaluate_promotion(live_conf, agentic_conf, live_gate, agentic_gate, book_number=1.0)
@@ -187,7 +187,7 @@ class PromotionCachePreventsRecomputeTest(unittest.TestCase):
         live_gate = {"belongs_to_series": True}
         agentic_gate = {"belongs_to_series": True}
         with patch(
-            "services.agentic_promotion_evaluator._evaluate_once",
+            "agentic.promotion_evaluator._evaluate_once",
             wraps=agentic_promotion_evaluator_module._evaluate_once,
         ) as spy_evaluate_once:
             evaluate_promotion(live_conf, agentic_conf, live_gate, agentic_gate, cache=cache)
@@ -265,7 +265,7 @@ class ResolutionCachePreventsRecomputeTest(unittest.TestCase):
 
         with patch.object(settings, "AGENTIC_ROUTING_ENABLED", True), patch.object(
             settings, "AGENTIC_SERIES_ACTIVATION", "1"
-        ), patch("services.agentic_resolution.validate_agentic_decision", return_value=True):
+        ), patch("agentic.resolution.validate_agentic_decision", return_value=True):
             uncached_conf, uncached_gate = resolve_routing_decisions(
                 1, live_confidence, live_gate, promotion_decisions
             )
@@ -300,7 +300,7 @@ class PreviewCachePreventsRecomputeTest(_InMemoryDbTestCase):
     def test_preview_cache_prevents_recompute(self):
         cache = AgenticTurnCache()
         with patch(
-            "services.agentic_promotion_evaluator._build_preview_entry",
+            "agentic.promotion_evaluator._build_preview_entry",
             wraps=agentic_promotion_evaluator_module._build_preview_entry,
         ) as spy_build_entry:
             first = build_activation_preview(self.series.id, db_session=self.db, cache=cache)
@@ -313,7 +313,7 @@ class PreviewCachePreventsRecomputeTest(_InMemoryDbTestCase):
 
     def test_no_cache_reconstructs_every_call(self):
         with patch(
-            "services.agentic_promotion_evaluator._build_preview_entry",
+            "agentic.promotion_evaluator._build_preview_entry",
             wraps=agentic_promotion_evaluator_module._build_preview_entry,
         ) as spy_build_entry:
             build_activation_preview(self.series.id, db_session=self.db)
@@ -648,7 +648,7 @@ class NoRoutingBehaviorChangeTest(_InMemoryDbTestCase):
     def test_no_routing_behavior_change_flag_on_not_activated(self):
         with self._mock_discovery(), patch.object(settings, "AGENTIC_ROUTING_ENABLED", True), patch(
             "agents.agentic_series_agent.SessionLocal", self.SessionLocal
-        ), patch("services.agentic_promotion_evaluator.evaluate_promotion", return_value="use_agentic"):
+        ), patch("agentic.promotion_evaluator.evaluate_promotion", return_value="use_agentic"):
             agent = SeriesIntelligenceAgent()
             result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
 
@@ -667,8 +667,8 @@ class NoRoutingBehaviorChangeTest(_InMemoryDbTestCase):
         with self._mock_discovery(), patch.object(settings, "AGENTIC_ROUTING_ENABLED", True), patch.object(
             settings, "AGENTIC_SERIES_ACTIVATION", str(self.series.id)
         ), patch("agents.agentic_series_agent.SessionLocal", self.SessionLocal), patch(
-            "services.agentic_promotion_evaluator.evaluate_promotion", return_value="use_agentic"
-        ), patch("services.agentic_resolution.validate_agentic_decision", return_value=True):
+            "agentic.promotion_evaluator.evaluate_promotion", return_value="use_agentic"
+        ), patch("agentic.resolution.validate_agentic_decision", return_value=True):
             agent = SeriesIntelligenceAgent()
             result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
 

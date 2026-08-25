@@ -1,5 +1,5 @@
 """Phase 3, candidate promotion (feature-flagged live routing) --
-`services/agentic_promotion_evaluator.py`'s `evaluate_promotion`/
+`agentic/promotion_evaluator.py`'s `evaluate_promotion`/
 `store_promotion_decision`/`get_promotion_history`, the new
 `AgenticPromotionDecision` model/`agentic_promotion_decisions` table,
 `settings.AGENTIC_ROUTING_ENABLED`, `agents/series_agent.py`'s new
@@ -39,7 +39,7 @@ from agents.series_agent import SeriesIntelligenceAgent
 from database import Base
 from models import AgenticPromotionDecision, Book, Series, SeriesSkeleton
 from routers.deps import create_owner_token
-from services.agentic_promotion_evaluator import (
+from agentic.promotion_evaluator import (
     evaluate_promotion,
     get_promotion_history,
     store_promotion_decision,
@@ -292,9 +292,9 @@ class PromotionLayerInSeriesAgentTest(unittest.TestCase):
         # rather than on run_agentic_turn, which is not a reliable signal
         # of whether *this* layer ran.
         with self._mock_discovery(), patch.object(settings, "AGENTIC_ROUTING_ENABLED", False), patch(
-            "services.agentic_promotion_evaluator.evaluate_promotion"
+            "agentic.promotion_evaluator.evaluate_promotion"
         ) as mock_evaluate, patch(
-            "services.agentic_promotion_evaluator.store_promotion_decision"
+            "agentic.promotion_evaluator.store_promotion_decision"
         ) as mock_store:
             agent = SeriesIntelligenceAgent()
             result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
@@ -317,8 +317,8 @@ class PromotionLayerInSeriesAgentTest(unittest.TestCase):
         #
         # Phase 7 note: evaluate_promotion is mocked here to force
         # "use_agentic" regardless of this fixture's real confidence/gate
-        # data, but services/agentic_resolution.py now independently
-        # re-validates that same data via services.agentic_safety.
+        # data, but agentic/resolution.py now independently
+        # re-validates that same data via agentic.safety.
         # validate_agentic_decision (defense-in-depth) before actually
         # applying it -- and this fixture's real agentic confidence
         # (a synthetic replay, not real corroborating provider evidence)
@@ -330,8 +330,8 @@ class PromotionLayerInSeriesAgentTest(unittest.TestCase):
         with self._mock_discovery(), patch.object(settings, "AGENTIC_ROUTING_ENABLED", True), patch.object(
             settings, "AGENTIC_SERIES_ACTIVATION", str(self.series.id)
         ), patch("agents.agentic_series_agent.SessionLocal", self.SessionLocal), patch(
-            "services.agentic_promotion_evaluator.evaluate_promotion", return_value="use_agentic"
-        ), patch("services.agentic_resolution.validate_agentic_decision", return_value=True):
+            "agentic.promotion_evaluator.evaluate_promotion", return_value="use_agentic"
+        ), patch("agentic.resolution.validate_agentic_decision", return_value=True):
             agent = SeriesIntelligenceAgent()
             result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
 
@@ -354,7 +354,7 @@ class PromotionLayerInSeriesAgentTest(unittest.TestCase):
         with self._mock_discovery(), patch.object(settings, "AGENTIC_ROUTING_ENABLED", True), patch(
             "agents.agentic_series_agent.SessionLocal", self.SessionLocal
         ), patch(
-            "services.agentic_promotion_evaluator.evaluate_promotion", return_value="use_live"
+            "agentic.promotion_evaluator.evaluate_promotion", return_value="use_live"
         ):
             agent = SeriesIntelligenceAgent()
             result = agent.run_series_check(self.db, self.series.id, emit_summary=False)

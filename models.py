@@ -458,7 +458,7 @@ class AgenticConfidenceDecision(Base):
     Purely diagnostic/side-channel -- entirely separate from whatever
     drives live routing (`SeriesSkeleton.skeleton_json`'s `confidence`
     field, computed by `confidence_engine.py`). Written only by
-    `services/agentic_confidence_gate_store.py`, which never touches
+    `agentic/confidence_gate_store.py`, which never touches
     `SeriesSkeleton` or `confidence_engine.py`, and read only by that
     same module's `get_agentic_confidence_history` and `/admin/agentic/
     confidence/{series_id}`.
@@ -494,7 +494,7 @@ class AgenticGateDecision(Base):
     pipeline's gate outcome for that book against the Phase 1 shadow
     loop's `gate_traces` entry for the same book.
 
-    Written only by `services/agentic_confidence_gate_store.py`
+    Written only by `agentic/confidence_gate_store.py`
     (`store_agentic_gate`), which never touches `SeriesSkeleton` or the
     live `evaluate_belongs_to_series_gate` logic in `agents/series_
     agent.py`, and read only by that same module's `get_agentic_gate_
@@ -520,11 +520,11 @@ class AgenticPromotionDecision(Base):
     book_number, live routing turn) recording not just the live vs
     agentic confidence/gate pair (same shape as `AgenticConfidenceDecision`/
     `AgenticGateDecision` above), but also `promotion_outcome`: which of
-    the two `services.agentic_promotion_evaluator.evaluate_promotion`
+    the two `agentic.promotion_evaluator.evaluate_promotion`
     actually chose for that book -- `"use_live"`, `"use_agentic"`, or
     `"reject_agentic"`.
 
-    Written only by `services/agentic_promotion_evaluator.py`
+    Written only by `agentic/promotion_evaluator.py`
     (`store_promotion_decision`), and only from `agents/series_agent.py`'s
     live routing path (gated by `settings.AGENTIC_ROUTING_ENABLED`) --
     never from the Phase 1/2 dry-run block, which has its own separate

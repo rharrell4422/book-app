@@ -13,7 +13,7 @@ unit.
 
 This module extracts exactly that resolution decision -- and nothing
 else -- into one pure(ish) function, `resolve_routing_decisions`. It is
-NOT a new decision authority: `services/agentic_promotion_evaluator.
+NOT a new decision authority: `agentic/promotion_evaluator.
 evaluate_promotion` still decides "use_agentic" vs "use_live" vs
 "reject_agentic" for each book, and `store_promotion_decision` still
 writes the shadow-table row -- both of those stay exactly where they
@@ -52,14 +52,14 @@ evaluation.md`, not re-litigated here) adds one more check per book,
 defense-in-depth on top of `evaluate_promotion`'s own Phase 7 safety
 gate: even for a book whose stored `outcome` is `"use_agentic"` (meaning
 `evaluate_promotion` already approved it, including its own Phase 7
-`services.agentic_safety.validate_agentic_decision` check at the time it
+`agentic.safety.validate_agentic_decision` check at the time it
 ran), this function independently re-runs that same check right before
 actually applying the agentic side. This is deliberately redundant --
 the point is that a resolution-time bug, a stale/replayed decision, or a
 future caller that bypasses `evaluate_promotion` entirely can never
 result in an unsafe agentic value reaching live routing, without this
-module needing to import anything from `services/agentic_promotion_
-evaluator.py` at all (see `services/agentic_safety.py`'s own docstring
+module needing to import anything from `agentic/promotion_
+evaluator.py` at all (see `agentic/safety.py`'s own docstring
 for why it's intentionally self-contained). A book that fails this
 re-check resolves to its live value instead, exactly as if its outcome
 had been `"use_live"` -- the failure is logged via `services.discovery_
@@ -71,7 +71,7 @@ from __future__ import annotations
 import logging
 
 import settings
-from services.agentic_safety import validate_agentic_decision
+from agentic.safety import validate_agentic_decision
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +119,7 @@ def _record_cache_access(cache_hit: bool) -> None:
 def _log_safety_violation(series_id, book_number, reason: str) -> None:
     """Fail-soft telemetry side-channel for the Phase 7 defense-in-depth
     veto above -- never raises. Deliberately a local helper (rather than
-    importing `services.agentic_promotion_evaluator`'s equivalent) so
+    importing `agentic.promotion_evaluator`'s equivalent) so
     this module stays independent of that one, per this module's own
     docstring.
     """
@@ -173,7 +173,7 @@ def resolve_routing_decisions(
 
     Phase 7: an outcome of `"use_agentic"` is additionally re-validated
     here, independently of `evaluate_promotion`'s own check, via
-    `services.agentic_safety.validate_agentic_decision` -- see module
+    `agentic.safety.validate_agentic_decision` -- see module
     docstring. Failing that re-check resolves the book to its live value
     (same as `"use_live"`/`"reject_agentic"`), not the agentic one, and
     logs a fail-soft safety-violation record.
@@ -198,7 +198,7 @@ def resolve_routing_decisions(
     is already an in-memory dict this function only ever reads from
     (`.get(book_number)`), so there was never a real per-book DB
     round-trip or recomputation to eliminate here -- but the optional
-    `cache` keyword (a `services.agentic_cache.AgenticTurnCache`) still
+    `cache` keyword (a `agentic.cache.AgenticTurnCache`) still
     memoizes that lookup by `book_number`, so this function never reads
     `promotion_decisions[book_number]` more than once per book even if
     something upstream calls this function more than once for the same

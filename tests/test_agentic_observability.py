@@ -11,7 +11,7 @@ Per the Phase 9 spec, this file needs to prove:
    (`evaluate_promotion`, `record_agentic_safety_violation`, `resolve_
    routing_decisions`' cache usage, `_run_agentic_turn_guarded`)
    increments the right one(s).
-2. `services/agentic_health.compute_agentic_health` returns every
+2. `agentic/health.compute_agentic_health` returns every
    documented field, reflects a series' real activation state, and its
    `determinism_ok` flag flips to `False` on malformed stored history.
 3. `/admin/agentic/metrics`, `/admin/agentic/health/{series_id}`, and
@@ -41,10 +41,10 @@ from agents.series_agent import _run_agentic_turn_guarded
 from database import Base
 from models import Series
 from routers.deps import create_owner_token
-from services.agentic_cache import AgenticTurnCache
-from services.agentic_health import compute_agentic_health
-from services.agentic_promotion_evaluator import evaluate_promotion, store_promotion_decision
-from services.agentic_resolution import resolve_routing_decisions
+from agentic.cache import AgenticTurnCache
+from agentic.health import compute_agentic_health
+from agentic.promotion_evaluator import evaluate_promotion, store_promotion_decision
+from agentic.resolution import resolve_routing_decisions
 from services.discovery_telemetry import get_agentic_metrics, record_agentic_safety_violation
 
 
@@ -197,7 +197,7 @@ class SafetyViolationMetricsTest(unittest.TestCase):
         agentic_gate = {"belongs_to_series": True}
 
         before = get_agentic_metrics()
-        with patch("services.agentic_promotion_evaluator.validate_agentic_decision", return_value=False):
+        with patch("agentic.promotion_evaluator.validate_agentic_decision", return_value=False):
             outcome = evaluate_promotion(live_conf, agentic_conf, live_gate, agentic_gate, book_number=1.0)
         after = get_agentic_metrics()
 
@@ -351,7 +351,7 @@ class AgenticHealthTest(_InMemoryDbTestCase):
 
         # Malformed history (an unrecognized promotion_outcome) -> False.
         with patch(
-            "services.agentic_promotion_evaluator.get_latest_promotion_decisions",
+            "agentic.promotion_evaluator.get_latest_promotion_decisions",
             return_value={1.0: {"promotion_outcome": "not-a-real-outcome", "timestamp": "2024-01-01T00:00:00+00:00"}},
         ):
             malformed_health = compute_agentic_health(self.series.id, db_session=self.db)
@@ -359,7 +359,7 @@ class AgenticHealthTest(_InMemoryDbTestCase):
 
         # A non-dict entry is just as malformed.
         with patch(
-            "services.agentic_promotion_evaluator.get_latest_promotion_decisions",
+            "agentic.promotion_evaluator.get_latest_promotion_decisions",
             return_value={1.0: "not-a-dict"},
         ):
             non_dict_health = compute_agentic_health(self.series.id, db_session=self.db)

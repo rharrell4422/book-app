@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -11,6 +12,8 @@ from bootstrap import (
 )
 from routers import admin, admin_agentic, auth, books, discovery, imports, notifications, profiles, series
 from services.skeleton_store import backfill_all_skeletons
+
+logger = logging.getLogger(__name__)
 
 # Bring the DB schema up to date (see bootstrap.run_migrations) before
 # anything else touches it.
@@ -31,6 +34,22 @@ async def lifespan(app: FastAPI):
     # for a series whose books changed outside of a Check Now (e.g. a
     # manual edit, an import, or a fresh series that's never been checked).
     await asyncio.to_thread(backfill_all_skeletons)
+    # Phase 10 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
+    # phase1_evaluation.md`, not re-litigated here): a one-time, fail-
+    # soft sanity check that the agentic package is wired together
+    # correctly -- see `agentic/invariants.py`'s own docstring for what
+    # it actually checks. A violation is logged loudly but never raised
+    # here: this must never prevent the app from starting, and this
+    # check is also re-runnable on demand via `GET /admin/agentic/
+    # startup-check` for the same reason (an admin shouldn't have to
+    # restart the process just to re-check this).
+    try:
+        from agentic.invariants import enforce_agentic_invariants
+
+        if not await asyncio.to_thread(enforce_agentic_invariants):
+            logger.error("startup: agentic invariants check failed -- see agentic.invariants logs above for detail")
+    except Exception:
+        logger.exception("startup: agentic invariants check itself raised unexpectedly; continuing startup anyway")
     yield
 
 

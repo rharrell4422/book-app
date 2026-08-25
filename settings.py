@@ -18,7 +18,7 @@ works if callers re-read the module attribute each time rather than
 capturing a stale copy at their own import time.
 
 Defaults to `False`: this is a feature-flagged, gradual promotion
-mechanism (`services/agentic_promotion_evaluator.py`), not a default-on
+mechanism (`agentic/promotion_evaluator.py`), not a default-on
 behavior change. With the flag unset/off, `agents/series_agent.py`'s
 live routing path is byte-for-byte identical to before this flag
 existed.

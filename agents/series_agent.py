@@ -1584,7 +1584,7 @@ class SeriesIntelligenceAgent:
             # above just routed). Additive only: read-only inputs
             # (skeleton_entries, already loaded above), a purely local
             # promotion_outcome computation, one shadow-table write per
-            # traced book (services.agentic_promotion_evaluator.
+            # traced book (agentic.promotion_evaluator.
             # store_promotion_decision), and one new result key below --
             # never a write to SeriesSkeleton.skeleton_json/probes_json,
             # and never a change to available_missing/needs_review/
@@ -1602,7 +1602,7 @@ class SeriesIntelligenceAgent:
             # `if series_is_activated and outcome == "use_agentic":
             # ... else: ...`, all traced books' decisions are collected
             # into `promotion_decisions` and resolved in one call to
-            # services.agentic_resolution.resolve_routing_decisions,
+            # agentic.resolution.resolve_routing_decisions,
             # which encapsulates both gates (AGENTIC_ROUTING_ENABLED,
             # settings.is_agentic_activated) that used to be checked by
             # hand here. Behavior is identical to Phase 4 -- not
@@ -1626,9 +1626,9 @@ class SeriesIntelligenceAgent:
             agentic_promotion_payload: dict = {"enabled": False, "activated": False, "promotions": []}
             if settings.AGENTIC_ROUTING_ENABLED:
                 try:
+                    from agentic.promotion_evaluator import evaluate_promotion, store_promotion_decision
+                    from agentic.resolution import resolve_routing_decisions
                     from agents.agentic_series_agent import run_agentic_turn
-                    from services.agentic_promotion_evaluator import evaluate_promotion, store_promotion_decision
-                    from services.agentic_resolution import resolve_routing_decisions
 
                     series_is_activated = settings.is_agentic_activated(series_id)
 
@@ -1911,7 +1911,7 @@ class SeriesIntelligenceAgent:
                 live_snapshot = _observe_live_pipeline(series_id, db)
 
                 # Phase 2 dual-write, final Phase 2 scaffolding block
-                # (services/agentic_confidence_gate_store.py): persist
+                # (agentic/confidence_gate_store.py): persist
                 # each traced book's live-vs-agentic confidence/gate pair
                 # to their own dedicated shadow tables, entirely separate
                 # from -- and never touching -- confidence_engine.py or
@@ -1921,7 +1921,7 @@ class SeriesIntelligenceAgent:
                 # failure here can't prevent the dry-run trace itself
                 # from being logged below.
                 try:
-                    from services.agentic_confidence_gate_store import store_agentic_confidence, store_agentic_gate
+                    from agentic.confidence_gate_store import store_agentic_confidence, store_agentic_gate
 
                     confidence_snapshot = live_snapshot.get("confidence_snapshot") or {}
                     for entry in agentic_trace.get("confidence_traces", []):

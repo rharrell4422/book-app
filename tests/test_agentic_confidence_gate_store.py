@@ -37,7 +37,7 @@ from agents.series_agent import SeriesIntelligenceAgent
 from database import Base
 from models import AgenticConfidenceDecision, AgenticGateDecision, Book, Series, SeriesSkeleton
 from routers.deps import create_owner_token
-from services.agentic_confidence_gate_store import (
+from agentic.confidence_gate_store import (
     get_agentic_confidence_history,
     get_agentic_gate_history,
     store_agentic_confidence,
@@ -105,7 +105,7 @@ class StoreAgenticConfidenceTest(unittest.TestCase):
         self.assertEqual(history, [])
 
     def test_confidence_opens_and_closes_its_own_session_when_none_supplied(self):
-        with patch("services.agentic_confidence_gate_store.SessionLocal", self.SessionLocal):
+        with patch("agentic.confidence_gate_store.SessionLocal", self.SessionLocal):
             store_agentic_confidence(self.series.id, 7.0, {"a": 1}, {"b": 2})
             history = get_agentic_confidence_history(self.series.id)
 
@@ -224,7 +224,7 @@ class StoreAgenticGateTest(unittest.TestCase):
         self.assertEqual(history, [])
 
     def test_gate_opens_and_closes_its_own_session_when_none_supplied(self):
-        with patch("services.agentic_confidence_gate_store.SessionLocal", self.SessionLocal):
+        with patch("agentic.confidence_gate_store.SessionLocal", self.SessionLocal):
             store_agentic_gate(self.series.id, 7.0, {"a": 1}, {"b": 2})
             history = get_agentic_gate_history(self.series.id)
 
@@ -398,10 +398,10 @@ class DryRunWiresIntoConfidenceGateStoreTest(unittest.TestCase):
 
     def test_confidence_gate_store_failure_does_not_block_dry_run_or_live_result(self):
         with self._mock_discovery([self._candidate()]), patch(
-            "services.agentic_confidence_gate_store.store_agentic_confidence",
+            "agentic.confidence_gate_store.store_agentic_confidence",
             side_effect=RuntimeError("shadow confidence write exploded"),
         ), patch(
-            "services.agentic_confidence_gate_store.store_agentic_gate",
+            "agentic.confidence_gate_store.store_agentic_gate",
             side_effect=RuntimeError("shadow gate write exploded"),
         ), patch("services.discovery_telemetry.record_agentic_dry_run") as mock_record_dry_run:
             agent = SeriesIntelligenceAgent()

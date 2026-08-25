@@ -8,9 +8,19 @@ owner-only admin router exposing everything `services/agentic_
 evaluation_harness.py`/`services/agentic_batch_orchestrator.py`/
 `services/agentic_promotion_checklist.py`/`services/agentic_admin_ui_
 stubs.py`/`services/agentic_promotion_plan.py`/`services/agentic_
-skeleton_preview_store.py`/`services/agentic_confidence_gate_store.py`/
-`services/agentic_promotion_evaluator.py`/`settings.py` already built,
+skeleton_preview_store.py`/`agentic/confidence_gate_store.py`/
+`agentic/promotion_evaluator.py`/`settings.py` already built,
 for manual triggering during evaluation -- not for end users.
+
+Phase 10 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_phase1_
+evaluation.md`, not re-litigated here): six of the modules this router
+depends on -- `agentic_cache.py`/`agentic_confidence_gate_store.py`/
+`agentic_promotion_evaluator.py`/`agentic_resolution.py`/`agentic_
+safety.py`/`agentic_health.py` -- moved from `services/` into a new,
+dedicated `agentic/` package around this point (no logic changes, only
+import paths); `readiness.py`/`invariants.py` are new Phase 10 modules
+that live there from the start. Everything else named above stays in
+`services/`.
 
 Per `discovery_agentic_phase1_plan.md`/`discovery_agentic_phase1_evaluation.md`
 (settled architecture, not re-litigated here): every route below is a thin
@@ -38,14 +48,15 @@ from fastapi import APIRouter, Body, Depends
 from fastapi.responses import HTMLResponse
 
 import settings
+from agentic.confidence_gate_store import get_agentic_confidence_history, get_agentic_gate_history
+from agentic.health import compute_agentic_health
+from agentic.promotion_evaluator import build_activation_preview, get_promotion_history
+from agentic.readiness import compute_agentic_readiness
 from routers.deps import require_owner
 from services.agentic_admin_ui_stubs import get_agentic_history, list_agentic_series
 from services.agentic_batch_orchestrator import run_batch_agentic_evaluations
-from services.agentic_confidence_gate_store import get_agentic_confidence_history, get_agentic_gate_history
 from services.agentic_evaluation_harness import generate_full_agentic_html, generate_full_agentic_report
-from services.agentic_health import compute_agentic_health
 from services.agentic_promotion_checklist import generate_promotion_readiness
-from services.agentic_promotion_evaluator import build_activation_preview, get_promotion_history
 from services.agentic_promotion_plan import build_phase2_promotion_plan
 from services.agentic_skeleton_preview_store import get_agentic_skeleton_previews
 from services.discovery_telemetry import get_agentic_metrics
@@ -167,7 +178,7 @@ def admin_agentic_previews(series_id: int) -> dict:
 @router.get("/confidence/{series_id}")
 def admin_agentic_confidence(series_id: int) -> dict:
     """Returns every stored shadow confidence decision for one series
-    (`services.agentic_confidence_gate_store.get_agentic_confidence_
+    (`agentic.confidence_gate_store.get_agentic_confidence_
     history`) -- the Phase 2 dual-write shadow table
     (`agentic_confidence_decisions`) pairing each traced book's live
     confidence against the shadow loop's confidence for the same book,
@@ -181,7 +192,7 @@ def admin_agentic_confidence(series_id: int) -> dict:
 @router.get("/gate/{series_id}")
 def admin_agentic_gate(series_id: int) -> dict:
     """Returns every stored shadow gate decision for one series
-    (`services.agentic_confidence_gate_store.get_agentic_gate_history`)
+    (`agentic.confidence_gate_store.get_agentic_gate_history`)
     -- the Phase 2 dual-write shadow table (`agentic_gate_decisions`)
     pairing each traced book's live `belongs-to-series` gate outcome
     against the shadow loop's gate outcome for the same book, on every
@@ -194,7 +205,7 @@ def admin_agentic_gate(series_id: int) -> dict:
 @router.get("/promotion-history/{series_id}")
 def admin_agentic_promotion(series_id: int) -> dict:
     """Returns every stored Phase 3 candidate-promotion decision for one
-    series (`services.agentic_promotion_evaluator.get_promotion_
+    series (`agentic.promotion_evaluator.get_promotion_
     history`) -- the shadow table (`agentic_promotion_decisions`)
     `agents/series_agent.py`'s live routing path writes to, one row per
     traced book per turn, only when `settings.AGENTIC_ROUTING_ENABLED`
@@ -217,7 +228,7 @@ def admin_agentic_activation_preview(series_id: int) -> dict:
     """Shows what live routing's resolved confidence/gate would look
     like for this series *if* Phase 4 activation were on -- computed
     from the most recent stored promotion decision per book
-    (`services.agentic_promotion_evaluator.build_activation_preview`),
+    (`agentic.promotion_evaluator.build_activation_preview`),
     regardless of whether the series is actually activated right now
     (that real state is also returned, under `"activated"`, for
     comparison). Never calls a live provider, never calls `run_agentic_
@@ -266,7 +277,7 @@ def admin_agentic_metrics() -> dict:
 @router.get("/health/{series_id}")
 def admin_agentic_health(series_id: int) -> dict:
     """Phase 9: returns one series' agentic health summary
-    (`services.agentic_health.compute_agentic_health`) -- promotion
+    (`agentic.health.compute_agentic_health`) -- promotion
     outcome counts, this process's global safety-violation count, this
     series' real current activation state, and a determinism sanity
     flag. Never calls a live provider, never calls `run_agentic_turn`,
@@ -300,3 +311,33 @@ def admin_agentic_summary() -> dict:
         "total_safety_violations": metrics.get("agentic_safety_violations", 0),
         "agentic_turn_invocations": metrics.get("agentic_turn_invocations", 0),
     }
+
+
+@router.get("/readiness/{series_id}")
+def admin_agentic_readiness(series_id: int) -> dict:
+    """Phase 10 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
+    phase1_evaluation.md`, not re-litigated here): returns one series'
+    agentic readiness report (`agentic.readiness.compute_agentic_
+    readiness`) -- whether it's currently safe, per this process's own
+    observability signals, to enable/keep enabled agentic routing for
+    this series. NOT itself an activation mechanism -- purely a read-
+    only judgment call, same as every other diagnostic in this router.
+    Read-only -- no writes.
+    """
+    return {"series_id": series_id, "readiness": compute_agentic_readiness(series_id)}
+
+
+@router.get("/startup-check")
+def admin_agentic_startup_check() -> dict:
+    """Phase 10: returns whether `agentic.invariants.enforce_agentic_
+    invariants` -- the same fail-soft sanity check `main.py` already
+    runs once at process startup -- currently holds. Re-runs the check
+    fresh on every request (cheap, pure, no DB/provider calls) rather
+    than returning a cached startup-time result, so this also doubles
+    as an on-demand "is the agentic layer still wired together
+    correctly" probe, not just a replay of what startup already found.
+    Read-only -- no writes.
+    """
+    from agentic.invariants import enforce_agentic_invariants
+
+    return {"invariants_ok": enforce_agentic_invariants()}

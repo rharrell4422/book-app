@@ -4,7 +4,7 @@ telemetry layer's per-series health computation, backing `GET /admin/
 agentic/health/{series_id}`.
 
 Read-only: never calls a live provider, never calls `run_agentic_turn`,
-never writes anything -- entirely derived from `services/agentic_
+never writes anything -- entirely derived from `agentic/
 promotion_evaluator.get_latest_promotion_decisions` (this series' most
 recent stored promotion decision per book_number -- see that function's
 own docstring for the Phase 6 determinism guarantees this inherits),
@@ -50,7 +50,7 @@ def compute_agentic_health(series_id: int, *, db_session=None) -> dict:
 
     `determinism_ok` is `True` unless a stored decision's own shape is
     malformed -- not a dict at all, or a `promotion_outcome` that isn't
-    one of the three valid literals (`services.agentic_safety.
+    one of the three valid literals (`agentic.safety.
     validate_promotion_outcome`) -- per the Phase 9 spec ("malformed
     history -> determinism_ok=False"). A perfectly healthy series with
     zero stored promotions at all is still `determinism_ok=True`: there
@@ -62,8 +62,8 @@ def compute_agentic_health(series_id: int, *, db_session=None) -> dict:
     `determinism_ok` False, rather than raising.
     """
     try:
-        from services.agentic_promotion_evaluator import get_latest_promotion_decisions
-        from services.agentic_safety import validate_promotion_outcome
+        from agentic.promotion_evaluator import get_latest_promotion_decisions
+        from agentic.safety import validate_promotion_outcome
         from services.discovery_telemetry import get_agentic_metrics
         from settings import is_agentic_activated
 

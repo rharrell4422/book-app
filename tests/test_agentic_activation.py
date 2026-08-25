@@ -42,7 +42,7 @@ from agents.series_agent import SeriesIntelligenceAgent
 from database import Base
 from models import AgenticPromotionDecision, Book, Series, SeriesSkeleton
 from routers.deps import create_owner_token
-from services.agentic_promotion_evaluator import build_activation_preview, store_promotion_decision
+from agentic.promotion_evaluator import build_activation_preview, store_promotion_decision
 
 
 class IsAgenticActivatedTest(unittest.TestCase):
@@ -136,7 +136,7 @@ class ActivationLayerInSeriesAgentTest(unittest.TestCase):
         with self._mock_discovery(), patch.object(settings, "AGENTIC_ROUTING_ENABLED", True), patch.object(
             settings, "AGENTIC_SERIES_ACTIVATION", ""
         ), patch("agents.agentic_series_agent.SessionLocal", self.SessionLocal), patch(
-            "services.agentic_promotion_evaluator.evaluate_promotion", return_value="use_agentic"
+            "agentic.promotion_evaluator.evaluate_promotion", return_value="use_agentic"
         ):
             result = self._run(self.series_a)
 
@@ -152,7 +152,7 @@ class ActivationLayerInSeriesAgentTest(unittest.TestCase):
 
     def test_activation_flag_on_applies_agentic_decisions(self):
         # Phase 7 note: evaluate_promotion is mocked to force
-        # "use_agentic", but services/agentic_resolution.py now
+        # "use_agentic", but agentic/resolution.py now
         # independently re-validates that against the fixture's real
         # confidence/gate data (defense-in-depth) before applying it --
         # mocked here too so this test can keep isolating "does
@@ -162,8 +162,8 @@ class ActivationLayerInSeriesAgentTest(unittest.TestCase):
         with self._mock_discovery(), patch.object(settings, "AGENTIC_ROUTING_ENABLED", True), patch.object(
             settings, "AGENTIC_SERIES_ACTIVATION", str(self.series_a.id)
         ), patch("agents.agentic_series_agent.SessionLocal", self.SessionLocal), patch(
-            "services.agentic_promotion_evaluator.evaluate_promotion", return_value="use_agentic"
-        ), patch("services.agentic_resolution.validate_agentic_decision", return_value=True):
+            "agentic.promotion_evaluator.evaluate_promotion", return_value="use_agentic"
+        ), patch("agentic.resolution.validate_agentic_decision", return_value=True):
             result = self._run(self.series_a)
 
         payload = result["agentic_promotion"]
@@ -184,8 +184,8 @@ class ActivationLayerInSeriesAgentTest(unittest.TestCase):
         with self._mock_discovery(), patch.object(settings, "AGENTIC_ROUTING_ENABLED", True), patch.object(
             settings, "AGENTIC_SERIES_ACTIVATION", str(self.series_a.id)
         ), patch("agents.agentic_series_agent.SessionLocal", self.SessionLocal), patch(
-            "services.agentic_promotion_evaluator.evaluate_promotion", return_value="use_agentic"
-        ), patch("services.agentic_resolution.validate_agentic_decision", return_value=True):
+            "agentic.promotion_evaluator.evaluate_promotion", return_value="use_agentic"
+        ), patch("agentic.resolution.validate_agentic_decision", return_value=True):
             result_a = self._run(self.series_a)
             result_b = self._run(self.series_b)
 
@@ -224,7 +224,7 @@ class ActivationLayerInSeriesAgentTest(unittest.TestCase):
         with self._mock_discovery(), patch.object(settings, "AGENTIC_ROUTING_ENABLED", True), patch.object(
             settings, "AGENTIC_SERIES_ACTIVATION", str(self.series_a.id)
         ), patch("agents.agentic_series_agent.SessionLocal", self.SessionLocal), patch(
-            "services.agentic_promotion_evaluator.evaluate_promotion", return_value="use_agentic"
+            "agentic.promotion_evaluator.evaluate_promotion", return_value="use_agentic"
         ):
             result = self._run(self.series_a)
 
@@ -245,7 +245,7 @@ class ActivationLayerInSeriesAgentTest(unittest.TestCase):
             settings, "AGENTIC_ROUTING_ENABLED", True
         ), patch.object(settings, "AGENTIC_SERIES_ACTIVATION", str(self.series_a.id)), patch(
             "agents.agentic_series_agent.SessionLocal", self.SessionLocal
-        ), patch("services.agentic_promotion_evaluator.evaluate_promotion", return_value="use_agentic"):
+        ), patch("agentic.promotion_evaluator.evaluate_promotion", return_value="use_agentic"):
             self._run(self.series_a)
 
         # discover_candidates_for_series is the live pipeline's own,

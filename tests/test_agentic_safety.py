@@ -1,6 +1,6 @@
-"""Phase 7, agentic safety & guardrail layer -- `services/agentic_safety.
+"""Phase 7, agentic safety & guardrail layer -- `agentic/safety.
 py`'s `validate_agentic_decision`/`validate_promotion_outcome`, their
-integration into `services/agentic_promotion_evaluator.evaluate_
+integration into `agentic/promotion_evaluator.evaluate_
 promotion` (before it would return `"use_agentic"`) and `services/
 agentic_resolution.resolve_routing_decisions` (defense-in-depth
 re-check), and `services/discovery_telemetry.record_agentic_safety_
@@ -35,9 +35,9 @@ import settings
 from agents.series_agent import SeriesIntelligenceAgent
 from database import Base
 from models import Book, Series, SeriesSkeleton
-from services.agentic_promotion_evaluator import evaluate_promotion
-from services.agentic_resolution import resolve_routing_decisions
-from services.agentic_safety import validate_agentic_decision, validate_promotion_outcome
+from agentic.promotion_evaluator import evaluate_promotion
+from agentic.resolution import resolve_routing_decisions
+from agentic.safety import validate_agentic_decision, validate_promotion_outcome
 
 
 class ValidateAgenticDecisionTest(unittest.TestCase):

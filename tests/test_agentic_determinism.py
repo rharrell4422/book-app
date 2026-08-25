@@ -6,12 +6,12 @@ outcome/value wins for any book.
 
 Per the Phase 6 spec, this file needs to prove:
 
-1. `services/agentic_promotion_evaluator.get_promotion_history` sorts by
+1. `agentic/promotion_evaluator.get_promotion_history` sorts by
    `(book_number ASC, timestamp ASC)`, and its new `get_latest_promotion_
    decisions` helper returns the single latest row per book_number, with
    deterministic tie-breaking (by `promotion_outcome`, lexicographically)
    for rows sharing an identical timestamp.
-2. `services/agentic_confidence_gate_store.get_agentic_confidence_history`/
+2. `agentic/confidence_gate_store.get_agentic_confidence_history`/
    `get_agentic_gate_history` sort the same way, and their new `get_
    latest_confidence_decisions`/`get_latest_gate_decisions` helpers return
    the single latest row per book_number.
@@ -22,7 +22,7 @@ Per the Phase 6 spec, this file needs to prove:
    `{book_number: value}` mapping into `float`-keyed, book_number-
    ascending order, failing soft (dropping malformed keys, `{}` for
    non-dict input).
-5. `services/agentic_resolution.resolve_routing_decisions` always returns
+5. `agentic/resolution.resolve_routing_decisions` always returns
    `(resolved_confidence, resolved_gate)` dicts with book_number-ascending
    key order, on every code path (flag off, not activated, activated).
 6. `agents/series_agent.py`'s live routing path returns `result[
@@ -44,14 +44,14 @@ import settings
 from agents.series_agent import SeriesIntelligenceAgent, _sorted_agentic_trace_list, _sorted_book_number_dict
 from database import Base
 from models import AgenticConfidenceDecision, AgenticGateDecision, AgenticPromotionDecision, Book, Series
-from services.agentic_confidence_gate_store import (
+from agentic.confidence_gate_store import (
     get_agentic_confidence_history,
     get_agentic_gate_history,
     get_latest_confidence_decisions,
     get_latest_gate_decisions,
 )
-from services.agentic_promotion_evaluator import get_latest_promotion_decisions, get_promotion_history
-from services.agentic_resolution import resolve_routing_decisions
+from agentic.promotion_evaluator import get_latest_promotion_decisions, get_promotion_history
+from agentic.resolution import resolve_routing_decisions
 
 
 class _InMemoryDbTestCase(unittest.TestCase):

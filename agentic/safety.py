@@ -2,8 +2,8 @@
 evaluation.md`'s settled architecture, not re-litigated here): the
 agentic safety & guardrail layer.
 
-Phases 3-6 built the decision authority (`services/agentic_promotion_
-evaluator.evaluate_promotion`), the resolution layer (`services/agentic_
+Phases 3-6 built the decision authority (`agentic.promotion_
+evaluator.evaluate_promotion`), the resolution layer (`agentic.
 resolution.resolve_routing_decisions`), and determinism hardening on top
 of both. This module adds one more, independent check on top of all of
 that: given a live/agentic confidence+gate pair, is it actually *safe* to
@@ -11,15 +11,15 @@ apply the agentic side at all, regardless of what `evaluate_promotion`'s
 own improvement/violation rules already concluded?
 
 `validate_agentic_decision` is deliberately self-contained -- it does
-NOT import or call anything from `services/agentic_promotion_evaluator.py`
+NOT import or call anything from `agentic/promotion_evaluator.py`
 (despite substantial overlap with that module's own `evaluate_promotion`
-rules 1-3), so that `services/agentic_resolution.py`'s defense-in-depth
+rules 1-3), so that `agentic/resolution.py`'s defense-in-depth
 re-check (Phase 7 section 3) never depends on the promotion evaluator
 module at all, and so this module has zero risk of circular imports with
 either of its two callers. Some duplication of `_confidence_dims`/
-`_belongs_to_series`/`_grade_rank`-shaped logic versus `agentic_promotion_
-evaluator.py` is intentional here, matching this codebase's established
-convention (see e.g. `services/agentic_confidence_gate_store.py` vs.
+`_belongs_to_series`/`_grade_rank`-shaped logic versus `agentic.promotion_
+evaluator` is intentional here, matching this codebase's established
+convention (see e.g. `agentic/confidence_gate_store.py` vs.
 `services/agentic_skeleton_preview_store.py`) of independent, mirrored
 modules rather than shared private helpers.
 
@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import math
 
-# Same grade vocabulary/ranking as `services/agentic_promotion_evaluator.
+# Same grade vocabulary/ranking as `agentic/promotion_evaluator.
 # py`'s own `_GRADE_RANK` (see that module's docstring for the "unverified"
 # placement rationale, not repeated here) -- duplicated per this module's
 # own docstring above.
@@ -59,7 +59,7 @@ _MAX_PLAUSIBLE_BOOK_NUMBER = 100_000
 
 def _confidence_dims(conf) -> dict:
     """Canonicalizes one side's confidence dict onto `_CONFIDENCE_
-    DIMENSIONS`' keys (see `services/agentic_promotion_evaluator.py`'s
+    DIMENSIONS`' keys (see `agentic/promotion_evaluator.py`'s
     `_confidence_dims` for the shared rationale) -- `{}` for anything
     that isn't a dict at all.
     """
@@ -111,9 +111,9 @@ def _is_plausible_book_number(value) -> bool:
 def validate_agentic_decision(live_conf, agentic_conf, live_gate, agentic_gate) -> bool:
     """Returns `True` if the agentic (confidence, gate) pair is SAFE to
     apply in place of the live one; `False` if not. Called from two
-    places: `services/agentic_promotion_evaluator.evaluate_promotion`
-    (before it would otherwise return `"use_agentic"`) and `services/
-    agentic_resolution.resolve_routing_decisions` (defense-in-depth,
+    places: `agentic.promotion_evaluator.evaluate_promotion`
+    (before it would otherwise return `"use_agentic"`) and `agentic.
+    resolution.resolve_routing_decisions` (defense-in-depth,
     re-checked independently even for a decision `evaluate_promotion`
     already approved).
 

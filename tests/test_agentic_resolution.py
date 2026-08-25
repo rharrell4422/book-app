@@ -1,4 +1,4 @@
-"""Phase 5, unified resolution layer -- `services/agentic_resolution.
+"""Phase 5, unified resolution layer -- `agentic/resolution.
 resolve_routing_decisions`.
 
 Per `discovery_agentic_phase1_plan.md`/`discovery_agentic_phase1_evaluation.md`
@@ -26,7 +26,7 @@ import unittest
 from unittest.mock import patch
 
 import settings
-from services.agentic_resolution import resolve_routing_decisions
+from agentic.resolution import resolve_routing_decisions
 
 
 class ResolveRoutingDecisionsTest(unittest.TestCase):

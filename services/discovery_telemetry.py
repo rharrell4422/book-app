@@ -96,7 +96,7 @@ def get_agentic_metrics() -> dict:
 
 
 def record_agentic_promotion_metric(outcome: str) -> None:
-    """Phase 9: called once per `services/agentic_promotion_evaluator.
+    """Phase 9: called once per `agentic/promotion_evaluator.
     evaluate_promotion` decision that's actually *computed* (i.e. from
     inside `_evaluate_once`, not on a Phase 8 cache hit -- a cache hit
     reuses an already-counted decision, it doesn't make a new one).
@@ -117,7 +117,7 @@ def record_agentic_promotion_metric(outcome: str) -> None:
 
 
 def record_agentic_cache_hit() -> None:
-    """Phase 9: called by `services/agentic_resolution.resolve_routing_
+    """Phase 9: called by `agentic/resolution.resolve_routing_
     decisions` each time its optional Phase 8 `cache` already held the
     promotion decision it asked for (no recomputation needed).
     """
@@ -125,7 +125,7 @@ def record_agentic_cache_hit() -> None:
 
 
 def record_agentic_cache_miss() -> None:
-    """Phase 9: called by `services/agentic_resolution.resolve_routing_
+    """Phase 9: called by `agentic/resolution.resolve_routing_
     decisions` each time its optional Phase 8 `cache` did NOT already
     hold the promotion decision it asked for (so it had to be looked up/
     computed via `cache`'s own `compute_fn`, then cached for next time).
@@ -502,7 +502,7 @@ def record_agentic_skeleton_preview_error(series_id: int, error: str) -> None:
 
 
 def record_agentic_confidence_gate_error(series_id: int, decision_kind: str, error: str) -> None:
-    """Phase 2 dual-write (`services/agentic_confidence_gate_store.py`):
+    """Phase 2 dual-write (`agentic/confidence_gate_store.py`):
     logs a failure to insert into the `agentic_confidence_decisions` or
     `agentic_gate_decisions` shadow table for `series_id`.
     `decision_kind` is `"confidence"` or `"gate"`, distinguishing which
@@ -532,7 +532,7 @@ def record_agentic_confidence_gate_error(series_id: int, decision_kind: str, err
 
 
 def record_agentic_promotion_error(series_id: int, error: str) -> None:
-    """Phase 3 (`services/agentic_promotion_evaluator.py`): logs a
+    """Phase 3 (`agentic/promotion_evaluator.py`): logs a
     failure to insert into the `agentic_promotion_decisions` shadow
     table for `series_id`. That store performs a real write (unlike the
     log-only `record_agentic_*` helpers above), so this is specifically
@@ -579,12 +579,12 @@ def record_agentic_dry_run(series_id: int, payload: dict) -> None:
 
 
 def record_agentic_safety_violation(series_id: int, book_number, reason: str) -> None:
-    """Phase 7 (`services/agentic_safety.py`'s guardrail layer): logs one
-    rejection of an otherwise-eligible agentic decision because `services.
-    agentic_safety.validate_agentic_decision` (or `validate_promotion_
-    outcome`) judged it unsafe -- called from both `services/agentic_
+    """Phase 7 (`agentic/safety.py`'s guardrail layer): logs one
+    rejection of an otherwise-eligible agentic decision because `agentic.
+    safety.validate_agentic_decision` (or `validate_promotion_
+    outcome`) judged it unsafe -- called from both `agentic.
     promotion_evaluator.evaluate_promotion` (before it would have
-    returned `"use_agentic"`) and `services/agentic_resolution.
+    returned `"use_agentic"`) and `agentic.resolution.
     resolve_routing_decisions` (its defense-in-depth re-check), so the
     same book/series can log this twice per turn if both layers agree
     it's unsafe -- that's expected, not a bug, since each call site logs
@@ -600,7 +600,7 @@ def record_agentic_safety_violation(series_id: int, book_number, reason: str) ->
     so it's safe to call from anywhere.
 
     Phase 9: incrementing the counter is intentionally placed here
-    rather than inside `services.agentic_safety.validate_agentic_
+    rather than inside `agentic.safety.validate_agentic_
     decision`/`validate_promotion_outcome` themselves -- those two stay
     exactly as pure as their own docstrings already promise (no I/O, not
     even an in-memory counter), and this function is only ever called at

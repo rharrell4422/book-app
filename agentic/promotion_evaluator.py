@@ -13,7 +13,7 @@ compares the *outputs* of those, already computed by its caller
 `settings.AGENTIC_ROUTING_ENABLED`). `evaluate_promotion` is a pure
 function: no DB, no I/O, no side effects -- same inputs always produce
 the same outcome. `store_promotion_decision`/`get_promotion_history`
-mirror `services/agentic_confidence_gate_store.py`'s shape and
+mirror `agentic/confidence_gate_store.py`'s shape and
 guarantees exactly (same fail-soft write, same pure/fail-soft read; see
 that module's own docstring, not repeated here) -- the only new table
 here is `agentic_promotion_decisions`, which additionally records the
@@ -47,9 +47,9 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from agentic.safety import validate_agentic_decision, validate_promotion_outcome
 from database import SessionLocal
 from models import AgenticPromotionDecision
-from services.agentic_safety import validate_agentic_decision, validate_promotion_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +139,7 @@ def evaluate_promotion(
 
     Phase 8 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
     phase1_evaluation.md`, not re-litigated here) adds one more, entirely
-    optional keyword: `cache`, a `services.agentic_cache.AgenticTurnCache`
+    optional keyword: `cache`, a `agentic.cache.AgenticTurnCache`
     instance. When provided (and `book_number` is not `None`), the actual
     decision (steps 1-6 plus both Phase 7 safety gates below) is computed
     at most once per `book_number` for that cache's lifetime -- a second
@@ -175,11 +175,11 @@ def evaluate_promotion(
     Phase 7 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
     phase1_evaluation.md`, not re-litigated here) adds two more gates on
     top of steps 1-6 above, neither of which changes this function's
-    "pure, no DB, no provider calls" contract (`services.agentic_safety`'s
+    "pure, no DB, no provider calls" contract (`agentic.safety`'s
     two functions are themselves pure):
 
     - Before finalizing a `"use_agentic"` candidate from step 5,
-      `services.agentic_safety.validate_agentic_decision` re-checks the
+      `agentic.safety.validate_agentic_decision` re-checks the
       same (live, agentic) pair against its own, independent safety
       rules (contradiction, malformed structures, negative values,
       missing fields, impossible book_number jumps, determinism
@@ -189,7 +189,7 @@ def evaluate_promotion(
       approved can still be vetoed here.
     - Immediately before returning, whatever outcome was decided (by
       steps 1-6 and the safety re-check above) is passed through
-      `services.agentic_safety.validate_promotion_outcome` -- this
+      `agentic.safety.validate_promotion_outcome` -- this
       function can only ever construct one of the three valid literal
       outcome strings itself, so that check can never actually fail in
       practice, but it's asserted explicitly per the Phase 7 spec rather

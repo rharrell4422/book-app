@@ -9,9 +9,9 @@ otherwise recompute the same (already-pure) result for the same
 `book_number` more than once within a single turn/request can share one
 cache instance and pay for that computation exactly once.
 
-Entirely opt-in: every Phase 8 caller (`services/agentic_promotion_
-evaluator.evaluate_promotion`/`build_activation_preview`, `services/
-agentic_resolution.resolve_routing_decisions`) accepts an optional
+Entirely opt-in: every Phase 8 caller (`agentic.promotion_
+evaluator.evaluate_promotion`/`build_activation_preview`, `agentic.
+resolution.resolve_routing_decisions`) accepts an optional
 `cache` parameter defaulting to `None`; omitting it reproduces the exact
 pre-Phase-8 behavior (fresh computation every call), so nothing here can
 change any existing caller's *result*, only how many times that result
