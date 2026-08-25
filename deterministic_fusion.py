@@ -787,6 +787,80 @@ def _should_trigger_author_fallback(
     return triggered
 
 
+# Gates the web-search(+Apify) pass in provider_io._fetch_all_providers_
+# parallel: skip it entirely when the free catalog APIs (Google Books/
+# OpenLibrary/Hardcover) already produced a complete, high-confidence
+# picture of the series on their own. Live incident that motivated this
+# (Percy Jackson and the Olympians -- 5 well-catalogued mainline books plus
+# 2 recent, well-catalogued sequels and one companion short story, all
+# already present across Google Books/OpenLibrary/Hardcover): every single
+# Check Now fired ~12-15 Serper web-search calls and 1-2 full Apify
+# Amazon-scrapes regardless, because nothing ever checked whether the
+# catalog-only picture was already good enough to skip them.
+#
+# Deliberately much stricter than FALLBACK_SERIES_COMPLETENESS_THRESHOLD/
+# FALLBACK_CONFIDENCE_THRESHOLD above: those decide whether it's worth
+# *broadening* a search that already ran; this decides whether it's safe
+# to *skip* a search (web/Apify) entirely, which must not happen on
+# anything less than near-total confidence -- a genuinely new/upcoming
+# volume the catalog APIs haven't indexed yet is exactly the case
+# web-search exists to catch, and this gate must never be the reason it's
+# missed.
+CATALOG_SUFFICIENCY_COMPLETENESS_THRESHOLD = 1.0
+CATALOG_SUFFICIENCY_CONFIDENCE_THRESHOLD = 0.75
+# "The catalogs agree" requires more than one catalog to have actually
+# spoken -- a single source can't corroborate itself. Hardcover in
+# particular is frequently unconfigured (no API key) in a given
+# environment; when it is, it simply doesn't count toward or against this
+# minimum, it isn't treated as a disagreeing source.
+CATALOG_SUFFICIENCY_MIN_CONTRIBUTING_PROVIDERS = 2
+
+
+def catalog_providers_are_sufficient(
+    fused_catalog_candidates: list["UnifiedCandidate"],
+    series_name: str | None,
+    highest_owned_book_number: int | None,
+    *,
+    contributing_provider_count: int,
+) -> bool:
+    """True only when Google Books/OpenLibrary/Hardcover, fused on their
+    own (no web-search/Apify candidates mixed in -- see the `fused_catalog_
+    candidates` caller contract), already look complete and confidently
+    corroborated enough that a web-search+Apify pass would be spending
+    money to reconfirm something already known, not to find something
+    genuinely missing.
+
+    Reuses _series_completeness_and_confidence's existing proxy signal --
+    unchanged, not a new metric -- just applied to catalog-only fusion
+    output and gated on much stricter thresholds than that function's other
+    caller (_should_trigger_author_fallback) uses, per this function's own
+    docstring on why "skip a search" and "broaden a search" need very
+    different confidence bars. `confidence_score` per candidate already
+    reflects cross-provider corroboration (_fuse_and_score_candidates sums
+    a weight per distinct provider that agrees on the same candidate, plus
+    bonuses for ISBN/author agreement and penalties for series-name
+    disagreement) -- so "avg confidence is high" here already substantively
+    means "the catalog providers agree with each other", not just "each
+    provider individually seems confident".
+    """
+    if contributing_provider_count < CATALOG_SUFFICIENCY_MIN_CONTRIBUTING_PROVIDERS:
+        return False
+    completeness, confidence = _series_completeness_and_confidence(
+        fused_catalog_candidates, series_name, highest_owned_book_number
+    )
+    sufficient = (
+        completeness >= CATALOG_SUFFICIENCY_COMPLETENESS_THRESHOLD
+        and confidence >= CATALOG_SUFFICIENCY_CONFIDENCE_THRESHOLD
+    )
+    if sufficient:
+        _log(
+            f"Catalog-sufficiency gate: catalogs alone are complete/confident enough "
+            f"(completeness={completeness:.0%}, confidence={confidence:.0%}, "
+            f"providers={contributing_provider_count}) -- skipping web search/Apify"
+        )
+    return sufficient
+
+
 def _is_cross_series_contamination(raw: dict, target_series_name: str | None) -> bool:
     """True only when a fallback candidate is EXPLICITLY tagged -- by its
     own series_name_hint, whether from Hardcover's structured field, the

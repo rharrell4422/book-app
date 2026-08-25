@@ -50,8 +50,10 @@ from discovery_text import (
 from deterministic_fusion import (
     UnifiedCandidate,
     _METADATA_COMPLETENESS_FIELDS,
+    _fuse_and_score_candidates,
     _reconciled_completeness_score,
     _resolve_candidate_number,
+    catalog_providers_are_sufficient,
 )
 from diagnostics import _record_drop_diagnostic
 
@@ -515,6 +517,17 @@ def _web_search_enabled() -> bool:
 
 def _llm_structuring_enabled() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+
+
+def _catalog_sufficiency_gate_enabled() -> bool:
+    """Kill switch for catalog_providers_are_sufficient (see that
+    function's docstring in deterministic_fusion.py) -- defaults on. Set
+    CATALOG_SUFFICIENCY_GATE_ENABLED=false to fall back to the previous,
+    always-run-web-search-when-configured behavior without a code change,
+    e.g. if the gate is ever suspected of skipping web search/Apify on a
+    series that genuinely needed it.
+    """
+    return os.environ.get("CATALOG_SUFFICIENCY_GATE_ENABLED", "true").strip().lower() != "false"
 
 
 def _fetch_serper_web_search(
@@ -1487,33 +1500,16 @@ def _fetch_all_providers_parallel(
     results: dict[str, list[dict]] = {"google": [], "openlibrary": [], "hardcover": [], "web": []}
     failures: dict[str, Exception] = {}
 
-    tasks: dict[str, tuple] = {}
-    catalog_fetchers = {
-        "google": GoogleBooksProvider(),
-        "openlibrary": OpenLibraryProvider(),
-        "hardcover": HardcoverProvider(),
-    }
-    for provider, query in catalog_queries.items():
-        cache_hit = cache.get_provider_fetch(provider, query) if cache is not None else CACHE_MISS
-        if cache_hit is not CACHE_MISS:
-            results[provider] = cache_hit
-        else:
-            tasks[provider] = (catalog_fetchers[provider].fetch, (query,), {"telemetry": telemetry})
-
-    if run_web_search:
-        tasks["web"] = (
-            WebDiscoveryProvider().fetch,
-            (resolved_web_queries, series_name, author),
-            {
-                "diagnostics": diagnostics,
-                "telemetry": telemetry,
-                "cache": cache,
-                "pass_label": pass_label,
-                "apify_budget": apify_budget,
-            },
-        )
-
-    if tasks:
+    def _run_tasks(tasks: dict[str, tuple]) -> None:
+        """Submits `tasks` to a fresh, per-call ThreadPoolExecutor and
+        populates the outer `results`/`failures` dicts -- shared by both
+        the catalog-only batch and the (conditional) web-search batch
+        below, so the catalog-sufficiency gate in between can see completed
+        catalog results before deciding whether a second batch is needed
+        at all.
+        """
+        if not tasks:
+            return
         with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
             future_to_provider = {
                 executor.submit(func, *args, **kwargs): provider for provider, (func, args, kwargs) in tasks.items()
@@ -1530,6 +1526,83 @@ def _fetch_all_providers_parallel(
                         cache.set_provider_fetch(provider, catalog_queries[provider], results[provider])
                 else:
                     failures[provider] = RuntimeError(fetch_result.error or f"{provider} provider failed")
+
+    catalog_tasks: dict[str, tuple] = {}
+    catalog_fetchers = {
+        "google": GoogleBooksProvider(),
+        "openlibrary": OpenLibraryProvider(),
+        "hardcover": HardcoverProvider(),
+    }
+    for provider, query in catalog_queries.items():
+        cache_hit = cache.get_provider_fetch(provider, query) if cache is not None else CACHE_MISS
+        if cache_hit is not CACHE_MISS:
+            results[provider] = cache_hit
+        else:
+            catalog_tasks[provider] = (catalog_fetchers[provider].fetch, (query,), {"telemetry": telemetry})
+
+    # Catalog providers must be fetched (or served from cache) and awaited
+    # BEFORE web search's own task is even built -- the catalog-sufficiency
+    # gate right below needs their completed results to decide whether
+    # web search/Apify are worth running at all. This trades away the
+    # previous all-four-providers-in-one-batch latency win on the
+    # "web search still needed" path (now two sequential batches instead
+    # of one) in exchange for being able to skip the second batch
+    # (web search, and by extension its own Apify sub-flow) entirely on
+    # the "catalogs alone are already sufficient" path.
+    _run_tasks(catalog_tasks)
+
+    if run_web_search and _catalog_sufficiency_gate_enabled():
+        contributing_provider_count = sum(
+            1
+            for provider in ("google", "openlibrary", "hardcover")
+            if provider not in failures and results.get(provider)
+        )
+        fused_catalog_candidates = _fuse_and_score_candidates(
+            {
+                "google": results["google"],
+                "openlibrary": results["openlibrary"],
+                "hardcover": results["hardcover"],
+                "web": [],
+            },
+            author,
+            series_name,
+        )
+        if catalog_providers_are_sufficient(
+            fused_catalog_candidates,
+            series_name,
+            highest_owned_book_number,
+            contributing_provider_count=contributing_provider_count,
+        ):
+            run_web_search = False
+            if telemetry is not None:
+                telemetry.record_gate_outcome("catalog_sufficiency", "skipped_web_search")
+            if diagnostics is not None:
+                diagnostics.append(
+                    {
+                        "type": "catalog_sufficiency_gate",
+                        "pass_label": pass_label,
+                        "outcome": "skipped_web_search",
+                    }
+                )
+        elif telemetry is not None:
+            telemetry.record_gate_outcome("catalog_sufficiency", "ran_web_search")
+
+    if run_web_search:
+        _run_tasks(
+            {
+                "web": (
+                    WebDiscoveryProvider().fetch,
+                    (resolved_web_queries, series_name, author),
+                    {
+                        "diagnostics": diagnostics,
+                        "telemetry": telemetry,
+                        "cache": cache,
+                        "pass_label": pass_label,
+                        "apify_budget": apify_budget,
+                    },
+                )
+            }
+        )
 
     results["_failures"] = failures
     return results

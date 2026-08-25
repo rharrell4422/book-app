@@ -32,6 +32,7 @@ from services.identity import (
     _normalize_discovered_title,
     owned_title_for_identity,
     _series_book_identity_key,
+    _series_number_slot_key,
 )
 from services.notifications import create_series_discovery_notification
 from services.skeleton_store import apply_skeleton_updates
@@ -405,7 +406,9 @@ def run_series_check_job_full(series_id: int) -> None:
                 if existing_asin and existing_asin not in existing_by_asin:
                     existing_by_asin[existing_asin] = existing
 
-                series_book_key = _series_book_identity_key(existing.series_name or db_series.name, existing.book_number)
+                series_book_key = _series_book_identity_key(
+                    series_id, owned_title_for_identity(existing), existing.author, existing.book_number
+                )
                 if series_book_key and series_book_key not in existing_by_series_book:
                     existing_by_series_book[series_book_key] = existing
 
@@ -438,19 +441,15 @@ def run_series_check_job_full(series_id: int) -> None:
                     canonical_metadata = candidate.get("canonical_metadata") if isinstance(candidate.get("canonical_metadata"), dict) else {}
 
                     normalized_title = str(canonical_metadata.get("title_normalized") or title).strip()
-                    normalized_series_name = str(
-                        canonical_metadata.get("series_name_normalized")
-                        or candidate.get("series_name")
-                        or db_series.name
-                        or ""
-                    ).strip()
                     normalized_author = candidate_author
                     normalized_book_number = canonical_metadata.get("book_number_normalized")
                     if normalized_book_number is None:
                         normalized_book_number = candidate.get("book_number")
                     candidate_asin = str(candidate.get("asin_or_id") or "").strip().upper()
 
-                    series_book_key = _series_book_identity_key(normalized_series_name, normalized_book_number)
+                    series_book_key = _series_book_identity_key(
+                        series_id, normalized_title, normalized_author, normalized_book_number
+                    )
                     canonical_title_key = _canonical_title_identity_key(normalized_title)
 
                     matched_existing: models.Book | None = None
@@ -620,7 +619,9 @@ def run_series_check_job_full(series_id: int) -> None:
 
                     if db_book.asin:
                         existing_by_asin[str(db_book.asin).strip().upper()] = db_book
-                    inserted_series_book_key = _series_book_identity_key(db_series.name, db_book.book_number)
+                    inserted_series_book_key = _series_book_identity_key(
+                        series_id, owned_title_for_identity(db_book), db_book.author, db_book.book_number
+                    )
                     if inserted_series_book_key:
                         existing_by_series_book[inserted_series_book_key] = db_book
                     inserted_title_key = _canonical_title_identity_key(owned_title_for_identity(db_book))
@@ -678,7 +679,11 @@ def run_series_check_job_full(series_id: int) -> None:
                 for existing in refreshed_active_books:
                     key = str(existing.asin or "").strip().upper()
                     if not key:
-                        key = _series_book_identity_key(existing.series_name or db_series.name, existing.book_number) or ""
+                        # Lenient series+number-only key (never title/author) --
+                        # this pass's job is to collapse rows that already
+                        # share a series+number slot despite a title mismatch;
+                        # see _series_number_slot_key's own docstring.
+                        key = _series_number_slot_key(series_id, existing.book_number) or ""
                     if not key:
                         key = _canonical_title_identity_key(owned_title_for_identity(existing)) or ""
                     if not key:
@@ -726,7 +731,10 @@ def run_series_check_job_full(series_id: int) -> None:
                     .all()
                 )
                 for existing in refreshed_after_identity_prune:
-                    series_book_key = _series_book_identity_key(existing.series_name or db_series.name, existing.book_number)
+                    # Same lenient series+number-only key as the pass above --
+                    # this is the "collapse regardless of title" final strict
+                    # pass, not candidate-vs-existing matching.
+                    series_book_key = _series_number_slot_key(series_id, existing.book_number)
                     if not series_book_key:
                         continue
 

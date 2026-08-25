@@ -5417,5 +5417,168 @@ class ManualDeleteRecalculationTest(unittest.TestCase):
         self.assertEqual(refreshed.unread_count, 6)
 
 
+class CatalogSufficiencyGateTest(unittest.TestCase):
+    """Coverage for the catalog-sufficiency gate (deterministic_fusion.
+    catalog_providers_are_sufficient + its wiring into provider_io.
+    _fetch_all_providers_parallel): skip web-search/Apify when Google
+    Books/OpenLibrary/Hardcover already agree on a complete picture of the
+    series, to stop the paid providers firing unconditionally on every
+    Check Now regardless of whether the free catalogs already answered the
+    question (live incident: a well-catalogued 7-book Percy Jackson series
+    still fired ~12-15 Serper calls and an Apify Amazon scrape on every
+    single run).
+    """
+
+    def setUp(self):
+        self._env_patch = patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+
+    def _catalog_hit(self, title: str, number: float, *, source: str, authors=("Rick Riordan",)):
+        return {
+            "title": title,
+            "authors": list(authors),
+            "series_name_hint": "Percy Jackson and the Olympians",
+            "series_number_hint": number,
+            "isbn13": f"978000000{int(number * 10):03d}",
+            "language": "en",
+            "source": source,
+        }
+
+    def _all_catalogs_agree(self, numbers) -> dict:
+        return {
+            "hardcover": [self._catalog_hit(f"Book {n}", n, source="hardcover") for n in numbers],
+            "google": [self._catalog_hit(f"Book {n}", n, source="google_books") for n in numbers],
+            "openlibrary": [self._catalog_hit(f"Book {n}", n, source="openlibrary") for n in numbers],
+            "web": [],
+        }
+
+    def test_sufficient_when_catalogs_fully_agree_with_no_gaps(self):
+        fused = discovery_engine._fuse_and_score_candidates(
+            self._all_catalogs_agree(range(1, 6)),
+            "Rick Riordan",
+            "Percy Jackson and the Olympians",
+        )
+        self.assertTrue(
+            discovery_engine.catalog_providers_are_sufficient(
+                fused,
+                "Percy Jackson and the Olympians",
+                None,
+                contributing_provider_count=3,
+            )
+        )
+
+    def test_not_sufficient_when_only_one_provider_contributed(self):
+        candidates = [self._catalog_hit(f"Book {n}", n, source="hardcover") for n in range(1, 6)]
+        fused = discovery_engine._fuse_and_score_candidates(
+            {"hardcover": candidates, "google": [], "openlibrary": [], "web": []},
+            "Rick Riordan",
+            "Percy Jackson and the Olympians",
+        )
+        self.assertFalse(
+            discovery_engine.catalog_providers_are_sufficient(
+                fused,
+                "Percy Jackson and the Olympians",
+                None,
+                contributing_provider_count=1,
+            )
+        )
+
+    def test_not_sufficient_when_there_is_a_numbering_gap(self):
+        # Only books 1, 2, and 5 are known -- a real gap (3 and 4 missing),
+        # not just a genuinely-complete-but-short series.
+        fused = discovery_engine._fuse_and_score_candidates(
+            self._all_catalogs_agree((1, 2, 5)),
+            "Rick Riordan",
+            "Percy Jackson and the Olympians",
+        )
+        self.assertFalse(
+            discovery_engine.catalog_providers_are_sufficient(
+                fused,
+                "Percy Jackson and the Olympians",
+                None,
+                contributing_provider_count=3,
+            )
+        )
+
+    def test_fetch_all_providers_parallel_skips_web_search_when_catalogs_sufficient(self):
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[self._catalog_hit(f"Book {n}", n, source="hardcover") for n in range(1, 6)],
+        ), patch.object(
+            discovery_engine,
+            "_fetch_google_books",
+            return_value=[self._catalog_hit(f"Book {n}", n, source="google_books") for n in range(1, 6)],
+        ), patch.object(
+            discovery_engine,
+            "_fetch_openlibrary",
+            return_value=[self._catalog_hit(f"Book {n}", n, source="openlibrary") for n in range(1, 6)],
+        ), patch.object(provider_io, "_fetch_serper_web_search") as mock_web_search:
+            result = discovery_engine._fetch_all_providers_parallel(
+                "Rick Riordan",
+                "Percy Jackson and the Olympians",
+                "Percy Jackson and the Olympians Rick Riordan",
+                None,
+                author="Rick Riordan",
+                enable_web_search=True,
+            )
+
+        mock_web_search.assert_not_called()
+        self.assertEqual(result["web"], [])
+
+    def test_fetch_all_providers_parallel_still_runs_web_search_when_catalogs_incomplete(self):
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[self._catalog_hit(f"Book {n}", n, source="hardcover") for n in (1, 2, 5)],
+        ), patch.object(
+            discovery_engine,
+            "_fetch_google_books",
+            return_value=[self._catalog_hit(f"Book {n}", n, source="google_books") for n in (1, 2, 5)],
+        ), patch.object(
+            discovery_engine,
+            "_fetch_openlibrary",
+            return_value=[self._catalog_hit(f"Book {n}", n, source="openlibrary") for n in (1, 2, 5)],
+        ), patch.object(provider_io, "_fetch_serper_web_search", return_value=[]) as mock_web_search:
+            discovery_engine._fetch_all_providers_parallel(
+                "Rick Riordan",
+                "Percy Jackson and the Olympians",
+                "Percy Jackson and the Olympians Rick Riordan",
+                None,
+                author="Rick Riordan",
+                enable_web_search=True,
+            )
+
+        mock_web_search.assert_called()
+
+    def test_gate_can_be_disabled_via_env_var(self):
+        with patch.dict(os.environ, {"CATALOG_SUFFICIENCY_GATE_ENABLED": "false"}), patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[self._catalog_hit(f"Book {n}", n, source="hardcover") for n in range(1, 6)],
+        ), patch.object(
+            discovery_engine,
+            "_fetch_google_books",
+            return_value=[self._catalog_hit(f"Book {n}", n, source="google_books") for n in range(1, 6)],
+        ), patch.object(
+            discovery_engine,
+            "_fetch_openlibrary",
+            return_value=[self._catalog_hit(f"Book {n}", n, source="openlibrary") for n in range(1, 6)],
+        ), patch.object(provider_io, "_fetch_serper_web_search", return_value=[]) as mock_web_search:
+            discovery_engine._fetch_all_providers_parallel(
+                "Rick Riordan",
+                "Percy Jackson and the Olympians",
+                "Percy Jackson and the Olympians Rick Riordan",
+                None,
+                author="Rick Riordan",
+                enable_web_search=True,
+            )
+
+        mock_web_search.assert_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,8 +22,8 @@ class SeriesBookIdentityKeyTest(unittest.TestCase):
     """
 
     def test_fractional_and_whole_number_produce_different_keys(self):
-        whole = _series_book_identity_key("The Empyrean", 3)
-        fractional = _series_book_identity_key("The Empyrean", 3.5)
+        whole = _series_book_identity_key(1, "Onyx Storm", "Rebecca Yarros", 3)
+        fractional = _series_book_identity_key(1, "Threshing Day", "Rebecca Yarros", 3.5)
         self.assertIsNotNone(whole)
         self.assertIsNotNone(fractional)
         self.assertNotEqual(whole, fractional)
@@ -32,9 +32,51 @@ class SeriesBookIdentityKeyTest(unittest.TestCase):
         # 3 and 3.0 are the same book number and must still collapse to one
         # key -- only genuinely fractional positions should differ.
         self.assertEqual(
-            _series_book_identity_key("The Empyrean", 3),
-            _series_book_identity_key("The Empyrean", 3.0),
+            _series_book_identity_key(1, "Onyx Storm", "Rebecca Yarros", 3),
+            _series_book_identity_key(1, "Onyx Storm", "Rebecca Yarros", 3.0),
         )
+
+    def test_series_id_is_the_only_series_identifier_used(self):
+        # Regression coverage for a live incident: two Check Now runs of the
+        # same series minutes apart resolved Series.name to two differently
+        # formatted strings ("Percy Jackson and the Olympians" vs. "Percy
+        # Jackson & The Olympians") for the same series_id. The old
+        # series_name-keyed version of this function produced two different
+        # keys for the same book across those two runs, so the second run's
+        # candidates didn't match their own already-persisted rows and got
+        # inserted a second time as duplicates. series_name/series_name_hint
+        # text must never affect this key -- only the immutable series_id.
+        key_a = _series_book_identity_key(344, "Wrath of the Triple Goddess", "Rick Riordan", 7)
+        key_b = _series_book_identity_key(344, "Wrath of the Triple Goddess", "Rick Riordan", 7)
+        self.assertEqual(key_a, key_b)
+        self.assertNotEqual(
+            _series_book_identity_key(344, "Wrath of the Triple Goddess", "Rick Riordan", 7),
+            _series_book_identity_key(999, "Wrath of the Triple Goddess", "Rick Riordan", 7),
+        )
+
+    def test_title_annotation_with_series_name_does_not_destabilize_key(self):
+        # The same underlying instability the series_id fix above addresses
+        # can leak back in through the *title* if a listing embeds the
+        # series name directly in it (e.g. Amazon/Apify titles commonly do)
+        # -- these two titles must still normalize to the same key.
+        self.assertEqual(
+            _series_book_identity_key(
+                344,
+                "The Chalice of the Gods: (Percy Jackson and the Olympians Book 6.0)",
+                "Rick Riordan",
+                6,
+            ),
+            _series_book_identity_key(
+                344,
+                "The Chalice of the Gods: (Percy Jackson & The Olympians Book 6.0)",
+                "Rick Riordan",
+                6,
+            ),
+        )
+
+    def test_missing_series_id_or_number_returns_none(self):
+        self.assertIsNone(_series_book_identity_key(None, "Some Title", "Some Author", 1))
+        self.assertIsNone(_series_book_identity_key(1, "Some Title", "Some Author", None))
 
     def test_normalized_book_number_value_preserves_fraction(self):
         self.assertEqual(_normalized_book_number_value(3.5), 3.5)
@@ -78,6 +120,25 @@ class CanonicalTitleIdentityKeyTest(unittest.TestCase):
         self.assertNotEqual(
             _canonical_title_identity_key("The Signed Confession"),
             _canonical_title_identity_key("The Confession"),
+        )
+
+    def test_strips_trailing_series_annotation_regardless_of_series_name_formatting(self):
+        # Same fix as _series_book_identity_key's series-name-instability
+        # test above, applied to the title-only fallback key: a listing
+        # title that embeds "(<series name> Book N)" must not fail to match
+        # an otherwise-identical title just because the embedded series name
+        # is formatted differently between two provider fetches.
+        self.assertEqual(
+            _canonical_title_identity_key(
+                "Wrath of the Triple Goddess: (Percy Jackson and the Olympians Book 7.0)"
+            ),
+            _canonical_title_identity_key(
+                "Wrath of the Triple Goddess: (Percy Jackson & The Olympians Book 7.0)"
+            ),
+        )
+        self.assertEqual(
+            _canonical_title_identity_key("Wrath of the Triple Goddess: (Percy Jackson & The Olympians Book 7.0)"),
+            _canonical_title_identity_key("Wrath of the Triple Goddess"),
         )
 
 

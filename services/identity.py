@@ -80,12 +80,31 @@ def _normalize_series_name_for_identity(value: str | None) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# A trailing "(<series name> Book N[.0])"-style annotation -- e.g. "The
+# Chalice of the Gods: (Percy Jackson and the Olympians Book 6.0)" --
+# commonly embedded directly in Amazon/Apify-sourced listing titles. Left
+# in place, this is just as unstable as Series.name itself: two Check Now
+# runs of the same series minutes apart returned this same book with the
+# series name formatted two different ways ("Percy Jackson and the
+# Olympians" vs. "Percy Jackson & The Olympians"), which would otherwise
+# make the *title* component of an identity key differ between runs even
+# after series_name was removed from the key itself (see
+# _series_book_identity_key's docstring for the full incident). Stripped
+# before any other title normalization below so neither this nor
+# _canonical_title_identity_key can be destabilized by it.
+_TRAILING_SERIES_ANNOTATION_PATTERN = re.compile(
+    r"\s*[:\-]?\s*\([^()]*\bbook\s+\d+(?:\.\d+)?\)\s*$",
+    re.IGNORECASE,
+)
+
+
 def _normalize_title_for_identity(value: str | None) -> str:
     # NS-3: the persistence-time sibling of discovery_text.py's core_title_
     # key/bare_title_key (discovery-time identity matching) -- see that
     # module's docstring for the full three-way split, including
     # services/title_normalization.py's separate UI-reformatting concern.
     text = str(value or "").strip()
+    text = _TRAILING_SERIES_ANNOTATION_PATTERN.sub("", text)
     text = re.sub(
         r"\((?:audible|audible audio|audio cd|kindle|kindle edition|paperback|hardcover|mass market paperback)[^)]*\)",
         "",
@@ -132,17 +151,85 @@ def _normalized_book_number_value(value) -> float | None:
         return None
 
 
-def _series_book_identity_key(series_name: str | None, book_number) -> str | None:
-    normalized_series = _normalize_series_name_for_identity(series_name)
+def _series_book_identity_key(
+    series_id: "int | None",
+    title: str | None,
+    author: str | None,
+    book_number,
+) -> str | None:
+    """Identity key for "book #N of series S", used to match a discovered
+    Check Now candidate against an existing library row.
+
+    Keyed on the immutable `series_id` -- never `Series.name` or a
+    candidate's own `series_name`/`series_name_hint` text, both of which are
+    display strings that can and do change between runs (a live incident:
+    two Check Now runs of the same series 8 minutes apart resolved its name
+    to "Percy Jackson and the Olympians" and then "Percy Jackson & The
+    Olympians" -- same series_id throughout. The old series_name-keyed
+    version of this function produced two different key values for the
+    exact same book across those two runs, so the second run's "Stolen
+    Chariot"/"Wrath of the Triple Goddess" candidates didn't match their own
+    already-persisted rows from the first run and got inserted a second
+    time as literal duplicates instead of being recognized as updates).
+    `series_name` must stay display-only from here on -- it is deliberately
+    not even accepted as a parameter any more, so no future call site can
+    reintroduce the same instability.
+
+    `title`/`author` are normalized the same way _canonical_title_
+    identity_key/_authors_match_exact do (including stripping a trailing
+    "(<series> Book N)"-style annotation some listing titles embed directly
+    -- see _TRAILING_SERIES_ANNOTATION_PATTERN -- so that source of the same
+    instability can't leak back in through the title component either) and
+    folded into the key alongside series_id/number for extra precision, but
+    -- like the series_name-keyed version before it -- only `series_id` and
+    `book_number` are required for a key to be produced at all; missing
+    title/author simply normalize to an empty key segment rather than
+    blocking the match, exactly as a missing series_name used to.
+    """
+    if series_id is None:
+        return None
     normalized_book_number = _normalized_book_number_value(book_number)
-    if not normalized_series or normalized_book_number is None:
+    if normalized_book_number is None:
+        return None
+    normalized_title = _normalize_title_for_identity(title)
+    normalized_author = _normalize_author_for_identity(author)
+    number_text = (
+        str(int(normalized_book_number))
+        if normalized_book_number.is_integer()
+        else str(normalized_book_number)
+    )
+    return f"{series_id}|{normalized_title}|{normalized_author}|{number_text}"
+
+
+def _series_number_slot_key(series_id: "int | None", book_number) -> str | None:
+    """Lenient sibling of _series_book_identity_key, keyed ONLY on
+    series_id + book_number -- deliberately ignores title/author entirely.
+
+    Used exclusively by the *existing-row* dedupe-collapse passes in
+    services/series_check_engine.py, whose job is to merge two rows that
+    already share the same series+number slot but drifted apart on title
+    (e.g. "Quest Academy: Scavengers" vs. "Scavengers: Quest Academy, Book
+    2" -- a real production case). Folding title/author into that
+    collapse's key would defeat its entire purpose: it exists specifically
+    to catch same-slot duplicates *despite* a title (or missing-ASIN)
+    mismatch. _series_book_identity_key's title/author components are
+    correct and desirable for *candidate-vs-existing* matching (deciding
+    whether a freshly discovered candidate is an update to an existing row
+    or a new insert), which is a different question with a different
+    tolerance for false negatives -- so the two keys are kept deliberately
+    separate rather than one being reused for both jobs.
+    """
+    if series_id is None:
+        return None
+    normalized_book_number = _normalized_book_number_value(book_number)
+    if normalized_book_number is None:
         return None
     number_text = (
         str(int(normalized_book_number))
         if normalized_book_number.is_integer()
         else str(normalized_book_number)
     )
-    return f"{normalized_series}|{number_text}"
+    return f"{series_id}|{number_text}"
 
 
 def _canonical_title_identity_key(title: str | None) -> str | None:

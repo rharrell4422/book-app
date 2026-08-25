@@ -113,6 +113,15 @@ def log_discovery_summary(*, result: dict, terminal_error: str | None = None) ->
                 f"llm_calls={stats.get('llm_calls', 0)} (llm_time={stats.get('llm_duration_s', 0)}s) "
                 f"tokens_in={stats.get('tokens_in', 0)} tokens_out={stats.get('tokens_out', 0)}"
             )
+        # by_gate surfaces labeled decision-point counters (e.g. the
+        # catalog-sufficiency gate's "skipped_web_search"/"ran_web_search" --
+        # see deterministic_fusion.catalog_providers_are_sufficient) so a
+        # Check Now debug run can directly confirm whether/why the paid
+        # web-search+Apify pass fired, not just how many times it did.
+        by_gate = telemetry.get("by_gate") or {}
+        for gate_name, outcomes in by_gate.items():
+            outcomes_text = ", ".join(f"{outcome}={count}" for outcome, count in outcomes.items())
+            _console_log(f"  GATE {gate_name}: {outcomes_text}")
 
     cache = result.get("cache")
     if cache:
