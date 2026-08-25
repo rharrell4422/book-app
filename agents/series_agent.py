@@ -1516,6 +1516,40 @@ class SeriesIntelligenceAgent:
                     )
 
                 live_snapshot = _observe_live_pipeline(series_id, db)
+
+                # Phase 2 dual-write, final Phase 2 scaffolding block
+                # (services/agentic_confidence_gate_store.py): persist
+                # each traced book's live-vs-agentic confidence/gate pair
+                # to their own dedicated shadow tables, entirely separate
+                # from -- and never touching -- confidence_engine.py or
+                # the live evaluate_belongs_to_series_gate logic. Guarded
+                # separately from the rest of this block, same reasoning
+                # as the skeleton-preview write above: a shadow-write
+                # failure here can't prevent the dry-run trace itself
+                # from being logged below.
+                try:
+                    from services.agentic_confidence_gate_store import store_agentic_confidence, store_agentic_gate
+
+                    confidence_snapshot = live_snapshot.get("confidence_snapshot") or {}
+                    for entry in agentic_trace.get("confidence_traces", []):
+                        book_number = entry["book_number"]
+                        live_conf = confidence_snapshot.get(str(book_number), {})
+                        agentic_conf = entry
+                        store_agentic_confidence(series_id, book_number, live_conf, agentic_conf, db_session=db)
+
+                    gate_snapshot = live_snapshot.get("gate_snapshot") or {}
+                    for entry in agentic_trace.get("gate_traces", []):
+                        book_number = entry["book_number"]
+                        live_gate = gate_snapshot.get(str(book_number), {})
+                        agentic_gate = entry
+                        store_agentic_gate(series_id, book_number, live_gate, agentic_gate, db_session=db)
+                except Exception:
+                    logger.exception(
+                        "run_series_check: storing agentic confidence/gate decisions failed for "
+                        "series_id=%s; continuing",
+                        series_id,
+                    )
+
                 record_agentic_dry_run(
                     series_id,
                     {

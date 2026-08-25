@@ -382,6 +382,36 @@ def record_agentic_skeleton_preview_error(series_id: int, error: str) -> None:
         )
 
 
+def record_agentic_confidence_gate_error(series_id: int, decision_kind: str, error: str) -> None:
+    """Phase 2 dual-write (`services/agentic_confidence_gate_store.py`):
+    logs a failure to insert into the `agentic_confidence_decisions` or
+    `agentic_gate_decisions` shadow table for `series_id`.
+    `decision_kind` is `"confidence"` or `"gate"`, distinguishing which
+    store call failed. Those stores perform real writes (unlike the
+    log-only `record_agentic_*` helpers above), so this is specifically
+    for surfacing write failures against those shadow tables -- it is
+    not itself a fallback persistence layer.
+
+    Same log-only, fail-soft convention as every other helper in this
+    module (tagged `agentic_confidence_gate_error`): a failure here must
+    never raise back into `store_agentic_confidence`/`store_agentic_
+    gate`, which already guard their own calls to this.
+    """
+    try:
+        logger.info(
+            "agentic_confidence_gate_error series_id=%s decision_kind=%s error=%s",
+            series_id,
+            decision_kind,
+            error,
+        )
+    except Exception:
+        logger.exception(
+            "record_agentic_confidence_gate_error: failed to log %s-decision store error for series_id=%s",
+            decision_kind,
+            series_id,
+        )
+
+
 def record_agentic_dry_run(series_id: int, payload: dict) -> None:
     """Phase 2 dual execution mode (`agents/series_agent.py`'s `run_
     series_check`): logs one live discovery turn's dry-run agentic

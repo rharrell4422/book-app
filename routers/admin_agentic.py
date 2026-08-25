@@ -1,12 +1,14 @@
 """Phase 1 agentic discovery, tenth implementation block (extended in the
 eleventh block with `/promotion`, `/series`, `/history`, in Phase 2's
-kickoff block with `/promotion-plan`, and in Phase 2's dual-write block
-with `/previews`): a read-only, owner-only admin router exposing
+kickoff block with `/promotion-plan`, in Phase 2's skeleton dual-write
+block with `/previews`, and in Phase 2's final scaffolding block with
+`/confidence`, `/gate`): a read-only, owner-only admin router exposing
 everything `services/agentic_evaluation_harness.py`/`services/agentic_
 batch_orchestrator.py`/`services/agentic_promotion_checklist.py`/
 `services/agentic_admin_ui_stubs.py`/`services/agentic_promotion_plan.py`/
-`services/agentic_skeleton_preview_store.py` already built, for manual
-triggering during evaluation -- not for end users.
+`services/agentic_skeleton_preview_store.py`/`services/agentic_
+confidence_gate_store.py` already built, for manual triggering during
+evaluation -- not for end users.
 
 Per `discovery_agentic_phase1_plan.md`/`discovery_agentic_phase1_evaluation.md`
 (settled architecture, not re-litigated here): every route below is a thin
@@ -33,6 +35,7 @@ from fastapi.responses import HTMLResponse
 from routers.deps import require_owner
 from services.agentic_admin_ui_stubs import get_agentic_history, list_agentic_series
 from services.agentic_batch_orchestrator import run_batch_agentic_evaluations
+from services.agentic_confidence_gate_store import get_agentic_confidence_history, get_agentic_gate_history
 from services.agentic_evaluation_harness import generate_full_agentic_html, generate_full_agentic_report
 from services.agentic_promotion_checklist import generate_promotion_readiness
 from services.agentic_promotion_plan import build_phase2_promotion_plan
@@ -150,3 +153,30 @@ def admin_agentic_previews(series_id: int) -> dict:
     -- no writes.
     """
     return {"series_id": series_id, "previews": get_agentic_skeleton_previews(series_id)}
+
+
+@router.get("/confidence/{series_id}")
+def admin_agentic_confidence(series_id: int) -> dict:
+    """Returns every stored shadow confidence decision for one series
+    (`services.agentic_confidence_gate_store.get_agentic_confidence_
+    history`) -- the Phase 2 dual-write shadow table
+    (`agentic_confidence_decisions`) pairing each traced book's live
+    confidence against the shadow loop's confidence for the same book,
+    on every live discovery turn. Entirely separate from live
+    `confidence_engine.py`/`SeriesSkeleton.skeleton_json`. Read-only --
+    no writes.
+    """
+    return {"series_id": series_id, "confidence_history": get_agentic_confidence_history(series_id)}
+
+
+@router.get("/gate/{series_id}")
+def admin_agentic_gate(series_id: int) -> dict:
+    """Returns every stored shadow gate decision for one series
+    (`services.agentic_confidence_gate_store.get_agentic_gate_history`)
+    -- the Phase 2 dual-write shadow table (`agentic_gate_decisions`)
+    pairing each traced book's live `belongs-to-series` gate outcome
+    against the shadow loop's gate outcome for the same book, on every
+    live discovery turn. Entirely separate from the live
+    `evaluate_belongs_to_series_gate` logic. Read-only -- no writes.
+    """
+    return {"series_id": series_id, "gate_history": get_agentic_gate_history(series_id)}

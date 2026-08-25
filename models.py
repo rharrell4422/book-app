@@ -9,6 +9,7 @@ from sqlalchemy import (
     Float,
     Text,
     ForeignKey,
+    Index,
 )
 from sqlalchemy.dialects.sqlite import JSON
 from sqlalchemy.orm import relationship
@@ -443,3 +444,69 @@ class AgenticSkeletonPreview(Base):
     series_id = Column(Integer, index=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
     preview_json = Column(JSON, nullable=False)
+
+
+class AgenticConfidenceDecision(Base):
+    """Phase 2 dual-write shadow table (final Phase 2 scaffolding block,
+    same settled architecture as `AgenticSkeletonPreview` above -- see
+    that class's docstring, not re-litigated here): one row per (series,
+    book_number, dry-run turn), pairing the live pipeline's confidence
+    for that book against the Phase 1 shadow loop's
+    (`agents/agentic_series_agent.run_agentic_turn`) `confidence_traces`
+    entry for the same book, at the moment of that turn.
+
+    Purely diagnostic/side-channel -- entirely separate from whatever
+    drives live routing (`SeriesSkeleton.skeleton_json`'s `confidence`
+    field, computed by `confidence_engine.py`). Written only by
+    `services/agentic_confidence_gate_store.py`, which never touches
+    `SeriesSkeleton` or `confidence_engine.py`, and read only by that
+    same module's `get_agentic_confidence_history` and `/admin/agentic/
+    confidence/{series_id}`.
+
+    One row per turn (not per series, and not per series+book_number
+    unique) for the same reason as `AgenticSkeletonPreview`: history
+    accumulates across repeated dry runs so the admin endpoint can show
+    whether live/agentic confidence drift over time, hence the surrogate
+    `id` primary key. `live_confidence`/`agentic_confidence` are stored
+    as opaque JSON blobs (whatever shape the caller passes in) rather
+    than individual scalar columns, matching every other Phase 1/2
+    shadow-diagnostic table's "store the trace as-is" convention.
+    """
+
+    __tablename__ = "agentic_confidence_decisions"
+    __table_args__ = (
+        Index("ix_agentic_confidence_decisions_series_id_book_number", "series_id", "book_number"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    series_id = Column(Integer, index=True)
+    book_number = Column(Float, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    live_confidence = Column(JSON, nullable=False)
+    agentic_confidence = Column(JSON, nullable=False)
+
+
+class AgenticGateDecision(Base):
+    """Phase 2 dual-write shadow table -- the `belongs-to-series` gate
+    counterpart to `AgenticConfidenceDecision` immediately above (see
+    that class's docstring for the shared rationale, not repeated here):
+    one row per (series, book_number, dry-run turn), pairing the live
+    pipeline's gate outcome for that book against the Phase 1 shadow
+    loop's `gate_traces` entry for the same book.
+
+    Written only by `services/agentic_confidence_gate_store.py`
+    (`store_agentic_gate`), which never touches `SeriesSkeleton` or the
+    live `evaluate_belongs_to_series_gate` logic in `agents/series_
+    agent.py`, and read only by that same module's `get_agentic_gate_
+    history` and `/admin/agentic/gate/{series_id}`.
+    """
+
+    __tablename__ = "agentic_gate_decisions"
+    __table_args__ = (Index("ix_agentic_gate_decisions_series_id_book_number", "series_id", "book_number"),)
+
+    id = Column(Integer, primary_key=True)
+    series_id = Column(Integer, index=True)
+    book_number = Column(Float, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    live_gate = Column(JSON, nullable=False)
+    agentic_gate = Column(JSON, nullable=False)
