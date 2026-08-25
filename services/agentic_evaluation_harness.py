@@ -41,6 +41,12 @@ Phase 1 diagnostics, each its own module, each equally read-only/pure:
 vs. the shadow loop's merge preview) and `services.agentic_ttl_
 validator.validate_ttl_behavior` (discovered/probe entry TTL sweep,
 reusing `services/skeleton_store.py`'s own unmodified expiry check).
+
+`generate_full_agentic_report`/`generate_full_agentic_html` are thin
+convenience wrappers layering `services.agentic_report_generator`'s pure
+JSON-consolidation/HTML-rendering on top of one fresh `run_agentic_
+evaluation_for_series` call -- see that module for why neither can write
+anything (they only ever transform an already-built dict/string).
 """
 
 from __future__ import annotations
@@ -54,8 +60,15 @@ from agents import agentic_series_agent
 from database import SessionLocal
 from models import Series, SeriesSkeleton
 from services.agentic_drift_detector import _preview_entries_by_number, detect_skeleton_drift
+from services.agentic_report_generator import generate_agentic_html_report, generate_agentic_report
 from services.agentic_ttl_validator import validate_ttl_behavior
-from services.discovery_telemetry import record_agentic_drift, record_agentic_evaluation, record_agentic_ttl
+from services.discovery_telemetry import (
+    record_agentic_drift,
+    record_agentic_evaluation,
+    record_agentic_full_html,
+    record_agentic_full_report,
+    record_agentic_ttl,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -303,3 +316,52 @@ def run_agentic_evaluation_for_series(series_id: int, *, db_session: Session | N
         )
 
     return report
+
+
+def generate_full_agentic_report(series_id: int, *, db_session: Session | None = None) -> dict:
+    """Convenience wrapper: runs `run_agentic_evaluation_for_series` (so
+    every diagnostic -- live observation, agentic trace, comparison,
+    drift, TTL -- is fresh) and consolidates it via `services.agentic_
+    report_generator.generate_agentic_report`. Logs the consolidated
+    report via `services.discovery_telemetry.record_agentic_full_report`
+    (fail-soft -- a logging failure here never affects the returned
+    report; this is in addition to, not instead of, `run_agentic_
+    evaluation_for_series`'s own per-diagnostic telemetry calls).
+
+    Does NOT modify any persistent state -- see `run_agentic_evaluation_
+    for_series` and `generate_agentic_report`'s own docstrings; this
+    function adds no new write surface on top of either.
+    """
+    evaluation = run_agentic_evaluation_for_series(series_id, db_session=db_session)
+    consolidated_report = generate_agentic_report(evaluation)
+
+    try:
+        record_agentic_full_report(series_id, consolidated_report)
+    except Exception:
+        logger.exception(
+            "generate_full_agentic_report: record_agentic_full_report failed for series_id=%s; continuing",
+            series_id,
+        )
+
+    return consolidated_report
+
+
+def generate_full_agentic_html(series_id: int, *, db_session: Session | None = None) -> str:
+    """Same as `generate_full_agentic_report` above, but returns the
+    HTML-style string rendering (`services.agentic_report_generator.
+    generate_agentic_html_report`) instead of the consolidated JSON dict,
+    and logs it via `services.discovery_telemetry.record_agentic_full_
+    html`. Same no-write, fail-soft-logging guarantees.
+    """
+    evaluation = run_agentic_evaluation_for_series(series_id, db_session=db_session)
+    html_report = generate_agentic_html_report(evaluation)
+
+    try:
+        record_agentic_full_html(series_id, html_report)
+    except Exception:
+        logger.exception(
+            "generate_full_agentic_html: record_agentic_full_html failed for series_id=%s; continuing",
+            series_id,
+        )
+
+    return html_report

@@ -305,6 +305,41 @@ def record_agentic_ttl(series_id: int, ttl_report: dict) -> None:
         logger.exception("record_agentic_ttl: failed to log TTL report for series_id=%s", series_id)
 
 
+def record_agentic_full_report(series_id: int, report: dict) -> None:
+    """Phase 1 report generator (`services/agentic_report_generator.py`,
+    called from `services/agentic_evaluation_harness.generate_full_
+    agentic_report`): logs one series' consolidated JSON evaluation
+    report (live + agentic + comparison + drift + TTL, merged).
+
+    Same log-only fallback as the other `record_agentic_*` helpers above
+    (tagged `agentic_full_report`), fail-soft.
+    """
+    try:
+        logger.info(
+            "agentic_full_report series_id=%s report=%s",
+            series_id,
+            json.dumps(report, default=str),
+        )
+    except Exception:
+        logger.exception("record_agentic_full_report: failed to log report for series_id=%s", series_id)
+
+
+def record_agentic_full_html(series_id: int, html: str) -> None:
+    """Phase 1 report generator (`services/agentic_report_generator.py`,
+    called from `services/agentic_evaluation_harness.generate_full_
+    agentic_html`): logs one series' HTML-style evaluation report.
+
+    `html` is already a plain, pre-escaped string (see `services/
+    agentic_report_generator.py`'s module docstring) -- logged as-is,
+    tagged `agentic_full_html`, fail-soft like every other `record_
+    agentic_*` helper above.
+    """
+    try:
+        logger.info("agentic_full_html series_id=%s html=%s", series_id, html)
+    except Exception:
+        logger.exception("record_agentic_full_html: failed to log HTML report for series_id=%s", series_id)
+
+
 @contextmanager
 def maybe_pass_scope(telemetry: "DiscoveryTelemetry | None", name: str):
     """No-op passthrough when telemetry is None, so call sites don't need
