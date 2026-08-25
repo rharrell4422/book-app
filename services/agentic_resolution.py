@@ -46,6 +46,24 @@ order at all -- two runs over the exact same input could resolve books in
 a different order even though every individual book's resolved value
 was already correct. The resolved *values* were never nondeterministic;
 only the *order* callers iterate over them in was.
+
+Phase 7 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_phase1_
+evaluation.md`, not re-litigated here) adds one more check per book,
+defense-in-depth on top of `evaluate_promotion`'s own Phase 7 safety
+gate: even for a book whose stored `outcome` is `"use_agentic"` (meaning
+`evaluate_promotion` already approved it, including its own Phase 7
+`services.agentic_safety.validate_agentic_decision` check at the time it
+ran), this function independently re-runs that same check right before
+actually applying the agentic side. This is deliberately redundant --
+the point is that a resolution-time bug, a stale/replayed decision, or a
+future caller that bypasses `evaluate_promotion` entirely can never
+result in an unsafe agentic value reaching live routing, without this
+module needing to import anything from `services/agentic_promotion_
+evaluator.py` at all (see `services/agentic_safety.py`'s own docstring
+for why it's intentionally self-contained). A book that fails this
+re-check resolves to its live value instead, exactly as if its outcome
+had been `"use_live"` -- the failure is logged via `services.discovery_
+telemetry.record_agentic_safety_violation` (fail-soft; never raises).
 """
 
 from __future__ import annotations
@@ -53,6 +71,7 @@ from __future__ import annotations
 import logging
 
 import settings
+from services.agentic_safety import validate_agentic_decision
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +94,25 @@ def _sorted_dict_by_key(raw: dict) -> dict:
         return {key: raw[key] for key in sorted(raw, key=_safe_sort_key)}
     except Exception:
         return dict(raw)
+
+
+def _log_safety_violation(series_id, book_number, reason: str) -> None:
+    """Fail-soft telemetry side-channel for the Phase 7 defense-in-depth
+    veto above -- never raises. Deliberately a local helper (rather than
+    importing `services.agentic_promotion_evaluator`'s equivalent) so
+    this module stays independent of that one, per this module's own
+    docstring.
+    """
+    try:
+        from services.discovery_telemetry import record_agentic_safety_violation
+
+        record_agentic_safety_violation(series_id, book_number, reason)
+    except Exception:
+        logger.exception(
+            "resolve_routing_decisions: failed to log safety violation for series_id=%s book_number=%s",
+            series_id,
+            book_number,
+        )
 
 
 def resolve_routing_decisions(
@@ -111,6 +149,13 @@ def resolve_routing_decisions(
     snapshot's books) simply passes its live value straight through --
     "no decision" is never treated as "use agentic".
 
+    Phase 7: an outcome of `"use_agentic"` is additionally re-validated
+    here, independently of `evaluate_promotion`'s own check, via
+    `services.agentic_safety.validate_agentic_decision` -- see module
+    docstring. Failing that re-check resolves the book to its live value
+    (same as `"use_live"`/`"reject_agentic"`), not the agentic one, and
+    logs a fail-soft safety-violation record.
+
     Phase 6: both returned dicts have their keys in ascending-book_number
     order (see module docstring) -- `promotion_decisions` is consulted in
     that same sorted order while resolving, so this holds regardless of
@@ -145,10 +190,20 @@ def resolve_routing_decisions(
             live_conf = live_confidence_snapshot.get(book_number, decision.get("live_confidence"))
             live_gate_value = live_gate_snapshot.get(book_number, decision.get("live_gate"))
 
-            if decision.get("outcome") == "use_agentic":
+            if decision.get("outcome") == "use_agentic" and validate_agentic_decision(
+                live_conf, decision.get("agentic_confidence"), live_gate_value, decision.get("agentic_gate")
+            ):
                 resolved_confidence[book_number] = decision.get("agentic_confidence", live_conf)
                 resolved_gate[book_number] = decision.get("agentic_gate", live_gate_value)
             else:
+                if decision.get("outcome") == "use_agentic":
+                    # evaluate_promotion approved this book, but the
+                    # independent defense-in-depth re-check above just
+                    # vetoed it -- fall back to live, same as any other
+                    # non-"use_agentic" outcome, and log why.
+                    _log_safety_violation(
+                        series_id, book_number, "resolve_routing_decisions defense-in-depth re-check vetoed"
+                    )
                 resolved_confidence[book_number] = live_conf
                 resolved_gate[book_number] = live_gate_value
 

@@ -49,6 +49,7 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import AgenticPromotionDecision
+from services.agentic_safety import validate_agentic_decision, validate_promotion_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -119,11 +120,21 @@ def _belongs_to_series(gate: dict | None) -> bool | None:
     return None
 
 
-def evaluate_promotion(live_conf: dict, agentic_conf: dict, live_gate: dict, agentic_gate: dict) -> str:
-    """Pure decision function -- no DB, no I/O, deterministic. Returns
-    one of `"use_live"`, `"use_agentic"`, `"reject_agentic"` per the
-    Phase 1 plan's promotion rules (see module docstring for the input
-    contract):
+def evaluate_promotion(
+    live_conf: dict,
+    agentic_conf: dict,
+    live_gate: dict,
+    agentic_gate: dict,
+    *,
+    series_id: int | None = None,
+    book_number=None,
+) -> str:
+    """Pure decision function -- no DB, no provider calls, deterministic
+    (`series_id`/`book_number` are optional and used for nothing but
+    fail-soft safety-violation *logging* below -- see Phase 7 note).
+    Returns one of `"use_live"`, `"use_agentic"`, `"reject_agentic"` per
+    the Phase 1 plan's promotion rules (see module docstring for the
+    input contract):
 
     1. Deterministic-invariant check: an agentic decision that provides
        no usable confidence grade and no usable gate opinion at all --
@@ -142,10 +153,38 @@ def evaluate_promotion(live_conf: dict, agentic_conf: dict, live_gate: dict, age
        "the agentic gate must not contradict the live gate".
     4. Any violation from 1-3 -> `"reject_agentic"`.
     5. Otherwise, if the agentic side ranks strictly higher on at least
-       one shared confidence dimension -> `"use_agentic"` (gate
-       consistency is already guaranteed at this point, since step 3
-       would have rejected any contradiction).
+       one shared confidence dimension, it's a *candidate* for
+       `"use_agentic"` -- see Phase 7 step 6 below before that's final.
     6. Otherwise (no violation, no improvement) -> `"use_live"`.
+
+    Phase 7 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
+    phase1_evaluation.md`, not re-litigated here) adds two more gates on
+    top of steps 1-6 above, neither of which changes this function's
+    "pure, no DB, no provider calls" contract (`services.agentic_safety`'s
+    two functions are themselves pure):
+
+    - Before finalizing a `"use_agentic"` candidate from step 5,
+      `services.agentic_safety.validate_agentic_decision` re-checks the
+      same (live, agentic) pair against its own, independent safety
+      rules (contradiction, malformed structures, negative values,
+      missing fields, impossible book_number jumps, determinism
+      invariants -- see that function's own docstring). Failing that
+      check downgrades the outcome to `"reject_agentic"` -- a
+      `"use_agentic"` candidate this function's own rules 1-3 already
+      approved can still be vetoed here.
+    - Immediately before returning, whatever outcome was decided (by
+      steps 1-6 and the safety re-check above) is passed through
+      `services.agentic_safety.validate_promotion_outcome` -- this
+      function can only ever construct one of the three valid literal
+      outcome strings itself, so that check can never actually fail in
+      practice, but it's asserted explicitly per the Phase 7 spec rather
+      than assumed.
+
+    Either Phase 7 rejection logs a fail-soft `services.discovery_
+    telemetry.record_agentic_safety_violation(series_id, book_number,
+    reason)` call (a no-op, best-effort side-channel only -- a logging
+    failure, or omitted `series_id`/`book_number`, never affects the
+    returned decision).
     """
     live_dims = _confidence_dims(live_conf)
     agentic_dims = _confidence_dims(agentic_conf)
@@ -159,30 +198,61 @@ def evaluate_promotion(live_conf: dict, agentic_conf: dict, live_gate: dict, age
     agentic_has_no_opinion = not agentic_dims and agentic_belongs is None
     live_has_an_opinion = bool(live_dims) or live_belongs is not None
     if agentic_has_no_opinion and live_has_an_opinion:
-        return "reject_agentic"
+        outcome = "reject_agentic"
+    else:
+        # Rule 2 (+ "must not reduce provider agreement", same math):
+        # every shared confidence dimension must rank agentic >= live.
+        shared_confidence_keys = set(live_dims) & set(agentic_dims)
+        required_fields_violation = any(
+            _grade_rank(agentic_dims[key]) < _grade_rank(live_dims[key]) for key in shared_confidence_keys
+        )
 
-    # Rule 2 (+ "must not reduce provider agreement", same math): every
-    # shared confidence dimension must rank agentic >= live.
-    shared_confidence_keys = set(live_dims) & set(agentic_dims)
-    required_fields_violation = any(
-        _grade_rank(agentic_dims[key]) < _grade_rank(live_dims[key]) for key in shared_confidence_keys
-    )
+        # Rule 3: an explicit disagreement on series membership.
+        gate_contradiction = (
+            live_belongs is not None and agentic_belongs is not None and bool(live_belongs) != bool(agentic_belongs)
+        )
 
-    # Rule 3: an explicit disagreement on series membership.
-    gate_contradiction = (
-        live_belongs is not None and agentic_belongs is not None and bool(live_belongs) != bool(agentic_belongs)
-    )
+        if required_fields_violation or gate_contradiction:
+            outcome = "reject_agentic"
+        else:
+            improves_confidence = any(
+                _grade_rank(agentic_dims[key]) > _grade_rank(live_dims[key]) for key in shared_confidence_keys
+            )
+            outcome = "use_agentic" if improves_confidence else "use_live"
 
-    if required_fields_violation or gate_contradiction:
-        return "reject_agentic"
+    # Phase 7 step 1: an outcome of "use_agentic" is only final if the
+    # independent safety guardrail agrees it's safe to apply.
+    if outcome == "use_agentic" and not validate_agentic_decision(live_conf, agentic_conf, live_gate, agentic_gate):
+        _log_safety_violation(series_id, book_number, "validate_agentic_decision rejected use_agentic candidate")
+        outcome = "reject_agentic"
 
-    improves_confidence = any(
-        _grade_rank(agentic_dims[key]) > _grade_rank(live_dims[key]) for key in shared_confidence_keys
-    )
-    if improves_confidence:
-        return "use_agentic"
+    # Phase 7 step 2: the outcome itself must be one of the three valid
+    # literals -- can't actually fail given this function's own control
+    # flow above, but asserted explicitly per the Phase 7 spec.
+    if not validate_promotion_outcome(outcome):
+        _log_safety_violation(series_id, book_number, f"invalid promotion outcome: {outcome!r}")
+        outcome = "reject_agentic"
 
-    return "use_live"
+    return outcome
+
+
+def _log_safety_violation(series_id, book_number, reason: str) -> None:
+    """Fail-soft telemetry side-channel shared by both Phase 7 rejection
+    points in `evaluate_promotion` above -- never raises, and a missing
+    `series_id`/`book_number` (the caller didn't opt into logging) is
+    still logged as `None` rather than skipped, so a real bug that
+    somehow produces an invalid outcome is never silently dropped just
+    because the caller omitted the optional logging context.
+    """
+    try:
+        from services.discovery_telemetry import record_agentic_safety_violation
+
+        record_agentic_safety_violation(series_id, book_number, reason)
+    except Exception:
+        logger.exception(
+            "evaluate_promotion: failed to log safety violation for series_id=%s book_number=%s", series_id,
+            book_number,
+        )
 
 
 def store_promotion_decision(

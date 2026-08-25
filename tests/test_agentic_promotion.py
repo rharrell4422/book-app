@@ -314,11 +314,24 @@ class PromotionLayerInSeriesAgentTest(unittest.TestCase):
         # is_agentic_activated) -- see tests/test_agentic_activation.py
         # for the flag-on-but-not-activated ("record, don't apply") case
         # this test used to (incorrectly, post-Phase-4) also cover.
+        #
+        # Phase 7 note: evaluate_promotion is mocked here to force
+        # "use_agentic" regardless of this fixture's real confidence/gate
+        # data, but services/agentic_resolution.py now independently
+        # re-validates that same data via services.agentic_safety.
+        # validate_agentic_decision (defense-in-depth) before actually
+        # applying it -- and this fixture's real agentic confidence
+        # (a synthetic replay, not real corroborating provider evidence)
+        # may not itself pass that real check. That re-check is also
+        # mocked here so this test can keep isolating "does the wiring
+        # apply the agentic side for a use_agentic outcome" from "is this
+        # particular fixture's data actually safe" -- the latter is
+        # covered by tests/test_agentic_safety.py instead.
         with self._mock_discovery(), patch.object(settings, "AGENTIC_ROUTING_ENABLED", True), patch.object(
             settings, "AGENTIC_SERIES_ACTIVATION", str(self.series.id)
         ), patch("agents.agentic_series_agent.SessionLocal", self.SessionLocal), patch(
             "services.agentic_promotion_evaluator.evaluate_promotion", return_value="use_agentic"
-        ):
+        ), patch("services.agentic_resolution.validate_agentic_decision", return_value=True):
             agent = SeriesIntelligenceAgent()
             result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
 

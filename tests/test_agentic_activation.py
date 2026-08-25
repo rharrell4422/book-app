@@ -151,11 +151,19 @@ class ActivationLayerInSeriesAgentTest(unittest.TestCase):
             self.assertEqual(promotion["resolved_gate"], {"belongs_to_series": True, "source_class": "library"})
 
     def test_activation_flag_on_applies_agentic_decisions(self):
+        # Phase 7 note: evaluate_promotion is mocked to force
+        # "use_agentic", but services/agentic_resolution.py now
+        # independently re-validates that against the fixture's real
+        # confidence/gate data (defense-in-depth) before applying it --
+        # mocked here too so this test can keep isolating "does
+        # activation apply the agentic side" from "is this fixture's
+        # data actually safe" (covered separately by
+        # tests/test_agentic_safety.py).
         with self._mock_discovery(), patch.object(settings, "AGENTIC_ROUTING_ENABLED", True), patch.object(
             settings, "AGENTIC_SERIES_ACTIVATION", str(self.series_a.id)
         ), patch("agents.agentic_series_agent.SessionLocal", self.SessionLocal), patch(
             "services.agentic_promotion_evaluator.evaluate_promotion", return_value="use_agentic"
-        ):
+        ), patch("services.agentic_resolution.validate_agentic_decision", return_value=True):
             result = self._run(self.series_a)
 
         payload = result["agentic_promotion"]
@@ -170,11 +178,14 @@ class ActivationLayerInSeriesAgentTest(unittest.TestCase):
     def test_activation_is_per_series(self):
         # Only series_a is activated -- series_b must still resolve to
         # live even with the exact same global flag/mocked outcome.
+        # Phase 7 note: see test_activation_flag_on_applies_agentic_
+        # decisions above for why validate_agentic_decision is also
+        # mocked here.
         with self._mock_discovery(), patch.object(settings, "AGENTIC_ROUTING_ENABLED", True), patch.object(
             settings, "AGENTIC_SERIES_ACTIVATION", str(self.series_a.id)
         ), patch("agents.agentic_series_agent.SessionLocal", self.SessionLocal), patch(
             "services.agentic_promotion_evaluator.evaluate_promotion", return_value="use_agentic"
-        ):
+        ), patch("services.agentic_resolution.validate_agentic_decision", return_value=True):
             result_a = self._run(self.series_a)
             result_b = self._run(self.series_b)
 

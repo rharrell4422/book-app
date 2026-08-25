@@ -1608,7 +1608,12 @@ class SeriesIntelligenceAgent:
                         promo_agentic_gate = agentic_gate_by_number.get(promo_book_number, {})
 
                         promo_outcome = evaluate_promotion(
-                            promo_live_conf, promo_agentic_conf, promo_live_gate, promo_agentic_gate
+                            promo_live_conf,
+                            promo_agentic_conf,
+                            promo_live_gate,
+                            promo_agentic_gate,
+                            series_id=series_id,
+                            book_number=promo_book_number,
                         )
                         store_promotion_decision(
                             series_id,

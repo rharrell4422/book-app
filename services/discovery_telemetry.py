@@ -459,6 +459,40 @@ def record_agentic_dry_run(series_id: int, payload: dict) -> None:
         logger.exception("record_agentic_dry_run: failed to log dry-run payload for series_id=%s", series_id)
 
 
+def record_agentic_safety_violation(series_id: int, book_number, reason: str) -> None:
+    """Phase 7 (`services/agentic_safety.py`'s guardrail layer): logs one
+    rejection of an otherwise-eligible agentic decision because `services.
+    agentic_safety.validate_agentic_decision` (or `validate_promotion_
+    outcome`) judged it unsafe -- called from both `services/agentic_
+    promotion_evaluator.evaluate_promotion` (before it would have
+    returned `"use_agentic"`) and `services/agentic_resolution.
+    resolve_routing_decisions` (its defense-in-depth re-check), so the
+    same book/series can log this twice per turn if both layers agree
+    it's unsafe -- that's expected, not a bug, since each call site logs
+    its own point of rejection independently.
+
+    Purely diagnostic. No writes -- logging one line is the only side
+    effect. Same log-only, fail-soft convention as every other `record_
+    agentic_*` helper in this module (tagged `agentic_safety_violation`):
+    a failure here must never raise back into its caller, both of which
+    already guard their own call to this, but this function guards
+    itself too so it's safe to call from anywhere.
+    """
+    try:
+        logger.info(
+            "agentic_safety_violation series_id=%s book_number=%s reason=%s",
+            series_id,
+            book_number,
+            reason,
+        )
+    except Exception:
+        logger.exception(
+            "record_agentic_safety_violation: failed to log safety violation for series_id=%s book_number=%s",
+            series_id,
+            book_number,
+        )
+
+
 @contextmanager
 def maybe_pass_scope(telemetry: "DiscoveryTelemetry | None", name: str):
     """No-op passthrough when telemetry is None, so call sites don't need
