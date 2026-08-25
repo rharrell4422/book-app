@@ -113,9 +113,18 @@ def log_discovery_summary(*, result: dict, terminal_error: str | None = None) ->
                 f"llm_calls={stats.get('llm_calls', 0)} (llm_time={stats.get('llm_duration_s', 0)}s) "
                 f"tokens_in={stats.get('tokens_in', 0)} tokens_out={stats.get('tokens_out', 0)}"
             )
-        # by_gate surfaces labeled decision-point counters (e.g. the
-        # catalog-sufficiency gate's "skipped_web_search"/"ran_web_search" --
-        # see deterministic_fusion.catalog_providers_are_sufficient) so a
+        # by_gate surfaces labeled decision-point counters -- most notably
+        # catalog_sufficiency (see deterministic_fusion.
+        # catalog_providers_are_sufficient/provider_io._fetch_all_providers_
+        # parallel), whose outcome per evaluation is always one of PASSED
+        # (catalogs sufficient, web search skipped) / FAILED (catalogs NOT
+        # sufficient, web search ran) / SKIPPED (gate disabled via
+        # CATALOG_SUFFICIENCY_GATE_ENABLED) / OVERRIDDEN (a different code
+        # path -- the missing-volume interior-gap lookahead -- fired web
+        # search without ever consulting this gate). The gate can be
+        # evaluated more than once per Check Now (once per multi-round
+        # catch-up round, plus the always-ungated missing-volume path), so
+        # this prints per-outcome counts rather than a single value -- a
         # Check Now debug run can directly confirm whether/why the paid
         # web-search+Apify pass fired, not just how many times it did.
         by_gate = telemetry.get("by_gate") or {}

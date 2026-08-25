@@ -1614,20 +1614,10 @@ def _fetch_all_providers_parallel(
                 run_web_search = False
             if telemetry is not None:
                 telemetry.record_gate_outcome("catalog_sufficiency", outcome)
-            if diagnostics is not None:
-                diagnostics.append(
-                    {
-                        "type": "catalog_sufficiency_gate",
-                        "pass_label": pass_label,
-                        "outcome": outcome,
-                    }
-                )
         else:
             _log(f"Catalog-sufficiency gate [{pass_label}]: DISABLED via CATALOG_SUFFICIENCY_GATE_ENABLED -- running web search unconditionally")
             if telemetry is not None:
                 telemetry.record_gate_outcome("catalog_sufficiency", "SKIPPED")
-            if diagnostics is not None:
-                diagnostics.append({"type": "catalog_sufficiency_gate", "pass_label": pass_label, "outcome": "SKIPPED"})
 
     if run_web_search:
         _run_tasks(

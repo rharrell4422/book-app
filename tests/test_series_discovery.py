@@ -5554,6 +5554,62 @@ class CatalogSufficiencyGateTest(unittest.TestCase):
 
         mock_web_search.assert_called()
 
+    def test_missing_volume_lookahead_records_overridden_gate_outcome(self):
+        # _reconstruct_series_skeleton's interior-gap lookahead bypasses
+        # _fetch_all_providers_parallel (and therefore the catalog-
+        # sufficiency gate) entirely by design -- see its own inline
+        # comment. That bypass must still show up in the same
+        # catalog_sufficiency telemetry bucket, tagged OVERRIDDEN, so it's
+        # visible in the debug summary rather than looking like the gate
+        # silently failed to fire.
+        from services.discovery_telemetry import DiscoveryTelemetry
+
+        telemetry = DiscoveryTelemetry()
+        unified_candidates = [
+            discovery_engine.UnifiedCandidate(
+                title="Book 1", authors=["Rick Riordan"], series_number=1.0, confidence_score=1.0
+            ),
+            discovery_engine.UnifiedCandidate(
+                title="Book 3", authors=["Rick Riordan"], series_number=3.0, confidence_score=1.0
+            ),
+        ]
+        with patch.dict(
+            os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}
+        ), patch.object(provider_io, "_fetch_serper_web_search", return_value=[]):
+            discovery_engine._reconstruct_series_skeleton(
+                unified_candidates,
+                [],
+                series_name="Percy Jackson and the Olympians",
+                author="Rick Riordan",
+                telemetry=telemetry,
+            )
+
+        self.assertEqual(telemetry.summary()["by_gate"]["catalog_sufficiency"].get("OVERRIDDEN"), 1)
+
+    def test_debug_summary_prints_gate_outcome_line(self):
+        from services.discovery_logging import log_discovery_summary
+
+        result = {
+            "series_id": 344,
+            "series_name": "Percy Jackson and the Olympians",
+            "telemetry": {
+                "by_pass": {},
+                "by_gate": {"catalog_sufficiency": {"FAILED": 2, "OVERRIDDEN": 1}},
+                "total_web_search_calls": 14,
+                "total_llm_calls": 3,
+                "total_tokens_in": 0,
+                "total_tokens_out": 0,
+            },
+        }
+        with patch("services.discovery_logging._console_log") as mock_console_log:
+            log_discovery_summary(result=result)
+
+        printed_lines = [call.args[0] for call in mock_console_log.call_args_list]
+        gate_lines = [line for line in printed_lines if "GATE catalog_sufficiency:" in line]
+        self.assertEqual(len(gate_lines), 1)
+        self.assertIn("FAILED=2", gate_lines[0])
+        self.assertIn("OVERRIDDEN=1", gate_lines[0])
+
     def test_gate_can_be_disabled_via_env_var(self):
         with patch.dict(os.environ, {"CATALOG_SUFFICIENCY_GATE_ENABLED": "false"}), patch.object(
             discovery_engine,

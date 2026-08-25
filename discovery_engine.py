@@ -332,6 +332,24 @@ def _reconstruct_series_skeleton(
     targeted_missing = missing_numbers[:MAX_MISSING_VOLUME_LOOKAHEAD_QUERIES]
     lookahead_queries = [f'"{resolved_series_name}" {resolved_author} book {number}' for number in targeted_missing]
 
+    # PB-10 diagnostic pass (Copilot's override-path concern #4): this call
+    # goes straight to _fetch_web_search, NOT through
+    # _fetch_all_providers_parallel -- it never consults the
+    # catalog-sufficiency gate at all, by design (see this function's own
+    # docstring: it exists specifically to chase an *already-confirmed*
+    # interior numbering gap that survived the targeted -- and, if it ran,
+    # author-fallback -- pass, so there's nothing left for a catalog
+    # re-check to possibly short-circuit). Recorded as "OVERRIDDEN" under
+    # the same catalog_sufficiency gate label so it's visible in the same
+    # by_gate/debug-summary breakdown as the gated passes, not silently
+    # invisible to someone auditing why web search fired at all.
+    _log(
+        f"Catalog-sufficiency gate [missing_volume]: OVERRIDDEN -- bypassing gate entirely to chase "
+        f"confirmed interior gap(s) {targeted_missing} for series={resolved_series_name!r}"
+    )
+    if telemetry is not None:
+        telemetry.record_gate_outcome("catalog_sufficiency", "OVERRIDDEN")
+
     try:
         lookahead_raw = _fetch_web_search(
             lookahead_queries,
