@@ -196,6 +196,62 @@ class ComputeSeriesDeltaTest(unittest.TestCase):
         # don't know yet which (if either) copy is the "real" one.
         self.assertEqual(len(delta["missing_books"]), 2)
 
+    def test_two_candidates_sharing_a_number_with_distinct_isbns_are_not_flagged_duplicate(self):
+        # Percy Jackson incident (2026-08-25): a novel and its own
+        # graphic-novel adaptation both legitimately resolve to the same
+        # series position, each with its own distinct, real ISBN --
+        # fusion's own ISBN-first identity rule already correctly decided
+        # these are two different products, not two unmerged copies of the
+        # same book. This must NOT be treated the same as the
+        # (title-only, no-ISBN) unmerged-duplicate case above.
+        skeleton: list[dict] = []
+        candidates = [
+            _candidate(title="The Sea of Monsters", series_number=2, isbn13="9780786290741", source="hardcover"),
+            _candidate(
+                title="The Sea of Monsters: The Graphic Novel",
+                series_number=2,
+                isbn13="9781423145509",
+                source="hardcover",
+            ),
+        ]
+        delta = delta_engine.compute_series_delta(42, skeleton, candidates, series_name="Percy Jackson")
+        self.assertEqual(delta["malformed_books"], [])
+        self.assertEqual(len(delta["missing_books"]), 2)
+
+    def test_isbn_less_candidate_sharing_a_number_with_an_isbn_haver_is_flagged_alone(self):
+        # A genuinely distinguishable (own distinct ISBN) sibling escapes
+        # the duplicate flag, but an ISBN-less candidate at the same
+        # number still looks ambiguous on its own terms and stays flagged
+        # -- this isn't "duplicates are never flagged now", only "a
+        # candidate that's clearly a different, identifiable product no
+        # longer drags -- or gets dragged down by -- an unrelated sibling".
+        skeleton: list[dict] = []
+        candidates = [
+            _candidate(title="The Titan's Curse", series_number=3, isbn13="9782019109974", source="hardcover"),
+            _candidate(
+                title="The Titan's Curse: Special Edition",
+                series_number=3,
+                isbn13=None,
+                source="hardcover",
+            ),
+        ]
+        delta = delta_engine.compute_series_delta(42, skeleton, candidates, series_name="Percy Jackson")
+        duplicate_reasons = [m["reason"] for m in delta["malformed_books"]]
+        self.assertEqual(duplicate_reasons, ["duplicate_number:3.0"])
+        self.assertEqual(delta["malformed_books"][0]["candidate"]["title"], "The Titan's Curse: Special Edition")
+
+    def test_two_candidates_sharing_both_number_and_isbn_are_still_flagged_duplicate(self):
+        # Same ISBN, same number -- a genuine unmerged duplicate (fusion
+        # should have collapsed these), not a distinguishable co-edition.
+        skeleton: list[dict] = []
+        candidates = [
+            _candidate(title="The Sea of Monsters", series_number=2, isbn13="9780786290741", source="hardcover"),
+            _candidate(title="Sea of Monsters", series_number=2, isbn13="9780786290741", source="google_books"),
+        ]
+        delta = delta_engine.compute_series_delta(42, skeleton, candidates, series_name="Percy Jackson")
+        duplicate_reasons = [m["reason"] for m in delta["malformed_books"]]
+        self.assertEqual(duplicate_reasons, ["duplicate_number:2.0", "duplicate_number:2.0"])
+
     def test_numbering_gaps_are_skeleton_numbers_not_resurfaced_this_round(self):
         skeleton = [_skeleton_entry(1), _skeleton_entry(2), _skeleton_entry(3)]
         candidates = [_candidate(title="Book One", series_number=1)]

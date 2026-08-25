@@ -190,5 +190,83 @@ class InsufficientMetadataConfidenceTest(unittest.TestCase):
         self.assertNotEqual(scored["overall"], "zero")
 
 
+class PercyJacksonMissingVolumeIncidentTest(unittest.TestCase):
+    """Percy Jackson incident (2026-08-25): after the catalog-sufficiency
+    gate + fusion fixes correctly stopped calling Serper/Apify, "The Sea of
+    Monsters" (book 2), "The Titan's Curse" (book 3), "The Battle of the
+    Labyrinth" (book 4), and "The Last Olympian" (book 5) were still never
+    surfaced as missing books to add -- every one of them scored an
+    auto-dropped "low" overall confidence, purely because each has its own
+    real graphic-novel adaptation (a distinct, legitimately-co-existing
+    product with its own ISBN) sharing the same series number.
+    delta_engine.compute_series_delta's old duplicate_number check flagged
+    *both* the novel and its graphic-novel sibling as malformed just for
+    sharing a number, which confidence_engine._number_confidence then
+    graded "low" for both -- dragging the well-corroborated novel down
+    with its unrelated sibling. This is the end-to-end (delta ->
+    confidence) regression test for that fix: each of the four novels
+    must now score "medium" or better (accept-worthy), not "low".
+    """
+
+    def _novel_and_graphic_novel(self, title, isbn13, graphic_isbn13, number):
+        return [
+            {
+                "title": title,
+                "authors": ["Rick Riordan"],
+                "isbn13": isbn13,
+                "series_number": number,
+                "metadata_completeness_score": 0.9,
+                "source_provenance": [{"source": "hardcover"}, {"source": "openlibrary"}],
+            },
+            {
+                "title": f"{title}: The Graphic Novel",
+                "authors": ["Rick Riordan", "Robert Venditti"],
+                "isbn13": graphic_isbn13,
+                "series_number": number,
+                "metadata_completeness_score": 0.9,
+                "source_provenance": [{"source": "hardcover"}],
+            },
+        ]
+
+    def test_novel_sharing_a_number_with_its_own_graphic_novel_scores_medium_not_low(self):
+        # No skeleton entries at all for numbers 2-5 -- these are
+        # genuinely new-to-the-library volumes, exactly like the real
+        # incident (only 1, 2.5, 6, 7 were ever owned).
+        skeleton_entries = [{"book_number": 1.0, "title": "The Lightning Thief"}]
+
+        for title, isbn13, graphic_isbn13, number in [
+            ("The Sea of Monsters", "9780786290741", "9781423145509", 2.0),
+            ("The Titan's Curse", "9782019109974", "9780141357751", 3.0),
+            ("The Battle of the Labyrinth", "9789632454900", "9781484786390", 4.0),
+            ("The Last Olympian", "9788804616672", "9781368046084", 5.0),
+        ]:
+            with self.subTest(title=title):
+                candidates = self._novel_and_graphic_novel(title, isbn13, graphic_isbn13, number)
+                delta = delta_engine.compute_series_delta(
+                    series_id=344,
+                    skeleton_entries=skeleton_entries,
+                    provider_candidates=candidates,
+                    series_name="Percy Jackson & The Olympians",
+                )
+                # Neither the novel nor its graphic-novel sibling should be
+                # flagged malformed just for sharing a series number -- both
+                # have their own distinct, real ISBN.
+                self.assertEqual(delta["malformed_books"], [])
+
+                result = compute_confidence(
+                    series_id=344,
+                    skeleton_entries=skeleton_entries,
+                    provider_candidates=candidates,
+                    delta=delta,
+                    series_name="Percy Jackson & The Olympians",
+                    series_author="Rick Riordan",
+                )
+                novel_scored = next(
+                    entry for entry in result["confidence"] if entry["candidate"]["title"] == title
+                )
+                self.assertNotIn(novel_scored["overall"], ("low", "zero"))
+                self.assertEqual(novel_scored["number_confidence"], "medium")
+
+
 if __name__ == "__main__":
     unittest.main()

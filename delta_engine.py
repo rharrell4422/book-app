@@ -139,13 +139,40 @@ def compute_series_delta(
             )
 
     # Two (non-malformed) candidates both resolving to the same structured
-    # number is a real data problem fusion's own dedupe (isbn13 ->
-    # title_key -> normalized title) should already have collapsed --
-    # surfaced here rather than silently letting one win.
+    # number CAN be a real data problem fusion's own dedupe (isbn13 ->
+    # title_key -> normalized title) should already have collapsed -- but
+    # it is just as often two genuinely different, legitimately co-existing
+    # products correctly left unmerged by fusion's own ISBN-first identity
+    # rule (see deterministic_fusion._fuse_and_score_candidates): a novel
+    # and its own graphic-novel adaptation, or a boxed set alongside the
+    # standalone edition, both correctly tagged with the same series
+    # position. Percy Jackson incident (2026-08-25): "The Sea of Monsters"
+    # (95% confidence, 2 corroborating sources) and "The Sea of Monsters:
+    # The Graphic Novel" (a different real product, its own distinct ISBN)
+    # both resolve to number=2 -- flagging *both* as malformed dragged the
+    # genuinely well-corroborated novel down to a "low" confidence grade
+    # and got it silently auto-dropped by agents/series_agent.py's routing,
+    # even though it was exactly the missing volume the user needed
+    # surfaced. A candidate whose own isbn13 is non-empty and not shared by
+    # any sibling at this number is distinguishable from those siblings on
+    # its own terms -- that's what fusion's ISBN-first rule already used to
+    # decide these are different books, not a sign it failed to merge
+    # anything. Only candidates that are NOT distinguishable this way (no
+    # isbn13 at all, or an isbn13 shared with another candidate at the same
+    # number) still look like the "fusion should have merged these" case
+    # this check exists to catch.
     for number, candidates_for_number in number_to_candidates.items():
         if len(candidates_for_number) < 2:
             continue
+        isbn_counts: dict[str, int] = {}
         for candidate in candidates_for_number:
+            isbn13 = str(candidate.get("isbn13") or "").strip()
+            if isbn13:
+                isbn_counts[isbn13] = isbn_counts.get(isbn13, 0) + 1
+        for candidate in candidates_for_number:
+            isbn13 = str(candidate.get("isbn13") or "").strip()
+            if isbn13 and isbn_counts.get(isbn13, 0) < 2:
+                continue
             malformed_books.append(
                 {
                     "type": "malformed_book",
