@@ -88,7 +88,7 @@ class AgenticEvaluationHarnessTest(unittest.TestCase):
 
         self.assertEqual(report["series_id"], self.series.id)
         self.assertIn("timestamp", report)
-        for key in ("live_observation", "agentic_trace", "comparison"):
+        for key in ("live_observation", "agentic_trace", "comparison", "drift_report", "ttl_report"):
             self.assertIn(key, report)
             self.assertIsInstance(report[key], dict)
 
@@ -233,6 +233,9 @@ class AgenticEvaluationHarnessTest(unittest.TestCase):
                 for step in agentic.get("reasoning_steps") or []
             ]
             stripped["agentic_trace"] = agentic
+            ttl_report = dict(stripped["ttl_report"])
+            ttl_report.pop("timestamp", None)
+            stripped["ttl_report"] = ttl_report
             return stripped
 
         self.assertEqual(_strip_volatile(first), _strip_volatile(second))

@@ -34,6 +34,13 @@ anything: `agents.series_agent._build_series_identity_sets`/
 models directly (there's no dedicated "read a skeleton" helper in
 `services/skeleton_store.py` beyond the ORM query itself, so this module
 queries the same way `agents/agentic_series_agent.py` already does).
+
+`run_agentic_evaluation_for_series` additionally composes two more
+Phase 1 diagnostics, each its own module, each equally read-only/pure:
+`services.agentic_drift_detector.detect_skeleton_drift` (live skeleton
+vs. the shadow loop's merge preview) and `services.agentic_ttl_
+validator.validate_ttl_behavior` (discovered/probe entry TTL sweep,
+reusing `services/skeleton_store.py`'s own unmodified expiry check).
 """
 
 from __future__ import annotations
@@ -46,7 +53,9 @@ from sqlalchemy.orm import Session
 from agents import agentic_series_agent
 from database import SessionLocal
 from models import Series, SeriesSkeleton
-from services.discovery_telemetry import record_agentic_evaluation
+from services.agentic_drift_detector import _preview_entries_by_number, detect_skeleton_drift
+from services.agentic_ttl_validator import validate_ttl_behavior
+from services.discovery_telemetry import record_agentic_drift, record_agentic_evaluation, record_agentic_ttl
 
 logger = logging.getLogger(__name__)
 
@@ -204,9 +213,16 @@ def run_agentic_evaluation_for_series(series_id: int, *, db_session: Session | N
       (that module's own docstring covers its no-write guarantees).
     - Computes a structured comparison between the two (see
       `_compare_live_vs_agentic`).
+    - Computes a skeleton-drift report (`services.agentic_drift_detector.
+      detect_skeleton_drift`) between the live snapshot and the shadow
+      loop's merge preview, and a TTL sweep validation report
+      (`services.agentic_ttl_validator.validate_ttl_behavior`) for the
+      same series -- both pure/read-only, reusing this session.
     - Logs the resulting report via `services.discovery_telemetry.
-      record_agentic_evaluation` (fail-soft -- a logging failure here
-      never affects the returned report).
+      record_agentic_evaluation`, plus `record_agentic_drift`/
+      `record_agentic_ttl` for the two new sub-reports (each call
+      independently fail-soft -- a logging failure in any one of them
+      never affects the returned report or the others).
 
     Does NOT modify any persistent state: no DB writes anywhere in this
     function, and every function it calls shares that same guarantee.
@@ -234,11 +250,29 @@ def run_agentic_evaluation_for_series(series_id: int, *, db_session: Session | N
 
         comparison = _compare_live_vs_agentic(live_observation, agentic_trace)
 
+        # detect_skeleton_drift expects both sides in the same
+        # "<book_number str>: entry" shape live_observation's own
+        # skeleton_snapshot already uses -- _preview_entries_by_number
+        # reshapes agentic_trace's list-of-one-preview
+        # skeleton_merge_previews (see agents/agentic_series_agent.py)
+        # into that shape; see services/agentic_drift_detector.py's
+        # module docstring for why that reshaping lives there rather
+        # than inside detect_skeleton_drift itself.
+        drift_report = detect_skeleton_drift(
+            live_observation["skeleton_snapshot"],
+            _preview_entries_by_number(agentic_trace.get("skeleton_merge_previews") or []),
+        )
+        # Reuses this call's own already-open session rather than
+        # re-opening a second one for the same series.
+        ttl_report = validate_ttl_behavior(series_id, db_session=db)
+
         report = {
             "series_id": series_id,
             "live_observation": live_observation,
             "agentic_trace": agentic_trace,
             "comparison": comparison,
+            "drift_report": drift_report,
+            "ttl_report": ttl_report,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     finally:
@@ -251,6 +285,20 @@ def run_agentic_evaluation_for_series(series_id: int, *, db_session: Session | N
         logger.exception(
             "run_agentic_evaluation_for_series: record_agentic_evaluation failed for series_id=%s; "
             "continuing (report is still returned)",
+            series_id,
+        )
+    try:
+        record_agentic_drift(series_id, report["drift_report"])
+    except Exception:
+        logger.exception(
+            "run_agentic_evaluation_for_series: record_agentic_drift failed for series_id=%s; continuing",
+            series_id,
+        )
+    try:
+        record_agentic_ttl(series_id, report["ttl_report"])
+    except Exception:
+        logger.exception(
+            "run_agentic_evaluation_for_series: record_agentic_ttl failed for series_id=%s; continuing",
             series_id,
         )
 

@@ -269,6 +269,42 @@ def record_agentic_batch(series_ids: list[int], batch_report: dict) -> None:
         logger.exception("record_agentic_batch: failed to log batch report for series_ids=%s", series_ids)
 
 
+def record_agentic_drift(series_id: int, drift_report: dict) -> None:
+    """Phase 1 drift detector (`services/agentic_drift_detector.py`, called
+    from `services/agentic_evaluation_harness.py`): logs one series'
+    live-vs-agentic-preview skeleton drift report.
+
+    Same log-only fallback as `record_agentic_evaluation`/`record_agentic_
+    batch` above (tagged `agentic_drift`), fail-soft.
+    """
+    try:
+        logger.info(
+            "agentic_drift series_id=%s drift_report=%s",
+            series_id,
+            json.dumps(drift_report, default=str),
+        )
+    except Exception:
+        logger.exception("record_agentic_drift: failed to log drift report for series_id=%s", series_id)
+
+
+def record_agentic_ttl(series_id: int, ttl_report: dict) -> None:
+    """Phase 1 TTL sweep validator (`services/agentic_ttl_validator.py`,
+    called from `services/agentic_evaluation_harness.py`): logs one
+    series' discovered/probe TTL validation report.
+
+    Same log-only fallback as the other `record_agentic_*` helpers above
+    (tagged `agentic_ttl`), fail-soft.
+    """
+    try:
+        logger.info(
+            "agentic_ttl series_id=%s ttl_report=%s",
+            series_id,
+            json.dumps(ttl_report, default=str),
+        )
+    except Exception:
+        logger.exception("record_agentic_ttl: failed to log TTL report for series_id=%s", series_id)
+
+
 @contextmanager
 def maybe_pass_scope(telemetry: "DiscoveryTelemetry | None", name: str):
     """No-op passthrough when telemetry is None, so call sites don't need
