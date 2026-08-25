@@ -11,6 +11,25 @@ something from one of them, it no longer belongs in this module.
 
 discovery_engine.py re-exports everything below, so existing external
 callers (agents/series_agent.py, tests, etc.) are unaffected by this split.
+
+NS-3: core_title_key/bare_title_key below are one of three deliberately
+separate title-normalization systems in this repo (a fourth, book_
+metadata_utils.py's normalize_book_title(), was dead code with zero
+callers and was removed under DC-1). Each of the three answers a
+different question and is not a fallback/superseded version of another:
+  - core_title_key/bare_title_key (here): discovery-time identity
+    matching -- "is this search-result title the same book as one already
+    owned or already seen?" Tolerant of edition/subtitle noise, folds in a
+    parsed book number for disambiguation.
+  - services/identity.py's _normalize_title_for_identity: persistence-time
+    identity matching -- the stricter sibling used when deciding whether a
+    discovered candidate is actually a new database row vs. an existing
+    one (see that module's own docstring on why it's kept separate from
+    the author-match split too).
+  - services/title_normalization.py: UI-facing title *reformatting* (e.g.
+    "Book Title, Book 4" -> "Book Title (Book 4)" for display), not an
+    identity key at all -- its output is meant to be read by a person, not
+    compared for equality.
 """
 from __future__ import annotations
 
@@ -144,9 +163,10 @@ def _series_names_compatible(hint: str | None, target: str | None) -> bool:
     "Jonathan Hunt" vs. Google Books' "Jonathan Hunt Thriller Series") --
     as opposed to two genuinely different series that happen to share some
     text. Used anywhere a hint needs to be checked against a series
-    identity, whether that's the target series being searched for
-    (_is_cross_series_contamination, the Phase 2 scoring penalty) or another
-    hint from the same candidate's own source_provenance
+    identity -- live deterministic gating, not a shadow/future-only path --
+    whether that's the target series being searched for
+    (_is_cross_series_contamination) or another hint from the same
+    candidate's own source_provenance
     (_candidate_has_provenance_disagreement).
 
     normalize_series_branding_name handles the common case (a generic
@@ -761,6 +781,17 @@ def _to_int_or_none(value) -> int | None:
         return None
     try:
         return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float_or_none(value) -> float | None:
+    """NS-5: shared home for a helper delta_engine.py and confidence_engine.py
+    each defined identically -- both now import it from here instead."""
+    if value is None:
+        return None
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return None
 
