@@ -9,7 +9,7 @@ from bootstrap import (
     clear_stale_ghost_flags_on_read_books,
     run_migrations,
 )
-from routers import admin, auth, books, discovery, imports, notifications, profiles, series
+from routers import admin, admin_agentic, auth, books, discovery, imports, notifications, profiles, series
 from services.skeleton_store import backfill_all_skeletons
 
 # Bring the DB schema up to date (see bootstrap.run_migrations) before
@@ -24,9 +24,12 @@ async def lifespan(app: FastAPI):
     # needs to run against a live DB session each time the app starts.
     await asyncio.to_thread(clear_stale_ghost_flags_on_read_books)
     await asyncio.to_thread(backfill_series_state)
-    # Phase 1 of agentic discovery: keeps series_skeleton in sync with the
-    # library on every boot. Purely additive -- nothing reads this table
-    # yet, so this cannot change any existing behavior.
+    # Phase 0 of agentic discovery: keeps series_skeleton in sync with the
+    # library on every boot. agents/series_agent.py already reads this
+    # table for delta/confidence routing on every Check Now run, so this
+    # backfill is what keeps that read path from seeing a stale skeleton
+    # for a series whose books changed outside of a Check Now (e.g. a
+    # manual edit, an import, or a fresh series that's never been checked).
     await asyncio.to_thread(backfill_all_skeletons)
     yield
 
@@ -56,6 +59,11 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(admin.router)
+# Phase 1 agentic discovery: read-only, owner-only diagnostics only (see
+# routers/admin_agentic.py's module docstring) -- not linked from any
+# user-facing UI, and every route it exposes is a thin pass-through to an
+# already shadow-mode-only service function.
+app.include_router(admin_agentic.router)
 app.include_router(profiles.router)
 app.include_router(series.router)
 app.include_router(books.router)
