@@ -249,6 +249,61 @@ def store_promotion_decision(
             db.close()
 
 
+def build_activation_preview(series_id: int, *, db_session: Session | None = None) -> dict:
+    """Phase 4 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
+    phase1_evaluation.md`'s settled architecture, not re-litigated
+    here): read-only "what would routing look like if this series were
+    activated" preview, backing `GET /admin/agentic/activation-preview/
+    {series_id}`.
+
+    Never calls `run_agentic_turn`/a live provider and never writes
+    anything -- it works entirely off `get_promotion_history`'s already-
+    recorded rows (one per traced book per past live-routing turn where
+    `settings.AGENTIC_ROUTING_ENABLED` was on), keeping only the most
+    recent row per `book_number` (history is oldest-first; last
+    occurrence wins). For each of those, it recomputes what
+    `agents/series_agent.py`'s live routing path would resolve to *if*
+    `settings.is_agentic_activated(series_id)` were `True` -- i.e. the
+    agentic side exactly when that row's own `promotion_outcome` was
+    `"use_agentic"`, live otherwise -- regardless of whether this series
+    is actually activated right now. Returns:
+
+        {"activated": bool,  # the series' REAL current activation state
+         "preview": {"<book_number>": {"outcome": ..., "resolved_confidence": ...,
+                                         "resolved_gate": ...}, ...}}
+
+    Fail-soft: any exception (e.g. a broken `db_session`) yields
+    `{"activated": False, "preview": {}}` rather than raising.
+    """
+    try:
+        from settings import is_agentic_activated
+
+        history = get_promotion_history(series_id, db_session=db_session)
+        latest_by_book_number: dict = {}
+        for entry in history:
+            book_number = entry.get("book_number")
+            if book_number is None:
+                continue
+            latest_by_book_number[book_number] = entry
+
+        preview: dict = {}
+        for book_number, entry in latest_by_book_number.items():
+            outcome = entry.get("promotion_outcome")
+            use_agentic = outcome == "use_agentic"
+            preview[str(book_number)] = {
+                "outcome": outcome,
+                "resolved_confidence": entry.get("agentic_confidence") if use_agentic else entry.get(
+                    "live_confidence"
+                ),
+                "resolved_gate": entry.get("agentic_gate") if use_agentic else entry.get("live_gate"),
+            }
+
+        return {"activated": is_agentic_activated(series_id), "preview": preview}
+    except Exception:
+        logger.exception("build_activation_preview failed for series_id=%s; returning empty preview", series_id)
+        return {"activated": False, "preview": {}}
+
+
 def get_promotion_history(series_id: int, *, db_session: Session | None = None) -> list[dict]:
     """Read-only: returns every stored `agentic_promotion_decisions` row
     for `series_id`, oldest first, as plain dicts:

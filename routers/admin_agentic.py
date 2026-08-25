@@ -2,14 +2,15 @@
 eleventh block with `/promotion`, `/series`, `/history`, in Phase 2's
 kickoff block with `/promotion-plan`, in Phase 2's skeleton dual-write
 block with `/previews`, in Phase 2's final scaffolding block with
-`/confidence`, `/gate`, and in Phase 3 with `/promotion-history`): a
-read-only, owner-only admin router exposing everything `services/
-agentic_evaluation_harness.py`/`services/agentic_batch_orchestrator.py`/
+`/confidence`, `/gate`, in Phase 3 with `/promotion-history`, and in
+Phase 4 with `/activation-preview`, `/activation-status`): a read-only,
+owner-only admin router exposing everything `services/agentic_
+evaluation_harness.py`/`services/agentic_batch_orchestrator.py`/
 `services/agentic_promotion_checklist.py`/`services/agentic_admin_ui_
 stubs.py`/`services/agentic_promotion_plan.py`/`services/agentic_
 skeleton_preview_store.py`/`services/agentic_confidence_gate_store.py`/
-`services/agentic_promotion_evaluator.py` already built, for manual
-triggering during evaluation -- not for end users.
+`services/agentic_promotion_evaluator.py`/`settings.py` already built,
+for manual triggering during evaluation -- not for end users.
 
 Per `discovery_agentic_phase1_plan.md`/`discovery_agentic_phase1_evaluation.md`
 (settled architecture, not re-litigated here): every route below is a thin
@@ -23,10 +24,12 @@ pattern this mirrors), and never linked from any user-facing UI. Nothing
 here writes to the database, calls a live provider, or changes routing/
 confidence/gate/skeleton behavior -- it only ever triggers the existing
 read-only diagnostics and returns their output. `/promotion-plan` (Phase
-2 kickoff) and `/promotion-history` (Phase 3) are the same story: neither
-is a promotion mechanism itself, just a read-only view of what Phase 3's
-feature-flagged live routing layer (`agents/series_agent.py`, gated by
-`settings.AGENTIC_ROUTING_ENABLED`) has decided/recorded so far.
+2 kickoff), `/promotion-history` (Phase 3), and `/activation-preview`/
+`/activation-status` (Phase 4) are the same story: none of them is a
+promotion/activation mechanism itself, just a read-only view of what
+`agents/series_agent.py`'s feature-flagged live routing layer (gated by
+`settings.AGENTIC_ROUTING_ENABLED`/`settings.is_agentic_activated`) has
+decided/recorded/would-hypothetically-do so far.
 """
 
 from __future__ import annotations
@@ -34,13 +37,14 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, Depends
 from fastapi.responses import HTMLResponse
 
+import settings
 from routers.deps import require_owner
 from services.agentic_admin_ui_stubs import get_agentic_history, list_agentic_series
 from services.agentic_batch_orchestrator import run_batch_agentic_evaluations
 from services.agentic_confidence_gate_store import get_agentic_confidence_history, get_agentic_gate_history
 from services.agentic_evaluation_harness import generate_full_agentic_html, generate_full_agentic_report
 from services.agentic_promotion_checklist import generate_promotion_readiness
-from services.agentic_promotion_evaluator import get_promotion_history
+from services.agentic_promotion_evaluator import build_activation_preview, get_promotion_history
 from services.agentic_promotion_plan import build_phase2_promotion_plan
 from services.agentic_skeleton_preview_store import get_agentic_skeleton_previews
 
@@ -204,3 +208,41 @@ def admin_agentic_promotion(series_id: int) -> dict:
     named after, not a conflict worth renaming the older route over).
     """
     return {"series_id": series_id, "promotion_history": get_promotion_history(series_id)}
+
+
+@router.get("/activation-preview/{series_id}")
+def admin_agentic_activation_preview(series_id: int) -> dict:
+    """Shows what live routing's resolved confidence/gate would look
+    like for this series *if* Phase 4 activation were on -- computed
+    from the most recent stored promotion decision per book
+    (`services.agentic_promotion_evaluator.build_activation_preview`),
+    regardless of whether the series is actually activated right now
+    (that real state is also returned, under `"activated"`, for
+    comparison). Never calls a live provider, never calls `run_agentic_
+    turn`, never writes anything. Read-only -- no writes.
+    """
+    preview = build_activation_preview(series_id)
+    return {"series_id": series_id, "activated": preview["activated"], "preview": preview["preview"]}
+
+
+@router.get("/activation-status")
+def admin_agentic_activation_status() -> dict:
+    """Shows every series_id currently allowlisted by `settings.
+    AGENTIC_SERIES_ACTIVATION` -- the raw Phase 4 activation env var,
+    parsed the same way `settings.is_agentic_activated` does. Does not
+    also require `settings.AGENTIC_ROUTING_ENABLED` to be on to appear
+    here (unlike `is_agentic_activated` itself) -- this endpoint answers
+    "what does the allowlist say", not "is agentic routing actually
+    live for this series right now" (see `/activation-preview` for the
+    latter, per series). Read-only -- no writes.
+    """
+    activated_series = set()
+    for raw in settings.AGENTIC_SERIES_ACTIVATION.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            activated_series.add(int(raw))
+        except ValueError:
+            continue
+    return {"activated_series": sorted(activated_series)}

@@ -299,7 +299,7 @@ class PromotionLayerInSeriesAgentTest(unittest.TestCase):
             agent = SeriesIntelligenceAgent()
             result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
 
-        self.assertEqual(result["agentic_promotion"], {"enabled": False, "promotions": []})
+        self.assertEqual(result["agentic_promotion"], {"enabled": False, "activated": False, "promotions": []})
         mock_evaluate.assert_not_called()
         mock_store.assert_not_called()
 
@@ -307,9 +307,16 @@ class PromotionLayerInSeriesAgentTest(unittest.TestCase):
         self.assertEqual(history, [])
 
     def test_promotion_layer_uses_agentic_when_flag_on(self):
-        with self._mock_discovery(), patch.object(settings, "AGENTIC_ROUTING_ENABLED", True), patch(
-            "agents.agentic_series_agent.SessionLocal", self.SessionLocal
-        ), patch(
+        # Phase 4 note: recording ("use_agentic" outcome + shadow-table
+        # write) happens whenever AGENTIC_ROUTING_ENABLED is on, but
+        # *applying* it to resolved_confidence/resolved_gate additionally
+        # requires this series to be activated (settings.
+        # is_agentic_activated) -- see tests/test_agentic_activation.py
+        # for the flag-on-but-not-activated ("record, don't apply") case
+        # this test used to (incorrectly, post-Phase-4) also cover.
+        with self._mock_discovery(), patch.object(settings, "AGENTIC_ROUTING_ENABLED", True), patch.object(
+            settings, "AGENTIC_SERIES_ACTIVATION", str(self.series.id)
+        ), patch("agents.agentic_series_agent.SessionLocal", self.SessionLocal), patch(
             "services.agentic_promotion_evaluator.evaluate_promotion", return_value="use_agentic"
         ):
             agent = SeriesIntelligenceAgent()
@@ -317,12 +324,14 @@ class PromotionLayerInSeriesAgentTest(unittest.TestCase):
 
         payload = result["agentic_promotion"]
         self.assertTrue(payload["enabled"])
+        self.assertTrue(payload["activated"])
         self.assertGreater(len(payload["promotions"]), 0)
         for promotion in payload["promotions"]:
             self.assertEqual(promotion["outcome"], "use_agentic")
             # resolved_confidence/resolved_gate must be the *agentic* side
-            # when the outcome says so, not the live side.
+            # when the outcome says so and the series is activated.
             self.assertNotEqual(promotion["resolved_confidence"], {})
+            self.assertNotIn("confidence", promotion["resolved_confidence"])  # live shape uses "confidence", not "overall"
 
         history = get_promotion_history(self.series.id, db_session=self.db)
         self.assertEqual(len(history), len(payload["promotions"]))

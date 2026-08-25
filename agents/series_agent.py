@@ -1413,7 +1413,8 @@ class SeriesIntelligenceAgent:
                 },
             )
 
-            # Phase 3 candidate promotion (discovery_agentic_phase1_plan.md/
+            # Phase 3 candidate promotion, extended in Phase 4 with
+            # per-series activation (discovery_agentic_phase1_plan.md/
             # discovery_agentic_phase1_evaluation.md, not re-litigated
             # here): feature-flagged (settings.AGENTIC_ROUTING_ENABLED),
             # fail-soft, conditional use of the Phase 1 shadow loop's
@@ -1429,20 +1430,37 @@ class SeriesIntelligenceAgent:
             # store_promotion_decision), and one new result key below --
             # never a write to SeriesSkeleton.skeleton_json/probes_json,
             # and never a change to available_missing/needs_review/
-            # added_books above, regardless of outcome. With the flag
-            # off, this block is not entered at all: zero extra queries,
-            # byte-for-byte identical to before this feature existed.
+            # added_books above, regardless of outcome or activation.
+            # With AGENTIC_ROUTING_ENABLED off, this block is not entered
+            # at all: zero extra queries, byte-for-byte identical to
+            # before this feature existed.
+            #
+            # Phase 4's activation gate (settings.is_agentic_activated)
+            # decides only whether a book's promotion decision is
+            # *applied* to this result's "resolved_confidence"/
+            # "resolved_gate" -- the decision itself (evaluate_promotion)
+            # and its shadow-table write (store_promotion_decision) both
+            # still happen for every traced book whenever
+            # AGENTIC_ROUTING_ENABLED is on, activated or not, so a
+            # series can accumulate promotion history for later review
+            # before ever being activated. Not activated (Phase 3
+            # behavior): "record, don't apply" -- resolved_* is always
+            # the live value. Activated (Phase 4): "record AND apply"
+            # -- resolved_* becomes the agentic value exactly when
+            # evaluate_promotion chose "use_agentic".
             #
             # Passes this call's own `db` through (unlike the Phase 2
             # dry-run block below, which deliberately does not -- see
             # its own comment) so `run_agentic_turn` reads the exact
             # same in-flight transaction's skeleton state rather than a
             # second, independent session.
-            agentic_promotion_payload: dict = {"enabled": False, "promotions": []}
+            agentic_promotion_payload: dict = {"enabled": False, "activated": False, "promotions": []}
             if settings.AGENTIC_ROUTING_ENABLED:
                 try:
                     from agents.agentic_series_agent import run_agentic_turn
                     from services.agentic_promotion_evaluator import evaluate_promotion, store_promotion_decision
+
+                    series_is_activated = settings.is_agentic_activated(series_id)
 
                     promotion_context = {
                         "series_id": series_id,
@@ -1505,24 +1523,33 @@ class SeriesIntelligenceAgent:
                             db_session=db,
                         )
 
-                        use_agentic = promo_outcome == "use_agentic"
+                        # Phase 4: only an activated series ever applies
+                        # "use_agentic" -- a non-activated series always
+                        # resolves to live, regardless of what the
+                        # evaluator decided (still recorded above either
+                        # way).
+                        apply_agentic = series_is_activated and promo_outcome == "use_agentic"
                         promotions.append(
                             {
                                 "book_number": promo_book_number,
                                 "outcome": promo_outcome,
-                                "resolved_confidence": promo_agentic_conf if use_agentic else promo_live_conf,
-                                "resolved_gate": promo_agentic_gate if use_agentic else promo_live_gate,
+                                "resolved_confidence": promo_agentic_conf if apply_agentic else promo_live_conf,
+                                "resolved_gate": promo_agentic_gate if apply_agentic else promo_live_gate,
                             }
                         )
 
-                    agentic_promotion_payload = {"enabled": True, "promotions": promotions}
+                    agentic_promotion_payload = {
+                        "enabled": True,
+                        "activated": series_is_activated,
+                        "promotions": promotions,
+                    }
                 except Exception:
                     logger.exception(
-                        "run_series_check: Phase 3 candidate-promotion layer failed for series_id=%s; "
+                        "run_series_check: Phase 3/4 candidate-promotion layer failed for series_id=%s; "
                         "continuing with live routing unaffected",
                         series_id,
                     )
-                    agentic_promotion_payload = {"enabled": True, "promotions": [], "error": True}
+                    agentic_promotion_payload = {"enabled": True, "activated": False, "promotions": [], "error": True}
 
             result = {
                 "series_id": series.id,
