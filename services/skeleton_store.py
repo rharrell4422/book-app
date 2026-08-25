@@ -484,64 +484,91 @@ def apply_skeleton_updates(
             series_id,
         )
 
-    updates = [update for update in (skeleton_updates or []) if isinstance(update, dict) and update.get("book_number") is not None]
     now = datetime.utcnow()
-    now_iso = now.isoformat()
 
     def merge_fn(existing_entries: list) -> list:
-        by_number: dict = {}
-        for entry in existing_entries or []:
-            if isinstance(entry, dict) and entry.get("book_number") is not None:
-                by_number[entry["book_number"]] = entry
-
-        library_numbers = {
-            number
-            for number, entry in by_number.items()
-            # Legacy (schema_version 1) entries have no source_class at all
-            # and are always library-sourced -- see module docstring.
-            if entry.get("source_class", "library") == "library"
-        }
-
-        for update in updates:
-            number = update["book_number"]
-            if number in library_numbers:
-                # The library is always authoritative over an unconfirmed
-                # agent finding for a number it already owns.
-                continue
-            previous = by_number.get(number)
-            merged_entry = dict(update)
-
-            # FIX-SS-ENUM: reject/drop an unrecognized status instead of
-            # silently persisting it -- fall back to the previous entry's
-            # status (if any) rather than inventing one.
-            status_value = merged_entry.get("status")
-            if status_value is not None and status_value not in VALID_SKELETON_STATUSES:
-                logger.warning(
-                    "apply_skeleton_updates: dropping unrecognized status %r for "
-                    "series_id=%s book_number=%s (valid: %s)",
-                    status_value,
-                    series_id,
-                    number,
-                    sorted(VALID_SKELETON_STATUSES),
-                )
-                if previous is not None and previous.get("status") in VALID_SKELETON_STATUSES:
-                    merged_entry["status"] = previous["status"]
-                else:
-                    merged_entry.pop("status", None)
-
-            merged_entry["source_class"] = "discovered"
-            merged_entry["first_seen_at"] = (previous or {}).get("first_seen_at") or update.get("first_seen_at") or now_iso
-            merged_entry["last_confirmed_at"] = now_iso
-            by_number[number] = merged_entry
-
-        survivors = [
-            entry
-            for entry in by_number.values()
-            if entry.get("source_class") != "discovered" or not _is_expired_discovered_entry(entry, now)
-        ]
-        return sorted(survivors, key=_sort_key)
+        return compute_skeleton_updates_merge(existing_entries, skeleton_updates, now=now, series_id=series_id)
 
     return _upsert_skeleton_row(db, series_id, merge_fn)
+
+
+def compute_skeleton_updates_merge(
+    existing_entries: list,
+    skeleton_updates: list[dict] | None,
+    *,
+    now: datetime,
+    series_id: int | None = None,
+) -> list[dict]:
+    """Pure merge computation extracted from `apply_skeleton_updates`'s
+    `merge_fn` closure above -- exact same logic, just named and callable
+    without going through `_upsert_skeleton_row` (i.e. without ever
+    reading/writing the database). Zero behavior change for
+    `apply_skeleton_updates` itself, which now just delegates to this.
+
+    Extracted specifically so Phase 1's `agents/agentic_series_agent.py`
+    (deterministic shadow loop, see that module) can compute a read-only
+    *preview* of what a skeleton merge would produce -- given the same
+    `existing_entries` a real call would see, plus a candidate
+    `skeleton_updates` list -- without any risk of it accidentally
+    persisting anything, since this function alone has no access to `db`
+    at all.
+    """
+    updates = [
+        update for update in (skeleton_updates or []) if isinstance(update, dict) and update.get("book_number") is not None
+    ]
+    now_iso = now.isoformat()
+
+    by_number: dict = {}
+    for entry in existing_entries or []:
+        if isinstance(entry, dict) and entry.get("book_number") is not None:
+            by_number[entry["book_number"]] = entry
+
+    library_numbers = {
+        number
+        for number, entry in by_number.items()
+        # Legacy (schema_version 1) entries have no source_class at all
+        # and are always library-sourced -- see module docstring.
+        if entry.get("source_class", "library") == "library"
+    }
+
+    for update in updates:
+        number = update["book_number"]
+        if number in library_numbers:
+            # The library is always authoritative over an unconfirmed
+            # agent finding for a number it already owns.
+            continue
+        previous = by_number.get(number)
+        merged_entry = dict(update)
+
+        # FIX-SS-ENUM: reject/drop an unrecognized status instead of
+        # silently persisting it -- fall back to the previous entry's
+        # status (if any) rather than inventing one.
+        status_value = merged_entry.get("status")
+        if status_value is not None and status_value not in VALID_SKELETON_STATUSES:
+            logger.warning(
+                "apply_skeleton_updates: dropping unrecognized status %r for "
+                "series_id=%s book_number=%s (valid: %s)",
+                status_value,
+                series_id,
+                number,
+                sorted(VALID_SKELETON_STATUSES),
+            )
+            if previous is not None and previous.get("status") in VALID_SKELETON_STATUSES:
+                merged_entry["status"] = previous["status"]
+            else:
+                merged_entry.pop("status", None)
+
+        merged_entry["source_class"] = "discovered"
+        merged_entry["first_seen_at"] = (previous or {}).get("first_seen_at") or update.get("first_seen_at") or now_iso
+        merged_entry["last_confirmed_at"] = now_iso
+        by_number[number] = merged_entry
+
+    survivors = [
+        entry
+        for entry in by_number.values()
+        if entry.get("source_class") != "discovered" or not _is_expired_discovered_entry(entry, now)
+    ]
+    return sorted(survivors, key=_sort_key)
 
 
 def backfill_all_skeletons() -> None:

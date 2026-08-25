@@ -305,6 +305,121 @@ def _is_known_candidate(
     return False
 
 
+def evaluate_belongs_to_series_gate(
+    *,
+    title: str,
+    inferred_number,
+    candidate_confidence: str | None,
+    series_name: str,
+    known_series_titles: set[str],
+    owned_core_title_texts: set[str],
+    highest_owned_book_number: int | None,
+) -> dict:
+    """Pure extraction of `run_series_check`'s belongs-to-series gate --
+    exact same computation the live loop used inline before this
+    extraction, just named and callable independently (zero behavior
+    change to the live loop, which now just calls this and unpacks the
+    result -- see the loop body for the call site). Callers pass in
+    `title`/`inferred_number` already resolved (see the loop's own
+    Hardcover-position-vs-title-inference comment) rather than this
+    function re-deriving them, so there's exactly one place that ever
+    computes those two values.
+
+    Extracted specifically so PB-5's shadow gate trace and Phase 1's
+    `agents/agentic_series_agent.py` (deterministic shadow loop, see that
+    module) can evaluate the identical, unmodified gate logic without
+    duplicating it -- two independently-maintained copies of this much
+    branching logic is exactly the kind of drift risk
+    `discovery_agentic_phase1_evaluation.md` flags elsewhere (see its
+    author-mismatch-reconciliation discussion) for a different gate.
+
+    Targeted-search results are relevance-ranked by the API against
+    "<series name> <author>", but that ranking isn't a strict filter -- a
+    prolific author's unrelated books (e.g. a different series, an
+    anthology, a companion volume) can still come back as "targeted"
+    hits with zero textual tie to the series being checked (regression:
+    searching "Safehold David Weber" surfaced "Bolo!", "Worlds Of Honor",
+    and "At All Costs" -- unrelated Weber titles from other series).
+    Trusting confidence=="targeted" alone is only safe when the source
+    also gave a real series-position number for it (structured data,
+    e.g. Hardcover's series_number_hint, or a "Book N" pattern in the
+    title itself) -- a same-author hit with no number and no textual
+    series reference is too weak a signal on its own to add to the
+    library as a new book. "missing_volume_recovery" is trusted the same
+    way: it's tagged only when the candidate came from a lookahead query
+    built for that exact missing number, at least as specific as the
+    plain targeted pass's "<series> <author>" query.
+
+    continues_numbering alone is too weak a signal for a prolific
+    multi-series author: a same-author book that simply has a higher
+    inferred number than the highest owned volume says nothing about
+    which of the author's several series it belongs to (regression:
+    "Check Now" on George Wagner's "Jonathan Hunt Thriller Series" pulled
+    in higher-numbered books from his other, unrelated thriller series
+    purely because they continued the numbering). Requiring it to be
+    corroborated by an actual textual tie to *this* series -- explicit or
+    partial title match -- keeps continues_numbering useful for genuine
+    continuations while closing that cross-series contamination path.
+
+    A self-identified "<Flagship Series> universe" tie-in novel (see
+    _looks_like_universe_tie_in) can textually match the series name via
+    explicit_series_match/partial_match while actually belonging to a
+    different spin-off series -- for those, downgrade to requiring an
+    actual series-position number tying it to *this* series, same bar as
+    any other same-author-but-unrelated book.
+
+    A candidate that spells out two or more already-owned book titles by
+    name (rather than using a "Books 1-3"/"Boxed Set"/"Omnibus" label) is
+    a compilation of existing content, not a new entry -- regardless of
+    how it otherwise matched (regression: "The Safehold Series, Volume I:
+    Off Armageddon Reef, By Schism Rent Asunder, By Heresies Distressed,
+    A Mighty Fortress, How Firm a Foundation" strings together five owned
+    titles with no number and no bundle keyword, so it passed as a new
+    "available" book).
+    """
+    came_from_targeted_search = candidate_confidence in ("targeted", "missing_volume_recovery")
+    explicit_series_match = _title_pattern_match(title, series_name, known_series_titles)
+    partial_match = _partial_series_match(title, series_name)
+    # inferred_number is deliberately left as whatever type its source
+    # gave it (int from infer_number_from_title, but a *string* from a
+    # provider's series_number_hint, e.g. Apify's/Hardcover's "9") --
+    # _to_int_or_none gives both sides a real numeric type to compare
+    # regardless of which source inferred_number came from (see the live
+    # loop's own comment for the crash this fixed).
+    inferred_number_int = discovery_engine._to_int_or_none(inferred_number)
+    continues_numbering = bool(
+        inferred_number_int is not None
+        and highest_owned_book_number
+        and inferred_number_int > highest_owned_book_number
+    )
+    targeted_with_number = bool(came_from_targeted_search and inferred_number)
+    continues_numbering_valid = continues_numbering and (explicit_series_match or partial_match)
+    belongs_to_series = bool(
+        targeted_with_number or explicit_series_match or partial_match or continues_numbering_valid
+    )
+
+    is_universe_tie_in = _looks_like_universe_tie_in(title)
+    if is_universe_tie_in and not (targeted_with_number or continues_numbering):
+        belongs_to_series = False
+
+    referenced_owned_titles = _count_referenced_owned_titles(title, owned_core_title_texts)
+    is_compilation_of_owned_titles = referenced_owned_titles >= 2
+    if is_compilation_of_owned_titles:
+        belongs_to_series = False
+
+    return {
+        "explicit_series_match": explicit_series_match,
+        "partial_match": partial_match,
+        "inferred_number_int": inferred_number_int,
+        "continues_numbering": continues_numbering,
+        "targeted_with_number": targeted_with_number,
+        "is_universe_tie_in": is_universe_tie_in,
+        "referenced_owned_titles": referenced_owned_titles,
+        "is_compilation_of_owned_titles": is_compilation_of_owned_titles,
+        "belongs_to_series": belongs_to_series,
+    }
+
+
 def _empty_result(series_id: int | None, series_name: str | None, reason: str) -> dict:
     return {
         "series_id": series_id,
@@ -891,93 +1006,32 @@ class SeriesIntelligenceAgent:
                 )
                 resolved_number = _normalize_identity_number(inferred_number) if inferred_number else ""
 
-                # Targeted-search results are relevance-ranked by the API
-                # against "<series name> <author>", but that ranking isn't a
-                # strict filter -- a prolific author's unrelated books (e.g.
-                # a different series, an anthology, a companion volume) can
-                # still come back as "targeted" hits with zero textual tie to
-                # the series being checked (regression: searching "Safehold
-                # David Weber" surfaced "Bolo!", "Worlds Of Honor", and "At
-                # All Costs" -- unrelated Weber titles from other series).
-                # Trusting confidence=="targeted" alone is only safe when the
-                # source also gave a real series-position number for it
-                # (structured data, e.g. Hardcover's series_number_hint, or a
-                # "Book N" pattern in the title itself) -- a same-author hit
-                # with no number and no textual series reference is too weak
-                # a signal on its own to add to the library as a new book.
-                # "missing_volume_recovery" (see the skeleton re-merge above)
-                # is trusted the same way: it's tagged only when the
-                # candidate came from a lookahead query built for that
-                # exact missing number, which is at least as specific as
-                # the plain targeted pass's "<series> <author>" query.
-                came_from_targeted_search = raw.get("confidence") in ("targeted", "missing_volume_recovery")
-                explicit_series_match = _title_pattern_match(title, series.name, known_series_titles)
-                partial_match = _partial_series_match(title, series.name)
-                # inferred_number is deliberately left as whatever type its
-                # source gave it (int from infer_number_from_title, but a
-                # *string* from a provider's series_number_hint, e.g.
-                # Apify's/Hardcover's "9") for the display/f-string uses
-                # further down -- but that means a bare `inferred_number >
-                # highest_owned_book_number` (int) here would raise
-                # TypeError: '>' not supported between instances of 'str'
-                # and 'int' the moment any candidate actually carries a
-                # string hint. Live regression (2026-08-24): fixing a
-                # separate Apify bug that had silently discarded every
-                # Apify result finally let an Apify candidate with a
-                # string series_number_hint reach this line, hard-crashing
-                # the whole Check Now run (terminal_error) despite already
-                # having found real new candidates earlier in the same
-                # run. _to_int_or_none gives both sides a real numeric type
-                # to compare regardless of which source inferred_number
-                # came from.
-                inferred_number_int = discovery_engine._to_int_or_none(inferred_number)
-                continues_numbering = bool(
-                    inferred_number_int is not None
-                    and highest_owned_book_number
-                    and inferred_number_int > highest_owned_book_number
+                # Belongs-to-series gate: extracted to evaluate_belongs_to_
+                # series_gate (see that function's docstring for the full
+                # rationale/regressions behind every branch below) so PB-5's
+                # shadow trace and agents/agentic_series_agent.py's
+                # deterministic shadow loop can call the exact same,
+                # unmodified logic instead of duplicating it. Zero behavior
+                # change from before this extraction -- same inputs, same
+                # branching, just named and callable.
+                gate_result = evaluate_belongs_to_series_gate(
+                    title=title,
+                    inferred_number=inferred_number,
+                    candidate_confidence=raw.get("confidence"),
+                    series_name=series.name,
+                    known_series_titles=known_series_titles,
+                    owned_core_title_texts=owned_core_title_texts,
+                    highest_owned_book_number=highest_owned_book_number,
                 )
-                targeted_with_number = bool(came_from_targeted_search and inferred_number)
-                # continues_numbering alone is too weak a signal for a
-                # prolific multi-series author: a same-author book that
-                # simply has a higher inferred number than the highest owned
-                # volume says nothing about which of the author's several
-                # series it belongs to (regression: "Check Now" on George
-                # Wagner's "Jonathan Hunt Thriller Series" pulled in
-                # higher-numbered books from his other, unrelated thriller
-                # series purely because they continued the numbering).
-                # Requiring it to be corroborated by an actual textual tie to
-                # *this* series -- explicit or partial title match -- keeps
-                # continues_numbering useful for genuine continuations while
-                # closing that cross-series contamination path.
-                continues_numbering_valid = continues_numbering and (explicit_series_match or partial_match)
-                belongs_to_series = bool(
-                    targeted_with_number or explicit_series_match or partial_match or continues_numbering_valid
-                )
-
-                # A self-identified "<Flagship Series> universe" tie-in novel
-                # (see _looks_like_universe_tie_in) can textually match the
-                # series name via explicit_series_match/partial_match while
-                # actually belonging to a different spin-off series -- for
-                # those, downgrade to requiring an actual series-position
-                # number tying it to *this* series, same bar as any other
-                # same-author-but-unrelated book.
-                is_universe_tie_in = _looks_like_universe_tie_in(title)
-                if is_universe_tie_in and not (targeted_with_number or continues_numbering):
-                    belongs_to_series = False
-
-                # A candidate that spells out two or more already-owned book
-                # titles by name (rather than using a "Books 1-3"/"Boxed
-                # Set"/"Omnibus" label) is a compilation of existing content,
-                # not a new entry -- regardless of how it otherwise matched
-                # (regression: "The Safehold Series, Volume I: Off
-                # Armageddon Reef, By Schism Rent Asunder, By Heresies
-                # Distressed, A Mighty Fortress, How Firm a Foundation"
-                # strings together five owned titles with no number and no
-                # bundle keyword, so it passed as a new "available" book).
-                referenced_owned_titles = _count_referenced_owned_titles(title, owned_core_title_texts)
-                is_compilation_of_owned_titles = referenced_owned_titles >= 2
-                if is_compilation_of_owned_titles:
-                    belongs_to_series = False
+                explicit_series_match = gate_result["explicit_series_match"]
+                partial_match = gate_result["partial_match"]
+                inferred_number_int = gate_result["inferred_number_int"]
+                continues_numbering = gate_result["continues_numbering"]
+                targeted_with_number = gate_result["targeted_with_number"]
+                is_universe_tie_in = gate_result["is_universe_tie_in"]
+                referenced_owned_titles = gate_result["referenced_owned_titles"]
+                is_compilation_of_owned_titles = gate_result["is_compilation_of_owned_titles"]
+                belongs_to_series = gate_result["belongs_to_series"]
 
                 # PB-5: this is the belongs-to-series gate the Phase-1 plan
                 # calls out -- computed here (and only here; no such gate
