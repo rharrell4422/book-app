@@ -1551,41 +1551,83 @@ def _fetch_all_providers_parallel(
     # the "catalogs alone are already sufficient" path.
     _run_tasks(catalog_tasks)
 
-    if run_web_search and _catalog_sufficiency_gate_enabled():
-        contributing_provider_count = sum(
-            1
-            for provider in ("google", "openlibrary", "hardcover")
-            if provider not in failures and results.get(provider)
-        )
-        fused_catalog_candidates = _fuse_and_score_candidates(
-            {
-                "google": results["google"],
-                "openlibrary": results["openlibrary"],
-                "hardcover": results["hardcover"],
-                "web": [],
-            },
-            author,
-            series_name,
-        )
-        if catalog_providers_are_sufficient(
-            fused_catalog_candidates,
-            series_name,
-            highest_owned_book_number,
-            contributing_provider_count=contributing_provider_count,
-        ):
-            run_web_search = False
+    # PB-10 diagnostic pass (Percy Jackson re-run investigation): the gate
+    # below is only ever *reached* when `run_web_search` is already True
+    # here -- i.e. this pass would have run web search anyway (enough
+    # queries, Serper+Anthropic both configured, enable_web_search=True for
+    # this pass). Most _fetch_all_providers_parallel callers never reach
+    # this line at all: precheck passes `enable_web_search=False` outright,
+    # and the author-fallback pass defaults `enable_fallback_web_search` to
+    # False in the real Check Now flow -- for both, `run_web_search` is
+    # already False before this point, so nothing about the gate is even
+    # applicable and nothing is logged here (there was never going to be a
+    # web-search call for the gate to skip). Logged verbosely and
+    # unconditionally (not just on the "sufficient" branch, unlike the
+    # original version of this gate) precisely because the last diagnosis
+    # of this gate had no visibility into *why* it did or didn't fire.
+    if run_web_search:
+        if _catalog_sufficiency_gate_enabled():
+            contributing_provider_count = sum(
+                1
+                for provider in ("google", "openlibrary", "hardcover")
+                if provider not in failures and results.get(provider)
+            )
+            _log(
+                f"Catalog-sufficiency gate [{pass_label}] BEFORE: series={series_name!r} author={author!r} "
+                f"google_hits={len(results.get('google') or [])} "
+                f"openlibrary_hits={len(results.get('openlibrary') or [])} "
+                f"hardcover_hits={len(results.get('hardcover') or [])} "
+                f"contributing_providers={contributing_provider_count}"
+            )
+            for provider_key in ("hardcover", "google", "openlibrary"):
+                for raw in results.get(provider_key) or []:
+                    _log(
+                        f"  [{pass_label}] catalog input ({provider_key}): "
+                        f"title={raw.get('title')!r} authors={raw.get('authors')!r} "
+                        f"number={raw.get('series_number_hint')!r} isbn13={raw.get('isbn13')!r}"
+                    )
+
+            fused_catalog_candidates = _fuse_and_score_candidates(
+                {
+                    "google": results["google"],
+                    "openlibrary": results["openlibrary"],
+                    "hardcover": results["hardcover"],
+                    "web": [],
+                },
+                author,
+                series_name,
+            )
+            sufficient = catalog_providers_are_sufficient(
+                fused_catalog_candidates,
+                series_name,
+                highest_owned_book_number,
+                contributing_provider_count=contributing_provider_count,
+                pass_label=pass_label,
+            )
+            _log(
+                f"Catalog-sufficiency gate [{pass_label}] AFTER: "
+                f"sufficient={sufficient} -> {'SKIP' if sufficient else 'RUN'} web search "
+                f"(highest_owned_book_number={highest_owned_book_number})"
+            )
+            outcome = "PASSED" if sufficient else "FAILED"
+            if sufficient:
+                run_web_search = False
             if telemetry is not None:
-                telemetry.record_gate_outcome("catalog_sufficiency", "skipped_web_search")
+                telemetry.record_gate_outcome("catalog_sufficiency", outcome)
             if diagnostics is not None:
                 diagnostics.append(
                     {
                         "type": "catalog_sufficiency_gate",
                         "pass_label": pass_label,
-                        "outcome": "skipped_web_search",
+                        "outcome": outcome,
                     }
                 )
-        elif telemetry is not None:
-            telemetry.record_gate_outcome("catalog_sufficiency", "ran_web_search")
+        else:
+            _log(f"Catalog-sufficiency gate [{pass_label}]: DISABLED via CATALOG_SUFFICIENCY_GATE_ENABLED -- running web search unconditionally")
+            if telemetry is not None:
+                telemetry.record_gate_outcome("catalog_sufficiency", "SKIPPED")
+            if diagnostics is not None:
+                diagnostics.append({"type": "catalog_sufficiency_gate", "pass_label": pass_label, "outcome": "SKIPPED"})
 
     if run_web_search:
         _run_tasks(

@@ -822,6 +822,7 @@ def catalog_providers_are_sufficient(
     highest_owned_book_number: int | None,
     *,
     contributing_provider_count: int,
+    pass_label: str = "targeted",
 ) -> bool:
     """True only when Google Books/OpenLibrary/Hardcover, fused on their
     own (no web-search/Apify candidates mixed in -- see the `fused_catalog_
@@ -842,21 +843,40 @@ def catalog_providers_are_sufficient(
     disagreement) -- so "avg confidence is high" here already substantively
     means "the catalog providers agree with each other", not just "each
     provider individually seems confident".
+
+    PB-10 diagnostic pass: every candidate this evaluates, plus the
+    completeness/confidence/provider-count numbers actually compared
+    against the thresholds above, is logged unconditionally (pass or
+    fail) -- the original version of this gate only logged on the
+    "sufficient" branch, which made a live "why didn't this skip web
+    search" investigation (the Percy Jackson re-run) impossible to answer
+    from logs alone.
     """
-    if contributing_provider_count < CATALOG_SUFFICIENCY_MIN_CONTRIBUTING_PROVIDERS:
-        return False
     completeness, confidence = _series_completeness_and_confidence(
         fused_catalog_candidates, series_name, highest_owned_book_number
     )
     sufficient = (
-        completeness >= CATALOG_SUFFICIENCY_COMPLETENESS_THRESHOLD
+        contributing_provider_count >= CATALOG_SUFFICIENCY_MIN_CONTRIBUTING_PROVIDERS
+        and completeness >= CATALOG_SUFFICIENCY_COMPLETENESS_THRESHOLD
         and confidence >= CATALOG_SUFFICIENCY_CONFIDENCE_THRESHOLD
     )
-    if sufficient:
+    _log(
+        f"catalog_providers_are_sufficient [{pass_label}]: series={series_name!r} "
+        f"highest_owned_book_number={highest_owned_book_number} "
+        f"fused_candidate_count={len(fused_catalog_candidates)} "
+        f"contributing_providers={contributing_provider_count} "
+        f"(min_required={CATALOG_SUFFICIENCY_MIN_CONTRIBUTING_PROVIDERS}) "
+        f"completeness={completeness:.0%} (threshold={CATALOG_SUFFICIENCY_COMPLETENESS_THRESHOLD:.0%}) "
+        f"confidence={confidence:.0%} (threshold={CATALOG_SUFFICIENCY_CONFIDENCE_THRESHOLD:.0%}) "
+        f"-> sufficient={sufficient}"
+    )
+    for candidate in fused_catalog_candidates:
+        resolved_number = _resolve_candidate_number(candidate, series_name)
         _log(
-            f"Catalog-sufficiency gate: catalogs alone are complete/confident enough "
-            f"(completeness={completeness:.0%}, confidence={confidence:.0%}, "
-            f"providers={contributing_provider_count}) -- skipping web search/Apify"
+            f"  [{pass_label}] fused catalog candidate: title={candidate.title!r} "
+            f"authors={candidate.authors!r} number={resolved_number!r} "
+            f"confidence_score={candidate.confidence_score:.2f} "
+            f"sources={[m.get('source') for m in candidate.source_provenance]}"
         )
     return sufficient
 
