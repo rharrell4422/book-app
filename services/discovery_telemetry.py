@@ -361,6 +361,27 @@ def record_agentic_promotion_plan(series_id: int, plan: dict) -> None:
         logger.exception("record_agentic_promotion_plan: failed to log plan for series_id=%s", series_id)
 
 
+def record_agentic_skeleton_preview_error(series_id: int, error: str) -> None:
+    """Phase 2 dual-write (`services/agentic_skeleton_preview_store.py`):
+    logs a failure to insert into the `agentic_skeleton_previews` shadow
+    table for `series_id`. That store performs a real write (unlike the
+    log-only `record_agentic_*` helpers above), so this is specifically
+    for surfacing write failures against that shadow table -- it is not
+    itself a fallback persistence layer.
+
+    Same log-only, fail-soft convention as every other helper in this
+    module (tagged `agentic_skeleton_preview_error`): a failure here must
+    never raise back into `store_agentic_skeleton_preview`, which already
+    guards its own call to this.
+    """
+    try:
+        logger.info("agentic_skeleton_preview_error series_id=%s error=%s", series_id, error)
+    except Exception:
+        logger.exception(
+            "record_agentic_skeleton_preview_error: failed to log preview-store error for series_id=%s", series_id
+        )
+
+
 def record_agentic_dry_run(series_id: int, payload: dict) -> None:
     """Phase 2 dual execution mode (`agents/series_agent.py`'s `run_
     series_check`): logs one live discovery turn's dry-run agentic

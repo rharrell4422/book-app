@@ -414,3 +414,32 @@ class Notification(Base):
     series_name = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     dismissed_at = Column(DateTime, nullable=True)
+
+
+class AgenticSkeletonPreview(Base):
+    """Phase 2 dual-write shadow table (`discovery_agentic_phase1_plan.md`/
+    `discovery_agentic_phase1_evaluation.md`'s settled architecture, not
+    re-litigated here): one row per dry-run turn, storing the Phase 1
+    shadow loop's (`agents/agentic_series_agent.run_agentic_turn`)
+    `skeleton_merge_previews` output for a series.
+
+    Purely diagnostic/side-channel, same as every other Phase 1/2 agentic
+    artifact -- entirely separate from `SeriesSkeleton.skeleton_json`
+    (the live, routing-relevant table). Written only by
+    `services/agentic_skeleton_preview_store.py`, which never touches
+    `SeriesSkeleton`, and read only by that same module's `get_agentic_
+    skeleton_previews` and `/admin/agentic/previews/{series_id}`.
+
+    One row per turn rather than one row per series (unlike
+    `SeriesSkeleton`, which is one row per series) -- multiple previews
+    accumulate over time so the admin endpoint can show how the shadow
+    loop's preview drifts (or doesn't) across repeated dry runs, hence
+    the surrogate `id` primary key instead of `series_id` alone.
+    """
+
+    __tablename__ = "agentic_skeleton_previews"
+
+    id = Column(Integer, primary_key=True)
+    series_id = Column(Integer, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    preview_json = Column(JSON, nullable=False)

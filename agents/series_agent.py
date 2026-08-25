@@ -1494,9 +1494,27 @@ class SeriesIntelligenceAgent:
             try:
                 from agents.agentic_series_agent import run_agentic_turn
                 from services.agentic_evaluation_harness import _observe_live_pipeline
+                from services.agentic_skeleton_preview_store import store_agentic_skeleton_preview
 
                 dry_run_context = {"series_id": series_id, "timestamp": datetime.utcnow().isoformat()}
                 agentic_trace = run_agentic_turn(series_id, dry_run_context)
+
+                # Phase 2 dual-write (services/agentic_skeleton_preview_
+                # store.py): persist this turn's preview to the dedicated
+                # shadow table, entirely separate from -- and never
+                # touching -- SeriesSkeleton.skeleton_json. Guarded
+                # separately from the rest of this block so a shadow-
+                # write failure can't prevent the dry-run trace itself
+                # from being logged below.
+                try:
+                    preview = agentic_trace.get("skeleton_merge_previews", {})
+                    store_agentic_skeleton_preview(series_id, preview, db_session=db)
+                except Exception:
+                    logger.exception(
+                        "run_series_check: storing agentic skeleton preview failed for series_id=%s; continuing",
+                        series_id,
+                    )
+
                 live_snapshot = _observe_live_pipeline(series_id, db)
                 record_agentic_dry_run(
                     series_id,

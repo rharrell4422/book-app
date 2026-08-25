@@ -1,11 +1,12 @@
 """Phase 1 agentic discovery, tenth implementation block (extended in the
-eleventh block with `/promotion`, `/series`, `/history`, and in Phase
-2's kickoff block with `/promotion-plan`): a read-only, owner-only admin
-router exposing everything `services/agentic_evaluation_harness.py`/
-`services/agentic_batch_orchestrator.py`/`services/agentic_promotion_
-checklist.py`/`services/agentic_admin_ui_stubs.py`/`services/agentic_
-promotion_plan.py` already built, for manual triggering during
-evaluation -- not for end users.
+eleventh block with `/promotion`, `/series`, `/history`, in Phase 2's
+kickoff block with `/promotion-plan`, and in Phase 2's dual-write block
+with `/previews`): a read-only, owner-only admin router exposing
+everything `services/agentic_evaluation_harness.py`/`services/agentic_
+batch_orchestrator.py`/`services/agentic_promotion_checklist.py`/
+`services/agentic_admin_ui_stubs.py`/`services/agentic_promotion_plan.py`/
+`services/agentic_skeleton_preview_store.py` already built, for manual
+triggering during evaluation -- not for end users.
 
 Per `discovery_agentic_phase1_plan.md`/`discovery_agentic_phase1_evaluation.md`
 (settled architecture, not re-litigated here): every route below is a thin
@@ -35,6 +36,7 @@ from services.agentic_batch_orchestrator import run_batch_agentic_evaluations
 from services.agentic_evaluation_harness import generate_full_agentic_html, generate_full_agentic_report
 from services.agentic_promotion_checklist import generate_promotion_readiness
 from services.agentic_promotion_plan import build_phase2_promotion_plan
+from services.agentic_skeleton_preview_store import get_agentic_skeleton_previews
 
 # Router-level dependency (not per-route): every route here is read-only
 # diagnostics, so unlike routers/admin.py (which has one route needing a
@@ -135,3 +137,16 @@ def admin_agentic_dry_run(series_id: int) -> dict:
     no writes.
     """
     return get_agentic_history(series_id)
+
+
+@router.get("/previews/{series_id}")
+def admin_agentic_previews(series_id: int) -> dict:
+    """Returns every stored agentic skeleton preview for one series
+    (`services.agentic_skeleton_preview_store.get_agentic_skeleton_
+    previews`) -- the Phase 2 dual-write shadow table
+    (`agentic_skeleton_previews`) that `agents/series_agent.py`'s
+    dry-run block appends one row to on every live discovery turn.
+    Entirely separate from the live `series_skeleton` table. Read-only
+    -- no writes.
+    """
+    return {"series_id": series_id, "previews": get_agentic_skeleton_previews(series_id)}
