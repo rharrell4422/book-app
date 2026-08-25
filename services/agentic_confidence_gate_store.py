@@ -249,14 +249,25 @@ def get_agentic_confidence_history(series_id: int, *, db_session: Session | None
             db.close()
 
 
-def get_latest_confidence_decisions(series_id: int, *, db_session: Session | None = None) -> dict:
+def get_latest_confidence_decisions(
+    series_id: int, *, db_session: Session | None = None, history: list[dict] | None = None
+) -> dict:
     """Phase 6: `{book_number: latest_confidence_decision_dict}` -- the
     single most recent `get_agentic_confidence_history` row per
     `book_number`, keyed by `float` book_number, returned in ascending-
     book_number order. Fail-soft: any exception yields `{}`.
+
+    Phase 8: `get_agentic_confidence_history` is already a single bulk
+    query per `series_id` (never one query per book), so this was
+    already a single DB round-trip. The optional `history` keyword lets
+    a caller that already has that series' history (from its own prior
+    `get_agentic_confidence_history` call this turn) pass it straight
+    through and skip the query here entirely. Omitting `history` (the
+    default) reproduces the exact pre-Phase-8 behavior: fetch fresh.
     """
     try:
-        history = get_agentic_confidence_history(series_id, db_session=db_session)
+        if history is None:
+            history = get_agentic_confidence_history(series_id, db_session=db_session)
         return _latest_by_book_number(history)
     except Exception:
         logger.exception(
@@ -303,14 +314,25 @@ def get_agentic_gate_history(series_id: int, *, db_session: Session | None = Non
             db.close()
 
 
-def get_latest_gate_decisions(series_id: int, *, db_session: Session | None = None) -> dict:
+def get_latest_gate_decisions(
+    series_id: int, *, db_session: Session | None = None, history: list[dict] | None = None
+) -> dict:
     """Phase 6: `{book_number: latest_gate_decision_dict}` -- the single
     most recent `get_agentic_gate_history` row per `book_number`, keyed
     by `float` book_number, returned in ascending-book_number order.
     Fail-soft: any exception yields `{}`.
+
+    Phase 8: `get_agentic_gate_history` is already a single bulk query
+    per `series_id` (never one query per book), so this was already a
+    single DB round-trip. The optional `history` keyword lets a caller
+    that already has that series' history (from its own prior `get_
+    agentic_gate_history` call this turn) pass it straight through and
+    skip the query here entirely. Omitting `history` (the default)
+    reproduces the exact pre-Phase-8 behavior: fetch fresh.
     """
     try:
-        history = get_agentic_gate_history(series_id, db_session=db_session)
+        if history is None:
+            history = get_agentic_gate_history(series_id, db_session=db_session)
         return _latest_by_book_number(history)
     except Exception:
         logger.exception("get_latest_gate_decisions failed for series_id=%s; returning empty dict", series_id)

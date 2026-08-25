@@ -95,6 +95,72 @@ def _sorted_agentic_trace_list(raw, *, book_number_key: str = "book_number") -> 
         return []
 
 
+def _run_agentic_turn_guarded(run_agentic_turn_fn, series_id: int, context: dict, *, shared_state: dict | None = None):
+    """Phase 8 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
+    phase1_evaluation.md`, not re-litigated here): a per-turn guard
+    ensuring `run_agentic_turn_fn` (always `agents.agentic_series_agent.
+    run_agentic_turn` in practice, passed in rather than imported here
+    to keep this helper trivially testable/free of a circular import) is
+    invoked at most once per `run_series_check` call, no matter how many
+    of this module's call sites ask for a trace during that call.
+
+    `context`/`shared_state` are plain dicts (`run_agentic_turn`'s real,
+    actual context shape below -- e.g. `promotion_context`/`dry_run_
+    context` -- is a dict, never an object with attributes), so the
+    guard is a dict key (`"_agentic_turn_ran"`/`"_agentic_turn_result"`),
+    not `getattr`/`setattr` on an object.
+
+    `shared_state`, when provided, is the guard/result-cache location
+    instead of `context` itself -- this is what actually lets the two
+    call sites below (the Phase 3/4/5 promotion block's own call, and
+    the Phase 2 dry-run block's call, each building its own `context`
+    dict for its own purposes -- see each block's own comment) share
+    ONE underlying `run_agentic_turn` invocation for a given `run_series_
+    check` call: both pass the *same* `shared_state` dict (created once,
+    near the top of that section of `run_series_check`), so whichever of
+    the two runs first performs the real call (using *its own* `context`
+    -- e.g. the promotion block's, which passes this turn's live `db`
+    session), and the second one reuses that exact trace unchanged,
+    never building its own `context`'s session/trace at all. Omitting
+    `shared_state` (the default) falls back to guarding against re-entry
+    on `context` alone, matching this helper's pre-Phase-8-merge
+    behavior for any other, unrelated caller.
+
+    Given both call sites below only ever read from `db`/`SeriesSkeleton`
+    state that is already fully committed by the time either one runs
+    (see each block's own comment on session handling), reusing the
+    first call's trace for the second is behaviorally equivalent to
+    computing it twice -- the only observable difference is the shared
+    trace's `turn_timestamp` field (informational only, never consulted
+    by any routing/promotion decision), which now reflects whichever
+    call happened first instead of a separately-stamped value per call
+    site.
+
+    If the one real invocation raises, that exception is cached too
+    (not just a successful result) and re-raised, unmodified, to every
+    subsequent guarded call for that same `shared_state` -- each call
+    site's own surrounding try/except (each already existed before
+    Phase 8) still independently observes and fail-softs on "run_
+    agentic_turn raised" exactly as it always did; this guard only
+    changes how many times the underlying call actually happens, never
+    whether a given call site sees success or failure.
+    """
+    state = shared_state if shared_state is not None else context
+    if state.get("_agentic_turn_ran"):
+        cached_exception = state.get("_agentic_turn_exception")
+        if cached_exception is not None:
+            raise cached_exception
+        return state.get("_agentic_turn_result")
+    state["_agentic_turn_ran"] = True
+    try:
+        result = run_agentic_turn_fn(series_id, context)
+    except Exception as exc:
+        state["_agentic_turn_exception"] = exc
+        raise
+    state["_agentic_turn_result"] = result
+    return result
+
+
 def _authors_match_exact(series_author: str | None, candidate_author: str | None) -> bool:
     series_norm = _normalize_author(series_author)
     candidate_norm = _normalize_author(candidate_author)
@@ -1521,6 +1587,14 @@ class SeriesIntelligenceAgent:
             # its own comment) so `run_agentic_turn` reads the exact
             # same in-flight transaction's skeleton state rather than a
             # second, independent session.
+            # Phase 8: one shared guard/result slot for this whole
+            # run_series_check call, so the Phase 3/4/5 promotion block
+            # below and the Phase 2 dry-run block further down (see each
+            # block's own comment) invoke agents.agentic_series_agent.
+            # run_agentic_turn at most once between them, whichever runs
+            # first -- see _run_agentic_turn_guarded's own docstring.
+            agentic_turn_state: dict = {}
+
             agentic_promotion_payload: dict = {"enabled": False, "activated": False, "promotions": []}
             if settings.AGENTIC_ROUTING_ENABLED:
                 try:
@@ -1535,7 +1609,9 @@ class SeriesIntelligenceAgent:
                         "timestamp": datetime.utcnow().isoformat(),
                         "db": db,
                     }
-                    promotion_trace = run_agentic_turn(series_id, promotion_context)
+                    promotion_trace = _run_agentic_turn_guarded(
+                        run_agentic_turn, series_id, promotion_context, shared_state=agentic_turn_state
+                    )
 
                     # Phase 6: normalize both trace lists into
                     # deterministic, book_number-ascending order before
@@ -1762,6 +1838,20 @@ class SeriesIntelligenceAgent:
             # logging itself -- is caught and logged via `record_agentic_
             # dry_run` instead of ever propagating to this function's
             # caller or affecting `result`.
+            #
+            # Phase 8: `_run_agentic_turn_guarded` below shares
+            # `agentic_turn_state` with the Phase 3/4/5 promotion block
+            # above -- when `AGENTIC_ROUTING_ENABLED` is on, that block
+            # already ran `run_agentic_turn` for this exact series_id/
+            # turn, so this call reuses its trace instead of invoking
+            # `run_agentic_turn` (and re-running its provider-adjacent
+            # deterministic replay) a second time. Everything below this
+            # point (the skeleton-preview/confidence/gate shadow writes,
+            # `_observe_live_pipeline`, `record_agentic_dry_run`) still
+            # runs exactly as before -- only the trace's origin changed.
+            # When the flag is off (the promotion block never ran), this
+            # is unaffected: `run_agentic_turn` still runs here, exactly
+            # once, exactly as before Phase 8.
             from services.discovery_telemetry import record_agentic_dry_run
 
             try:
@@ -1770,7 +1860,9 @@ class SeriesIntelligenceAgent:
                 from services.agentic_skeleton_preview_store import store_agentic_skeleton_preview
 
                 dry_run_context = {"series_id": series_id, "timestamp": datetime.utcnow().isoformat()}
-                agentic_trace = run_agentic_turn(series_id, dry_run_context)
+                agentic_trace = _run_agentic_turn_guarded(
+                    run_agentic_turn, series_id, dry_run_context, shared_state=agentic_turn_state
+                )
 
                 # Phase 2 dual-write (services/agentic_skeleton_preview_
                 # store.py): persist this turn's preview to the dedicated

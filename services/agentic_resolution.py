@@ -120,6 +120,8 @@ def resolve_routing_decisions(
     live_confidence_snapshot: dict,
     live_gate_snapshot: dict,
     promotion_decisions: dict,
+    *,
+    cache=None,
 ) -> tuple[dict, dict]:
     """Unified resolution layer: given a series' live confidence/gate
     snapshots (each `{book_number: value}`) and the promotion decisions
@@ -170,6 +172,23 @@ def resolve_routing_decisions(
 
     Pure aside from that logging: never writes to the database, never
     touches `skeleton_json`/`probes_json`, never calls a provider.
+
+    Phase 8 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
+    phase1_evaluation.md`, not re-litigated here): `promotion_decisions`
+    is already an in-memory dict this function only ever reads from
+    (`.get(book_number)`), so there was never a real per-book DB
+    round-trip or recomputation to eliminate here -- but the optional
+    `cache` keyword (a `services.agentic_cache.AgenticTurnCache`) still
+    memoizes that lookup by `book_number`, so this function never reads
+    `promotion_decisions[book_number]` more than once per book even if
+    something upstream calls this function more than once for the same
+    `series_id`/turn sharing one `cache` instance. Omitting `cache` (the
+    default) reproduces the exact pre-Phase-8 behavior. Per `services.
+    agentic_cache`'s own docstring, use a *dedicated* `AgenticTurnCache`
+    instance here -- do not share the one (if any) passed into `services.
+    agentic_promotion_evaluator.evaluate_promotion`, since that function
+    caches a different value shape (an outcome string, not this
+    function's decision dict) under the same `book_number` keys.
     """
     try:
         live_confidence_snapshot = live_confidence_snapshot or {}
@@ -186,7 +205,26 @@ def resolve_routing_decisions(
         resolved_gate: dict = {}
         all_book_numbers = set(live_confidence_snapshot) | set(live_gate_snapshot) | set(promotion_decisions)
         for book_number in sorted(all_book_numbers, key=_safe_sort_key):
-            decision = promotion_decisions.get(book_number) or {}
+            decision = None
+            if cache is not None:
+                try:
+                    decision = (
+                        cache.get_or_set_promotion(
+                            book_number, lambda bn=book_number: promotion_decisions.get(bn) or {}
+                        )
+                        or {}
+                    )
+                except Exception:
+                    # Phase 8 fail-soft: a broken cache must not prevent
+                    # this book_number from resolving -- fall back below.
+                    logger.exception(
+                        "resolve_routing_decisions: cache lookup failed for book_number=%s; "
+                        "resolving without it",
+                        book_number,
+                    )
+                    decision = None
+            if decision is None:
+                decision = promotion_decisions.get(book_number) or {}
             live_conf = live_confidence_snapshot.get(book_number, decision.get("live_confidence"))
             live_gate_value = live_gate_snapshot.get(book_number, decision.get("live_gate"))
 

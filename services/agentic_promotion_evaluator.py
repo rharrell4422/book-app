@@ -128,6 +128,7 @@ def evaluate_promotion(
     *,
     series_id: int | None = None,
     book_number=None,
+    cache=None,
 ) -> str:
     """Pure decision function -- no DB, no provider calls, deterministic
     (`series_id`/`book_number` are optional and used for nothing but
@@ -135,6 +136,20 @@ def evaluate_promotion(
     Returns one of `"use_live"`, `"use_agentic"`, `"reject_agentic"` per
     the Phase 1 plan's promotion rules (see module docstring for the
     input contract):
+
+    Phase 8 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
+    phase1_evaluation.md`, not re-litigated here) adds one more, entirely
+    optional keyword: `cache`, a `services.agentic_cache.AgenticTurnCache`
+    instance. When provided (and `book_number` is not `None`), the actual
+    decision (steps 1-6 plus both Phase 7 safety gates below) is computed
+    at most once per `book_number` for that cache's lifetime -- a second
+    `evaluate_promotion(..., book_number=X, cache=same_cache)` call for
+    the same `X` returns the first call's result without re-running any
+    of the logic below (or re-logging a safety violation, if the first
+    call triggered one). Omitting `cache` (the default) reproduces the
+    exact pre-Phase-8 behavior: every call recomputes from scratch. This
+    keyword changes nothing about *what* gets decided, only how many
+    times the decision underneath gets computed.
 
     1. Deterministic-invariant check: an agentic decision that provides
        no usable confidence grade and no usable gate opinion at all --
@@ -185,6 +200,36 @@ def evaluate_promotion(
     reason)` call (a no-op, best-effort side-channel only -- a logging
     failure, or omitted `series_id`/`book_number`, never affects the
     returned decision).
+    """
+    if cache is not None and book_number is not None:
+        try:
+            return cache.get_or_set_promotion(
+                book_number,
+                lambda: _evaluate_once(live_conf, agentic_conf, live_gate, agentic_gate, series_id, book_number),
+            )
+        except Exception:
+            # Phase 8 fail-soft: a broken/misbehaving cache must never
+            # prevent a real decision from being computed -- fall back
+            # to the uncached path below rather than raising.
+            logger.exception(
+                "evaluate_promotion: cache lookup failed for book_number=%s; recomputing without it", book_number
+            )
+    return _evaluate_once(live_conf, agentic_conf, live_gate, agentic_gate, series_id, book_number)
+
+
+def _evaluate_once(
+    live_conf: dict,
+    agentic_conf: dict,
+    live_gate: dict,
+    agentic_gate: dict,
+    series_id: int | None,
+    book_number,
+) -> str:
+    """The actual, pure promotion decision (`evaluate_promotion`'s steps
+    1-6 plus both Phase 7 safety gates) -- factored out so Phase 8's
+    optional `cache` wrapping in `evaluate_promotion` above has a plain
+    zero-argument closure to memoize. Not part of this module's public
+    contract; call `evaluate_promotion` instead.
     """
     live_dims = _confidence_dims(live_conf)
     agentic_dims = _confidence_dims(agentic_conf)
@@ -319,7 +364,22 @@ def store_promotion_decision(
             db.close()
 
 
-def build_activation_preview(series_id: int, *, db_session: Session | None = None) -> dict:
+def _build_preview_entry(entry: dict) -> dict:
+    """Pure per-book construction step behind `build_activation_preview`
+    below -- factored out (Phase 8) purely so that function's optional
+    `cache` wrapping has a plain, spy-able zero-argument closure to
+    memoize; the logic itself is unchanged from pre-Phase-8.
+    """
+    outcome = entry.get("promotion_outcome")
+    use_agentic = outcome == "use_agentic"
+    return {
+        "outcome": outcome,
+        "resolved_confidence": entry.get("agentic_confidence") if use_agentic else entry.get("live_confidence"),
+        "resolved_gate": entry.get("agentic_gate") if use_agentic else entry.get("live_gate"),
+    }
+
+
+def build_activation_preview(series_id: int, *, db_session: Session | None = None, cache=None) -> dict:
     """Phase 4 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
     phase1_evaluation.md`'s settled architecture, not re-litigated
     here): read-only "what would routing look like if this series were
@@ -345,6 +405,19 @@ def build_activation_preview(series_id: int, *, db_session: Session | None = Non
 
     Fail-soft: any exception (e.g. a broken `db_session`) yields
     `{"activated": False, "preview": {}}` rather than raising.
+
+    Phase 8: `get_latest_promotion_decisions` below already does the one
+    bulk `get_promotion_history` query itself needs (a single query per
+    `series_id`, not one per book -- see that function's own docstring),
+    so this function is already O(n) in the number of distinct
+    book_numbers, not O(n^2). The optional `cache` keyword (a `services.
+    agentic_cache.AgenticTurnCache`) additionally memoizes each book's
+    constructed preview entry (`_build_preview_entry` above) by
+    `book_number`, so a caller that calls this function more than once
+    for the same series within one turn/request, sharing one `cache`
+    instance, skips re-constructing entries for book_numbers it already
+    built. Omitting `cache` (the default) reproduces the exact
+    pre-Phase-8 behavior.
     """
     try:
         from settings import is_agentic_activated
@@ -353,15 +426,21 @@ def build_activation_preview(series_id: int, *, db_session: Session | None = Non
 
         preview: dict = {}
         for book_number, entry in latest_by_book_number.items():
-            outcome = entry.get("promotion_outcome")
-            use_agentic = outcome == "use_agentic"
-            preview[str(book_number)] = {
-                "outcome": outcome,
-                "resolved_confidence": entry.get("agentic_confidence") if use_agentic else entry.get(
-                    "live_confidence"
-                ),
-                "resolved_gate": entry.get("agentic_gate") if use_agentic else entry.get("live_gate"),
-            }
+            if cache is not None:
+                try:
+                    preview[str(book_number)] = cache.get_or_set_promotion(
+                        book_number, lambda entry=entry: _build_preview_entry(entry)
+                    )
+                    continue
+                except Exception:
+                    # Phase 8 fail-soft: a broken cache must not drop this
+                    # book_number's preview entry -- fall back below.
+                    logger.exception(
+                        "build_activation_preview: cache lookup failed for book_number=%s; "
+                        "constructing without it",
+                        book_number,
+                    )
+            preview[str(book_number)] = _build_preview_entry(entry)
 
         return {"activated": is_agentic_activated(series_id), "preview": preview}
     except Exception:
@@ -453,7 +532,9 @@ def get_promotion_history(series_id: int, *, db_session: Session | None = None) 
             db.close()
 
 
-def get_latest_promotion_decisions(series_id: int, *, db_session: Session | None = None) -> dict:
+def get_latest_promotion_decisions(
+    series_id: int, *, db_session: Session | None = None, history: list[dict] | None = None
+) -> dict:
     """Phase 6: `{book_number: latest_decision_dict}` -- the single most
     recent `get_promotion_history` row per `book_number`, keyed by
     `float` book_number and returned in ascending-book_number order.
@@ -472,9 +553,21 @@ def get_latest_promotion_decisions(series_id: int, *, db_session: Session | None
     Fail-soft: any exception (including one raised by `get_promotion_
     history` itself, though that function is already fail-soft) yields
     `{}` rather than raising.
+
+    Phase 8: `get_promotion_history` is already a single bulk query per
+    `series_id` (never one query per book -- see that function's own
+    docstring), so this function was already a single DB round-trip.
+    The optional `history` keyword lets a caller that has *already*
+    fetched that same series' history (e.g. via its own `get_promotion_
+    history` call, for some other reason, earlier in the same turn) pass
+    it straight through and skip the query here entirely -- `db_session`
+    is then never touched. Omitting `history` (the default, `None`)
+    reproduces the exact pre-Phase-8 behavior: fetch fresh via
+    `get_promotion_history`.
     """
     try:
-        history = get_promotion_history(series_id, db_session=db_session)
+        if history is None:
+            history = get_promotion_history(series_id, db_session=db_session)
         latest: dict = {}
         for entry in history:
             book_number = entry.get("book_number")
