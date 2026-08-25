@@ -28,6 +28,28 @@ def _console_log(message: str) -> None:
     print(f"[series_agent] {message}", flush=True)
 
 
+def _skeleton_entry_for_number(skeleton_entries: list[dict] | None, number) -> dict | None:
+    """PB-11 diagnostic helper: looks up whatever SeriesSkeleton entry (if
+    any) exists at `number` -- used only by the low/zero-confidence drop
+    log line above to show whether a stale/mismatched skeleton entry (see
+    confidence_engine._title_confidence's "low" grade) is what's actually
+    dragging a candidate down, without needing DB access to check.
+    """
+    try:
+        target = float(number)
+    except (TypeError, ValueError):
+        return None
+    for entry in skeleton_entries or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            if float(entry.get("book_number")) == target:
+                return entry
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _normalize_author(value: str | None) -> str:
     return str(value or "").strip().lower()
 
@@ -1373,6 +1395,22 @@ class SeriesIntelligenceAgent:
                     telemetry.record_gate_outcome("confidence_grade", str(overall_grade or "none"))
 
                 if overall_grade in ("low", "zero"):
+                    # PB-11 diagnostic (Percy Jackson books 4/5 investigation,
+                    # 2026-08-25): prints exactly which dimension(s) caused
+                    # the drop and whether a skeleton entry exists at this
+                    # number at all -- see confidence_engine.compute_confidence
+                    # for what each dimension means. Only on the drop path
+                    # itself so this stays silent for the common case.
+                    skeleton_entry_here = _skeleton_entry_for_number(skeleton_entries, resolved_number)
+                    entry_for_log = confidence_entry or {}
+                    _console_log(
+                        f"DROP low/zero-confidence candidate: title={title!r} number={resolved_number!r} "
+                        f"overall={overall_grade!r} provider={entry_for_log.get('provider_confidence')!r} "
+                        f"title_conf={entry_for_log.get('title_confidence')!r} "
+                        f"number_conf={entry_for_log.get('number_confidence')!r} "
+                        f"alignment={entry_for_log.get('series_alignment_confidence')!r} "
+                        f"skeleton_entry_at_number={skeleton_entry_here!r}"
+                    )
                     agentic_hooks.record_reasoning_step(
                         agentic_context,
                         {"phase": "routing", "decision": "drop", "confidence": overall_grade, "title": title},
