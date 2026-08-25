@@ -3468,6 +3468,85 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         self.assertEqual(update["confidence"], "medium")
         self.assertEqual(result["probes"], [])
 
+    def test_low_confidence_candidate_does_not_poison_known_numbers_for_a_later_good_candidate(self):
+        # PB-11 regression (Percy Jackson books 4/5 investigation,
+        # 2026-08-25, live incident): two raw hits resolve to the *same*
+        # missing book number (7) under different titles -- exactly what
+        # happens when one provider's text-only title ("...Book 7:...")
+        # carries no structured series_number_hint at all (so
+        # confidence_engine grades it number_confidence="low" -> dropped)
+        # while a different provider's plain title for the same real book
+        # *does* carry a real series_number_hint + isbn13 and would
+        # otherwise score well. The first (bad) candidate must not mark
+        # number 7 as "known" before its own confidence is graded --
+        # doing so used to make the loop treat the second (good) candidate
+        # as already_known and silently drop it before it ever reached
+        # confidence grading, exactly reproducing "catalog clearly shows
+        # the book, Check Now still reports nothing found."
+        candidates = [
+            {
+                "source": "google_books",
+                "source_id": "gb-bad-7",
+                "title": "Cherry Blossom Girls, Book 7: Working Title",
+                "authors": ["Harmon Cooper"],
+                "published_date": "",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            },
+            {
+                "source": "hardcover",
+                "source_id": "hc-good-7",
+                "title": "Cherry Blossom Girls Book Seven",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": "9781111111111",
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 7,
+                "upcoming_hint": False,
+            },
+        ]
+        bad_unified_candidate = discovery_engine.UnifiedCandidate(
+            title="Cherry Blossom Girls, Book 7: Working Title",
+            authors=["Harmon Cooper"],
+            series_name="Cherry Blossom Girls",
+            series_number=None,
+            isbn13=None,
+            metadata_completeness_score=0.5,
+            source_provenance=[{"source": "google_books"}],
+        )
+        good_unified_candidate = discovery_engine.UnifiedCandidate(
+            title="Cherry Blossom Girls Book Seven",
+            authors=["Harmon Cooper"],
+            series_name="Cherry Blossom Girls",
+            series_number=7.0,
+            isbn13="9781111111111",
+            metadata_completeness_score=1.0,
+            source_provenance=[{"source": "hardcover"}],
+        )
+        with self._mock_discovery(candidates, unified_candidates=[bad_unified_candidate, good_unified_candidate]):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertEqual(result["available_missing"], [
+            {
+                "title": "Cherry Blossom Girls Book Seven",
+                "author": "Harmon Cooper",
+                "series_name": "Cherry Blossom Girls",
+                "series_number": 7,
+                "date_iso": "2024-02-20",
+                "url": None,
+                "provider": "hardcover",
+                "identifier": "9781111111111",
+            }
+        ])
+        self.assertTrue(result["found"])
+
     def test_available_missing_and_upcoming_books_do_not_leak_into_skeleton_updates(self):
         # available_missing/upcoming_books get persisted as real Book rows
         # this same round and become `library`-class skeleton entries on

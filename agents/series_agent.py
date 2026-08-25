@@ -1299,27 +1299,6 @@ class SeriesIntelligenceAgent:
                     )
                     continue
 
-                # Different providers can return the same real book under
-                # differently-formatted titles within a *single* check run
-                # (e.g. Hardcover's "Havoc in the Deathyards, A
-                # Completionist Chronicles Short Story" vs OpenLibrary's
-                # bare "Havoc in the Deathyards") -- growing these sets as
-                # candidates get accepted lets the identity check above
-                # catch that on the very next candidate, the same way it
-                # catches matches against pre-existing owned books.
-                if isbn13:
-                    known_series_isbns.add(isbn13)
-                if title_key:
-                    known_series_titles.add(title_key)
-                if title_key and resolved_number:
-                    known_title_number_keys.add(f"{title_key}|{resolved_number}")
-                if resolved_number:
-                    known_series_numbers.add(resolved_number)
-                if not resolved_number:
-                    candidate_bare_key = discovery_engine.bare_title_key(title)
-                    if candidate_bare_key:
-                        known_bare_titles.add(candidate_bare_key)
-
                 parsed_date = discovery_engine.parse_flexible_date(raw.get("published_date"))
                 is_upcoming = discovery_engine.classify_upcoming(parsed_date, raw.get("upcoming_hint"))
 
@@ -1451,6 +1430,42 @@ class SeriesIntelligenceAgent:
                         {"phase": "routing", "decision": "needs_review", "confidence": overall_grade, "title": title},
                     )
                     continue
+
+                # PB-11 fix (Percy Jackson books 4/5 investigation,
+                # 2026-08-25): these sets must only grow on genuine
+                # acceptance, not merely on "reached this point without
+                # already being known" -- growing them earlier (right
+                # after the already_known check, before confidence
+                # grading) let a noisy/low-confidence duplicate for the
+                # same real book (e.g. a title-only "Book Four" hit with
+                # no structured series_number, scored number_confidence=
+                # "low" and dropped below) poison known_series_numbers
+                # *before* it was dropped, causing the very next
+                # candidate -- the real, well-corroborated "The Battle of
+                # the Labyrinth" -- to be wrongly treated as already_known
+                # and silently swallowed before it ever reached confidence
+                # grading. Different providers can still return the same
+                # real book under differently-formatted titles within a
+                # *single* check run (e.g. Hardcover's "Havoc in the
+                # Deathyards, A Completionist Chronicles Short Story" vs
+                # OpenLibrary's bare "Havoc in the Deathyards") -- growing
+                # these sets only as candidates get accepted (here) still
+                # lets the identity check above catch that on the very
+                # next candidate, the same way it catches matches against
+                # pre-existing owned books, without punishing a good
+                # candidate for a bad one that arrived first.
+                if isbn13:
+                    known_series_isbns.add(isbn13)
+                if title_key:
+                    known_series_titles.add(title_key)
+                if title_key and resolved_number:
+                    known_title_number_keys.add(f"{title_key}|{resolved_number}")
+                if resolved_number:
+                    known_series_numbers.add(resolved_number)
+                if not resolved_number:
+                    candidate_bare_key = discovery_engine.bare_title_key(title)
+                    if candidate_bare_key:
+                        known_bare_titles.add(candidate_bare_key)
 
                 if is_upcoming:
                     upcoming_books.append(canonical)
