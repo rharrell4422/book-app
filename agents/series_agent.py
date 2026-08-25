@@ -514,6 +514,25 @@ class SeriesIntelligenceAgent:
                     "all_providers_failed": all_providers_failed,
                 },
             )
+            # PB-5: same scoping decision as RT-1b's record_tool_call just
+            # above -- this is the one point in this file where "a provider
+            # call" is observable at all (the individual Serper/Apify/
+            # catalog adapter calls happen deep inside provider_protocol.py,
+            # threaded across worker threads with no context parameter to
+            # extend without a much larger structural change than a
+            # diagnostics-only pass warrants). Tagged "shadow:" in
+            # DiscoveryTelemetry so it's never conflated with RT-1b's own
+            # tool_calls entry for the same invocation.
+            agentic_hooks.shadow_probe(
+                agentic_context,
+                "discovery_stack",
+                f"{series.name} | {series_author}",
+                {
+                    "candidate_count": len(candidates),
+                    "provider_failures": provider_failures,
+                    "all_providers_failed": all_providers_failed,
+                },
+            )
             agentic_hooks.record_reasoning_step(
                 agentic_context,
                 {
@@ -593,6 +612,11 @@ class SeriesIntelligenceAgent:
                     series_delta,
                     series_name=series.name,
                     series_author=series_author,
+                    # PB-5: shares RT-1b's same per-turn context so both
+                    # tickets' traces land under one turn_id -- see that
+                    # module's docstring for why shadow_context defaulting
+                    # to None elsewhere changes nothing about this call.
+                    shadow_context=agentic_context,
                 )
                 logger.info("series_confidence: %s", json.dumps(series_confidence, default=str))
             except Exception:
@@ -954,6 +978,28 @@ class SeriesIntelligenceAgent:
                 is_compilation_of_owned_titles = referenced_owned_titles >= 2
                 if is_compilation_of_owned_titles:
                     belongs_to_series = False
+
+                # PB-5: this is the belongs-to-series gate the Phase-1 plan
+                # calls out -- computed here (and only here; no such gate
+                # exists in services/series_check_engine.py), so the shadow
+                # trace is wired at the real decision site rather than a
+                # file the plan named that doesn't contain this logic. Both
+                # dicts are built purely from values already computed above
+                # -- this call cannot change belongs_to_series itself.
+                agentic_hooks.shadow_gate_trace(
+                    agentic_context,
+                    inferred_number_int,
+                    {
+                        "title": title,
+                        "explicit_series_match": explicit_series_match,
+                        "partial_match": partial_match,
+                        "continues_numbering": continues_numbering,
+                        "targeted_with_number": targeted_with_number,
+                        "is_universe_tie_in": is_universe_tie_in,
+                        "is_compilation_of_owned_titles": is_compilation_of_owned_titles,
+                    },
+                    {"belongs_to_series": belongs_to_series},
+                )
 
                 candidate_diagnostics.append(
                     {

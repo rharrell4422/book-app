@@ -96,6 +96,7 @@ from typing import Callable
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+import agentic_hooks
 import models
 
 logger = logging.getLogger(__name__)
@@ -299,6 +300,13 @@ def _upsert_skeleton_row(
                 )
                 db.add(skeleton)
                 db.commit()
+                # PB-5: shadow-only trace of the merge that just committed --
+                # `existing_entries` (always [] on this first-ever-row
+                # branch) and `new_entries` are exactly what merge_fn
+                # produced above; never re-derived, never fed back in.
+                agentic_hooks.shadow_skeleton_merge_trace(
+                    {"series_id": series_id}, existing_entries, new_entries
+                )
                 return skeleton
 
             read_version = skeleton.version
@@ -335,6 +343,12 @@ def _upsert_skeleton_row(
 
             db.commit()
             db.refresh(skeleton)
+            # PB-5: same shadow-only trace as the insert branch above --
+            # `existing_entries` is this attempt's fresh pre-merge read,
+            # `new_entries` is merge_fn's already-committed result.
+            agentic_hooks.shadow_skeleton_merge_trace(
+                {"series_id": series_id}, existing_entries, new_entries
+            )
             return skeleton
         except (IntegrityError, OperationalError) as exc:
             db.rollback()

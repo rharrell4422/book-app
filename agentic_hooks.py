@@ -1,9 +1,24 @@
-"""RT-1b (Phase 1 agentic substrate): structured, turn-scoped tracing hooks
+"""Phase 1 agentic substrate: structured, side-channel-only tracing hooks
 around existing discovery logic.
 
 Per `discovery_agentic_phase1_plan.md` / `discovery_agentic_phase1_evaluation.md`
 (settled architecture -- see those docs for the full review trail, not
-re-litigated here), this module is **instrumentation only**:
+re-litigated here), this module covers two Phase-1 tickets:
+
+- **RT-1b** (turn lifecycle): `begin_turn`/`record_tool_call`/
+  `record_reasoning_step`/`record_world_model_update`/`end_turn` -- a
+  turn-scoped trace of one `run_series_check` call.
+- **PB-5** (shadow diagnostics): `shadow_probe`/`shadow_confidence_trace`/
+  `shadow_skeleton_merge_trace`/`shadow_gate_trace` -- finer-grained,
+  per-decision-point traces wired into `confidence_engine.py`,
+  `services/skeleton_store.py`, and the belongs-to-series gate in
+  `agents/series_agent.py`. PB-5's functions are deliberately independent
+  of RT-1b's (they accept any plain dict as `context`, not specifically a
+  `begin_turn`-produced one) so either ticket's instrumentation can be
+  torn out or replaced without touching the other's call sites.
+
+Both tickets share the same governing rules, true of every function in
+this module:
 
 - Side-channel only. Nothing here returns a value that any caller uses to
   make a routing/confidence/skeleton decision -- every public function
@@ -14,10 +29,11 @@ re-litigated here), this module is **instrumentation only**:
   discovery run -- every public function catches and logs its own
   exceptions rather than propagating them.
 - No new persistence. `context` is a plain dict; no ORM models, no new
-  tables/columns, no writes to `SeriesSkeleton` or anything else. Any
-  actual skeleton/world-model mutation still happens exactly where it
-  always has (`services/skeleton_store.py`) -- this module only *observes*
-  and logs a summary of it.
+  tables/columns, no writes to `SeriesSkeleton`/`skeleton_json`/
+  `probes_json` or anything else. Any actual skeleton/world-model
+  mutation, confidence computation, or gate decision still happens
+  exactly where it always has -- this module only *observes* and logs a
+  summary of it, strictly after the fact.
 - Delegates to `services/discovery_telemetry.py`'s existing
   `DiscoveryTelemetry` where one is available on `context["telemetry"]`
   (the same optional instance `agents/series_agent.py`'s
@@ -195,3 +211,132 @@ def end_turn(context: dict) -> None:
         )
     except Exception:
         logger.exception("agentic_hooks.end_turn failed")
+
+
+# ---------------------------------------------------------------------------
+# PB-5: shadow diagnostics
+#
+# Every function below is called *after* the real, unmodified decision it
+# describes has already been made by its caller -- none of them can affect
+# routing, confidence grades, skeleton merges, or gate outcomes, because
+# none of them are given the chance to run until that decision is final.
+# ---------------------------------------------------------------------------
+
+
+def shadow_probe(context: dict, provider: str, query: str, result) -> None:
+    """PB-5: shadow-mode trace of a provider probe -- what was asked, and
+    how much came back. Deliberately a separate channel from RT-1b's
+    `record_tool_call` (tagged `shadow:<provider>` when it delegates to
+    telemetry, so the two are distinguishable in `DiscoveryTelemetry.
+    tool_calls` rather than double-counted as the same entry) so PB-5's
+    diagnostics can be extended or removed independently of RT-1b's
+    turn-lifecycle bookkeeping. Never touches provider selection,
+    escalation, normalization, or error handling -- the caller has
+    already finished all of that before this is invoked.
+    """
+    try:
+        context = context if isinstance(context, dict) else {}
+        result_size = _result_size(result)
+        telemetry = context.get("telemetry")
+        if telemetry is not None and hasattr(telemetry, "record_tool_call"):
+            try:
+                telemetry.record_tool_call(
+                    provider=f"shadow:{provider}", query=str(query or ""), result_size=result_size
+                )
+            except Exception:
+                logger.exception("agentic_hooks.shadow_probe: telemetry delegation failed")
+        logger.info(
+            "agentic_shadow_probe turn_id=%s provider=%s query=%s result_size=%s",
+            context.get("turn_id"),
+            provider,
+            query,
+            result_size,
+        )
+    except Exception:
+        logger.exception("agentic_hooks.shadow_probe failed; continuing")
+
+
+def shadow_confidence_trace(context: dict, book_number: float | None, before: dict, after: dict) -> None:
+    """PB-5: records confidence_engine's per-candidate decision detail for
+    one `book_number` -- `before` (the four raw per-dimension grades:
+    provider/title/number/series_alignment confidence, as first computed)
+    and `after` (the same dimensions plus the resolved `overall` grade).
+    `confidence_engine.py` computes both dicts with its own existing,
+    unmodified `_overall_confidence` logic and passes them in strictly
+    after the fact -- this function has no way to feed anything back into
+    that computation, and never sees a candidate before its dimension
+    grades are already final.
+    """
+    try:
+        context = context if isinstance(context, dict) else {}
+        entry = {
+            "turn_id": context.get("turn_id"),
+            "book_number": book_number,
+            "before": dict(before or {}),
+            "after": dict(after or {}),
+            "recorded_at": _now_iso(),
+        }
+        logger.info("agentic_shadow_confidence_trace %s", entry)
+    except Exception:
+        logger.exception("agentic_hooks.shadow_confidence_trace failed; continuing")
+
+
+def shadow_skeleton_merge_trace(context: dict, before, after) -> None:
+    """PB-5: records a skeleton merge's before/after `skeleton_json` shape
+    -- entry counts and which `book_number`s were added/removed -- without
+    reading or writing `SeriesSkeleton` itself. `services/skeleton_store.py`
+    passes in the exact `existing_entries`/`new_entries` lists its own
+    unmodified `_upsert_skeleton_row`/`merge_fn` logic already computed,
+    strictly after a successful commit -- this function cannot alter the
+    merge result it's describing.
+    """
+    try:
+        context = context if isinstance(context, dict) else {}
+        before_list = before if isinstance(before, list) else []
+        after_list = after if isinstance(after, list) else []
+        before_numbers = {
+            entry.get("book_number")
+            for entry in before_list
+            if isinstance(entry, dict) and entry.get("book_number") is not None
+        }
+        after_numbers = {
+            entry.get("book_number")
+            for entry in after_list
+            if isinstance(entry, dict) and entry.get("book_number") is not None
+        }
+        entry = {
+            "turn_id": context.get("turn_id"),
+            "series_id": context.get("series_id"),
+            "before_count": len(before_list),
+            "after_count": len(after_list),
+            "added_numbers": sorted(after_numbers - before_numbers),
+            "removed_numbers": sorted(before_numbers - after_numbers),
+            "recorded_at": _now_iso(),
+        }
+        logger.info("agentic_shadow_skeleton_merge_trace %s", entry)
+    except Exception:
+        logger.exception("agentic_hooks.shadow_skeleton_merge_trace failed; continuing")
+
+
+def shadow_gate_trace(context: dict, book_number: float | None, gate_input: dict, gate_output: dict) -> None:
+    """PB-5: records the belongs-to-series gate's inputs (title/number
+    match signals the caller already computed -- explicit/partial title
+    match, targeted-with-number, continues-numbering, universe-tie-in/
+    compilation downgrades, etc.) and its output (the resolved
+    `belongs_to_series` boolean, plus whatever else the caller includes)
+    for one candidate. `agents/series_agent.py` is the only place this
+    gate is actually computed (see that module's `run_series_check`) --
+    this function only observes the already-final result.
+    """
+    try:
+        context = context if isinstance(context, dict) else {}
+        entry = {
+            "turn_id": context.get("turn_id"),
+            "book_number": book_number,
+            "gate_input": dict(gate_input or {}),
+            "gate_output": dict(gate_output or {}),
+            "recorded_at": _now_iso(),
+        }
+        logger.info("agentic_shadow_gate_trace %s", entry)
+    except Exception:
+        logger.exception("agentic_hooks.shadow_gate_trace failed; continuing")

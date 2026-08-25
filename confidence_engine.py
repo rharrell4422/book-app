@@ -54,7 +54,9 @@ below -- the exact regression this grade exists to prevent.
 
 from datetime import datetime
 
+import agentic_hooks
 import discovery_engine
+from discovery_text import _to_float_or_none  # NS-5: shared with delta_engine.py
 
 _LEVEL_RANK = {"zero": 0, "low": 1, "medium": 2, "high": 3}
 
@@ -69,15 +71,6 @@ _PROVIDER_CONFIDENCE = {
     "apify": "medium",
     "web_search": "low",  # frontier web-search snippet (formerly Brave, now Serper), per spec
 }
-
-
-def _to_float_or_none(value) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _candidate_key(candidate: dict) -> tuple:
@@ -398,11 +391,20 @@ def compute_confidence(
     *,
     series_name: str | None = None,
     series_author: str | None = None,
+    shadow_context: dict | None = None,
 ) -> dict:
     """Pure scoring pass -- does not mutate skeleton_entries,
     provider_candidates, or delta, makes no LLM/network/DB calls, and
     infers nothing beyond structured fields already present on each
     candidate.
+
+    `shadow_context` (PB-5, optional, defaults to `None`): when a caller
+    passes one (see `agents/series_agent.py`'s `agentic_context`), each
+    candidate's four raw dimension grades and the resulting `overall`
+    grade are reported via `agentic_hooks.shadow_confidence_trace` --
+    strictly after this function's own unmodified scoring logic below has
+    already produced them. `None` (the default, and every call site
+    before PB-5 existed) makes this a total no-op, same as before PB-5.
     """
     skeleton_by_number = _skeleton_by_number(skeleton_entries)
     skeleton_numbers = set(skeleton_by_number.keys())
@@ -426,6 +428,25 @@ def compute_confidence(
         overall = _overall_confidence(
             [provider_confidence, title_confidence, number_confidence, series_alignment_confidence]
         )
+
+        if shadow_context is not None:
+            agentic_hooks.shadow_confidence_trace(
+                shadow_context,
+                _to_float_or_none(candidate.get("series_number")),
+                {
+                    "provider_confidence": provider_confidence,
+                    "title_confidence": title_confidence,
+                    "number_confidence": number_confidence,
+                    "series_alignment_confidence": series_alignment_confidence,
+                },
+                {
+                    "provider_confidence": provider_confidence,
+                    "title_confidence": title_confidence,
+                    "number_confidence": number_confidence,
+                    "series_alignment_confidence": series_alignment_confidence,
+                    "overall": overall,
+                },
+            )
 
         scored.append(
             {
