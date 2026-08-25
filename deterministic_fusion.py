@@ -188,6 +188,25 @@ class UnifiedCandidate(BaseModel):
     upcoming_hint: bool | None = None
 
 
+def _authors_overlap(authors_a: list[str], authors_b: list[str]) -> bool:
+    """True if any name in authors_a fuzzy-matches (same token-subset check
+    as _author_matches) any name in authors_b -- used by
+    _fuse_and_score_candidates' TITLE+AUTHOR identity fallback (see its own
+    docstring) to decide whether two same-titled hits plausibly refer to
+    the same real book. Only ONE overlapping name is required, not the
+    full list matching -- e.g. a novel's single author vs. a graphic-novel
+    adaptation's author+illustrator+colorist list should still be
+    recognized as the same underlying book off the one shared name.
+
+    Two empty/author-less lists (or one empty, one not) return False --
+    "no data to compare" is handled by the caller (title alone still
+    governs there), not treated as a false claim of overlap here.
+    """
+    if not authors_a or not authors_b:
+        return False
+    return any(_author_matches(authors_b, author) for author in authors_a if author)
+
+
 def _first_present_field(members: list[dict], field: str, *, exclude_sources: set[str] | None = None):
     """First non-empty value for `field` across a group of raw candidate
     dicts already confirmed to be the same real book (see
@@ -252,6 +271,20 @@ def _fuse_and_score_candidates(
     different, ISBN-less provider, since a wrong backfilled ISBN would
     directly change that candidate's dedupe key and stub-listing check
     inside _filter_and_merge.
+
+    PB-10 grouping fix (Percy Jackson catalog-sufficiency investigation):
+    identity grouping used to be strict isbn13-or-title-key -- two hits for
+    the exact same real book (e.g. Hardcover's "The Lightning Thief" with
+    an ISBN, OpenLibrary's "The Lightning Thief" with none) landed in
+    different groups purely because only one of them carried an ISBN, so
+    they never got credit for corroborating each other. Grouping now falls
+    back to a TITLE+AUTHOR match (same title-key, at least one overlapping
+    author -- see _authors_overlap) whenever *at least one side of the
+    comparison lacks an ISBN*. Deliberately narrow: if both sides carry an
+    ISBN and it differs, that's a real, unresolved edition question (e.g.
+    US vs. UK printing) left to _finalize_candidates' own dominance-based
+    edition-collapse logic downstream, not silently decided here by title
+    text alone.
     """
     ordered_raw: list[dict] = [
         *(provider_results.get("hardcover") or []),
@@ -262,16 +295,59 @@ def _fuse_and_score_candidates(
 
     groups: dict[str, list[dict]] = {}
     group_order: list[str] = []
+    # Parallel per-group bookkeeping the matching loop below needs, kept
+    # in lockstep with `groups`/`group_order` rather than recomputed from
+    # `groups` each time -- group_isbn is None until some member supplies
+    # one, and by construction (see the ISBN-conflict check below) never
+    # holds more than one distinct value.
+    group_title_key: dict[str, str] = {}
+    group_authors: dict[str, list[str]] = {}
+    group_isbn: dict[str, str | None] = {}
+    isbn_to_group: dict[str, str] = {}
+    next_group_id = 0
+
     for raw in ordered_raw:
         title = str(raw.get("title") or "").strip()
         if not title:
             continue
-        isbn13 = str(raw.get("isbn13") or "").strip()
-        identity_key = isbn13 or core_title_key(title) or normalize_text(title)
-        if identity_key not in groups:
-            groups[identity_key] = []
-            group_order.append(identity_key)
-        groups[identity_key].append(raw)
+        isbn13 = str(raw.get("isbn13") or "").strip() or None
+        title_key = core_title_key(title) or normalize_text(title)
+        raw_authors = [a for a in (raw.get("authors") or []) if a]
+
+        target_group_id: str | None = None
+        if isbn13 and isbn13 in isbn_to_group:
+            target_group_id = isbn_to_group[isbn13]
+        else:
+            for candidate_id in group_order:
+                if group_title_key.get(candidate_id) != title_key:
+                    continue
+                existing_isbn = group_isbn.get(candidate_id)
+                if existing_isbn and isbn13 and existing_isbn != isbn13:
+                    # Both sides have an ISBN and it differs -- a real
+                    # edition question, not this function's to resolve.
+                    continue
+                if raw_authors and group_authors.get(candidate_id) and not _authors_overlap(
+                    raw_authors, group_authors[candidate_id]
+                ):
+                    continue  # same title, but no author in common at all -- different book
+                target_group_id = candidate_id
+                break
+
+        if target_group_id is None:
+            target_group_id = f"g{next_group_id}"
+            next_group_id += 1
+            groups[target_group_id] = []
+            group_order.append(target_group_id)
+            group_title_key[target_group_id] = title_key
+            group_authors[target_group_id] = []
+            group_isbn[target_group_id] = None
+
+        groups[target_group_id].append(raw)
+        if raw_authors:
+            group_authors[target_group_id] = list(dict.fromkeys(group_authors[target_group_id] + raw_authors))
+        if isbn13 and not group_isbn[target_group_id]:
+            group_isbn[target_group_id] = isbn13
+            isbn_to_group[isbn13] = target_group_id
 
     fused: list[UnifiedCandidate] = []
     for identity_key in group_order:
@@ -816,6 +892,50 @@ CATALOG_SUFFICIENCY_CONFIDENCE_THRESHOLD = 0.75
 CATALOG_SUFFICIENCY_MIN_CONTRIBUTING_PROVIDERS = 2
 
 
+def _catalog_sufficiency_confidence(
+    fused_catalog_candidates: list["UnifiedCandidate"],
+    series_name: str | None,
+) -> float:
+    """Gate-only confidence signal -- deliberately NOT a change to
+    _series_completeness_and_confidence, which _should_trigger_author_
+    fallback also depends on; this is a separate calculation used only by
+    catalog_providers_are_sufficient below.
+
+    PB-10 fix: a flat average of confidence_score across every raw fused
+    candidate is dominated by non-canonical noise (box sets, coloring
+    books, companion guides) and by a real series' own bundle/box-set
+    listings that all resolve to the same book number as the real
+    standalone volume (e.g. Hardcover alone returning nine different
+    "book 1"-numbered titles for Percy Jackson -- the boxed set, three
+    different omnibus editions, the plain novel, etc.) -- none of that
+    should drag down how confidently book 1 itself is known. Per real
+    book NUMBER, only the single best-corroborated candidate matters,
+    not how many lower-quality duplicates/bundles also happen to carry
+    that same number; averaging across those deduplicated number slots
+    (not across every raw candidate) is what should decide whether the
+    catalogs "agree" on the series.
+
+    Only integer-numbered slots count, mirroring _series_completeness_and_
+    confidence's own known_numbers convention -- a fractional companion
+    entry (2.5) isn't a numbered "volume" this proxy reasons about, it's
+    still fully visible to the user elsewhere, just not part of this
+    scoring pass. Non-canonical candidates with no resolvable number at
+    all are excluded entirely (they don't even get a slot).
+    """
+    best_confidence_by_number: dict[int, float] = {}
+    for candidate in fused_catalog_candidates:
+        number = _resolve_candidate_number(candidate, series_name)
+        if number is None or not float(number).is_integer():
+            continue
+        slot = int(number)
+        best_confidence_by_number[slot] = max(
+            best_confidence_by_number.get(slot, 0.0), candidate.confidence_score
+        )
+    if not best_confidence_by_number:
+        return 0.0
+    return sum(best_confidence_by_number.values()) / len(best_confidence_by_number)
+
+
 def catalog_providers_are_sufficient(
     fused_catalog_candidates: list["UnifiedCandidate"],
     series_name: str | None,
@@ -851,10 +971,21 @@ def catalog_providers_are_sufficient(
     "sufficient" branch, which made a live "why didn't this skip web
     search" investigation (the Percy Jackson re-run) impossible to answer
     from logs alone.
+
+    PB-10 confidence fix: completeness still comes from the shared
+    _series_completeness_and_confidence (unchanged -- _should_trigger_
+    author_fallback also depends on it), but confidence here comes from
+    _catalog_sufficiency_confidence instead of that same shared helper's
+    own flat-average confidence -- see its docstring for why a flat
+    average across every raw fused candidate structurally never clears a
+    realistic bar for a real series (bundle/box-set noise all sharing one
+    book's number, no per-candidate reward for a *different* candidate at
+    the same number already being well-corroborated).
     """
-    completeness, confidence = _series_completeness_and_confidence(
+    completeness, _unused_flat_confidence = _series_completeness_and_confidence(
         fused_catalog_candidates, series_name, highest_owned_book_number
     )
+    confidence = _catalog_sufficiency_confidence(fused_catalog_candidates, series_name)
     sufficient = (
         contributing_provider_count >= CATALOG_SUFFICIENCY_MIN_CONTRIBUTING_PROVIDERS
         and completeness >= CATALOG_SUFFICIENCY_COMPLETENESS_THRESHOLD

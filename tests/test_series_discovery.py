@@ -5417,6 +5417,152 @@ class ManualDeleteRecalculationTest(unittest.TestCase):
         self.assertEqual(refreshed.unread_count, 6)
 
 
+class FusionGroupingTest(unittest.TestCase):
+    """Coverage for _fuse_and_score_candidates' TITLE+AUTHOR identity
+    fallback (PB-10 grouping fix): two hits for the same real book must
+    still be recognized as duplicates -- and get the multi-source
+    confidence bonus -- even when only one of them carries an ISBN. Live
+    incident that motivated this: Hardcover's ISBN-bearing "The Lightning
+    Thief" and OpenLibrary's ISBN-less "The Lightning Thief" landed in two
+    separate fusion groups under the old isbn13-or-title-key logic, so
+    neither ever got credit for the other corroborating it, capping
+    catalog-sufficiency confidence well below any realistic threshold for
+    a real series.
+    """
+
+    def test_isbn_haver_and_isbn_less_hit_merge_on_title_and_author(self):
+        fused = discovery_engine._fuse_and_score_candidates(
+            {
+                "hardcover": [
+                    {
+                        "source": "hardcover",
+                        "title": "The Lightning Thief",
+                        "authors": ["Rick Riordan"],
+                        "isbn13": "9780141335919",
+                        "series_number_hint": 1,
+                    }
+                ],
+                "google": [],
+                "openlibrary": [
+                    {
+                        "source": "openlibrary",
+                        "title": "The Lightning Thief",
+                        "authors": ["Rick Riordan"],
+                        "isbn13": None,
+                        "series_number_hint": None,
+                    }
+                ],
+                "web": [],
+            },
+            "Rick Riordan",
+            "Percy Jackson and the Olympians",
+        )
+        self.assertEqual(len(fused), 1)
+        merged = fused[0]
+        self.assertEqual(merged.isbn13, "9780141335919")
+        self.assertEqual({m.get("source") for m in merged.source_provenance}, {"hardcover", "openlibrary"})
+        # Multi-source corroboration bonus must actually apply now that
+        # both hits are recognized as the same book.
+        self.assertGreater(merged.confidence_score, 0.75)
+
+    def test_one_overlapping_author_is_enough_to_merge_graphic_novel_credits(self):
+        # A graphic-novel adaptation's author/illustrator/colorist list
+        # only needs to share ONE name with the novel's own (single)
+        # author to be recognized as the same underlying book.
+        fused = discovery_engine._fuse_and_score_candidates(
+            {
+                "hardcover": [
+                    {
+                        "source": "hardcover",
+                        "title": "The Sea of Monsters: The Graphic Novel",
+                        "authors": ["Rick Riordan"],
+                        "isbn13": "9781423145509",
+                        "series_number_hint": 2,
+                    }
+                ],
+                "google": [],
+                "openlibrary": [
+                    {
+                        "source": "openlibrary",
+                        "title": "The Sea of Monsters: The Graphic Novel",
+                        "authors": ["Attila Futaki", "Rick Riordan", "Robert Venditti"],
+                        "isbn13": None,
+                        "series_number_hint": None,
+                    }
+                ],
+                "web": [],
+            },
+            "Rick Riordan",
+            "Percy Jackson and the Olympians",
+        )
+        self.assertEqual(len(fused), 1)
+
+    def test_same_title_no_author_overlap_stays_separate(self):
+        # Same generic title, completely different authors -- these are
+        # different real books and must not be merged just because the
+        # title string matches.
+        fused = discovery_engine._fuse_and_score_candidates(
+            {
+                "hardcover": [
+                    {
+                        "source": "hardcover",
+                        "title": "Trivia",
+                        "authors": ["Rick Riordan"],
+                        "isbn13": None,
+                        "series_number_hint": None,
+                    }
+                ],
+                "google": [],
+                "openlibrary": [
+                    {
+                        "source": "openlibrary",
+                        "title": "Trivia",
+                        "authors": ["Trivion Books"],
+                        "isbn13": None,
+                        "series_number_hint": None,
+                    }
+                ],
+                "web": [],
+            },
+            "Rick Riordan",
+            "Percy Jackson and the Olympians",
+        )
+        self.assertEqual(len(fused), 2)
+
+    def test_both_sides_having_different_isbns_stays_separate(self):
+        # Both hits carry an ISBN and they disagree -- a genuine edition
+        # question (e.g. US vs. UK printing) left to _finalize_candidates'
+        # own dominance-based edition-collapse downstream, not decided
+        # here by title+author alone.
+        fused = discovery_engine._fuse_and_score_candidates(
+            {
+                "hardcover": [
+                    {
+                        "source": "hardcover",
+                        "title": "The Lightning Thief",
+                        "authors": ["Rick Riordan"],
+                        "isbn13": "9780141335919",
+                        "series_number_hint": 1,
+                    }
+                ],
+                "google": [
+                    {
+                        "source": "google_books",
+                        "title": "The Lightning Thief",
+                        "authors": ["Rick Riordan"],
+                        "isbn13": "9780786838653",
+                        "series_number_hint": None,
+                    }
+                ],
+                "openlibrary": [],
+                "web": [],
+            },
+            "Rick Riordan",
+            "Percy Jackson and the Olympians",
+        )
+        self.assertEqual(len(fused), 2)
+
+
 class CatalogSufficiencyGateTest(unittest.TestCase):
     """Coverage for the catalog-sufficiency gate (deterministic_fusion.
     catalog_providers_are_sufficient + its wiring into provider_io.
@@ -5501,6 +5647,71 @@ class CatalogSufficiencyGateTest(unittest.TestCase):
                 None,
                 contributing_provider_count=3,
             )
+        )
+
+    def test_percy_jackson_live_incident_data_now_passes_after_fusion_and_slot_fix(self):
+        # Exact raw provider data captured from the live Railway incident
+        # (2026-08-25 15:14:02 UTC "Percy Jackson & The Olympians" Check
+        # Now run) that motivated the PB-10 fusion-grouping and
+        # per-number-slot confidence fixes: Google Books returned 0 hits,
+        # Hardcover returned 25 (mostly single-source, including several
+        # bundle/box-set/graphic-novel variants of book 1), OpenLibrary
+        # returned 8 (no ISBNs at all). Before the fix this scored
+        # completeness=100%/confidence=51% and FAILED the 75% bar, so
+        # Serper+Apify fired to reconfirm a series the catalogs already
+        # fully knew about. This test locks in the fixed outcome.
+        hardcover_raw = [
+            {"source": "hardcover", "title": "Rick Riordan PERCY JACKSON & the OLYMPIANS Series Set Book 1-5", "authors": ["Rick Riordan"], "isbn13": "9798897226153", "series_number_hint": None},
+            {"source": "hardcover", "title": "The Sea of Monsters", "authors": ["Rick Riordan"], "isbn13": "9780786290741", "series_number_hint": 2.0},
+            {"source": "hardcover", "title": "The Titan's Curse", "authors": ["Rick Riordan"], "isbn13": "9782019109974", "series_number_hint": 3.0},
+            {"source": "hardcover", "title": "Demigods and Monsters: Your Favorite Authors on Rick Riordan's Percy Jackson and the Olympians Series", "authors": ["Rick Riordan"], "isbn13": "9781937856373", "series_number_hint": None},
+            {"source": "hardcover", "title": "The Lightning Thief", "authors": ["Rick Riordan"], "isbn13": "9780141335919", "series_number_hint": 1.0},
+            {"source": "hardcover", "title": "Percy Jackson and the Olympians / The Senior Adventures 1", "authors": ["Rick Riordan"], "isbn13": "9789124282882", "series_number_hint": 1.0},
+            {"source": "hardcover", "title": "Percy Jackson and the Olympians / The Senior Adventures 1-2", "authors": ["Rick Riordan"], "isbn13": "9781637995860", "series_number_hint": 1.0},
+            {"source": "hardcover", "title": "The Battle of the Labyrinth", "authors": ["Rick Riordan"], "isbn13": "9789632454900", "series_number_hint": 4.0},
+            {"source": "hardcover", "title": "The Last Olympian", "authors": ["Rick Riordan"], "isbn13": "9788804616672", "series_number_hint": 5.0},
+            {"source": "hardcover", "title": "Percy Jackson and the Olympians: The Complete Series", "authors": ["Rick Riordan"], "isbn13": "9781484707234", "series_number_hint": 1.0},
+            {"source": "hardcover", "title": "The Ultimate Guide", "authors": ["Rick Riordan", "Mary-Jane Knight"], "isbn13": "9788580572476", "series_number_hint": None},
+            {"source": "hardcover", "title": "The Percy Jackson Coloring Book", "authors": ["Rick Riordan", "Keith Robinson"], "isbn13": "9781484787793", "series_number_hint": None},
+            {"source": "hardcover", "title": "Percy Jackson and the Olympians 1-3", "authors": ["John Rocco", "Rick Riordan"], "isbn13": "9781484721476", "series_number_hint": 1.0},
+            {"source": "hardcover", "title": "Untitled Percy Jackson and the Olympians #8", "authors": ["Rick Riordan"], "isbn13": None, "series_number_hint": 3.0},
+            {"source": "hardcover", "title": "The Chalice of the Gods", "authors": ["Rick Riordan"], "isbn13": "9781368102193", "series_number_hint": 6.0},
+            {"source": "hardcover", "title": "The Demigod Files", "authors": ["Rick Riordan"], "isbn13": "9781423121664", "series_number_hint": None},
+            {"source": "hardcover", "title": "Wrath of the Triple Goddess", "authors": ["Rick Riordan"], "isbn13": "9781368107785", "series_number_hint": 7.0},
+            {"source": "hardcover", "title": "The Sword of Hades", "authors": ["Rick Riordan"], "isbn13": "9781368099325", "series_number_hint": None},
+            {"source": "hardcover", "title": "The Lightning Thief: The Graphic Novel", "authors": ["Robert Venditti", "Rick Riordan", "José Villarrubia", "Attila Futaki"], "isbn13": "9781423116967", "series_number_hint": 1.0},
+            {"source": "hardcover", "title": "The Sea of Monsters: The Graphic Novel", "authors": ["Attila Futaki", "Rick Riordan", "Tamas Gaspar", "Robert Venditti"], "isbn13": "9781423145509", "series_number_hint": 2.0},
+            {"source": "hardcover", "title": "Percy Jackson and the Stolen Chariot", "authors": ["Rick Riordan", "Manuela Salvi"], "isbn13": "9788852030505", "series_number_hint": 2.5},
+            {"source": "hardcover", "title": "The Battle of the Labyrinth: The Graphic Novel", "authors": ["Rick Riordan", "Robert Venditti", "Attila Futaki", "Tamas Gaspar"], "isbn13": "9781484786390", "series_number_hint": 4.0},
+            {"source": "hardcover", "title": "The Titan's Curse: The Graphic Novel", "authors": ["Robert Venditti", "Rick Riordan", "Attila Futaki", "Greg Guilhaumond", "Chris Dickey"], "isbn13": "9780141357751", "series_number_hint": 3.0},
+            {"source": "hardcover", "title": "The Last Olympian: The Graphic Novel", "authors": ["Rick Riordan", "Robert Venditti"], "isbn13": "9781368046084", "series_number_hint": 5.0},
+            {"source": "hardcover", "title": "Percy Jackson 1-5 / The Demigod Files / the Red Pyramid", "authors": ["Rick Riordan"], "isbn13": "9781780810065", "series_number_hint": 1.0},
+        ]
+        openlibrary_raw = [
+            {"source": "openlibrary", "title": "The Lightning Thief", "authors": ["Rick Riordan"], "isbn13": None, "series_number_hint": None},
+            {"source": "openlibrary", "title": "The Sea of Monsters", "authors": ["Rick Riordan"], "isbn13": None, "series_number_hint": None},
+            {"source": "openlibrary", "title": "The Battle of the Labyrinth", "authors": ["Rick Riordan"], "isbn13": None, "series_number_hint": None},
+            {"source": "openlibrary", "title": "Demigods and Monsters", "authors": ["Rick Riordan", "Leah Wilson"], "isbn13": None, "series_number_hint": None},
+            {"source": "openlibrary", "title": "Percy Jackson and the Olympians Collection Rick Riordan 5 Books Set by Rick Riordan", "authors": [], "isbn13": None, "series_number_hint": None},
+            {"source": "openlibrary", "title": "Trivia", "authors": ["Trivion Books"], "isbn13": None, "series_number_hint": None},
+            {"source": "openlibrary", "title": "Percy Jackson Color by Number", "authors": ["Zach Walsh"], "isbn13": None, "series_number_hint": None},
+            {"source": "openlibrary", "title": "The Titan's Curse", "authors": ["Rick Riordan"], "isbn13": None, "series_number_hint": None},
+        ]
+        fused = discovery_engine._fuse_and_score_candidates(
+            {"hardcover": hardcover_raw, "google": [], "openlibrary": openlibrary_raw, "web": []},
+            "Rick Riordan",
+            "Percy Jackson & The Olympians",
+        )
+        sufficient = discovery_engine.catalog_providers_are_sufficient(
+            fused,
+            "Percy Jackson & The Olympians",
+            1,
+            contributing_provider_count=2,
+        )
+        self.assertTrue(
+            sufficient,
+            "Percy Jackson's live-incident catalog data should now pass the gate "
+            "after the fusion-grouping and per-number-slot confidence fixes",
         )
 
     def test_fetch_all_providers_parallel_skips_web_search_when_catalogs_sufficient(self):
