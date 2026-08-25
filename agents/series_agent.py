@@ -12,6 +12,7 @@ import confidence_engine
 import delta_engine
 import discovery_engine
 import intelligence
+import settings
 from models import Book, Series, SeriesSkeleton
 from services.discovery_cache import DiscoveryCache
 from services.discovery_logging import log_discovery_summary
@@ -1412,10 +1413,122 @@ class SeriesIntelligenceAgent:
                 },
             )
 
+            # Phase 3 candidate promotion (discovery_agentic_phase1_plan.md/
+            # discovery_agentic_phase1_evaluation.md, not re-litigated
+            # here): feature-flagged (settings.AGENTIC_ROUTING_ENABLED),
+            # fail-soft, conditional use of the Phase 1 shadow loop's
+            # per-book confidence/gate decisions in place of the live
+            # skeleton's own -- for already-tracked books only (see
+            # agents/agentic_series_agent.run_agentic_turn's own
+            # docstring: its candidate_numbers come from the skeleton,
+            # not from this round's newly-discovered candidates the loop
+            # above just routed). Additive only: read-only inputs
+            # (skeleton_entries, already loaded above), a purely local
+            # promotion_outcome computation, one shadow-table write per
+            # traced book (services.agentic_promotion_evaluator.
+            # store_promotion_decision), and one new result key below --
+            # never a write to SeriesSkeleton.skeleton_json/probes_json,
+            # and never a change to available_missing/needs_review/
+            # added_books above, regardless of outcome. With the flag
+            # off, this block is not entered at all: zero extra queries,
+            # byte-for-byte identical to before this feature existed.
+            #
+            # Passes this call's own `db` through (unlike the Phase 2
+            # dry-run block below, which deliberately does not -- see
+            # its own comment) so `run_agentic_turn` reads the exact
+            # same in-flight transaction's skeleton state rather than a
+            # second, independent session.
+            agentic_promotion_payload: dict = {"enabled": False, "promotions": []}
+            if settings.AGENTIC_ROUTING_ENABLED:
+                try:
+                    from agents.agentic_series_agent import run_agentic_turn
+                    from services.agentic_promotion_evaluator import evaluate_promotion, store_promotion_decision
+
+                    promotion_context = {
+                        "series_id": series_id,
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "db": db,
+                    }
+                    promotion_trace = run_agentic_turn(series_id, promotion_context)
+
+                    # Same live snapshot shape services/agentic_
+                    # confidence_gate_store.py's dry-run wiring already
+                    # pairs against (services/agentic_evaluation_
+                    # harness.py's _observe_live_pipeline) -- reused here
+                    # by hand rather than via that function's own DB
+                    # query, since skeleton_entries above already read
+                    # the exact same row this same call/transaction, and
+                    # nothing has changed it since.
+                    live_confidence_by_number = {
+                        entry.get("book_number"): {
+                            "confidence": entry.get("confidence"),
+                            "status": entry.get("status"),
+                        }
+                        for entry in (skeleton_entries or [])
+                        if isinstance(entry, dict) and entry.get("book_number") is not None
+                    }
+                    live_gate_by_number = {
+                        entry.get("book_number"): {
+                            "belongs_to_series": True,
+                            "source_class": entry.get("source_class", "library"),
+                        }
+                        for entry in (skeleton_entries or [])
+                        if isinstance(entry, dict) and entry.get("book_number") is not None
+                    }
+                    agentic_gate_by_number = {
+                        trace_entry["book_number"]: trace_entry
+                        for trace_entry in promotion_trace.get("gate_traces", [])
+                        if isinstance(trace_entry, dict) and trace_entry.get("book_number") is not None
+                    }
+
+                    promotions: list[dict] = []
+                    for confidence_trace_entry in promotion_trace.get("confidence_traces", []):
+                        promo_book_number = confidence_trace_entry.get("book_number")
+                        if promo_book_number is None:
+                            continue
+                        promo_live_conf = live_confidence_by_number.get(promo_book_number, {})
+                        promo_agentic_conf = confidence_trace_entry.get("after", {})
+                        promo_live_gate = live_gate_by_number.get(promo_book_number, {})
+                        promo_agentic_gate = agentic_gate_by_number.get(promo_book_number, {})
+
+                        promo_outcome = evaluate_promotion(
+                            promo_live_conf, promo_agentic_conf, promo_live_gate, promo_agentic_gate
+                        )
+                        store_promotion_decision(
+                            series_id,
+                            promo_book_number,
+                            promo_live_conf,
+                            promo_agentic_conf,
+                            promo_live_gate,
+                            promo_agentic_gate,
+                            promo_outcome,
+                            db_session=db,
+                        )
+
+                        use_agentic = promo_outcome == "use_agentic"
+                        promotions.append(
+                            {
+                                "book_number": promo_book_number,
+                                "outcome": promo_outcome,
+                                "resolved_confidence": promo_agentic_conf if use_agentic else promo_live_conf,
+                                "resolved_gate": promo_agentic_gate if use_agentic else promo_live_gate,
+                            }
+                        )
+
+                    agentic_promotion_payload = {"enabled": True, "promotions": promotions}
+                except Exception:
+                    logger.exception(
+                        "run_series_check: Phase 3 candidate-promotion layer failed for series_id=%s; "
+                        "continuing with live routing unaffected",
+                        series_id,
+                    )
+                    agentic_promotion_payload = {"enabled": True, "promotions": [], "error": True}
+
             result = {
                 "series_id": series.id,
                 "series_name": series.name,
                 "highest_owned_book_number": highest_owned_book_number,
+                "agentic_promotion": agentic_promotion_payload,
                 "candidate_numbers": [],
                 "added_count": len(added_books),
                 "added_books": added_books,

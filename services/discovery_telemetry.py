@@ -412,6 +412,27 @@ def record_agentic_confidence_gate_error(series_id: int, decision_kind: str, err
         )
 
 
+def record_agentic_promotion_error(series_id: int, error: str) -> None:
+    """Phase 3 (`services/agentic_promotion_evaluator.py`): logs a
+    failure to insert into the `agentic_promotion_decisions` shadow
+    table for `series_id`. That store performs a real write (unlike the
+    log-only `record_agentic_*` helpers above), so this is specifically
+    for surfacing write failures against that table -- it is not itself
+    a fallback persistence layer.
+
+    Same log-only, fail-soft convention as every other helper in this
+    module (tagged `agentic_promotion_error`): a failure here must never
+    raise back into `store_promotion_decision`, which already guards its
+    own call to this.
+    """
+    try:
+        logger.info("agentic_promotion_error series_id=%s error=%s", series_id, error)
+    except Exception:
+        logger.exception(
+            "record_agentic_promotion_error: failed to log promotion-store error for series_id=%s", series_id
+        )
+
+
 def record_agentic_dry_run(series_id: int, payload: dict) -> None:
     """Phase 2 dual execution mode (`agents/series_agent.py`'s `run_
     series_check`): logs one live discovery turn's dry-run agentic

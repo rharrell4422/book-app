@@ -1,14 +1,15 @@
 """Phase 1 agentic discovery, tenth implementation block (extended in the
 eleventh block with `/promotion`, `/series`, `/history`, in Phase 2's
 kickoff block with `/promotion-plan`, in Phase 2's skeleton dual-write
-block with `/previews`, and in Phase 2's final scaffolding block with
-`/confidence`, `/gate`): a read-only, owner-only admin router exposing
-everything `services/agentic_evaluation_harness.py`/`services/agentic_
-batch_orchestrator.py`/`services/agentic_promotion_checklist.py`/
-`services/agentic_admin_ui_stubs.py`/`services/agentic_promotion_plan.py`/
-`services/agentic_skeleton_preview_store.py`/`services/agentic_
-confidence_gate_store.py` already built, for manual triggering during
-evaluation -- not for end users.
+block with `/previews`, in Phase 2's final scaffolding block with
+`/confidence`, `/gate`, and in Phase 3 with `/promotion-history`): a
+read-only, owner-only admin router exposing everything `services/
+agentic_evaluation_harness.py`/`services/agentic_batch_orchestrator.py`/
+`services/agentic_promotion_checklist.py`/`services/agentic_admin_ui_
+stubs.py`/`services/agentic_promotion_plan.py`/`services/agentic_
+skeleton_preview_store.py`/`services/agentic_confidence_gate_store.py`/
+`services/agentic_promotion_evaluator.py` already built, for manual
+triggering during evaluation -- not for end users.
 
 Per `discovery_agentic_phase1_plan.md`/`discovery_agentic_phase1_evaluation.md`
 (settled architecture, not re-litigated here): every route below is a thin
@@ -22,9 +23,10 @@ pattern this mirrors), and never linked from any user-facing UI. Nothing
 here writes to the database, calls a live provider, or changes routing/
 confidence/gate/skeleton behavior -- it only ever triggers the existing
 read-only diagnostics and returns their output. `/promotion-plan` (Phase
-2 kickoff) is the same story: a diagnostic plan of what promotion would
-require, never a promotion mechanism itself -- there is still no Phase 2
-switch anywhere in this codebase.
+2 kickoff) and `/promotion-history` (Phase 3) are the same story: neither
+is a promotion mechanism itself, just a read-only view of what Phase 3's
+feature-flagged live routing layer (`agents/series_agent.py`, gated by
+`settings.AGENTIC_ROUTING_ENABLED`) has decided/recorded so far.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from services.agentic_batch_orchestrator import run_batch_agentic_evaluations
 from services.agentic_confidence_gate_store import get_agentic_confidence_history, get_agentic_gate_history
 from services.agentic_evaluation_harness import generate_full_agentic_html, generate_full_agentic_report
 from services.agentic_promotion_checklist import generate_promotion_readiness
+from services.agentic_promotion_evaluator import get_promotion_history
 from services.agentic_promotion_plan import build_phase2_promotion_plan
 from services.agentic_skeleton_preview_store import get_agentic_skeleton_previews
 
@@ -180,3 +183,24 @@ def admin_agentic_gate(series_id: int) -> dict:
     `evaluate_belongs_to_series_gate` logic. Read-only -- no writes.
     """
     return {"series_id": series_id, "gate_history": get_agentic_gate_history(series_id)}
+
+
+@router.get("/promotion-history/{series_id}")
+def admin_agentic_promotion(series_id: int) -> dict:
+    """Returns every stored Phase 3 candidate-promotion decision for one
+    series (`services.agentic_promotion_evaluator.get_promotion_
+    history`) -- the shadow table (`agentic_promotion_decisions`)
+    `agents/series_agent.py`'s live routing path writes to, one row per
+    traced book per turn, only when `settings.AGENTIC_ROUTING_ENABLED`
+    is on. Entirely separate from `SeriesSkeleton.skeleton_json`.
+    Read-only -- no writes.
+
+    Deliberately named `/promotion-history/{series_id}`, not
+    `/promotion/{series_id}` -- that path is already taken by
+    `admin_promotion_check` above (the Phase 1/2 promotion-*readiness*
+    checklist, a different, older diagnostic with no relation to this
+    endpoint's per-book promotion outcomes; both are read-only and
+    "promotion" here means the Phase 3 feature this whole module is
+    named after, not a conflict worth renaming the older route over).
+    """
+    return {"series_id": series_id, "promotion_history": get_promotion_history(series_id)}

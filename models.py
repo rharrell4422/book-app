@@ -510,3 +510,50 @@ class AgenticGateDecision(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)
     live_gate = Column(JSON, nullable=False)
     agentic_gate = Column(JSON, nullable=False)
+
+
+class AgenticPromotionDecision(Base):
+    """Phase 3 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
+    phase1_evaluation.md`'s settled architecture, not re-litigated here):
+    the first table recording an actual *routing* decision rather than a
+    purely diagnostic side-by-side comparison -- one row per (series,
+    book_number, live routing turn) recording not just the live vs
+    agentic confidence/gate pair (same shape as `AgenticConfidenceDecision`/
+    `AgenticGateDecision` above), but also `promotion_outcome`: which of
+    the two `services.agentic_promotion_evaluator.evaluate_promotion`
+    actually chose for that book -- `"use_live"`, `"use_agentic"`, or
+    `"reject_agentic"`.
+
+    Written only by `services/agentic_promotion_evaluator.py`
+    (`store_promotion_decision`), and only from `agents/series_agent.py`'s
+    live routing path (gated by `settings.AGENTIC_ROUTING_ENABLED`) --
+    never from the Phase 1/2 dry-run block, which has its own separate
+    `AgenticConfidenceDecision`/`AgenticGateDecision` tables and never
+    calls the promotion evaluator. Read only by that same module's
+    `get_promotion_history` and `/admin/agentic/promotion-history/
+    {series_id}`.
+
+    One row per turn (not unique per series+book_number) for the same
+    reason as every other Phase 1/2/3 shadow/decision table: history
+    accumulates across repeated live routing turns, hence the surrogate
+    `id` primary key and the composite `(series_id, book_number)` index
+    for lookups rather than a uniqueness constraint on it.
+    """
+
+    __tablename__ = "agentic_promotion_decisions"
+    __table_args__ = (
+        Index("ix_agentic_promotion_decisions_series_id_book_number", "series_id", "book_number"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    series_id = Column(Integer, index=True)
+    book_number = Column(Float, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+    live_confidence = Column(JSON, nullable=False)
+    agentic_confidence = Column(JSON, nullable=False)
+
+    live_gate = Column(JSON, nullable=False)
+    agentic_gate = Column(JSON, nullable=False)
+
+    promotion_outcome = Column(String, nullable=False)
