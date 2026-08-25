@@ -1414,7 +1414,8 @@ class SeriesIntelligenceAgent:
             )
 
             # Phase 3 candidate promotion, extended in Phase 4 with
-            # per-series activation (discovery_agentic_phase1_plan.md/
+            # per-series activation and Phase 5 with a centralized
+            # resolution layer (discovery_agentic_phase1_plan.md/
             # discovery_agentic_phase1_evaluation.md, not re-litigated
             # here): feature-flagged (settings.AGENTIC_ROUTING_ENABLED),
             # fail-soft, conditional use of the Phase 1 shadow loop's
@@ -1435,19 +1436,22 @@ class SeriesIntelligenceAgent:
             # at all: zero extra queries, byte-for-byte identical to
             # before this feature existed.
             #
-            # Phase 4's activation gate (settings.is_agentic_activated)
-            # decides only whether a book's promotion decision is
-            # *applied* to this result's "resolved_confidence"/
-            # "resolved_gate" -- the decision itself (evaluate_promotion)
-            # and its shadow-table write (store_promotion_decision) both
-            # still happen for every traced book whenever
-            # AGENTIC_ROUTING_ENABLED is on, activated or not, so a
-            # series can accumulate promotion history for later review
-            # before ever being activated. Not activated (Phase 3
-            # behavior): "record, don't apply" -- resolved_* is always
-            # the live value. Activated (Phase 4): "record AND apply"
-            # -- resolved_* becomes the agentic value exactly when
-            # evaluate_promotion chose "use_agentic".
+            # Phase 5 note: evaluate_promotion + store_promotion_decision
+            # (the decision authority + its shadow-table write) are
+            # unchanged from Phase 3/4 -- still called once per traced
+            # book, still happen whenever AGENTIC_ROUTING_ENABLED is on,
+            # activated or not. What moved is *only* the "which side
+            # wins" resolution step: instead of an inline per-book
+            # `if series_is_activated and outcome == "use_agentic":
+            # ... else: ...`, all traced books' decisions are collected
+            # into `promotion_decisions` and resolved in one call to
+            # services.agentic_resolution.resolve_routing_decisions,
+            # which encapsulates both gates (AGENTIC_ROUTING_ENABLED,
+            # settings.is_agentic_activated) that used to be checked by
+            # hand here. Behavior is identical to Phase 4 -- not
+            # activated: "record, don't apply" (resolved_* always live);
+            # activated: "record AND apply" (resolved_* becomes agentic
+            # exactly when the outcome was "use_agentic").
             #
             # Passes this call's own `db` through (unlike the Phase 2
             # dry-run block below, which deliberately does not -- see
@@ -1459,6 +1463,7 @@ class SeriesIntelligenceAgent:
                 try:
                     from agents.agentic_series_agent import run_agentic_turn
                     from services.agentic_promotion_evaluator import evaluate_promotion, store_promotion_decision
+                    from services.agentic_resolution import resolve_routing_decisions
 
                     series_is_activated = settings.is_agentic_activated(series_id)
 
@@ -1477,7 +1482,7 @@ class SeriesIntelligenceAgent:
                     # query, since skeleton_entries above already read
                     # the exact same row this same call/transaction, and
                     # nothing has changed it since.
-                    live_confidence_by_number = {
+                    live_confidence_snapshot = {
                         entry.get("book_number"): {
                             "confidence": entry.get("confidence"),
                             "status": entry.get("status"),
@@ -1485,7 +1490,7 @@ class SeriesIntelligenceAgent:
                         for entry in (skeleton_entries or [])
                         if isinstance(entry, dict) and entry.get("book_number") is not None
                     }
-                    live_gate_by_number = {
+                    live_gate_snapshot = {
                         entry.get("book_number"): {
                             "belongs_to_series": True,
                             "source_class": entry.get("source_class", "library"),
@@ -1499,14 +1504,20 @@ class SeriesIntelligenceAgent:
                         if isinstance(trace_entry, dict) and trace_entry.get("book_number") is not None
                     }
 
-                    promotions: list[dict] = []
+                    # Decision authority pass: unchanged from Phase 3/4
+                    # -- one evaluate_promotion + store_promotion_
+                    # decision call per traced book. Only the outcome
+                    # (plus the live/agentic pair it was computed from)
+                    # is kept here now, keyed by book_number, for the
+                    # single resolve_routing_decisions call below.
+                    promotion_decisions: dict = {}
                     for confidence_trace_entry in promotion_trace.get("confidence_traces", []):
                         promo_book_number = confidence_trace_entry.get("book_number")
                         if promo_book_number is None:
                             continue
-                        promo_live_conf = live_confidence_by_number.get(promo_book_number, {})
+                        promo_live_conf = live_confidence_snapshot.get(promo_book_number, {})
                         promo_agentic_conf = confidence_trace_entry.get("after", {})
-                        promo_live_gate = live_gate_by_number.get(promo_book_number, {})
+                        promo_live_gate = live_gate_snapshot.get(promo_book_number, {})
                         promo_agentic_gate = agentic_gate_by_number.get(promo_book_number, {})
 
                         promo_outcome = evaluate_promotion(
@@ -1523,20 +1534,40 @@ class SeriesIntelligenceAgent:
                             db_session=db,
                         )
 
-                        # Phase 4: only an activated series ever applies
-                        # "use_agentic" -- a non-activated series always
-                        # resolves to live, regardless of what the
-                        # evaluator decided (still recorded above either
-                        # way).
-                        apply_agentic = series_is_activated and promo_outcome == "use_agentic"
-                        promotions.append(
-                            {
-                                "book_number": promo_book_number,
-                                "outcome": promo_outcome,
-                                "resolved_confidence": promo_agentic_conf if apply_agentic else promo_live_conf,
-                                "resolved_gate": promo_agentic_gate if apply_agentic else promo_live_gate,
-                            }
+                        promotion_decisions[promo_book_number] = {
+                            "outcome": promo_outcome,
+                            "live_confidence": promo_live_conf,
+                            "agentic_confidence": promo_agentic_conf,
+                            "live_gate": promo_live_gate,
+                            "agentic_gate": promo_agentic_gate,
+                        }
+
+                    # Phase 5's centralized resolution layer. Wrapped in
+                    # its own try/except (belt-and-suspenders on top of
+                    # resolve_routing_decisions' own internal fail-soft
+                    # fallback) so that even an unexpected error *inside*
+                    # that defensive fallback can't escape this block --
+                    # reverting to the live snapshots verbatim either way.
+                    try:
+                        resolved_confidence, resolved_gate = resolve_routing_decisions(
+                            series_id,
+                            live_confidence_snapshot,
+                            live_gate_snapshot,
+                            promotion_decisions,
                         )
+                    except Exception:
+                        resolved_confidence = live_confidence_snapshot
+                        resolved_gate = live_gate_snapshot
+
+                    promotions: list[dict] = [
+                        {
+                            "book_number": promo_book_number,
+                            "outcome": decision["outcome"],
+                            "resolved_confidence": resolved_confidence.get(promo_book_number),
+                            "resolved_gate": resolved_gate.get(promo_book_number),
+                        }
+                        for promo_book_number, decision in promotion_decisions.items()
+                    ]
 
                     agentic_promotion_payload = {
                         "enabled": True,
@@ -1545,7 +1576,7 @@ class SeriesIntelligenceAgent:
                     }
                 except Exception:
                     logger.exception(
-                        "run_series_check: Phase 3/4 candidate-promotion layer failed for series_id=%s; "
+                        "run_series_check: Phase 3/4/5 candidate-promotion layer failed for series_id=%s; "
                         "continuing with live routing unaffected",
                         series_id,
                     )
