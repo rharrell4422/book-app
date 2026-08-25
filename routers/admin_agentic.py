@@ -43,10 +43,12 @@ from services.agentic_admin_ui_stubs import get_agentic_history, list_agentic_se
 from services.agentic_batch_orchestrator import run_batch_agentic_evaluations
 from services.agentic_confidence_gate_store import get_agentic_confidence_history, get_agentic_gate_history
 from services.agentic_evaluation_harness import generate_full_agentic_html, generate_full_agentic_report
+from services.agentic_health import compute_agentic_health
 from services.agentic_promotion_checklist import generate_promotion_readiness
 from services.agentic_promotion_evaluator import build_activation_preview, get_promotion_history
 from services.agentic_promotion_plan import build_phase2_promotion_plan
 from services.agentic_skeleton_preview_store import get_agentic_skeleton_previews
+from services.discovery_telemetry import get_agentic_metrics
 
 # Router-level dependency (not per-route): every route here is read-only
 # diagnostics, so unlike routers/admin.py (which has one route needing a
@@ -246,3 +248,55 @@ def admin_agentic_activation_status() -> dict:
         except ValueError:
             continue
     return {"activated_series": sorted(activated_series)}
+
+
+@router.get("/metrics")
+def admin_agentic_metrics() -> dict:
+    """Phase 9 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
+    phase1_evaluation.md`, not re-litigated here): returns every
+    process-wide, in-memory agentic counter (`services.discovery_
+    telemetry.get_agentic_metrics`) -- promotion attempts/outcomes,
+    safety violations, Phase 8 cache hits/misses, and `run_agentic_turn`
+    invocations/failures. Purely observational: reading this never
+    resets or otherwise mutates the counters. Read-only -- no writes.
+    """
+    return {"metrics": get_agentic_metrics()}
+
+
+@router.get("/health/{series_id}")
+def admin_agentic_health(series_id: int) -> dict:
+    """Phase 9: returns one series' agentic health summary
+    (`services.agentic_health.compute_agentic_health`) -- promotion
+    outcome counts, this process's global safety-violation count, this
+    series' real current activation state, and a determinism sanity
+    flag. Never calls a live provider, never calls `run_agentic_turn`,
+    never writes anything. Read-only -- no writes.
+    """
+    return {"series_id": series_id, "health": compute_agentic_health(series_id)}
+
+
+@router.get("/summary")
+def admin_agentic_summary() -> dict:
+    """Phase 9: a global, at-a-glance rollup of agentic activity across
+    every series -- the current activation allowlist (same parsing as
+    `/activation-status` above) alongside a handful of process-wide
+    counters (`services.discovery_telemetry.get_agentic_metrics`).
+    Read-only -- no writes.
+    """
+    activated_series = set()
+    for raw in settings.AGENTIC_SERIES_ACTIVATION.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            activated_series.add(int(raw))
+        except ValueError:
+            continue
+
+    metrics = get_agentic_metrics()
+    return {
+        "activated_series": sorted(activated_series),
+        "total_promotions": metrics.get("agentic_promotion_attempts", 0),
+        "total_safety_violations": metrics.get("agentic_safety_violations", 0),
+        "agentic_turn_invocations": metrics.get("agentic_turn_invocations", 0),
+    }

@@ -32,6 +32,125 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
+# Phase 9 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_phase1_
+# evaluation.md`, not re-litigated here): the agentic observability &
+# telemetry layer's global, in-memory counters. Deliberately process-
+# wide (not per-series, not per-request) and deliberately NOT the same
+# thing as `DiscoveryTelemetry` above (a per-*run* object a caller
+# constructs and discards) -- these persist for the life of the process,
+# the same way a Prometheus-style counter would, so an admin can see
+# "how much agentic work has this process done since it started" via
+# `GET /admin/agentic/metrics` without needing a request-scoped object
+# threaded through every agentic call site.
+#
+# Guarded by one shared lock (simple, not per-counter -- the spec's own
+# "thread-safe via simple locks", and every increment here is O(1) dict
+# math, so contention is a non-issue) rather than e.g. `threading.local`
+# or `collections.Counter` with no lock at all, since multiple worker
+# threads (see this module's own docstring re: `_fetch_all_providers_
+# parallel`) can legitimately be mid-turn concurrently across different
+# requests.
+_agentic_metrics_lock = threading.Lock()
+_agentic_metrics: dict[str, int] = {
+    "agentic_promotion_attempts": 0,
+    "agentic_promotion_use_agentic": 0,
+    "agentic_promotion_use_live": 0,
+    "agentic_promotion_rejected": 0,
+    "agentic_safety_violations": 0,
+    "agentic_cache_hits": 0,
+    "agentic_cache_misses": 0,
+    "agentic_turn_invocations": 0,
+    "agentic_turn_failures": 0,
+}
+
+
+def _increment_agentic_metric(name: str, amount: int = 1) -> None:
+    """Shared, fail-soft increment behind every `record_agentic_*_metric`
+    helper below -- never raises back into its caller (every one of
+    those callers is itself a fail-soft side-channel already, same
+    convention as every other `record_agentic_*` function in this
+    module).
+    """
+    try:
+        with _agentic_metrics_lock:
+            _agentic_metrics[name] = _agentic_metrics.get(name, 0) + amount
+    except Exception:
+        logger.exception("_increment_agentic_metric: failed to increment %s", name)
+
+
+def get_agentic_metrics() -> dict:
+    """Returns every Phase 9 agentic counter as a stable, sorted-by-key
+    dict (`{"agentic_cache_hits": 0, "agentic_cache_misses": 0, ...}`) --
+    a plain snapshot copy, never the live dict itself, so a caller can't
+    accidentally mutate process-wide counters by holding onto the
+    returned object. Fail-soft: any unexpected error yields `{}` rather
+    than raising.
+    """
+    try:
+        with _agentic_metrics_lock:
+            snapshot = dict(_agentic_metrics)
+        return dict(sorted(snapshot.items()))
+    except Exception:
+        logger.exception("get_agentic_metrics: failed to read counters; returning empty dict")
+        return {}
+
+
+def record_agentic_promotion_metric(outcome: str) -> None:
+    """Phase 9: called once per `services/agentic_promotion_evaluator.
+    evaluate_promotion` decision that's actually *computed* (i.e. from
+    inside `_evaluate_once`, not on a Phase 8 cache hit -- a cache hit
+    reuses an already-counted decision, it doesn't make a new one).
+    Increments `agentic_promotion_attempts` unconditionally, plus
+    whichever of `agentic_promotion_use_agentic`/`agentic_promotion_
+    use_live`/`agentic_promotion_rejected` matches `outcome`
+    (`"reject_agentic"` maps to the `_rejected` counter's shorter name).
+    An unrecognized `outcome` still counts as an attempt, just with no
+    matching outcome-specific counter incremented.
+    """
+    _increment_agentic_metric("agentic_promotion_attempts")
+    if outcome == "use_agentic":
+        _increment_agentic_metric("agentic_promotion_use_agentic")
+    elif outcome == "use_live":
+        _increment_agentic_metric("agentic_promotion_use_live")
+    elif outcome == "reject_agentic":
+        _increment_agentic_metric("agentic_promotion_rejected")
+
+
+def record_agentic_cache_hit() -> None:
+    """Phase 9: called by `services/agentic_resolution.resolve_routing_
+    decisions` each time its optional Phase 8 `cache` already held the
+    promotion decision it asked for (no recomputation needed).
+    """
+    _increment_agentic_metric("agentic_cache_hits")
+
+
+def record_agentic_cache_miss() -> None:
+    """Phase 9: called by `services/agentic_resolution.resolve_routing_
+    decisions` each time its optional Phase 8 `cache` did NOT already
+    hold the promotion decision it asked for (so it had to be looked up/
+    computed via `cache`'s own `compute_fn`, then cached for next time).
+    """
+    _increment_agentic_metric("agentic_cache_misses")
+
+
+def record_agentic_turn_invocation() -> None:
+    """Phase 9: called by `agents/series_agent.py`'s `_run_agentic_turn_
+    guarded` each time it actually invokes `agents/agentic_series_agent.
+    run_agentic_turn` for real (never on a Phase 8 shared-state reuse --
+    see that helper's own docstring). Watching this counter stay at (at
+    most) one increment per `run_series_check` call is exactly how an
+    admin would confirm Phase 8's once-per-turn guard is holding.
+    """
+    _increment_agentic_metric("agentic_turn_invocations")
+
+
+def record_agentic_turn_failure() -> None:
+    """Phase 9: called by `agents/series_agent.py`'s `_run_agentic_turn_
+    guarded` each time the one real `run_agentic_turn` invocation it just
+    made (see `record_agentic_turn_invocation` above) raised.
+    """
+    _increment_agentic_metric("agentic_turn_failures")
+
 
 class DiscoveryTelemetry:
     def __init__(self) -> None:
@@ -472,11 +591,25 @@ def record_agentic_safety_violation(series_id: int, book_number, reason: str) ->
     its own point of rejection independently.
 
     Purely diagnostic. No writes -- logging one line is the only side
-    effect. Same log-only, fail-soft convention as every other `record_
-    agentic_*` helper in this module (tagged `agentic_safety_violation`):
-    a failure here must never raise back into its caller, both of which
-    already guard their own call to this, but this function guards
-    itself too so it's safe to call from anywhere.
+    effect (Phase 9 adds a second, equally side-effect-only one: bumping
+    the in-memory `agentic_safety_violations` counter below). Same
+    log-only, fail-soft convention as every other `record_agentic_*`
+    helper in this module (tagged `agentic_safety_violation`): a failure
+    here must never raise back into its caller, both of which already
+    guard their own call to this, but this function guards itself too
+    so it's safe to call from anywhere.
+
+    Phase 9: incrementing the counter is intentionally placed here
+    rather than inside `services.agentic_safety.validate_agentic_
+    decision`/`validate_promotion_outcome` themselves -- those two stay
+    exactly as pure as their own docstrings already promise (no I/O, not
+    even an in-memory counter), and this function is only ever called at
+    the two real "a violation just changed what happens" moments
+    (`evaluate_promotion`'s own veto, `resolve_routing_decisions`'
+    defense-in-depth veto), not from `tests/test_agentic_safety.py`'s
+    many direct, non-production calls to those two pure functions -- so
+    the counter reflects genuine production rejections, not every unit
+    test assertion about them.
     """
     try:
         logger.info(
@@ -488,6 +621,15 @@ def record_agentic_safety_violation(series_id: int, book_number, reason: str) ->
     except Exception:
         logger.exception(
             "record_agentic_safety_violation: failed to log safety violation for series_id=%s book_number=%s",
+            series_id,
+            book_number,
+        )
+    try:
+        _increment_agentic_metric("agentic_safety_violations")
+    except Exception:
+        logger.exception(
+            "record_agentic_safety_violation: failed to increment agentic_safety_violations counter for "
+            "series_id=%s book_number=%s",
             series_id,
             book_number,
         )

@@ -278,7 +278,35 @@ def _evaluate_once(
         _log_safety_violation(series_id, book_number, f"invalid promotion outcome: {outcome!r}")
         outcome = "reject_agentic"
 
+    # Phase 9 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
+    # phase1_evaluation.md`, not re-litigated here): counted here, at
+    # the end of `_evaluate_once`, rather than in the public
+    # `evaluate_promotion` wrapper -- this is the one place that always
+    # runs exactly once per book_number actually *computed* (a Phase 8
+    # cache hit skips straight to the cached return value without ever
+    # reaching this function again), so "agentic_promotion_attempts"
+    # means "a decision was computed", matching this counter's own
+    # docstring, not "evaluate_promotion was called" (that would double-
+    # count every cache hit as a fresh attempt).
+    _record_promotion_metric(outcome)
+
     return outcome
+
+
+def _record_promotion_metric(outcome: str) -> None:
+    """Fail-soft telemetry side-channel for the Phase 9 counter above --
+    never raises. Deliberately a local helper (matching `_log_safety_
+    violation`'s own convention just below) rather than importing
+    `services.discovery_telemetry` at module load time, for the same
+    reason every other telemetry call in this module is a function-
+    scoped import: avoids any risk of a circular import at import time.
+    """
+    try:
+        from services.discovery_telemetry import record_agentic_promotion_metric
+
+        record_agentic_promotion_metric(outcome)
+    except Exception:
+        logger.exception("_record_promotion_metric: failed to record metric for outcome=%r", outcome)
 
 
 def _log_safety_violation(series_id, book_number, reason: str) -> None:

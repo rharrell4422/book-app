@@ -144,6 +144,13 @@ def _run_agentic_turn_guarded(run_agentic_turn_fn, series_id: int, context: dict
     agentic_turn raised" exactly as it always did; this guard only
     changes how many times the underlying call actually happens, never
     whether a given call site sees success or failure.
+
+    Phase 9 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
+    phase1_evaluation.md`, not re-litigated here): the one real
+    invocation below (never a cache-hit reuse) bumps `services.
+    discovery_telemetry`'s in-memory `agentic_turn_invocations` counter,
+    and `agentic_turn_failures` too if it raises -- fail-soft, never
+    raises itself, purely observational.
     """
     state = shared_state if shared_state is not None else context
     if state.get("_agentic_turn_ran"):
@@ -152,13 +159,34 @@ def _run_agentic_turn_guarded(run_agentic_turn_fn, series_id: int, context: dict
             raise cached_exception
         return state.get("_agentic_turn_result")
     state["_agentic_turn_ran"] = True
+    _record_agentic_turn_metric(invoked=True)
     try:
         result = run_agentic_turn_fn(series_id, context)
     except Exception as exc:
         state["_agentic_turn_exception"] = exc
+        _record_agentic_turn_metric(failed=True)
         raise
     state["_agentic_turn_result"] = result
     return result
+
+
+def _record_agentic_turn_metric(*, invoked: bool = False, failed: bool = False) -> None:
+    """Fail-soft telemetry side-channel for `_run_agentic_turn_guarded`'s
+    Phase 9 counters above -- never raises. Function-scoped import, same
+    convention as every other telemetry call site in the agentic modules
+    (avoids any risk of a circular import at module load time).
+    """
+    try:
+        from services.discovery_telemetry import record_agentic_turn_failure, record_agentic_turn_invocation
+
+        if invoked:
+            record_agentic_turn_invocation()
+        if failed:
+            record_agentic_turn_failure()
+    except Exception:
+        logger.exception(
+            "_record_agentic_turn_metric: failed to record metric (invoked=%s, failed=%s)", invoked, failed
+        )
 
 
 def _authors_match_exact(series_author: str | None, candidate_author: str | None) -> bool:

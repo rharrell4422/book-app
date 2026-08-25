@@ -96,6 +96,26 @@ def _sorted_dict_by_key(raw: dict) -> dict:
         return dict(raw)
 
 
+def _record_cache_access(cache_hit: bool) -> None:
+    """Fail-soft telemetry side-channel for the Phase 9 `agentic_cache_
+    hits`/`agentic_cache_misses` counters above -- never raises.
+    Deliberately a local helper (matching `_log_safety_violation`'s own
+    convention just below) rather than a module-level import, for the
+    same reason every other telemetry call in this module is a
+    function-scoped import: avoids any risk of a circular import at
+    import time.
+    """
+    try:
+        from services.discovery_telemetry import record_agentic_cache_hit, record_agentic_cache_miss
+
+        if cache_hit:
+            record_agentic_cache_hit()
+        else:
+            record_agentic_cache_miss()
+    except Exception:
+        logger.exception("_record_cache_access: failed to record cache metric (cache_hit=%s)", cache_hit)
+
+
 def _log_safety_violation(series_id, book_number, reason: str) -> None:
     """Fail-soft telemetry side-channel for the Phase 7 defense-in-depth
     veto above -- never raises. Deliberately a local helper (rather than
@@ -189,6 +209,13 @@ def resolve_routing_decisions(
     agentic_promotion_evaluator.evaluate_promotion`, since that function
     caches a different value shape (an outcome string, not this
     function's decision dict) under the same `book_number` keys.
+
+    Phase 9 (`discovery_agentic_phase1_plan.md`/`discovery_agentic_
+    phase1_evaluation.md`, not re-litigated here): every `cache` lookup
+    above also bumps `services.discovery_telemetry`'s in-memory
+    `agentic_cache_hits`/`agentic_cache_misses` counter (fail-soft, never
+    raises) -- purely observational, never consulted by anything in this
+    function's own control flow.
     """
     try:
         live_confidence_snapshot = live_confidence_snapshot or {}
@@ -208,12 +235,19 @@ def resolve_routing_decisions(
             decision = None
             if cache is not None:
                 try:
+                    # Phase 9: recorded *before* the actual lookup below,
+                    # since `get_or_set_promotion` itself mutates the
+                    # cache on a miss -- checking membership first is the
+                    # only way to observe "was this already cached"
+                    # rather than "is this cached now".
+                    cache_hit = book_number in cache.promotion
                     decision = (
                         cache.get_or_set_promotion(
                             book_number, lambda bn=book_number: promotion_decisions.get(bn) or {}
                         )
                         or {}
                     )
+                    _record_cache_access(cache_hit)
                 except Exception:
                     # Phase 8 fail-soft: a broken cache must not prevent
                     # this book_number from resolving -- fall back below.
