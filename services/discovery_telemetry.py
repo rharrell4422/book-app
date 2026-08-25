@@ -237,6 +237,38 @@ def record_agentic_evaluation(series_id: int, report: dict) -> None:
         logger.exception("record_agentic_evaluation: failed to log report for series_id=%s", series_id)
 
 
+def record_agentic_batch(series_ids: list[int], batch_report: dict) -> None:
+    """Phase 1 batch orchestrator (`services/agentic_batch_orchestrator.py`):
+    logs one completed batch of shadow-mode agentic-vs-live comparison
+    reports for `series_ids`.
+
+    Purely diagnostic, same log-only fallback as `record_agentic_
+    evaluation` above (tagged `agentic_batch` instead, so a batch summary
+    is distinguishable from an individual per-series report when
+    grepping/filtering logs) -- see that function's docstring for why
+    there's no structured/persisted store here yet. Deliberately does
+    NOT call `record_agentic_evaluation` per series itself -- `services.
+    agentic_batch_orchestrator.run_batch_agentic_evaluations` uses
+    `services.agentic_replay_runner.replay_and_compare` (not `services.
+    agentic_evaluation_harness.run_agentic_evaluation_for_series`)
+    precisely so each series' report is logged exactly once, as part of
+    this one batch-level call, rather than once per series here plus
+    once again at the batch level.
+
+    Fail-soft: a logging/serialization failure here must never propagate
+    back into the batch orchestrator that called this.
+    """
+    try:
+        logger.info(
+            "agentic_batch series_ids=%s count=%s batch_report=%s",
+            list(series_ids or []),
+            len(series_ids or []),
+            json.dumps(batch_report, default=str),
+        )
+    except Exception:
+        logger.exception("record_agentic_batch: failed to log batch report for series_ids=%s", series_ids)
+
+
 @contextmanager
 def maybe_pass_scope(telemetry: "DiscoveryTelemetry | None", name: str):
     """No-op passthrough when telemetry is None, so call sites don't need
