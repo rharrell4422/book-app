@@ -244,7 +244,20 @@ for this series right now":
 | `activation_state` | `settings.is_agentic_activated(series_id)` right now. |
 | `metrics_ok` | The Phase 9 observability counters are present and well-formed. |
 | `cache_ok` | A self-contained `agentic.cache.AgenticTurnCache` smoke test (throwaway probe data only) passed. |
-| `ready` | `True` only if every field above is `True` (as applicable) *and* `safety_violations_recent == 0`. |
+| `ready` | `True` only if `promotion_history_ok`, `determinism_ok`, `metrics_ok`, and `cache_ok` are all `True` *and* `safety_violations_recent == 0`. |
+
+**`activation_state` does not gate `ready`.** It's reported for
+visibility, but deliberately excluded from the `ready` computation --
+this report is meant to answer "would it be safe to *activate* this
+series", not just "is it still safe now that it's activated". Gating
+`ready` on `activation_state` would make the check circular for exactly
+the pre-activation decision this checklist uses it for: no series could
+ever show `ready=True` before it was already in `settings.AGENTIC_
+SERIES_ACTIVATION`. (An earlier version of this module did gate on
+`activation_state`; production data showed all 316 series in the
+library came back `ready=False` purely because none were activated yet,
+with every other field green -- confirming the circularity and
+prompting this fix.)
 
 **Caveat**: because `safety_violations_recent` mirrors a process-wide,
 lifetime counter rather than a per-series or per-time-window one, a

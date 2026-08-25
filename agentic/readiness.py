@@ -18,8 +18,19 @@ activated`), plus one small new self-check of its own (`agentic.cache`'s
 `AgenticTurnCache`, exercised against throwaway data only -- never a
 real series' cache).
 
-`ready` is deliberately strict: `True` only when every one of the five
-boolean fields below is `True` *and* `safety_violations_recent == 0`.
+`ready` is `True` only when `promotion_history_ok`, `determinism_ok`,
+`metrics_ok`, and `cache_ok` are all `True` *and* `safety_violations_
+recent == 0`. `activation_state` is deliberately NOT one of `ready`'s
+gating conditions, even though it's reported alongside the others --
+this function is meant to answer "would it be safe to activate this
+series" as much as "is it still safe now that it's activated", and a
+series that has never been added to `settings.AGENTIC_SERIES_
+ACTIVATION` must still be able to show `ready=True` (its `activation_
+state` will simply be `False` alongside it). Gating `ready` on `
+activation_state` would make this check circular for exactly the
+pre-activation use case it exists for: no series could ever be
+"ready to activate" without already being activated.
+
 Because `safety_violations_recent` mirrors `services.discovery_
 telemetry`'s process-wide, lifetime `agentic_safety_violations` counter
 (there is no per-series, per-time-window violation store anywhere in
@@ -76,7 +87,9 @@ def compute_agentic_readiness(series_id: int, *, db_session=None) -> dict:
          "activation_state": bool,           # settings.is_agentic_activated(series_id) right now
          "metrics_ok": bool,                 # observability counters are present and well-formed
          "cache_ok": bool,                   # agentic.cache.AgenticTurnCache self-check passed
-         "ready": bool}                      # every field above True AND zero violations
+         "ready": bool}                      # promotion_history_ok/determinism_ok/metrics_ok/
+                                              # cache_ok all True AND zero violations --
+                                              # activation_state does NOT gate this; see module docstring
 
     Fail-soft: any exception (a broken `db_session`, a broken dependency,
     etc.) yields the same shape with every boolean `False`, the count at
@@ -113,10 +126,12 @@ def compute_agentic_readiness(series_id: int, *, db_session=None) -> dict:
         activation_state = bool(is_agentic_activated(series_id))
         cache_ok = _self_check_cache()
 
+        # activation_state is intentionally excluded from this gate -- see
+        # module docstring for why "ready" must not require already being
+        # activated.
         ready = bool(
             promotion_history_ok
             and determinism_ok
-            and activation_state
             and metrics_ok
             and cache_ok
             and safety_violations_recent == 0

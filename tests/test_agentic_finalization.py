@@ -139,14 +139,17 @@ class ReadinessReportTest(_InMemoryDbTestCase):
         self.assertTrue(readiness["activation_state"])
         self.assertTrue(readiness["metrics_ok"])
 
-    def test_readiness_report_ready_false_when_not_activated(self):
+    def test_readiness_report_ready_true_even_when_not_yet_activated(self):
+        # `ready` must NOT be gated on `activation_state` -- otherwise no
+        # series could ever be "ready to activate" before it's already
+        # activated, which defeats the point of a pre-activation check.
         with patch.object(settings, "AGENTIC_ROUTING_ENABLED", True), patch.object(
             settings, "AGENTIC_SERIES_ACTIVATION", ""
         ), patch("services.discovery_telemetry.get_agentic_metrics", return_value=_clean_metrics()):
             readiness = compute_agentic_readiness(self.series.id, db_session=self.db)
 
         self.assertFalse(readiness["activation_state"])
-        self.assertFalse(readiness["ready"])
+        self.assertTrue(readiness["ready"])
 
     def test_readiness_fails_soft_on_broken_db_session(self):
         broken_db = MagicMock()
