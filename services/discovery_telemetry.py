@@ -24,9 +24,13 @@ DiscoveryTelemetry instance pays no cost and changes no behavior.
 
 from __future__ import annotations
 
+import json
+import logging
 import threading
 import time
 from contextlib import contextmanager
+
+logger = logging.getLogger(__name__)
 
 
 class DiscoveryTelemetry:
@@ -202,6 +206,35 @@ class DiscoveryTelemetry:
             # purely informational.
             "total_tool_calls": len(tool_calls),
         }
+
+
+def record_agentic_evaluation(series_id: int, report: dict) -> None:
+    """Phase 1 evaluation harness (`services/agentic_evaluation_harness.py`):
+    logs one completed shadow-mode agentic-vs-live comparison report for
+    `series_id`.
+
+    This module has no structured/persisted JSON-log store of its own --
+    `DiscoveryTelemetry` above is a per-run, in-memory counters object,
+    never written anywhere durable. Per the harness's own spec ("if no
+    structured storage exists yet, log via the existing logging mechanism
+    with a clear tag"), this is that log-only fallback, tagged
+    `agentic_evaluation` so it's easy to grep/filter for later analysis.
+    Wiring in real structured storage (a table, a file, etc.) is explicit
+    future work, not this ticket.
+
+    Fail-soft: a logging/serialization failure here must never propagate
+    back into the harness that called this -- `run_agentic_evaluation_
+    for_series` already wraps its own call to this in a try/except, but
+    this function guards itself too so it's safe to call from anywhere.
+    """
+    try:
+        logger.info(
+            "agentic_evaluation series_id=%s report=%s",
+            series_id,
+            json.dumps(report, default=str),
+        )
+    except Exception:
+        logger.exception("record_agentic_evaluation: failed to log report for series_id=%s", series_id)
 
 
 @contextmanager
