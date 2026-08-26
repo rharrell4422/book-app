@@ -1484,6 +1484,22 @@ def _fetch_all_providers_parallel(
         enable_web_search and resolved_web_queries and _web_search_enabled() and _llm_structuring_enabled()
     )
 
+    # Observability only -- logs the real, final query string each provider
+    # is about to receive (not the caller's targeted_query_text, which
+    # Google Books never actually uses). Tagged by pass_label so a single
+    # discovery run that triggers multiple passes (targeted, author_
+    # fallback, precheck) gets one accurate line per pass instead of one
+    # potentially-misleading line per run. Purely additive: reuses the
+    # already-computed query_series_name/google_query/hardcover_query/
+    # resolved_openlibrary_query/resolved_web_queries values below without
+    # touching identity, fusion, or sufficiency logic.
+    _log(
+        f"DiscoveryQuery[{pass_label}]: raw_series_name={series_name!r} "
+        f"normalized_series_name={query_series_name!r} google_query={google_query!r} "
+        f"hardcover_query={hardcover_query!r} openlibrary_query={resolved_openlibrary_query!r} "
+        f"web_search_queries={resolved_web_queries!r}"
+    )
+
     # Layer A provider-fetch cache (see services/discovery_cache.py):
     # Google/OpenLibrary/Hardcover's query text here doesn't depend on
     # highest_owned_book_number at all, so it's byte-identical on every
