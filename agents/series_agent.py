@@ -733,6 +733,25 @@ class SeriesIntelligenceAgent:
                 default=None,
             )
 
+            # DiscoveryType classification (Discovery Rules): derived from
+            # owned-book count rather than the durable/in-memory skeleton --
+            # neither is populated yet at this point in the run. A series
+            # with 0 or 1 genuinely-owned books (excluding is_missing
+            # placeholders) is still being built out, so interior-gap
+            # missing-volume lookahead (see _reconstruct_series_skeleton
+            # below) should run as it does today. Once the user owns 2+
+            # books, this is an established series and Check Now should
+            # behave as a new-release check -- targeted/author-fallback
+            # passes still run as-is, but the aggressive gap-chasing
+            # lookahead is skipped so it doesn't fire extra web-search
+            # queries chasing old interior gaps on every routine check.
+            owned_book_count = sum(1 for book in active_series_books if not bool(book.is_missing))
+            discovery_type = "FULL_SERIES" if owned_book_count <= 1 else "NEW_RELEASE"
+            enable_missing_volume_lookahead = discovery_type == "FULL_SERIES"
+            _console_log(
+                f"DiscoveryType={discovery_type} (owned_book_count={owned_book_count}) for series: {series.name}"
+            )
+
             if not series_author:
                 result = _empty_result(series.id, series.name, "series-missing-author")
                 result["highest_owned_book_number"] = highest_owned_book_number
@@ -964,6 +983,7 @@ class SeriesIntelligenceAgent:
                 author=series_author,
                 telemetry=telemetry,
                 cache=cache,
+                enable_missing_volume_lookahead=enable_missing_volume_lookahead,
             )
             agentic_hooks.record_reasoning_step(
                 agentic_context,

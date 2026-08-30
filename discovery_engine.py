@@ -233,6 +233,7 @@ def _reconstruct_series_skeleton(
     author: str | None = None,
     telemetry: "DiscoveryTelemetry | None" = None,
     cache: "DiscoveryCache | None" = None,
+    enable_missing_volume_lookahead: bool = True,
 ) -> dict:
     """Infers how many volumes a series is expected to have -- the highest
     integer book number seen anywhere, across owned_books' book_number,
@@ -283,12 +284,22 @@ def _reconstruct_series_skeleton(
     fallback, which exists mainly so this function still does something
     sensible if unified_candidates is empty of any usable hint.
 
+    enable_missing_volume_lookahead (Discovery Rules gate, default True):
+    when False, skips the lookahead search entirely even if interior gaps
+    exist -- missing_numbers is still computed and returned accurately for
+    diagnostics, only the recovery web-search is suppressed. series_agent.py
+    sets this based on its own run-level DiscoveryType classification
+    (owned-book count <= 1 -> FULL_SERIES -> True; >= 2 -> NEW_RELEASE ->
+    False), so a routine new-release check on an established series doesn't
+    re-fire web-search queries chasing old interior gaps every run.
+
     Returns {"candidates": [...], "expected_total": int | None,
     "missing_numbers": [...], "recovered_numbers": [...]}. "candidates" is
     unified_candidates with any newly-recovered volumes fused in; when
     there's nothing missing, no resolvable series_name/author, no resolvable
-    expected total at all, or web search isn't configured
-    (SERPER_API_KEY/ANTHROPIC_API_KEY), it's returned unchanged.
+    expected total at all, web search isn't configured
+    (SERPER_API_KEY/ANTHROPIC_API_KEY), or enable_missing_volume_lookahead
+    is False, it's returned unchanged.
     """
     resolved_series_name = series_name or next((c.series_name for c in unified_candidates if c.series_name), None)
     resolved_author = author or next(
@@ -327,6 +338,7 @@ def _reconstruct_series_skeleton(
         or not resolved_series_name
         or not resolved_author
         or not (_web_search_enabled() and _llm_structuring_enabled())
+        or not enable_missing_volume_lookahead
     ):
         return _result(missing_numbers, [], unified_candidates)
 
