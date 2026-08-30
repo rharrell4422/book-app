@@ -10,11 +10,17 @@ import { useToast } from "@/components/ui/use-toast";
 import { fetchApiWithFallback } from "@/lib/api-client";
 import { refreshNotificationsBadgeCount } from "@/lib/notifications-badge";
 
+type NotificationBookTitle = {
+  title: string;
+  status: "available" | "upcoming";
+};
+
 type NotificationItem = {
   id: number;
   series_id: number | null;
   series_name: string | null;
   count_new_books: number;
+  book_titles: NotificationBookTitle[];
   created_at: string;
 };
 
@@ -302,20 +308,29 @@ export default function NotificationsPage() {
             <li key={item.id}>
               <Card>
                 <CardContent className="flex items-center justify-between gap-3 py-3">
-                  <p className="text-sm">
-                    <span className="font-medium">
-                      {item.count_new_books} new book{item.count_new_books === 1 ? "" : "s"}
-                    </span>{" "}
-                    added to{" "}
-                    {item.series_id ? (
-                      <Link href={`/series/${item.series_id}`} className="font-medium underline underline-offset-2">
-                        {item.series_name || "a series"}
-                      </Link>
-                    ) : (
-                      <span className="font-medium">{item.series_name || "a series"}</span>
-                    )}{" "}
-                    on {formatNotificationDate(item.created_at)}.
-                  </p>
+                  <div>
+                    <p className="text-sm">
+                      <span className="font-medium">
+                        {item.count_new_books} new book{item.count_new_books === 1 ? "" : "s"}
+                      </span>{" "}
+                      added to{" "}
+                      {item.series_id ? (
+                        <Link href={`/series/${item.series_id}`} className="font-medium underline underline-offset-2">
+                          {item.series_name || "a series"}
+                        </Link>
+                      ) : (
+                        <span className="font-medium">{item.series_name || "a series"}</span>
+                      )}{" "}
+                      on {formatNotificationDate(item.created_at)}.
+                    </p>
+                    {item.book_titles.length > 0 ? (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {item.book_titles
+                          .map((bookTitle) => `${bookTitle.title} (${bookTitle.status})`)
+                          .join(" \u2022 ")}
+                      </p>
+                    ) : null}
+                  </div>
                   <Button
                     variant="ghost"
                     size="sm"

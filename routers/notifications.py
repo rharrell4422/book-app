@@ -26,6 +26,10 @@ def read_unseen_notifications(db: Session = Depends(get_db), profile_id: str = D
             series_id=notification.series_id,
             series_name=notification.series_name,
             count_new_books=notification.count_new_books or 0,
+            # Nullable at the DB level for rows written before this column
+            # existed (see models.Notification's docstring) -- those fall
+            # back to an empty list rather than erroring.
+            book_titles=notification.book_titles_json or [],
             created_at=notification.created_at,
         )
         for notification in notifications

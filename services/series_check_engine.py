@@ -271,7 +271,17 @@ def run_series_check_job_full(series_id: int) -> None:
         # "Finalization" below), so a multi-round catch-up looks like one
         # atomic Check Now to the user, not several.
         all_persisted_new_books: list[dict] = []
-        total_discovery_delta_count = 0
+        # Durable-notification title list (see services/notifications.py
+        # and models.Notification's docstring): keyed by Book.id so a book
+        # that flips upcoming->available mid-run (across the multi-round
+        # catch-up loop below) collapses to a single entry carrying its
+        # last-known status, rather than appearing twice. Both
+        # `count_new_books` and the title list handed to
+        # create_series_discovery_notification() are derived from this one
+        # dict after the loop (len() and .values() respectively), so the
+        # two can never disagree -- see the "Durable Notifications: Count
+        # Fix + Title List + Dedupe" design chat's finalized resolution.
+        book_delta_titles: dict[int, dict] = {}
         all_provider_failures: list[dict] = []
         any_all_providers_failed = False
         rounds_run = 0
@@ -436,11 +446,6 @@ def run_series_check_job_full(series_id: int) -> None:
             discovered_candidates = result.get("added_books") or []
             seen_batch_identity_keys: set[str] = set()
             db_changed = False
-            # Counts upcoming->available transitions on existing rows for
-            # *this* round only -- summed into total_discovery_delta_count
-            # below, alongside every other round's count, for the single
-            # end-of-job notification (see architecture spec #2.2).
-            transitioned_to_available_count = 0
 
             try:
                 for candidate in discovered_candidates:
@@ -580,7 +585,18 @@ def run_series_check_job_full(series_id: int) -> None:
                         db_changed = True
 
                         if was_upcoming_before_update and status != "upcoming":
-                            transitioned_to_available_count += 1
+                            # Durable-notification title list (see the
+                            # book_delta_titles dict declared before the
+                            # round loop above): overwrites any earlier
+                            # round's "upcoming" insert entry for this same
+                            # book id with its last-known "available"
+                            # status, or adds a fresh entry if it had been
+                            # sitting as upcoming since a previous Check Now
+                            # click entirely.
+                            book_delta_titles[int(matched_existing.id)] = {
+                                "title": matched_existing.title,
+                                "status": "available",
+                            }
 
                         continue
 
@@ -659,18 +675,25 @@ def run_series_check_job_full(series_id: int) -> None:
                             "library_position": "top",
                         }
                     )
+                    # Durable-notification title list (see the
+                    # book_delta_titles dict declared before the round loop
+                    # above) -- status is "available" or "upcoming" here,
+                    # never anything else (_classify_discovered_status's
+                    # only two return values).
+                    book_delta_titles[int(db_book.id)] = {"title": db_book.title, "status": status}
 
                 # Durable series-level discovery notification (see services/
-                # notifications.py): counted here per round, but the actual
-                # notification fires only once, after the loop, with the
-                # total summed across every round (see architecture spec
-                # #2.2) -- a per-round fire would spam the user with
-                # multiple "new books found" notifications from one click.
-                new_available_insert_count = sum(
-                    1 for book in persisted_new_books_this_round if book.get("status") != "upcoming"
-                )
-                round_discovery_delta_count = new_available_insert_count + transitioned_to_available_count
-                total_discovery_delta_count += round_discovery_delta_count
+                # notifications.py): both the count and the title list are
+                # derived from book_delta_titles (declared before the round
+                # loop) once every round has run -- see "Finalization"
+                # below -- not accumulated per round here, since the whole
+                # point of keying by book id is to let a later round's
+                # transition overwrite an earlier round's insert entry for
+                # the same book instead of double-counting it. A per-round
+                # fire would also spam the user with multiple "new books
+                # found" notifications from one click (architecture spec
+                # #2.2), which is why the notification itself still only
+                # fires once, after the loop.
 
                 # NOTE: this used to also delete any existing not-yet-read "ghost"
                 # book that this run's candidate set didn't happen to re-surface
@@ -857,6 +880,15 @@ def run_series_check_job_full(series_id: int) -> None:
                 break
 
         # ---- Finalization: runs exactly once, after the loop ----
+        # discovery_delta_count and its title list are both derived from
+        # book_delta_titles (declared before the round loop) here, once,
+        # rather than accumulated per round -- this is what guarantees the
+        # count and the list can never disagree, even in the rare case
+        # where a book flips upcoming->available across rounds of the same
+        # Check Now click (see book_delta_titles's own comment above).
+        total_discovery_delta_count = len(book_delta_titles)
+        discovery_delta_titles = list(book_delta_titles.values())
+
         # Built from a fresh dict rather than mutating last_result in place:
         # series_agent.run_series_check's return value isn't ours to
         # mutate, and tests that mock it with one shared return_value
@@ -866,13 +898,13 @@ def run_series_check_job_full(series_id: int) -> None:
         result["added_books"] = all_persisted_new_books
         result["added_count"] = len(all_persisted_new_books)
         # See the durable-notification block above -- new inserts (excluding
-        # upcoming-only ones) plus upcoming->available transitions, summed
-        # across every round. Kept as a distinct field rather than folding
-        # into added_count/added_books, which already have an established
-        # "fresh inserts only" meaning relied on elsewhere (e.g. services/
-        # discovery_logging.py's debug summary). This is what both the
-        # ephemeral popup and the durable notification row use, so the two
-        # numbers can never disagree.
+        # upcoming-only ones) plus upcoming->available transitions, deduped
+        # by book id across every round. Kept as a distinct field rather
+        # than folding into added_count/added_books, which already have an
+        # established "fresh inserts only" meaning relied on elsewhere
+        # (e.g. services/discovery_logging.py's debug summary). This is
+        # what both the ephemeral popup and the durable notification row
+        # use, so the two numbers can never disagree.
         result["discovery_delta_count"] = total_discovery_delta_count
         result["provider_failures"] = all_provider_failures
         result["all_providers_failed"] = any_all_providers_failed
@@ -897,6 +929,7 @@ def run_series_check_job_full(series_id: int) -> None:
                 series_id=series_id,
                 series_name=db_series.name,
                 count_new_books=total_discovery_delta_count,
+                book_titles=discovery_delta_titles,
             )
             db.commit()
 

@@ -23,18 +23,32 @@ SERIES_DISCOVERY_DELTA_KIND = "series_discovery_delta"
 
 
 def create_series_discovery_notification(
-    db: Session, *, profile_id: str, series_id: int, series_name: str, count_new_books: int
+    db: Session,
+    *,
+    profile_id: str,
+    series_id: int,
+    series_name: str,
+    count_new_books: int,
+    book_titles: list[dict] | None = None,
 ) -> models.Notification:
     """Records one aggregated notification for a series' discovery run.
     Does not commit -- the caller (series_check_engine's persistence loop)
     already commits once per change-set; piggybacking on that keeps this
     atomic with the book inserts/updates it's describing.
+
+    `book_titles` (see models.Notification's docstring): a deduped
+    `[{"title": str, "status": "available"|"upcoming"}, ...]` list, one
+    entry per distinct book contributing to `count_new_books` -- the
+    caller guarantees `len(book_titles) == count_new_books`. Defaults to
+    an empty list rather than None so downstream JSON handling never has
+    to distinguish "not provided" from "nothing to show".
     """
     notification = models.Notification(
         profile_id=profile_id,
         series_id=series_id,
         series_name=series_name,
         count_new_books=count_new_books,
+        book_titles_json=book_titles if book_titles is not None else [],
         kind=SERIES_DISCOVERY_DELTA_KIND,
     )
     db.add(notification)

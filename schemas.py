@@ -325,11 +325,17 @@ class SeriesOverviewRequest(BaseModel):
 # ------------------------------------------------------------
 
 
+class NotificationBookTitle(BaseModel):
+    title: str
+    status: Literal["available", "upcoming"]
+
+
 class NotificationItem(BaseModel):
     id: int
     series_id: int | None = None
     series_name: str | None = None
     count_new_books: int
+    book_titles: list[NotificationBookTitle] = []
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

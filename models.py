@@ -402,6 +402,18 @@ class Notification(Base):
     filtered out of the durable Notifications view by kind, not deleted.
     `dismissed_at` supports both a per-row dismiss (the Notifications view)
     and a bulk dismiss-all, unlike the old single-modal-only bulk dismiss.
+
+    `book_titles_json` (added in the "Durable Notifications: Count Fix +
+    Title List + Dedupe" follow-up) is a compact `[{"title": str, "status":
+    "available"|"upcoming"}, ...]` list -- one entry per *distinct* book
+    (by id) that contributed to `count_new_books` for this run, deduped so
+    a book that flips upcoming->available mid-run (across the multi-round
+    catch-up loop) appears once, with its last-known status. Nullable so
+    pre-existing rows written before this column existed remain valid;
+    application code always populates it for any row written going
+    forward. Strictly informational, like the rest of this table -- no
+    confidence/provider/candidate-review fields, which stay exclusive to
+    SeriesCandidateNotification below.
     """
 
     __tablename__ = "notifications"
@@ -416,6 +428,7 @@ class Notification(Base):
     # populated for any row written with kind="series_discovery_delta".
     count_new_books = Column(Integer, nullable=True)
     series_name = Column(String, nullable=True)
+    book_titles_json = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     dismissed_at = Column(DateTime, nullable=True)
 

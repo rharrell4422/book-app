@@ -148,9 +148,12 @@ class NotificationCrudTest(unittest.TestCase):
 
 class SeriesCheckNotificationHooksTest(unittest.TestCase):
     """Confirms run_series_check_job_full writes exactly one aggregated
-    notification per series per run, counting new available inserts plus
-    upcoming->available transitions -- never per-book, never for a
-    brand-new upcoming insert, never for a no-op refresh.
+    notification per series per run, counting every newly-inserted book
+    (available or upcoming) plus upcoming->available transitions, deduped
+    by book id -- never per-book, never for a no-op refresh -- and that
+    the notification's book_titles list always has exactly count_new_books
+    entries (see the "Durable Notifications: Count Fix + Title List +
+    Dedupe" design chat's finalized spec).
     """
 
     @classmethod
@@ -238,6 +241,7 @@ class SeriesCheckNotificationHooksTest(unittest.TestCase):
         self.assertEqual(notifications[0].count_new_books, 1)
         self.assertEqual(notifications[0].series_name, self.series.name)
         self.assertIsNone(notifications[0].book_id)
+        self.assertEqual(notifications[0].book_titles_json, [{"title": "Edge of Shadow", "status": "available"}])
 
     def test_multiple_new_books_in_one_run_create_a_single_row_with_the_total_count(self):
         self._run_job_with_mocked_discovery(
@@ -250,15 +254,25 @@ class SeriesCheckNotificationHooksTest(unittest.TestCase):
         notifications = self._notifications_for_this_series()
         self.assertEqual(len(notifications), 1)
         self.assertEqual(notifications[0].count_new_books, 2)
+        self.assertEqual(len(notifications[0].book_titles_json), 2)
+        self.assertEqual(
+            {item["title"] for item in notifications[0].book_titles_json},
+            {"Edge of Shadow", "Edge of Dawn"},
+        )
 
-    def test_new_upcoming_book_does_not_create_a_notification(self):
-        # A brand-new *upcoming* insert is intentionally not a trigger --
-        # it'll count later, if/when a subsequent check flips it to
-        # available (the transition branch below).
+    def test_new_upcoming_book_creates_a_notification_with_an_upcoming_status_tag(self):
+        # Corrected behavior (see the "Durable Notifications: Count Fix +
+        # Title List + Dedupe" spec, item 1): a brand-new *upcoming*
+        # insert now contributes to the aggregate count and the title
+        # list at insert-time, rather than only once/if it later flips to
+        # available.
         self._run_job_with_mocked_discovery(
             [self._candidate(status_hint="upcoming", status="upcoming", expected_date="2027-01-01")]
         )
-        self.assertEqual(self._notifications_for_this_series(), [])
+        notifications = self._notifications_for_this_series()
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(notifications[0].count_new_books, 1)
+        self.assertEqual(notifications[0].book_titles_json, [{"title": "Edge of Shadow", "status": "upcoming"}])
 
     def test_upcoming_to_available_transition_creates_a_notification(self):
         existing = models.Book(
@@ -285,6 +299,7 @@ class SeriesCheckNotificationHooksTest(unittest.TestCase):
         self.assertEqual(len(notifications), 1)
         self.assertEqual(notifications[0].count_new_books, 1)
         self.assertIsNone(notifications[0].book_id)
+        self.assertEqual(notifications[0].book_titles_json, [{"title": "Edge of Shadow", "status": "available"}])
 
     def test_new_insert_and_transition_in_the_same_run_are_summed_into_one_row(self):
         existing = models.Book(
@@ -313,6 +328,46 @@ class SeriesCheckNotificationHooksTest(unittest.TestCase):
         notifications = self._notifications_for_this_series()
         self.assertEqual(len(notifications), 1)
         self.assertEqual(notifications[0].count_new_books, 2)
+        self.assertEqual(
+            {item["title"] for item in notifications[0].book_titles_json},
+            {"Edge of Shadow", "Edge of Dawn"},
+        )
+
+    def test_book_flipping_upcoming_to_available_across_rounds_of_one_run_is_not_double_counted(self):
+        # Regression guard for the cross-round edge case the finalized
+        # spec's dedupe requirement (item 3) exists to solve: round 1
+        # inserts a book as upcoming; round 2 of the *same* Check Now
+        # click re-discovers it as available (matched_existing this time,
+        # since round 1's insert already committed). Without dedupe-by-
+        # book-id, this would double-attribute one book's journey as 2
+        # toward count_new_books and list it twice.
+        first_round = {
+            "series_id": self.series.id,
+            "added_books": [
+                self._candidate(status_hint="upcoming", status="upcoming", expected_date="2027-01-01")
+            ],
+            "provider_failures": [],
+            "all_providers_failed": False,
+        }
+        second_round = {
+            "series_id": self.series.id,
+            "added_books": [self._candidate(status_hint="available", status="available")],
+            "provider_failures": [],
+            "all_providers_failed": False,
+        }
+        with patch.object(series_check_engine, "SessionLocal", self.SessionLocal), patch.object(
+            library_sync, "SessionLocal", self.SessionLocal
+        ), patch.object(
+            series_check_engine.series_agent,
+            "run_series_check",
+            side_effect=[first_round, second_round, {**second_round, "added_books": []}],
+        ):
+            series_check_engine.run_series_check_job_full(self.series.id)
+
+        notifications = self._notifications_for_this_series()
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(notifications[0].count_new_books, 1)
+        self.assertEqual(notifications[0].book_titles_json, [{"title": "Edge of Shadow", "status": "available"}])
 
     def test_already_available_book_refresh_does_not_create_a_notification(self):
         existing = models.Book(
