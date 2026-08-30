@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { BellIcon } from "lucide-react";
+import { BellIcon, HelpCircleIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -17,6 +17,42 @@ type NotificationItem = {
   count_new_books: number;
   created_at: string;
 };
+
+type CandidateReviewUrls = {
+  amazon_ku_search: string;
+  google_search: string;
+  asin_lookup?: string | null;
+};
+
+type CandidateNotificationItem = {
+  id: number;
+  series_id: number | null;
+  series_name: string | null;
+  candidate_title: string;
+  candidate_number: number | null;
+  overall_confidence: string | null;
+  provider_confidence: string | null;
+  isbn13: string | null;
+  publication_date: string | null;
+  asin: string | null;
+  author: string | null;
+  source_url: string | null;
+  provider: string | null;
+  series_name_hint: string | null;
+  reason_flags: string[];
+  created_at: string;
+  last_seen_at: string;
+  review_urls: CandidateReviewUrls;
+};
+
+const REASON_FLAG_LABELS: Record<string, string> = {
+  number_inferred_from_title: "Number guessed from title",
+  missing_series_number: "No series number found",
+};
+
+function formatReasonFlag(flag: string): string {
+  return REASON_FLAG_LABELS[flag] || flag.replace(/_/g, " ");
+}
 
 function formatNotificationDate(value: string): string {
   const parsed = new Date(value);
@@ -40,6 +76,8 @@ export default function NotificationsPage() {
   const [items, setItems] = useState<NotificationItem[] | null>(null);
   const [dismissingId, setDismissingId] = useState<number | null>(null);
   const [dismissingAll, setDismissingAll] = useState(false);
+  const [candidates, setCandidates] = useState<CandidateNotificationItem[] | null>(null);
+  const [candidateActionId, setCandidateActionId] = useState<number | null>(null);
 
   const loadNotifications = useCallback(async () => {
     try {
@@ -55,12 +93,28 @@ export default function NotificationsPage() {
     }
   }, [toast]);
 
+  const loadCandidates = useCallback(async () => {
+    try {
+      const response = await fetchApiWithFallback("/notifications/candidates", { cache: "no-store" });
+      const data = await response.json();
+      setCandidates(Array.isArray(data) ? data : []);
+    } catch {
+      setCandidates([]);
+      toast({
+        title: "Couldn't load candidate books",
+        description: "Please try again.",
+      });
+    }
+  }, [toast]);
+
   useEffect(() => {
-    // loadNotifications sets state before its first await -- standard
-    // "fetch on mount" pattern, not derived state.
+    // loadNotifications/loadCandidates set state before their first await --
+    // standard "fetch on mount" pattern, not derived state.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadNotifications();
-  }, [loadNotifications]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadCandidates();
+  }, [loadNotifications, loadCandidates]);
 
   async function handleDismiss(id: number) {
     setDismissingId(id);
@@ -94,6 +148,52 @@ export default function NotificationsPage() {
     }
   }
 
+  async function handleAddCandidateToSeries(id: number) {
+    setCandidateActionId(id);
+    try {
+      const response = await fetchApiWithFallback(`/notifications/candidates/${id}/add`, { method: "POST" });
+      const data = await response.json();
+      setCandidates((current) => (current ? current.filter((item) => item.id !== id) : current));
+      toast({
+        title: "Added to series",
+        description: data?.title ? `"${data.title}" was added to your library.` : undefined,
+      });
+    } catch {
+      toast({
+        title: "Couldn't add book",
+        description: "Please try again.",
+      });
+    } finally {
+      setCandidateActionId(null);
+    }
+  }
+
+  function handleReviewCandidate(candidate: CandidateNotificationItem) {
+    const urls = [
+      candidate.review_urls.amazon_ku_search,
+      candidate.review_urls.google_search,
+      candidate.review_urls.asin_lookup,
+    ].filter((url): url is string => Boolean(url));
+    for (const url of urls) {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  }
+
+  async function handleIgnoreCandidate(id: number) {
+    setCandidateActionId(id);
+    try {
+      await fetchApiWithFallback(`/notifications/candidates/${id}/ignore`, { method: "POST" });
+      setCandidates((current) => (current ? current.filter((item) => item.id !== id) : current));
+    } catch {
+      toast({
+        title: "Couldn't dismiss candidate",
+        description: "Please try again.",
+      });
+    } finally {
+      setCandidateActionId(null);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-2xl space-y-4 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -117,6 +217,75 @@ export default function NotificationsPage() {
           </Link>
         </div>
       </div>
+
+      {candidates && candidates.length > 0 ? (
+        <section className="space-y-2">
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-muted-foreground">
+            <HelpCircleIcon className="h-4 w-4" />
+            Review candidate books
+          </h2>
+          <ul className="flex flex-col gap-2">
+            {candidates.map((candidate) => (
+              <li key={candidate.id}>
+                <Card>
+                  <CardContent className="flex flex-col gap-2 py-3">
+                    <div>
+                      <p className="text-sm font-medium">
+                        {candidate.candidate_title}
+                        {candidate.candidate_number != null ? ` (#${candidate.candidate_number})` : ""}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {candidate.series_id ? (
+                          <Link
+                            href={`/series/${candidate.series_id}`}
+                            className="underline underline-offset-2"
+                          >
+                            {candidate.series_name || "a series"}
+                          </Link>
+                        ) : (
+                          candidate.series_name || candidate.series_name_hint || "Unlinked series"
+                        )}
+                        {candidate.author ? ` \u2022 ${candidate.author}` : ""}
+                      </p>
+                      {candidate.reason_flags.length > 0 ? (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {candidate.reason_flags.map(formatReasonFlag).join(" \u2022 ")}
+                        </p>
+                      ) : null}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        variant="default"
+                        size="sm"
+                        onClick={() => handleAddCandidateToSeries(candidate.id)}
+                        disabled={candidateActionId === candidate.id}
+                      >
+                        Add to Series
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleReviewCandidate(candidate)}
+                        disabled={candidateActionId === candidate.id}
+                      >
+                        Review
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleIgnoreCandidate(candidate.id)}
+                        disabled={candidateActionId === candidate.id}
+                      >
+                        Do Not Add
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       {items === null ? (
         <p className="text-sm text-muted-foreground">Loading notifications...</p>

@@ -370,6 +370,21 @@ def _fuse_and_score_candidates(
             backfilled_isbn = _first_present_field(members, "isbn13", exclude_sources={"web_search"})
             merged_isbn13 = str(backfilled_isbn).strip() if backfilled_isbn else None
 
+        # Same backfill treatment as isbn13 above -- asin is only ever set
+        # by apify_provider.py (confirmed by grep; no exclude_sources
+        # equivalent needed, unlike isbn13's web_search exclusion, since
+        # there's only one truthful source to backfill from in the first
+        # place). Without this, an ASIN captured on an Apify hit silently
+        # vanishes whenever that hit gets grouped with any other provider's
+        # hit for the same book -- members[0]/primary becomes that other
+        # provider's dict, which never had an "asin" key at all -- exactly
+        # the multi-source case the "Review Candidate Book" notification's
+        # optional ASIN lookup most wants it for.
+        merged_asin = str(primary.get("asin") or "").strip() or None
+        if not merged_asin:
+            backfilled_asin = _first_present_field(members, "asin")
+            merged_asin = str(backfilled_asin).strip() if backfilled_asin else None
+
         merged_published_date = str(
             primary.get("published_date") or _first_present_field(members, "published_date") or ""
         ).strip()
@@ -453,6 +468,7 @@ def _fuse_and_score_candidates(
             "authors": merged_authors,
             "language": merged_language,
             "isbn13": merged_isbn13,
+            "asin": merged_asin,
             "published_date": merged_published_date,
             "description": merged_description,
             "series_name_hint": merged_series_name_hint,

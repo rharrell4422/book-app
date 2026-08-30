@@ -14,6 +14,7 @@ import discovery_engine
 import intelligence
 import settings
 from models import Book, Series, SeriesSkeleton
+from services import candidate_notifications
 from services.discovery_cache import DiscoveryCache
 from services.discovery_logging import log_discovery_summary
 from services.discovery_telemetry import DiscoveryTelemetry
@@ -1332,6 +1333,14 @@ class SeriesIntelligenceAgent:
                     # to skeleton_json -- see that function and
                     # services/skeleton_store.py's matching addition.
                     "isbn13": isbn13 or None,
+                    # LitRPG Enhanced Discovery addition: real ASIN (not the
+                    # isbn13-or-synthetic "identifier" above), captured by
+                    # apify_provider.py and backfilled through multi-source
+                    # fusion (see deterministic_fusion._fuse_and_score_
+                    # candidates) -- threaded through so a candidate
+                    # notification's Review action can offer an optional
+                    # direct ASIN lookup.
+                    "asin": raw.get("asin"),
                 }
 
                 # Manual-override routing. `confidence_entry` is None when
@@ -1418,24 +1427,57 @@ class SeriesIntelligenceAgent:
                     # deliberate mitigation: it lets a human dismiss those
                     # at a glance without this module needing new scoring
                     # logic. This is an expected noise floor, not a bug.
-                    needs_review.append(
-                        {
-                            **canonical,
-                            "needs_review": True,
-                            "low_confidence_ambiguous": low_confidence_ambiguous,
-                            "series_name_hint": raw.get("series_name_hint"),
-                            "overall_confidence": overall_grade,
-                            "provider_confidence": (
-                                confidence_entry.get("provider_confidence") if confidence_entry else None
-                            ),
-                            "title_confidence": confidence_entry.get("title_confidence") if confidence_entry else None,
-                            "number_confidence": (
-                                confidence_entry.get("number_confidence") if confidence_entry else None
-                            ),
-                            "series_alignment_confidence": (
-                                confidence_entry.get("series_alignment_confidence") if confidence_entry else None
-                            ),
-                        }
+                    #
+                    # LitRPG Enhanced Discovery ("Review Candidate Book")
+                    # replacement: this branch used to append to
+                    # `needs_review`, which fed _needs_review_to_skeleton_
+                    # updates and wrote an "unconfirmed" SeriesSkeleton
+                    # entry every round until a human happened to notice it
+                    # in a Check Now response. It now creates (or refreshes,
+                    # on rediscovery) a durable series_candidate_notifications
+                    # row instead -- see services/candidate_notifications.py
+                    # -- and deliberately does NOT append to `needs_review`
+                    # or write a skeleton entry: SeriesSkeleton stays
+                    # unaware of this candidate until "Add to Series" is
+                    # explicitly chosen (services/candidate_notifications.
+                    # resolve_add_to_series calls backfill_skeleton_for_
+                    # series itself at that point).
+                    reason_flags: list[str] = []
+                    # "Ambiguous number extraction": the number came from
+                    # infer_number_from_title's text-parsing fallback, not a
+                    # structured provider field -- book_number_source can't
+                    # be used here (it's Book-row-only, hardcoded to
+                    # "provider" for every discovery-persisted book; see
+                    # services/series_check_engine.py).
+                    if not raw.get("series_number_hint") and inferred_number:
+                        reason_flags.append("number_inferred_from_title")
+                    if not resolved_number:
+                        reason_flags.append("missing_series_number")
+
+                    candidate_notifications.create_or_refresh_candidate_notification(
+                        db,
+                        profile_id=series.profile_id,
+                        series_id=series.id,
+                        series_name=series.name,
+                        # Not `canonical` as-is: canonical["title"] is
+                        # `display_title`, which has a "(Series Name Book N)"
+                        # suffix appended above for the auto-accept path's
+                        # benefit (a persisted Book's title). The notification
+                        # already carries series_name/candidate_number as
+                        # their own fields (see CandidateNotificationItem),
+                        # so baking that same suffix into candidate_title
+                        # would both duplicate it in the UI and drift
+                        # title_key/bare_title_key dedupe away from the raw
+                        # provider title this candidate is actually keyed on
+                        # everywhere else in this loop (already_known,
+                        # known_series_titles, etc.).
+                        canonical={**canonical, "title": title},
+                        overall_confidence=overall_grade,
+                        provider_confidence=(
+                            confidence_entry.get("provider_confidence") if confidence_entry else None
+                        ),
+                        series_name_hint=raw.get("series_name_hint"),
+                        reason_flags=reason_flags,
                     )
                     agentic_hooks.record_reasoning_step(
                         agentic_context,

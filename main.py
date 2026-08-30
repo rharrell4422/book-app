@@ -10,7 +10,18 @@ from bootstrap import (
     clear_stale_ghost_flags_on_read_books,
     run_migrations,
 )
-from routers import admin, admin_agentic, auth, books, discovery, imports, notifications, profiles, series
+from routers import (
+    admin,
+    admin_agentic,
+    auth,
+    books,
+    candidate_notifications,
+    discovery,
+    imports,
+    notifications,
+    profiles,
+    series,
+)
 from services.skeleton_store import backfill_all_skeletons
 
 logger = logging.getLogger(__name__)
@@ -89,3 +100,4 @@ app.include_router(books.router)
 app.include_router(imports.router)
 app.include_router(discovery.router)
 app.include_router(notifications.router)
+app.include_router(candidate_notifications.router)

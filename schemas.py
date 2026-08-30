@@ -340,6 +340,50 @@ class NotificationDismissResponse(BaseModel):
 
 
 # ------------------------------------------------------------
+# "Review Candidate Book" notifications (LitRPG Enhanced Discovery)
+# ------------------------------------------------------------
+
+
+class CandidateReviewUrls(BaseModel):
+    amazon_ku_search: str
+    google_search: str
+    asin_lookup: Optional[str] = None
+
+
+class CandidateNotificationItem(BaseModel):
+    id: int
+    series_id: Optional[int] = None
+    series_name: Optional[str] = None
+    candidate_title: str
+    candidate_number: Optional[float] = None
+    overall_confidence: Optional[str] = None
+    provider_confidence: Optional[str] = None
+    isbn13: Optional[str] = None
+    publication_date: Optional[str] = None
+    asin: Optional[str] = None
+    author: Optional[str] = None
+    source_url: Optional[str] = None
+    provider: Optional[str] = None
+    series_name_hint: Optional[str] = None
+    reason_flags: List[str] = []
+    created_at: datetime
+    last_seen_at: datetime
+    review_urls: CandidateReviewUrls
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CandidateNotificationAddResponse(BaseModel):
+    book_id: int
+    series_id: int
+    title: str
+
+
+class CandidateNotificationResolveResponse(BaseModel):
+    resolved: bool
+
+
+# ------------------------------------------------------------
 # Auto Discovery MVP button (§4)
 # ------------------------------------------------------------
 

@@ -19,7 +19,7 @@ from agents.series_agent import (
     discover_series_by_name,
 )
 from database import Base
-from models import Book, Series, SeriesSkeleton
+from models import Book, Series, SeriesCandidateNotification, SeriesSkeleton
 from services.discovery_cache import DiscoveryCache
 
 
@@ -3557,23 +3557,28 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         self.assertEqual(len(result["available_missing"]), 1)
         self.assertEqual(result["available_missing"][0]["series_number"], "10")
 
-    def test_medium_confidence_candidate_routes_to_needs_review_with_series_name_hint(self):
+    def test_medium_confidence_candidate_creates_candidate_notification_with_series_name_hint(self):
         # Title has no textual tie to "Cherry Blossom Girls" at all, isn't
         # tagged "targeted"/"missing_volume_recovery" (so no
         # targeted_with_number credit), and its number (7) isn't past the
         # highest owned number (9) either (no continues_numbering credit) --
         # belongs_to_series fails outright, making this genuinely ambiguous
         # (low_confidence_ambiguous=True), which is what actually routes a
-        # medium/unverified grade to needs_review. See the routing block's
+        # medium/unverified grade into this branch. See the routing block's
         # own comment in run_series_check for why a candidate that instead
         # passed belongs_to_series cleanly would auto-accept on this same
         # confidence grade -- "unverified" title_confidence, from the
         # missing SeriesSkeleton row, is the permanent state for any
         # candidate number nothing has seen before, not a signal of
-        # ambiguity on its own. series_name_hint is carried through into
-        # the review payload so a human reviewer can dismiss a same-author/
-        # different-series false positive on sight, without confidence_
-        # engine needing a series-identity dimension.
+        # ambiguity on its own.
+        #
+        # LitRPG Enhanced Discovery ("Review Candidate Book") replacement:
+        # this branch no longer appends to needs_review at all -- it
+        # creates a durable series_candidate_notifications row instead
+        # (see services/candidate_notifications.py), carrying
+        # series_name_hint through so a human reviewer can still dismiss a
+        # same-author/different-series false positive on sight, without
+        # confidence_engine needing a series-identity dimension.
         candidates = [
             {
                 "source": "hardcover",
@@ -3604,20 +3609,33 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
 
         self.assertFalse(result["found"])
         self.assertEqual(result["available_missing"], [])
-        self.assertEqual(len(result["needs_review"]), 1)
-        review_entry = result["needs_review"][0]
-        self.assertEqual(review_entry["overall_confidence"], "medium")
-        self.assertEqual(review_entry["series_name_hint"], "Cherry Blossom Girls")
-        self.assertTrue(review_entry["needs_review"])
-        self.assertTrue(review_entry["low_confidence_ambiguous"])
+        # needs_review is unconditionally empty for this branch now -- see
+        # module docstring on services/candidate_notifications.py.
+        self.assertEqual(result["needs_review"], [])
 
-    def test_needs_review_candidate_populates_skeleton_updates(self):
-        # PB-1 regression: a needs_review candidate (the only "found but not
-        # persisted" evidence Phase 0 computes) must be wired through to
+        rows = self.db.query(SeriesCandidateNotification).filter(
+            SeriesCandidateNotification.series_id == self.series.id
+        ).all()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row.candidate_title, "Desert Protocol")
+        self.assertEqual(row.overall_confidence, "medium")
+        self.assertEqual(row.series_name_hint, "Cherry Blossom Girls")
+        self.assertIsNone(row.resolution)
+
+    def test_needs_review_candidate_no_longer_populates_skeleton_updates(self):
+        # PB-1 originally wired needs_review candidates through to
         # result["skeleton_updates"] so apply_skeleton_updates (called by
-        # services/series_check_engine.py after persistence) actually has
-        # something to write. Same scenario as
-        # test_medium_confidence_candidate_routes_to_needs_review_with_series_name_hint.
+        # services/series_check_engine.py after persistence) had something
+        # to write. LitRPG Enhanced Discovery ("Review Candidate Book")
+        # deliberately supersedes that for this branch: SeriesSkeleton must
+        # stay unaware of an ambiguous candidate until "Add to Series" is
+        # explicitly chosen (services/candidate_notifications.
+        # resolve_add_to_series backfills the skeleton itself at that
+        # point) -- so skeleton_updates/probes must both stay empty here,
+        # with a series_candidate_notifications row created in their place.
+        # Same scenario as
+        # test_medium_confidence_candidate_creates_candidate_notification_with_series_name_hint.
         candidates = [
             {
                 "source": "hardcover",
@@ -3646,12 +3664,156 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
             agent = SeriesIntelligenceAgent()
             result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
 
-        self.assertEqual(len(result["skeleton_updates"]), 1)
-        update = result["skeleton_updates"][0]
-        self.assertEqual(update["book_number"], 7.0)
-        self.assertEqual(update["status"], "unconfirmed")
-        self.assertEqual(update["confidence"], "medium")
+        self.assertEqual(result["skeleton_updates"], [])
         self.assertEqual(result["probes"], [])
+
+        rows = self.db.query(SeriesCandidateNotification).filter(
+            SeriesCandidateNotification.series_id == self.series.id
+        ).all()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].source_url, "https://example.com/desert-protocol")
+        # series_number_hint (7) is present, so this is NOT ambiguous
+        # number extraction.
+        self.assertNotIn("number_inferred_from_title", rows[0].reason_flags)
+
+    def test_candidate_notification_flags_number_inferred_from_title(self):
+        # No series_number_hint at all -- the only source for a number is
+        # infer_number_from_title's "book N" keyword pattern parsing the
+        # raw title text, which is exactly the "ambiguous number
+        # extraction" this reason_flag exists to surface (see the routing
+        # block's comment in run_series_check: book_number_source can't be
+        # used here, it's Book-row-only and hardcoded to "provider" for
+        # every discovery-persisted book).
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "Desert Protocol Book 7",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "author_fallback",
+                "series_number_hint": None,
+                "series_name_hint": "Cherry Blossom Girls",
+                "upcoming_hint": False,
+            }
+        ]
+        unified_candidate = discovery_engine.UnifiedCandidate(
+            # series_number=7.0, not None: this mirrors what a real fused
+            # candidate looks like (fusion resolves the number from the
+            # same title text confidence_engine's number_confidence reads
+            # off, independently of series_agent's own raw.get(
+            # "series_number_hint")-first inference below). Leaving this
+            # None would make confidence_engine's number_confidence grade
+            # "low" (no structured number at all), which drops the
+            # candidate at the `overall_grade in ("low", "zero")` gate
+            # above -- before it ever reaches this branch -- rather than
+            # exercising the "ambiguous number extraction" flag this test
+            # is actually about.
+            title="Desert Protocol Book 7",
+            authors=["Harmon Cooper"],
+            series_name="Cherry Blossom Girls",
+            series_number=7.0,
+            metadata_completeness_score=1.0,
+            source_provenance=[{"source": "hardcover"}],
+        )
+        with self._mock_discovery(candidates, unified_candidates=[unified_candidate]):
+            agent = SeriesIntelligenceAgent()
+            agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        rows = self.db.query(SeriesCandidateNotification).filter(
+            SeriesCandidateNotification.series_id == self.series.id
+        ).all()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("number_inferred_from_title", rows[0].reason_flags)
+        self.assertEqual(rows[0].candidate_number, 7.0)
+
+    def test_candidate_notification_flags_missing_series_number(self):
+        # No series_number_hint AND no number-shaped text in the title at
+        # all -- infer_number_from_title has nothing to parse either, so
+        # this candidate has no resolvable number whatsoever. Must still
+        # get a durable notification (with candidate_number: null) rather
+        # than silently vanishing the way _needs_review_to_skeleton_updates
+        # used to drop a numberless needs_review entry via its own `continue`.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-x",
+                "title": "Desert Protocol",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "author_fallback",
+                "series_number_hint": None,
+                "series_name_hint": "Cherry Blossom Girls",
+                "upcoming_hint": False,
+            }
+        ]
+        # Deliberately no matching `unified_candidates` entry: a genuinely
+        # numberless candidate always grades number_confidence="low" in
+        # confidence_engine (see _number_confidence -- "no structured
+        # number to place at all"), and "no zero, any remaining low ->
+        # low" means overall_grade can never be "medium"/None from real
+        # computation for this candidate. The only way it reaches this
+        # branch at all is the `confidence_entry is None` fallback (empty
+        # confidence_lookup -- see routing block's own comment on that
+        # None case), which is exactly what leaving `unified_candidates`
+        # empty here reproduces.
+        with self._mock_discovery(candidates, unified_candidates=[]):
+            agent = SeriesIntelligenceAgent()
+            agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        rows = self.db.query(SeriesCandidateNotification).filter(
+            SeriesCandidateNotification.series_id == self.series.id
+        ).all()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("missing_series_number", rows[0].reason_flags)
+        self.assertIsNone(rows[0].candidate_number)
+
+    def test_candidate_notification_carries_asin_through_for_review_action(self):
+        # LitRPG Enhanced Discovery ASIN-threading: raw["asin"] (captured by
+        # apify_provider.py upstream, or here directly on the mocked
+        # post-fusion candidate dict) must flow through canonical["asin"]
+        # into the notification row, so the Review action's "Optional ASIN
+        # lookup if available" has something to link to.
+        candidates = [
+            {
+                "source": "apify",
+                "source_id": "B0EXAMPLE1",
+                "title": "Desert Protocol",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "asin": "B0EXAMPLE1",
+                "source_url": None,
+                "language": "",
+                "confidence": "author_fallback",
+                "series_number_hint": 7,
+                "series_name_hint": "Cherry Blossom Girls",
+                "upcoming_hint": False,
+            }
+        ]
+        unified_candidate = discovery_engine.UnifiedCandidate(
+            title="Desert Protocol",
+            authors=["Harmon Cooper"],
+            series_name="Cherry Blossom Girls",
+            series_number=7.0,
+            metadata_completeness_score=1.0,
+            source_provenance=[{"source": "apify"}],
+        )
+        with self._mock_discovery(candidates, unified_candidates=[unified_candidate]):
+            agent = SeriesIntelligenceAgent()
+            agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        rows = self.db.query(SeriesCandidateNotification).filter(
+            SeriesCandidateNotification.series_id == self.series.id
+        ).all()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].asin, "B0EXAMPLE1")
 
     def test_low_confidence_candidate_does_not_poison_known_numbers_for_a_later_good_candidate(self):
         # PB-11 regression (Percy Jackson books 4/5 investigation,
@@ -3729,6 +3891,10 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
                 "provider": "hardcover",
                 "identifier": "9781111111111",
                 "isbn13": "9781111111111",
+                # LitRPG Enhanced Discovery ASIN-threading addition --
+                # canonical now always carries a real "asin" field
+                # (None here since this candidate has none).
+                "asin": None,
             }
         ])
         self.assertTrue(result["found"])
@@ -4476,7 +4642,10 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
 
         available_titles = {book["title"] for book in result["available_missing"]}
         upcoming_titles = {book["title"] for book in result["upcoming_books"]}
-        review_titles = {book["title"] for book in result["needs_review"]}
+        # This branch no longer appends to needs_review at all -- see
+        # test_medium_confidence_candidate_creates_candidate_notification_with_series_name_hint.
+        review_titles: set[str] = set()
+        self.assertEqual(result["needs_review"], [])
         all_titles = available_titles | upcoming_titles | review_titles
         # The pre-existing "targeted" candidate must survive -- its title has
         # no textual tie to "Cherry Blossom Girls" at all, so only a
@@ -4511,12 +4680,24 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         # means silently dropped. series_agent never asked confidence_engine
         # to score it either (it's not in this test's `unified_candidates`
         # override), so there's no grade to route on; the safe fallback for
-        # "ambiguous and nothing to grade it" is needs_review, not silent
-        # disappearance -- a human still needs to see and dismiss it.
-        self.assertIn("Unrelated Standalone Thriller: (Cherry Blossom Girls Book 11)", review_titles)
+        # "ambiguous and nothing to grade it" is a durable candidate
+        # notification, not silent disappearance -- a human still needs to
+        # see and dismiss it, just via services/candidate_notifications.py
+        # now rather than needs_review.
         self.assertNotIn(
             "Unrelated Standalone Thriller: (Cherry Blossom Girls Book 11)", available_titles | upcoming_titles
         )
+        # Notification candidate_title is the raw provider title ("Unrelated
+        # Standalone Thriller"), not canonical's display_title -- see
+        # run_series_check's own comment at the create_or_refresh_candidate_
+        # notification call site for why the "(Series Name Book N)" suffix
+        # (built for the auto-accept path's persisted-Book-title use case)
+        # is deliberately not reused for the notification's candidate_title.
+        stray_notifications = self.db.query(SeriesCandidateNotification).filter(
+            SeriesCandidateNotification.series_id == self.series.id,
+            SeriesCandidateNotification.candidate_title == "Unrelated Standalone Thriller",
+        ).all()
+        self.assertEqual(len(stray_notifications), 1)
 
     def test_no_author_on_file_returns_empty_result_without_calling_apis(self):
         series = Series(name="No Author Series", profile_id="robbie")
@@ -5729,6 +5910,77 @@ class FusionGroupingTest(unittest.TestCase):
         # Multi-source corroboration bonus must actually apply now that
         # both hits are recognized as the same book.
         self.assertGreater(merged.confidence_score, 0.75)
+
+    def test_asin_survives_fusion_when_apify_hit_is_not_the_primary_member(self):
+        # LitRPG Enhanced Discovery ASIN-threading fix: an Apify hit's real
+        # ASIN used to silently vanish whenever it got grouped with any
+        # other provider's hit for the same book, since provenance[0] (the
+        # base every downstream raw dict is built from -- see
+        # _unified_candidate_to_raw_dict) becomes whichever member landed
+        # first in `ordered_raw` (hardcover/google/openlibrary before
+        # web/apify), and only apify_provider.py ever sets "asin" at all --
+        # confirmed by grep, no other provider does. Hardcover is primary
+        # here specifically to exercise that multi-source case, not the
+        # apify-is-sole-source case a naive `raw.get("asin")` already
+        # handled.
+        fused = discovery_engine._fuse_and_score_candidates(
+            {
+                "hardcover": [
+                    {
+                        "source": "hardcover",
+                        "title": "Desert Protocol",
+                        "authors": ["Harmon Cooper"],
+                        "isbn13": "9781111111111",
+                        "series_number_hint": 7,
+                    }
+                ],
+                "google": [],
+                "openlibrary": [],
+                "web": [
+                    {
+                        "source": "apify",
+                        "title": "Desert Protocol",
+                        "authors": ["Harmon Cooper"],
+                        "isbn13": None,
+                        "series_number_hint": 7,
+                        "asin": "B0EXAMPLE1",
+                    }
+                ],
+            },
+            "Harmon Cooper",
+            "Cherry Blossom Girls",
+        )
+        self.assertEqual(len(fused), 1)
+        merged = fused[0]
+        self.assertEqual(merged.source_provenance[0].get("source"), "hardcover")
+        self.assertEqual(merged.source_provenance[0].get("asin"), "B0EXAMPLE1")
+
+    def test_asin_backfill_does_not_clobber_a_real_value_already_on_the_primary_member(self):
+        # An apify-sourced primary member already carries its own real
+        # "asin" -- the backfill must not stomp it with None just because
+        # _first_present_field's scan (which includes the primary member
+        # itself) happens to run.
+        fused = discovery_engine._fuse_and_score_candidates(
+            {
+                "hardcover": [],
+                "google": [],
+                "openlibrary": [],
+                "web": [
+                    {
+                        "source": "apify",
+                        "title": "Desert Protocol",
+                        "authors": ["Harmon Cooper"],
+                        "isbn13": None,
+                        "series_number_hint": 7,
+                        "asin": "B0EXAMPLE1",
+                    }
+                ],
+            },
+            "Harmon Cooper",
+            "Cherry Blossom Girls",
+        )
+        self.assertEqual(len(fused), 1)
+        self.assertEqual(fused[0].source_provenance[0].get("asin"), "B0EXAMPLE1")
 
     def test_one_overlapping_author_is_enough_to_merge_graphic_novel_credits(self):
         # A graphic-novel adaptation's author/illustrator/colorist list

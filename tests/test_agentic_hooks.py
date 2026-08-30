@@ -30,7 +30,7 @@ import agentic_hooks
 import discovery_engine
 from agents.series_agent import SeriesIntelligenceAgent
 from database import Base
-from models import Book, Series
+from models import Book, Series, SeriesCandidateNotification
 from services.discovery_telemetry import DiscoveryTelemetry
 
 
@@ -338,10 +338,23 @@ class SeriesAgentNoBehaviorChangeTest(unittest.TestCase):
             agent = SeriesIntelligenceAgent()
             result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
 
-        self.assertEqual(len(result["needs_review"]), 1)
-        self.assertEqual(len(result["skeleton_updates"]), 1)
-        self.assertEqual(result["skeleton_updates"][0]["book_number"], 7.0)
-        self.assertEqual(result["skeleton_updates"][0]["status"], "unconfirmed")
+        # LitRPG Enhanced Discovery ("Review Candidate Book") superseded
+        # this branch's needs_review/skeleton_updates behavior -- see
+        # services/candidate_notifications.py's module docstring and
+        # tests/test_series_discovery.py's
+        # test_needs_review_candidate_no_longer_populates_skeleton_updates.
+        # This test's actual point (RT-1b wiring changes nothing about
+        # run_series_check's routing outcome) still holds: both are
+        # unconditionally empty for this branch regardless of
+        # agentic_context, with a durable candidate notification created
+        # in their place.
+        self.assertEqual(result["needs_review"], [])
+        self.assertEqual(result["skeleton_updates"], [])
+        rows = self.db.query(SeriesCandidateNotification).filter(
+            SeriesCandidateNotification.series_id == self.series.id
+        ).all()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].candidate_number, 7.0)
 
     def test_telemetry_param_still_populates_result_and_gets_tool_call_traced(self):
         telemetry = DiscoveryTelemetry()

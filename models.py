@@ -420,6 +420,81 @@ class Notification(Base):
     dismissed_at = Column(DateTime, nullable=True)
 
 
+class SeriesCandidateNotification(Base):
+    """"Review Candidate Book" notifications (see the LitRPG Enhanced
+    Discovery design chat's finalized spec) -- one durable row per
+    ambiguous/low-confidence discovery candidate that today's routing in
+    `agents/series_agent.py` sends to the `needs_review` bucket (the
+    `low_confidence_ambiguous and (overall_grade in {"medium", None})`
+    branch). That branch no longer appends to `needs_review`/writes a
+    SeriesSkeleton entry directly -- this table is its sole replacement,
+    giving the human a durable, actionable (Add to Series / Review / Do
+    Not Add) surface instead of a candidate that only ever lived inside
+    one `Check Now` response and an unconfirmed skeleton row.
+
+    `series_id` is nullable for a hypothetical future standalone-candidate
+    path (mirrors `Notification.series_id`); every current write site
+    always has a series.
+
+    Identity/dedupe columns (`isbn13`, `title_key`, `bare_title_key`,
+    `candidate_number`) mirror the normalized-identity comparisons
+    `agents/series_agent._is_known_candidate` already uses for owned
+    books, reused here (see `services/candidate_notifications.py`) so the
+    same candidate rediscovered on a later run refreshes `last_seen_at`
+    in place instead of creating a duplicate row, and so a candidate
+    explicitly dismissed via "Do Not Add" (`resolution="ignored"`) never
+    resurfaces as a new row either -- both checks match on this same
+    normalized identity, not on literal title/ASIN string equality (raw
+    provider titles for the same book vary run to run).
+
+    `resolution` distinguishes *why* a row is no longer active from
+    `dismissed_at`-style single-state tables like `Notification`: `None`
+    (unresolved/pending), `"added"` (persisted as a real Book row), or
+    `"ignored"` (permanently suppressed, never recreated). `resolved_at`
+    is stamped for both terminal states.
+    """
+
+    __tablename__ = "series_candidate_notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    profile_id = Column(String, ForeignKey("profiles.id"), nullable=False, index=True)
+    series_id = Column(Integer, ForeignKey("series.id"), nullable=True, index=True)
+    series_name = Column(String, nullable=True)
+
+    candidate_title = Column(String, nullable=False)
+    candidate_number = Column(Float, nullable=True)
+    overall_confidence = Column(String, nullable=True)
+    provider_confidence = Column(String, nullable=True)
+    isbn13 = Column(String, nullable=True)
+    publication_date = Column(String, nullable=True)
+    asin = Column(String, nullable=True)
+    author = Column(String, nullable=True)
+    source_url = Column(String, nullable=True)
+    provider = Column(String, nullable=True)
+    # Same-author/different-series false positives (confidence_engine has
+    # no series-identity dimension -- see the routing block's comment in
+    # run_series_check) are common enough in this bucket that a human
+    # reviewer needs this at a glance to dismiss them on sight.
+    series_name_hint = Column(String, nullable=True)
+    # List of strings, e.g. "number_inferred_from_title",
+    # "missing_series_number" -- see services/candidate_notifications.py.
+    reason_flags = Column(JSON, nullable=False, default=list)
+
+    # Normalized-identity columns for dedupe/ignore matching -- see class
+    # docstring. Always populated (possibly empty string) so an equality
+    # filter never has to special-case NULL.
+    title_key = Column(String, nullable=False, default="", index=True)
+    bare_title_key = Column(String, nullable=False, default="")
+
+    # None = unresolved/pending, "added" = persisted as a Book row,
+    # "ignored" = permanently suppressed via "Do Not Add".
+    resolution = Column(String, nullable=True, index=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    last_seen_at = Column(DateTime, default=datetime.utcnow)
+    resolved_at = Column(DateTime, nullable=True)
+
+
 class AgenticSkeletonPreview(Base):
     """Phase 2 dual-write shadow table (`discovery_agentic_phase1_plan.md`/
     `discovery_agentic_phase1_evaluation.md`'s settled architecture, not
