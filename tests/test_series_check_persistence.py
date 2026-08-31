@@ -351,6 +351,81 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
         self.assertNotEqual(companion.id, onyx_storm_id)
         self.assertEqual(companion.read_status, "upcoming")
 
+    def test_bare_titled_candidate_with_mismatched_number_does_not_clobber_book_one(self):
+        # Regression (live bug, "Defiance of the Fall 17" investigation,
+        # 2026-08-30): book 1 of a series is very often titled with nothing
+        # but the bare series name (no number in the title text at all).
+        # A discovery candidate whose own title lost its volume number
+        # somewhere upstream (e.g. an LLM reconciliation pass merging
+        # several raw provider hits) while its book_number field stayed
+        # correct used to fall through the ASIN and series+title+author+
+        # number identity keys (neither matches, since no existing row sits
+        # at that number) straight into the bare canonical_title_key
+        # fallback -- which ignores book_number entirely and matched pure
+        # title text against book 1. That silently "updated" (a no-op
+        # metadata refresh) the existing book 1 row instead of inserting
+        # the real new book, so it never showed up and no notification
+        # fired. See services/identity.py's _book_numbers_compatible.
+        book_one = Book(
+            title="Defiance of the Fall",
+            author="Some Author",
+            series_id=self.series.id,
+            profile_id=self.series.profile_id,
+            book_number=1.0,
+            series_order=1,
+            record_status="active",
+            is_read=True,
+            read_status="read",
+        )
+        self.db.add(book_one)
+        self.db.commit()
+        book_one_id = book_one.id
+
+        self._run_job_with_mocked_discovery(
+            [
+                {
+                    # Title lost its "17" upstream; book_number stayed correct.
+                    "title": "Defiance of the Fall",
+                    "author": "Some Author",
+                    "series_name": "The First Peacemaker",
+                    "book_number": 17,
+                    "source_url": None,
+                    "provider": "hardcover",
+                    "publication_date": "2026-08-25",
+                    "expected_date": None,
+                    "status_hint": "available",
+                    "asin_or_id": None,
+                    "is_missing": True,
+                    "status": "available",
+                    "canonical_metadata": {
+                        "title_normalized": "Defiance of the Fall",
+                        "series_name_normalized": "The First Peacemaker",
+                        "book_number_normalized": 17,
+                        "publish_date_normalized": "2026-08-25",
+                        "upcoming_date_normalized": None,
+                        "availability": "available",
+                        "edition_type": "unknown",
+                        "title_selector": None,
+                    },
+                }
+            ]
+        )
+
+        self.db.refresh(book_one)
+        self.assertEqual(book_one.id, book_one_id)
+        self.assertEqual(book_one.book_number, 1.0)
+        self.assertTrue(book_one.is_read)
+        self.assertEqual(book_one.read_status, "read")
+
+        book_seventeen = (
+            self.db.query(Book)
+            .filter(Book.series_id == self.series.id, Book.book_number == 17.0)
+            .first()
+        )
+        self.assertIsNotNone(book_seventeen)
+        self.assertNotEqual(book_seventeen.id, book_one_id)
+        self.assertEqual(book_seventeen.read_status, "available")
+
     def test_dedupe_collapse_merges_release_date_from_loser_into_keeper(self):
         # Reproduces the real-world "Quest Academy" / "Ultimate Level" /
         # "The Bad Guys" data loss: two active rows end up sharing the same

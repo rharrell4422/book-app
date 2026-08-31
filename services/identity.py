@@ -237,6 +237,36 @@ def _canonical_title_identity_key(title: str | None) -> str | None:
     return normalized_title or None
 
 
+def _book_numbers_compatible(candidate_number, existing_number) -> bool:
+    """Guards the bare-title-only identity fallback (_canonical_title_
+    identity_key, used by services/series_check_engine.py's persistence
+    loop when neither ASIN nor the stricter series+title+author+number key
+    matched anything) against a real production incident: a series' book 1
+    is very often titled with nothing but the bare series name (no number
+    in the title text at all), so its canonical_title_key can collide with
+    ANY later-numbered candidate whose own title lost its number somewhere
+    upstream (e.g. an LLM reconciliation pass merging/normalizing several
+    raw provider hits) while its separate book_number field stayed intact.
+    Without this guard, that collision silently "updates" book 1 (a no-op
+    metadata refresh, since its fields already match) instead of inserting
+    the real new book -- exactly what happened to "Defiance of the Fall
+    17": it resolved to title="Defiance of the Fall"/book_number=17, and
+    canonical_title_key alone matched it straight onto the owned book 1
+    row, so book 17 was never persisted and no notification fired.
+
+    Either side missing a number is not treated as a contradiction --
+    there's nothing to disagree about, and plenty of legitimately-matching
+    rows (e.g. a book whose number was never resolved by either side) still
+    need the title-only fallback to work. Only an actual numeric mismatch
+    -- both sides have a number, and they differ -- disqualifies the match.
+    """
+    candidate_value = _normalized_book_number_value(candidate_number)
+    existing_value = _normalized_book_number_value(existing_number)
+    if candidate_value is None or existing_value is None:
+        return True
+    return candidate_value == existing_value
+
+
 def owned_title_for_identity(book: "models.Book") -> str:
     """The title to use for identity/discovery matching against an existing
     owned book -- Book.canonical_title (provider-resolved) when present,

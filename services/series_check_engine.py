@@ -27,6 +27,7 @@ from services.discovery_cache import DiscoveryCache
 from services.discovery_telemetry import DiscoveryTelemetry
 from services.identity import (
     _authors_match_exact,
+    _book_numbers_compatible,
     _canonical_title_identity_key,
     _edition_priority,
     _normalize_discovered_title,
@@ -482,8 +483,29 @@ def run_series_check_job_full(series_id: int) -> None:
                         matched_existing = existing_by_series_book[series_book_key]
                         dedupe_reason_code = "DEDUPE_UPDATE_BY_SERIES_BOOK"
                     elif canonical_title_key and canonical_title_key in existing_by_canonical_title:
-                        matched_existing = existing_by_canonical_title[canonical_title_key]
-                        dedupe_reason_code = "DEDUPE_UPDATE_BY_TITLE"
+                        title_only_match = existing_by_canonical_title[canonical_title_key]
+                        # Guard against the "Defiance of the Fall 17"
+                        # incident: a bare-title-only match is only trusted
+                        # when the two book numbers don't actively
+                        # contradict each other -- see
+                        # _book_numbers_compatible's docstring. Neither
+                        # ASIN nor the stricter series+title+author+number
+                        # key matched anything above, so without this check
+                        # a candidate whose title lost its volume number
+                        # upstream (while book_number stayed correct) would
+                        # silently "update" an unrelated existing book
+                        # (most commonly book 1, whose title is often just
+                        # the bare series name) instead of ever being
+                        # inserted.
+                        if _book_numbers_compatible(normalized_book_number, title_only_match.book_number):
+                            matched_existing = title_only_match
+                            dedupe_reason_code = "DEDUPE_UPDATE_BY_TITLE"
+                        else:
+                            _console_log(
+                                f"[DEDUPE_SKIP_TITLE_NUMBER_MISMATCH] series_id={series_id} "
+                                f"candidate_title={normalized_title!r} candidate_number={normalized_book_number!r} "
+                                f"existing_book_id={title_only_match.id} existing_number={title_only_match.book_number!r}"
+                            )
 
                     identity_fingerprint = candidate_asin or series_book_key or canonical_title_key or _normalize_discovered_title(normalized_title)
                     if identity_fingerprint in seen_batch_identity_keys and matched_existing is None:
