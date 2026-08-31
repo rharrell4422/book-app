@@ -45,6 +45,7 @@ from discovery_text import (
     _series_names_compatible,
     _to_int_or_none,
     core_title_key,
+    infer_number_from_title,
     normalize_series_name_for_query,
     normalize_text,
 )
@@ -585,7 +586,7 @@ Search results:
 A retailer listing existing (e.g. a Kindle Store page) is NOT proof a book has already been released -- pre-order listings look identical to a snippet with no date. If the snippet/title does not explicitly confirm a release date or that the book is already out, set "is_upcoming" to true and "published_date" to null rather than guessing it's already available -- it's far more useful to flag a book as "coming soon, exact date unconfirmed" than to wrongly tell a reader something is ready to read.
 
 Respond with ONLY a JSON array (no prose, no markdown code fences). Each element must have this shape:
-{{"result_index": <int, the [N] index above>, "title": <string, the clean book title without the series name or a "Book N" suffix>, "series_name": <string or null, the name of the series this book belongs to, if any -- null if it's a standalone>, "book_number": <int or null, this book's position in its series if stated or clearly implied>, "author_names": [<string>, ...], "published_date": <string, "YYYY-MM-DD"/"YYYY-MM"/"YYYY" if EXPLICITLY stated in the snippet, else null>, "is_upcoming": <bool, see rule above>, "isbn13": <string or null>}}
+{{"result_index": <int, the [N] index above>, "title": <string, the clean book title without the series name or a "Book N" suffix -- BUT if the book has no title of its own beyond its series name and position (i.e. the only title given for it IS "<Series Name> <N>", with no separate subtitle at all), output that full "<Series Name> <N>" text as-is instead of stripping it down to just the bare series name>, "series_name": <string or null, the name of the series this book belongs to, if any -- null if it's a standalone>, "book_number": <int or null, this book's position in its series if stated or clearly implied>, "author_names": [<string>, ...], "published_date": <string, "YYYY-MM-DD"/"YYYY-MM"/"YYYY" if EXPLICITLY stated in the snippet, else null>, "is_upcoming": <bool, see rule above>, "isbn13": <string or null>}}
 
 If none of the results are genuine matches, respond with exactly: []"""
 
@@ -1243,6 +1244,41 @@ def _parse_web_search_structured_items(structured_with_source: list[tuple[dict, 
         except (TypeError, ValueError):
             book_number = None
 
+        series_name_hint = str(item.get("series_name") or "").strip() or None
+        # Belt-and-suspenders on top of the prompt instruction above: some
+        # series (progression-fantasy/LitRPG especially) title every entry
+        # with nothing but "<Series Name> <N>" -- no distinct subtitle at
+        # all. If the LLM still stripped that down to just the bare series
+        # name (title now carries no number of its own -- see
+        # infer_number_from_title), the resulting title collapses onto the
+        # SAME core_title_key as every other bare-series-titled candidate
+        # (most commonly book 1, which very often really is just titled
+        # the bare series name with no number). That broke two different
+        # ways in production ("Defiance of the Fall 17" investigation,
+        # 2026-08-30/31): fusion couldn't recognize this as the same book
+        # as a same-numbered candidate from another provider (no shared
+        # title_key to merge on), leaving two title-distinguishable-looking
+        # candidates that share a number and no ISBN -- which
+        # delta_engine's duplicate_number check then flags as a real
+        # conflict instead of a missed merge, tanking confidence and
+        # dropping it outright; and/or persistence's own bare-title
+        # fallback matched it straight onto owned book 1 instead of ever
+        # inserting the real new book. Restoring the number to the title
+        # text fixes both by letting core_title_key fold it back in.
+        # Excluded for book_number == 1: that's exactly the case where a
+        # bare "<Series Name>" title (no number) is legitimately correct
+        # (book 1 is the eponymous volume), so reconstructing a "<Series
+        # Name> 1" title there would be actively wrong, not a fix.
+        if (
+            book_number is not None
+            and book_number != 1
+            and series_name_hint
+            and infer_number_from_title(title, series_name_hint) is None
+            and core_title_key(title) == core_title_key(series_name_hint)
+        ):
+            number_text = int(book_number) if book_number == int(book_number) else book_number
+            title = f"{series_name_hint} {number_text}"
+
         author_names = item.get("author_names")
         if not isinstance(author_names, list) or not author_names:
             author_names = [author]
@@ -1273,7 +1309,7 @@ def _parse_web_search_structured_items(structured_with_source: list[tuple[dict, 
                 # belongs to -- used as a per-candidate series-name signal by
                 # discover_candidates_for_author (see series_name_hint on the
                 # Hardcover provider for the same purpose).
-                "series_name_hint": str(item.get("series_name") or "").strip() or None,
+                "series_name_hint": series_name_hint,
             }
         )
     return results
