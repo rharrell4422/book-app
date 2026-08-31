@@ -101,6 +101,11 @@ class BookBase(BaseModel):
     is_upcoming_final: Optional[bool] = None
     is_missing: Optional[bool] = None
     record_status: Optional[str] = None
+    # Availability axis (see models.Book's docstring). Independent of
+    # is_read/read_status above -- e.g. is_read=false + availability_status
+    # ="owned" is a perfectly valid, common combination ("unread").
+    availability_status: Optional[str] = None
+    availability_locked: Optional[bool] = None
 
 
 ##
@@ -129,6 +134,8 @@ class BookListItem(BaseModel):
     read_status: Optional[str] = None
     is_read: Optional[bool] = None
     is_upcoming_final: Optional[bool] = None
+    availability_status: Optional[str] = None
+    availability_locked: Optional[bool] = None
     rating: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)
@@ -177,6 +184,8 @@ class BookUpdate(BaseModel):
     is_upcoming_final: Optional[bool] = None
     is_missing: Optional[bool] = None
     record_status: Optional[str] = None
+    availability_status: Optional[str] = None
+    availability_locked: Optional[bool] = None
 
 
 # ------------------------------------------------------------

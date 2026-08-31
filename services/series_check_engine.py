@@ -35,6 +35,7 @@ from services.identity import (
     _series_book_identity_key,
     _series_number_slot_key,
 )
+from services.availability_bridge import derive_legacy_fields
 from services.notifications import create_series_discovery_notification
 from services.skeleton_store import apply_skeleton_updates
 
@@ -161,10 +162,29 @@ def _merge_loser_fields_into_keeper(keeper: models.Book, loser: models.Book) -> 
             if loser_value not in (None, ""):
                 setattr(keeper, field, loser_value)
 
+    # Same "don't lose a locked/explicit signal to the row that merely
+    # scored higher" principle as the field backfill above, applied to the
+    # availability axis: an unlocked keeper adopts a locked loser's
+    # availability_status rather than silently discarding it.
+    if not bool(keeper.availability_locked) and bool(loser.availability_locked):
+        keeper.availability_status = loser.availability_status
+        keeper.availability_locked = True
+
     if bool(loser.is_read) and not bool(keeper.is_read):
         keeper.is_read = True
         keeper.read_date = keeper.read_date or loser.read_date
-        keeper.read_status = "read"
+        # Having actually read it is the strongest possible ownership
+        # signal there is -- locks the availability axis to "owned" too,
+        # overriding whatever the merge above just adopted.
+        keeper.availability_status = "owned"
+        keeper.availability_locked = True
+
+    for key, value in derive_legacy_fields(
+        is_read=bool(keeper.is_read),
+        availability_status=keeper.availability_status,
+        availability_locked=bool(keeper.availability_locked),
+    ).items():
+        setattr(keeper, key, value)
 
 
 def _build_series_counters(db: Session, series_id: int) -> dict:
@@ -594,12 +614,36 @@ def run_series_check_job_full(series_id: int) -> None:
                                 incoming_edition_type,
                             )
 
-                        if status == "upcoming":
-                            matched_existing.read_status = "upcoming"
-                            matched_existing.is_upcoming_auto = True
-                        elif str(matched_existing.read_status or "").strip().lower() != "read":
-                            matched_existing.read_status = "available"
-                            matched_existing.is_upcoming_auto = False
+                        # Only write availability_status when this row isn't
+                        # availability_locked (see models.Book's docstring and
+                        # the "Two-Axis Status Architecture" design chat) --
+                        # a manually/import-locked "unread"/"owned"/"available"
+                        # book must never be silently flipped back to
+                        # "upcoming" (or anywhere else) by a later Check Now,
+                        # with the sole exception below: a locked "upcoming"
+                        # whose own release date has since passed is stale by
+                        # definition, not a case of overriding a deliberate
+                        # choice.
+                        discovered_availability = "upcoming" if status == "upcoming" else "available"
+                        existing_locked = bool(matched_existing.availability_locked)
+                        existing_availability = str(matched_existing.availability_status or "").strip().lower()
+                        stale_upcoming_self_heal = (
+                            existing_locked
+                            and existing_availability == "upcoming"
+                            and discovered_availability == "available"
+                        )
+
+                        if not existing_locked or stale_upcoming_self_heal:
+                            matched_existing.availability_status = discovered_availability
+                            if stale_upcoming_self_heal:
+                                matched_existing.availability_locked = False
+
+                        for key, value in derive_legacy_fields(
+                            is_read=bool(matched_existing.is_read),
+                            availability_status=matched_existing.availability_status,
+                            availability_locked=bool(matched_existing.availability_locked),
+                        ).items():
+                            setattr(matched_existing, key, value)
 
                         matched_existing.is_missing = bool(matched_existing.is_missing and bool(candidate.get("is_missing")))
                         matched_existing.record_status = "active"
@@ -659,9 +703,17 @@ def run_series_check_job_full(series_id: int) -> None:
                         format=incoming_edition_type if incoming_edition_type != "unknown" else None,
                         edition=incoming_edition_type if incoming_edition_type != "unknown" else None,
                         is_read=False,
-                        read_status="upcoming" if status == "upcoming" else "available",
-                        is_upcoming_auto=(status == "upcoming"),
-                        is_upcoming_final=False,
+                        # Unlocked -- a fresh discovery insert with no user
+                        # decision behind it yet, exactly like a brand-new
+                        # manually-added book with no status chosen (see
+                        # models.Book's docstring on availability_locked).
+                        availability_status=("upcoming" if status == "upcoming" else "available"),
+                        availability_locked=False,
+                        **derive_legacy_fields(
+                            is_read=False,
+                            availability_status=("upcoming" if status == "upcoming" else "available"),
+                            availability_locked=False,
+                        ),
                         is_missing=bool(candidate.get("is_missing")),
                         record_status="active",
                     )

@@ -44,6 +44,24 @@ class LibrarySyncUpcomingHealingTest(unittest.TestCase):
         self.db.close()
 
     def _add_book(self, **kwargs) -> Book:
+        # These fixtures predate the availability_status/availability_locked
+        # axis and still pass legacy read_status/is_upcoming_auto/final
+        # kwargs -- update_from_series now reads availability_status/
+        # availability_locked as its source of truth (see library_sync.py),
+        # so backfill those two here from the same legacy kwargs using the
+        # same mapping the real migration uses (see
+        # f1a2b3c4d5e6_add_availability_status_axis_to_books.py), unless a
+        # test explicitly overrides one directly.
+        if "availability_locked" not in kwargs:
+            kwargs["availability_locked"] = bool(kwargs.get("is_upcoming_final"))
+        if "availability_status" not in kwargs:
+            if kwargs.get("is_upcoming_final") or str(kwargs.get("read_status") or "").strip().lower() == "upcoming":
+                kwargs["availability_status"] = "upcoming"
+            elif str(kwargs.get("read_status") or "").strip().lower() in ("read", "unread"):
+                kwargs["availability_status"] = "owned"
+            elif str(kwargs.get("read_status") or "").strip().lower() == "available":
+                kwargs["availability_status"] = "available"
+
         defaults = dict(
             title="Some Book",
             author="Some Author",

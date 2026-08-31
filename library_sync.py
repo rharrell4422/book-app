@@ -6,6 +6,11 @@ from sqlalchemy import or_
 
 import models
 from database import SessionLocal
+from services.availability_bridge import (
+    derive_legacy_fields,
+    normalize_availability_status,
+    should_self_heal_stale_upcoming,
+)
 
 
 def update_from_series(series_id: int, profile_id: str | None = None) -> dict:
@@ -37,11 +42,17 @@ def update_from_series(series_id: int, profile_id: str | None = None) -> dict:
             changed = False
 
             is_read = bool(book.is_read) or str(book.read_status or "").strip().lower() == "read"
+            availability_status = normalize_availability_status(book.availability_status)
+            availability_locked = bool(book.availability_locked)
+
             if is_read:
-                # Preserve user-managed read timeline for owned books.
-                if str(book.read_status or "").strip().lower() != "read":
-                    book.read_status = "read"
-                    changed = True
+                # Preserve user-managed read timeline for owned books --
+                # the availability axis is left completely alone here (a
+                # read book obviously isn't "upcoming", but this function
+                # has no basis to guess "available" vs "owned" for it, and
+                # doesn't need to -- derive_legacy_fields below already
+                # forces read_status="read" purely from is_read regardless
+                # of whatever availability_status ends up being).
                 if book.is_missing:
                     book.is_missing = False
                     changed = True
@@ -53,37 +64,57 @@ def update_from_series(series_id: int, profile_id: str | None = None) -> dict:
                 has_known_date = isinstance(candidate_date, date)
                 is_future_release = has_known_date and candidate_date > today
 
-                explicit_status = str(book.read_status or "").strip().lower()
-                is_marked_upcoming = bool(book.is_upcoming_auto) or bool(book.is_upcoming_final) or explicit_status == "upcoming"
+                is_marked_upcoming = availability_status == "upcoming"
 
                 if has_known_date:
                     # A concrete date is the strongest signal available -- once it
                     # has passed, the book is out even if it was previously (or is
                     # still) flagged upcoming, e.g. a stale spreadsheet-import date
                     # from before the release, or an old auto-discovery run.
-                    # Without this, a book stuck at read_status="upcoming" would
-                    # never self-heal since that flag alone used to keep it upcoming
-                    # forever, even long after its date had passed.
+                    # Without this, a book stuck at availability_status="upcoming"
+                    # would never self-heal since that flag alone used to keep it
+                    # upcoming forever, even long after its date had passed.
                     should_be_upcoming = is_future_release
                 else:
                     # No date to go on (e.g. an announced-but-undated preorder) --
                     # trust whatever previously classified this as upcoming.
                     should_be_upcoming = is_marked_upcoming
 
-                if should_be_upcoming:
-                    if explicit_status != "upcoming":
-                        book.read_status = "upcoming"
+                # upcoming -> available is the one self-heal that fires even
+                # through a lock: a *locked* "upcoming" whose own release
+                # date has since passed is stale by definition, not a case
+                # of second-guessing a deliberate user/import choice (see
+                # services/availability_bridge.should_self_heal_stale_upcoming
+                # and the frontend's matching exception in book-format.ts /
+                # getBookStatus). No other transition -- and specifically
+                # never "owned"/"available" -> "upcoming" -- ever overrides
+                # a lock.
+                stale_upcoming_self_heal = (
+                    availability_locked
+                    and not should_be_upcoming
+                    and should_self_heal_stale_upcoming(availability_status, candidate_date, today)
+                )
+
+                if not availability_locked or stale_upcoming_self_heal:
+                    next_status = "upcoming" if should_be_upcoming else "available"
+                    if next_status != availability_status:
+                        availability_status = next_status
                         changed = True
-                else:
-                    if explicit_status != "available":
-                        book.read_status = "available"
+                    if stale_upcoming_self_heal:
+                        availability_locked = False
                         changed = True
-                    if bool(book.is_upcoming_auto):
-                        book.is_upcoming_auto = False
-                        changed = True
-                    if bool(book.is_upcoming_final):
-                        book.is_upcoming_final = False
-                        changed = True
+
+            if book.availability_status != availability_status:
+                book.availability_status = availability_status
+                changed = True
+            if bool(book.availability_locked) != availability_locked:
+                book.availability_locked = availability_locked
+                changed = True
+
+            for key, value in derive_legacy_fields(is_read, availability_status, availability_locked).items():
+                if getattr(book, key) != value:
+                    setattr(book, key, value)
+                    changed = True
 
             if changed:
                 updated_rows += 1

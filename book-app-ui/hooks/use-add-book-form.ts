@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { useToast } from "@/components/ui/use-toast";
 import { fetchApiWithFallback } from "@/lib/api-client";
-import { type BookStatus, normalizeText } from "@/lib/book-format";
+import { type BookStatus, normalizeText, statusToAvailability } from "@/lib/book-format";
 import {
   EMPTY_ADD_BOOK_FORM,
   normalizeLookupMatchedTitle,
@@ -361,6 +361,14 @@ export function useAddBookForm(options?: {
         ? (form.readDate || new Date().toISOString().split("T")[0])
         : null;
       const releaseDate = readStatus !== "read" ? form.releaseDate.trim() : "";
+      // See lib/book-format.ts's statusToAvailability -- the single Status
+      // dropdown still only ever picks one BookStatus value, but the
+      // backend now tracks reading (is_read) and availability
+      // (availability_status) as two independent axes (see models.Book's
+      // docstring). A create always sends an explicit availability_status,
+      // which crud.create_book locks on the spot -- exactly as authoritative
+      // as any other value this same form already always sent on create.
+      const availabilityStatus = statusToAvailability(readStatus);
       // Belt-and-suspenders alongside onClassificationChange's clearing of
       // bookNumber -- Standalone never sends a book number, matching the
       // backend's own book_number-requires-series_id rejection.
@@ -400,7 +408,7 @@ export function useAddBookForm(options?: {
           release_date: releaseDate || undefined,
           publication_date: form.publicationDate || undefined,
           read_date: readDate || undefined,
-          read_status: readStatus,
+          availability_status: availabilityStatus,
           is_read: isRead,
           auto_summary: form.autoSummary || undefined,
         }),

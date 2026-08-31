@@ -351,6 +351,120 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
         self.assertNotEqual(companion.id, onyx_storm_id)
         self.assertEqual(companion.read_status, "upcoming")
 
+    def test_matched_existing_locked_availability_is_not_overwritten_by_discovery(self):
+        # "Two-Axis Status Architecture" regression: a book whose
+        # availability_status was explicitly locked (a manual edit, or an
+        # explicit CSV import token) must not be silently reclassified by a
+        # later Check Now re-match, even though the old single-flag logic
+        # would have unconditionally overwritten read_status/is_upcoming_auto
+        # here on every match.
+        locked_book = Book(
+            title="Edge of Shadow",
+            author="Some Author",
+            series_id=self.series.id,
+            profile_id=self.series.profile_id,
+            series_order=8,
+            book_number=8.0,
+            record_status="active",
+            is_read=False,
+            availability_status="owned",
+            availability_locked=True,
+            asin="WEB_SEARCH:HTTPS://WWW.AMAZON.COM/DP/EXAMPLE8",
+        )
+        self.db.add(locked_book)
+        self.db.commit()
+        locked_book_id = locked_book.id
+
+        self._run_job_with_mocked_discovery(
+            [
+                {
+                    "title": "Edge of Shadow",
+                    "author": "Some Author",
+                    "series_name": "The First Peacemaker",
+                    "book_number": 8,
+                    "source_url": None,
+                    "provider": "web_search",
+                    "publication_date": None,
+                    "expected_date": "2026-09-29",
+                    "status_hint": "upcoming",
+                    "asin_or_id": "web_search:https://www.amazon.com/dp/example8",
+                    "is_missing": False,
+                    "status": "upcoming",
+                    "canonical_metadata": {
+                        "title_normalized": "Edge of Shadow",
+                        "series_name_normalized": "The First Peacemaker",
+                        "book_number_normalized": 8,
+                        "publish_date_normalized": None,
+                        "upcoming_date_normalized": "2026-09-29",
+                        "availability": "upcoming",
+                        "edition_type": "unknown",
+                        "title_selector": None,
+                    },
+                }
+            ]
+        )
+
+        self.db.refresh(locked_book)
+        self.assertEqual(locked_book.id, locked_book_id)
+        self.assertEqual(locked_book.availability_status, "owned")
+        self.assertTrue(locked_book.availability_locked)
+        self.assertEqual(locked_book.read_status, "unread")
+
+    def test_matched_existing_locked_upcoming_with_available_candidate_self_heals(self):
+        # The one exception: a *locked* "upcoming" row is allowed to move to
+        # "available" once discovery itself reports the book as available --
+        # a stale locked-upcoming is stale by definition, not a case of
+        # overriding a deliberate choice.
+        stale_locked_book = Book(
+            title="Edge of Shadow",
+            author="Some Author",
+            series_id=self.series.id,
+            profile_id=self.series.profile_id,
+            series_order=8,
+            book_number=8.0,
+            record_status="active",
+            is_read=False,
+            availability_status="upcoming",
+            availability_locked=True,
+            asin="WEB_SEARCH:HTTPS://WWW.AMAZON.COM/DP/EXAMPLE8",
+        )
+        self.db.add(stale_locked_book)
+        self.db.commit()
+
+        self._run_job_with_mocked_discovery(
+            [
+                {
+                    "title": "Edge of Shadow",
+                    "author": "Some Author",
+                    "series_name": "The First Peacemaker",
+                    "book_number": 8,
+                    "source_url": None,
+                    "provider": "web_search",
+                    "publication_date": "2026-08-09",
+                    "expected_date": None,
+                    "status_hint": "available",
+                    "asin_or_id": "web_search:https://www.amazon.com/dp/example8",
+                    "is_missing": False,
+                    "status": "available",
+                    "canonical_metadata": {
+                        "title_normalized": "Edge of Shadow",
+                        "series_name_normalized": "The First Peacemaker",
+                        "book_number_normalized": 8,
+                        "publish_date_normalized": "2026-08-09",
+                        "upcoming_date_normalized": None,
+                        "availability": "available",
+                        "edition_type": "unknown",
+                        "title_selector": None,
+                    },
+                }
+            ]
+        )
+
+        self.db.refresh(stale_locked_book)
+        self.assertEqual(stale_locked_book.availability_status, "available")
+        self.assertFalse(stale_locked_book.availability_locked)
+        self.assertEqual(stale_locked_book.read_status, "available")
+
     def test_bare_titled_candidate_with_mismatched_number_does_not_clobber_book_one(self):
         # Regression (live bug, "Defiance of the Fall 17" investigation,
         # 2026-08-30): book 1 of a series is very often titled with nothing

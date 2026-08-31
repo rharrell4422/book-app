@@ -95,6 +95,8 @@ class LightListEndpointsTest(unittest.TestCase):
                 "read_status",
                 "is_read",
                 "is_upcoming_final",
+                "availability_status",
+                "availability_locked",
                 "rating",
             },
         )

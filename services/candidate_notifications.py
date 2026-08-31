@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 import discovery_engine
 import models
 from intelligence import recalculate_intelligence
+from services.availability_bridge import derive_legacy_fields
 from services.skeleton_store import backfill_skeleton_for_series
 
 AMAZON_KU_SEARCH_URL = "https://www.amazon.com/kindle-dbs/hz/search?ie=UTF8&fieldTargetedSeries={query}"
@@ -249,6 +250,7 @@ def resolve_add_to_series(
     is_upcoming = bool(parsed_date and parsed_date > date.today())
     number_inferred = "number_inferred_from_title" in (row.reason_flags or [])
 
+    discovered_availability = "upcoming" if is_upcoming else "available"
     book = models.Book(
         profile_id=profile_id,
         title=row.candidate_title,
@@ -265,9 +267,13 @@ def resolve_add_to_series(
         source_url=row.source_url,
         date_added=date.today(),
         is_read=False,
-        read_status="upcoming" if is_upcoming else "available",
-        is_upcoming_auto=is_upcoming,
-        is_upcoming_final=False,
+        # Unlocked -- "Add to Series" confirms this candidate is real, but
+        # the upcoming/available call itself is still provider-date-driven,
+        # not a user decision about availability -- same as a fresh Check
+        # Now insert (see models.Book's docstring on availability_locked).
+        availability_status=discovered_availability,
+        availability_locked=False,
+        **derive_legacy_fields(is_read=False, availability_status=discovered_availability, availability_locked=False),
         is_missing=False,
         record_status="active",
     )

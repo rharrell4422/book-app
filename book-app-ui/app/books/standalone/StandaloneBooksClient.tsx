@@ -72,6 +72,11 @@ function getBookStatus(book: BookRow): BookStatus {
     return "upcoming";
   }
   if (explicitStatus === "available") return "available";
+  // Explicit "unread" must win outright -- previously there was no early
+  // return here, so an unread book would fall through to the date
+  // inference below and get silently flipped to "available" once its
+  // release date passed (the bug this patch fixes).
+  if (explicitStatus === "unread") return "unread";
 
   if (releaseDate) {
     const parsedDate = parseFlexibleDate(releaseDate);
@@ -244,8 +249,9 @@ export default function StandaloneBooksClient() {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          // availability_status is deliberately omitted -- see the
+          // matching comment in BooksClient.tsx's toggleRead.
           is_read: nextIsRead,
-          read_status: nextIsRead ? "read" : "unread",
           read_date: nextIsRead ? new Date().toISOString().split("T")[0] : null,
         }),
       });

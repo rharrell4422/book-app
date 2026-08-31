@@ -80,6 +80,12 @@ function getBookStatus(book: BookRow): BookStatus {
     return "upcoming";
   }
   if (explicitStatus === "available") return "available";
+  // Explicit "unread" must win outright -- previously there was no early
+  // return here, so an unread book would fall through to the date/flag
+  // inference below and get silently flipped to "available" once its
+  // release date passed (the bug this patch fixes). None of the inference
+  // branches below may run once any explicit status has matched above.
+  if (explicitStatus === "unread") return "unread";
 
   if (releaseDate) {
     const parsedDate = new Date(releaseDate);
@@ -621,36 +627,20 @@ export default function BooksClient() {
 
   async function toggleRead(book: BookRow) {
     const nextIsRead = !book.is_read;
-    const releaseDate = book.release_date || book.publication_date;
-    const shouldStayUpcoming = Boolean(book.is_upcoming_auto || book.is_upcoming_final);
-    let nextStatus = nextIsRead ? "read" : "unread";
-    if (!nextIsRead && releaseDate) {
-      const parsedDate = new Date(releaseDate);
-      if (!Number.isNaN(parsedDate.valueOf())) {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        parsedDate.setHours(0, 0, 0, 0);
-        if (parsedDate > today) {
-          nextStatus = "upcoming";
-        } else {
-          nextStatus = "available";
-        }
-      }
-    }
-    if (!nextIsRead && shouldStayUpcoming) {
-      nextStatus = "upcoming";
-    }
-    if (!nextIsRead && !shouldStayUpcoming && book.series_id && book.book_number !== null && book.book_number !== undefined) {
-      nextStatus = "available";
-    }
 
     try {
       const response = await fetchApiWithFallback(`/books/${book.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          // availability_status is deliberately omitted -- this quick
+          // action only ever touches the reading axis (is_read/read_date).
+          // The backend re-derives read_status from is_read plus whatever
+          // this book's availability_status already is (see crud.books._
+          // apply_availability_bridge_for_update), so unmarking a book as
+          // read can never silently reclassify its availability the way a
+          // date/series-number heuristic here used to.
           is_read: nextIsRead,
-          read_status: nextStatus,
           read_date: nextIsRead ? new Date().toISOString().split("T")[0] : null,
         }),
       });

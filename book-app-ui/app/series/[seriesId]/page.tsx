@@ -352,6 +352,14 @@ function getBookStatus(book: BookRecord) {
   if (explicitStatus === "available") {
     return "available";
   }
+  // Explicit "unread" must win outright -- previously there was no early
+  // return here, so an unread book would fall through to the date/flag
+  // inference below and get silently flipped to "available" once its
+  // release date passed (the bug this patch fixes). None of the inference
+  // branches below may run once any explicit status has matched above.
+  if (explicitStatus === "unread") {
+    return "unread";
+  }
 
   if (releaseDate) {
     return isFutureDate(releaseDate) ? "upcoming" : "available";

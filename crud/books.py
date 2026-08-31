@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 import discovery_engine
 from models import Book, Series
 from intelligence import recalculate_intelligence
+from services.availability_bridge import derive_legacy_fields, normalize_availability_status
 from services.identity import is_placeholder_author
 from services.metadata_provenance import provenance_for_declined_or_manual_entry, provenance_for_find_bind
 
@@ -145,6 +146,59 @@ def _book_payload(
     return payload
 
 
+def _apply_availability_bridge_for_create(payload: dict) -> None:
+    """"Touched key" locking, create-path variant (see the "Two-Axis Status
+    Architecture" design chat): a brand-new book with no availability_status
+    in its payload gets the same unlocked default as a discovery insert
+    (column default "available", unlocked) so Check Now can manage it right
+    away; a payload that *does* include availability_status is exactly as
+    authoritative as a manual Edit Book choice and locks on the spot.
+    Mutates `payload` in place, also filling in the derived legacy fields
+    (read_status/is_upcoming_auto/is_upcoming_final) so a not-yet-migrated
+    reader of those columns sees a self-consistent row from creation.
+    """
+    explicit_availability = "availability_status" in payload
+    availability_status = normalize_availability_status(payload.get("availability_status"))
+    availability_locked = bool(payload.get("availability_locked", explicit_availability))
+    is_read = bool(payload.get("is_read", False))
+
+    payload["availability_status"] = availability_status
+    payload["availability_locked"] = availability_locked
+    payload.update(derive_legacy_fields(is_read, availability_status, availability_locked))
+
+
+def _apply_availability_bridge_for_update(payload: dict, db_book: Book) -> None:
+    """"Touched key" locking, update-path variant: `payload` only contains
+    keys the client actually sent (see update_book's exclude_unset=True), so
+    presence of "availability_status" in it -- not its value -- is what
+    means "the user just chose this", which is exactly what should flip
+    availability_locked on. A PUT that never mentions availability_status
+    (e.g. editing just the title, or the edit form's "status untouched"
+    path -- see book-app-ui/hooks/use-edit-book-form.ts) must leave the
+    existing lock state completely alone; this is the fix for the "toggled
+    to unread but it silently reverted to available" bug, since a book's
+    existing lock can no longer be flipped by a request that doesn't even
+    mention this axis. Mutates `payload` in place, also refreshing the
+    derived legacy fields against the row's *effective* post-update state
+    (payload value if touched, otherwise the row's current value) so they
+    never fall out of sync with the two-axis truth on any update, even one
+    that leaves both axes alone.
+    """
+    if "availability_status" in payload:
+        payload["availability_status"] = normalize_availability_status(payload["availability_status"])
+        if "availability_locked" not in payload:
+            payload["availability_locked"] = True
+
+    effective_is_read = bool(payload["is_read"]) if "is_read" in payload else bool(db_book.is_read)
+    effective_availability_status = normalize_availability_status(
+        payload["availability_status"] if "availability_status" in payload else db_book.availability_status
+    )
+    effective_availability_locked = bool(
+        payload["availability_locked"] if "availability_locked" in payload else db_book.availability_locked
+    )
+    payload.update(derive_legacy_fields(effective_is_read, effective_availability_status, effective_availability_locked))
+
+
 def _should_clear_ghost_flags(db_book: Book, payload: dict) -> bool:
     if not (db_book.is_missing or db_book.is_upcoming_auto or db_book.is_upcoming_final):
         return False
@@ -174,6 +228,7 @@ def create_book(db: Session, book, profile_id: str):
     payload.update(
         provenance_for_find_bind(find_confidence) if find_confidence else provenance_for_declined_or_manual_entry()
     )
+    _apply_availability_bridge_for_create(payload)
     _validate_series_belongs_to_profile(db, payload.get("series_id"), profile_id)
     _validate_book_number_requires_series(payload)
     payload["profile_id"] = profile_id
@@ -235,6 +290,17 @@ def update_book(db: Session, book_id: int, book, profile_id: str):
         payload.setdefault("is_missing", False)
         payload.setdefault("is_upcoming_auto", False)
         payload.setdefault("is_upcoming_final", False)
+        # Mirror the ghost-clear onto the new availability axis too, but
+        # only when this request didn't already touch it explicitly --
+        # an edit that title-corrects/confirms/marks-read a stale "upcoming"
+        # ghost row should knock it out of "upcoming" the same way it always
+        # cleared is_upcoming_auto/final, and unlocked (not "owned"/
+        # "available" is nobody's explicit choice here) so discovery/Check
+        # Now can still manage it going forward.
+        if "availability_status" not in payload and normalize_availability_status(db_book.availability_status) == "upcoming":
+            payload["availability_status"] = "available"
+            payload.setdefault("availability_locked", False)
+    _apply_availability_bridge_for_update(payload, db_book)
     for key, value in payload.items():
         setattr(db_book, key, value)
 

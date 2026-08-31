@@ -7,6 +7,27 @@
 
 export type BookStatus = "unread" | "available" | "upcoming" | "read";
 
+/** The backend's independent availability axis (see models.Book's
+ * docstring) -- "upcoming" (not released yet), "available" (exists, not
+ * yet owned/downloaded), "owned" (the user has their own copy). Kept
+ * distinct from BookStatus, which is still the single dropdown value the
+ * Add/Edit Book forms show; statusToAvailability below is the one place
+ * that translates between the two. */
+export type AvailabilityStatus = "upcoming" | "available" | "owned";
+
+/** Add/Edit Book only exposes one Status dropdown (unread/read/available/
+ * upcoming), but the backend now tracks reading and availability as two
+ * independent axes (is_read + availability_status -- see models.Book's
+ * docstring). This is the one place that translation happens: "unread" and
+ * "read" both mean the user already has the book, so both map to "owned";
+ * "available" maps straight across; anything else (currently just
+ * "upcoming") maps to "upcoming". */
+export function statusToAvailability(status: BookStatus | string): AvailabilityStatus {
+  if (status === "unread" || status === "read") return "owned";
+  if (status === "available") return "available";
+  return "upcoming";
+}
+
 export function normalizeText(value: unknown): string {
   return String(value ?? "").trim().toLowerCase();
 }

@@ -12,7 +12,7 @@ import {
 } from "@/components/books/add-book-form-fields";
 import { useToast } from "@/components/ui/use-toast";
 import { fetchApiWithFallback } from "@/lib/api-client";
-import { type BookStatus, normalizeText, toIsoDateString } from "@/lib/book-format";
+import { type BookStatus, normalizeText, statusToAvailability, toIsoDateString } from "@/lib/book-format";
 import { lockedSeriesEditDates } from "@/lib/locked-series-edit";
 import { publishBookStatusUpdate } from "@/lib/book-status-sync";
 
@@ -87,6 +87,15 @@ export function useEditBookForm(options: {
   const [loadedBook, setLoadedBook] = useState<BookRecord | null>(null);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(false);
+  // Set by onStatusChange the moment the user actually picks a new Status
+  // value, reset whenever a book (re)loads. Governs whether handleSave
+  // sends availability_status at all -- see crud.books._apply_
+  // availability_bridge_for_update's "touched key" locking rule and
+  // handleSave's own comment below. Without this, every save (even one
+  // that only fixes a typo in the title) would silently re-derive/re-lock
+  // availability_status from date inference, which is exactly the "toggled
+  // to unread but it silently reverted to available" bug.
+  const [statusTouched, setStatusTouched] = useState(false);
   const [notFound, setNotFound] = useState(false);
   const [lookingUpBook, setLookingUpBook] = useState(false);
   const [showLookupSummary, setShowLookupSummary] = useState(false);
@@ -136,6 +145,7 @@ export function useEditBookForm(options: {
       }
       setLoadedBook(book);
       setForm(nextForm);
+      setStatusTouched(false);
       setLookupResult(null);
       setShowLookupSummary(Boolean(nextForm.autoSummary));
     } catch (error) {
@@ -180,6 +190,7 @@ export function useEditBookForm(options: {
   }
 
   function onStatusChange(nextStatus: BookStatus) {
+    setStatusTouched(true);
     setForm((prev) => ({
       ...prev,
       status: nextStatus,
@@ -336,15 +347,45 @@ export function useEditBookForm(options: {
         : null;
       const libraryReleaseDate = readStatus !== "read" ? form.releaseDate.trim() : "";
 
-      const lockedDates = seriesLocked
-        ? lockedSeriesEditDates({
-            status: form.status,
-            releaseDate: form.releaseDate,
-            readDate: form.readDate,
-            existingReleaseDate: loadedBook?.release_date,
-            existingPublicationDate: loadedBook?.publication_date,
-          })
-        : null;
+      // statusTouched governs whether this save is allowed to touch the
+      // availability axis at all (see the state declaration above and
+      // crud.books._apply_availability_bridge_for_update's "touched key"
+      // locking rule):
+      // - Touched: the explicit form status is sent as-is, bypassing
+      //   lockedSeriesEditDates's date/status inference entirely -- that
+      //   inference silently overriding an explicit choice (e.g. an
+      //   already-past publication_date flipping a just-picked "unread"
+      //   back to "available") is exactly the bug this fixes.
+      // - Untouched: falls back to the exact same lockedSeriesEditDates
+      //   inference as before for dates/is_read, and availability_status is
+      //   omitted from the request body entirely -- an edit that never
+      //   touches Status (e.g. fixing a typo in the title) must never
+      //   accidentally lock/move this book's availability.
+      let effectiveReadDate: string | null;
+      let effectiveReleaseDate: string | null;
+      let effectiveIsRead: boolean;
+      let availabilityStatusForPayload: string | undefined;
+
+      if (statusTouched) {
+        effectiveReadDate = libraryReadDate;
+        effectiveReleaseDate = libraryReleaseDate || null;
+        effectiveIsRead = isRead;
+        availabilityStatusForPayload = statusToAvailability(readStatus);
+      } else {
+        const lockedDates = seriesLocked
+          ? lockedSeriesEditDates({
+              status: form.status,
+              releaseDate: form.releaseDate,
+              readDate: form.readDate,
+              existingReleaseDate: loadedBook?.release_date,
+              existingPublicationDate: loadedBook?.publication_date,
+            })
+          : null;
+        effectiveReadDate = lockedDates ? lockedDates.read_date : libraryReadDate;
+        effectiveReleaseDate = lockedDates ? lockedDates.release_date : (libraryReleaseDate || null);
+        effectiveIsRead = lockedDates ? lockedDates.is_read : isRead;
+        availabilityStatusForPayload = undefined;
+      }
 
       // Belt-and-suspenders alongside onClassificationChange's clearing of
       // bookNumber -- Standalone never sends a book number, matching the
@@ -360,11 +401,11 @@ export function useEditBookForm(options: {
           series_id: resolvedSeriesId,
           series_order: effectiveBookNumber,
           book_number: effectiveBookNumber,
-          release_date: lockedDates ? lockedDates.release_date : (libraryReleaseDate || null),
+          release_date: effectiveReleaseDate,
           publication_date: form.publicationDate || null,
-          read_date: lockedDates ? lockedDates.read_date : libraryReadDate,
-          read_status: lockedDates ? lockedDates.read_status : readStatus,
-          is_read: lockedDates ? lockedDates.is_read : isRead,
+          read_date: effectiveReadDate,
+          ...(availabilityStatusForPayload ? { availability_status: availabilityStatusForPayload } : {}),
+          is_read: effectiveIsRead,
           auto_summary: form.autoSummary || null,
         }),
       });

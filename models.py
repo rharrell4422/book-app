@@ -274,6 +274,24 @@ class Book(Base):
     date_started = Column(Date, nullable=True)
     date_finished = Column(Date, nullable=True)
     read_status = Column(String, nullable=True)  # unread, reading, read, abandoned
+    # Availability axis -- independent of the reading axis above (is_read/
+    # read_status). "upcoming" (not yet released), "available" (released,
+    # not yet owned/downloaded), "owned" (the user has their own copy).
+    # Deliberately separate from read_status: a book can be "available" (a
+    # digital copy exists that the user hasn't downloaded) AND "unread" at
+    # the same time -- collapsing both into one field is exactly the bug
+    # that prompted this column (see the "Two-Axis Status Architecture"
+    # design chat). read_status/is_upcoming_auto/is_upcoming_final are kept
+    # in sync from this + is_read as a legacy bridge for not-yet-migrated
+    # consumers -- see services/availability_bridge.py.
+    availability_status = Column(String, default="available")  # upcoming, available, owned
+    # True once a user (manual edit, CSV import with an explicit token) or
+    # a self-heal rule has authoritatively set availability_status --
+    # discovery/Check Now and library_sync may only write availability_status
+    # while this is False (see services/availability_bridge.py and
+    # library_sync.update_from_series), so a user's explicit choice can
+    # never be silently overwritten by a later automated run.
+    availability_locked = Column(Boolean, default=False)
     rating = Column(Integer, nullable=True)
     external_rating = Column(Float, nullable=True)
     external_rating_count = Column(Integer, nullable=True)

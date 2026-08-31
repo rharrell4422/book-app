@@ -27,6 +27,7 @@ try:
     from models import Series, Book
     from intelligence import recalculate_intelligence
     from services.identity import is_placeholder_author
+    from services.availability_bridge import derive_legacy_fields
     import discovery_engine
 except Exception as e:
     print("\n\n🔥 IMPORTER MODULE FAILED DURING IMPORT 🔥")
@@ -73,6 +74,31 @@ HEADER_MAP: Dict[str, List[str]] = {
     "review": ["review", "review text", "comments"],
     "notes": ["notes", "note", "personal notes"],
     "tags": ["tags", "labels", "categories"],
+}
+
+
+# Explicit-token normalization for the imported Read/Status column,
+# mapping onto the two-axis model (see services/availability_bridge.py and
+# models.Book's docstring). Reading axis (is_read) and availability axis
+# (availability_status/availability_locked) are derived independently from
+# the same raw token rather than one being inferred from the other, so a
+# spreadsheet's "Unread" row (owned, not yet read) is never confused with
+# an "Available" row (exists, not yet owned/downloaded).
+_IMPORT_READ_TOKENS = {"read", "completed", "finished"}
+# Only these tokens are unambiguous enough to *lock* availability_status --
+# an explicit spreadsheet cell is exactly as authoritative as a manual Edit
+# Book choice. Anything else (blank, "reading", "dnf", free text, etc.) is
+# ambiguous and is left unlocked at the column default so discovery/Check
+# Now can still manage it going forward.
+_IMPORT_AVAILABILITY_TOKEN_MAP = {
+    "read": "owned",
+    "completed": "owned",
+    "finished": "owned",
+    "unread": "owned",
+    "available": "available",
+    "upcoming": "upcoming",
+    "tbr": "upcoming",
+    "to be read": "upcoming",
 }
 
 
@@ -201,12 +227,32 @@ def import_row(raw_headers: List[str], row_values: List[Any]) -> Tuple[Dict[str,
     # DERIVED FIELDS
     # ------------------------------------------------------------
     read_status_raw = (book_data.get("read_status") or "").strip().lower()
-    is_read = read_status_raw in ["read", "completed", "finished"]
-    is_upcoming = read_status_raw in ["upcoming", "tbr", "to be read"]
+    is_read = read_status_raw in _IMPORT_READ_TOKENS
+    availability_token = _IMPORT_AVAILABILITY_TOKEN_MAP.get(read_status_raw)
+    if availability_token is not None:
+        availability_status = availability_token
+        availability_locked = True
+    else:
+        # Ambiguous/blank cell: don't lock, so this row's availability can
+        # still be corrected by discovery/Check Now going forward, same as
+        # a brand-new manually-added book with no status chosen yet.
+        availability_status = "available"
+        availability_locked = False
+
+    legacy = derive_legacy_fields(
+        is_read=is_read, availability_status=availability_status, availability_locked=availability_locked
+    )
 
     book_data["is_read"] = is_read
-    book_data["is_upcoming"] = is_upcoming
-    book_data["read_status"] = read_status_raw
+    book_data["availability_status"] = availability_status
+    book_data["availability_locked"] = availability_locked
+    book_data["read_status"] = legacy["read_status"]
+    book_data["is_upcoming_auto"] = legacy["is_upcoming_auto"]
+    book_data["is_upcoming_final"] = legacy["is_upcoming_final"]
+    # Imported rows are never a discovery-provenance "ghost" -- is_missing
+    # is a Check Now/discovery-only signal (see models.Book.is_missing),
+    # never something a spreadsheet row can claim for itself.
+    book_data["is_missing"] = False
 
     # Use date_finished as date_read
     book_data["date_read"] = normalize_date(book_data.get("date_finished"))
@@ -507,6 +553,11 @@ def create_or_update_book(db: Session, book_data: Dict[str, Any], profile_id: st
         date_started=book_data.get("date_started"),
         date_finished=book_data.get("date_finished"),
         read_status=book_data.get("read_status"),
+        availability_status=book_data.get("availability_status"),
+        availability_locked=book_data.get("availability_locked"),
+        is_upcoming_auto=book_data.get("is_upcoming_auto"),
+        is_upcoming_final=book_data.get("is_upcoming_final"),
+        is_missing=book_data.get("is_missing"),
         import_raw_headers=book_data.get("import_raw_headers"),
         import_raw_row=book_data.get("import_raw_row"),
     )
