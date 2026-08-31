@@ -15,9 +15,9 @@ import {
   type BookStatus,
   formatDate,
   getCheckOnlineUrl,
+  getUnifiedBookStatus,
   hasUnconfirmedReleaseDate,
   getStatusChipClass as getStatusChipClassShared,
-  isPastOrTodayDate,
   normalizeText,
   parseFlexibleDate,
   toDateValue,
@@ -46,6 +46,7 @@ type BookRow = {
   author?: string | null;
   read_status?: string | null;
   is_read?: boolean | null;
+  availability_status?: string | null;
   is_missing?: boolean | null;
   is_upcoming_auto?: boolean | null;
   is_upcoming_final?: boolean | null;
@@ -62,57 +63,15 @@ type BookRow = {
 };
 
 function getBookStatus(book: BookRow): BookStatus {
-  const explicitStatus = String(book.read_status || "").trim().toLowerCase();
-
-  if (book.is_read || explicitStatus === "read") {
-    return "read";
-  }
-
-  const releaseDate = book.release_date || book.publication_date;
-
-  if (explicitStatus === "upcoming") {
-    // A stored "upcoming" flag can go stale -- e.g. a spreadsheet-imported
-    // date that was in the future at import time, or an old auto-discovery
-    // run -- so once we have an actual date and it has passed, trust the
-    // date over the flag. Mirrors the equivalent fix in library_sync.py,
-    // which re-syncs this on every "Check Now" run.
-    if (releaseDate && isPastOrTodayDate(releaseDate)) return "available";
-    return "upcoming";
-  }
-  if (explicitStatus === "available") return "available";
-  // Explicit "unread" must win outright -- previously there was no early
-  // return here, so an unread book would fall through to the date/flag
-  // inference below and get silently flipped to "available" once its
-  // release date passed (the bug this patch fixes). None of the inference
-  // branches below may run once any explicit status has matched above.
-  if (explicitStatus === "unread") return "unread";
-
-  if (releaseDate) {
-    const parsedDate = new Date(releaseDate);
-    if (!Number.isNaN(parsedDate.valueOf())) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      parsedDate.setHours(0, 0, 0, 0);
-      if (parsedDate > today) {
-        return "upcoming";
-      }
-      return "available";
-    }
-  }
-
-  if (book.is_upcoming_auto || book.is_upcoming_final) {
-    return "upcoming";
-  }
-
-  if (book.is_missing) {
-    return "available";
-  }
-
-  if (book.series_id && book.book_number !== null && book.book_number !== undefined) {
-    return "available";
-  }
-
-  return "unread";
+  // Delegates to the shared is_read + availability_status derivation (see
+  // book-format.ts's getUnifiedBookStatus docstring) -- Phase 3 of the
+  // "Two-Axis Status Architecture" design removed the legacy read_status
+  // string plus all its fallback heuristics (release-date blind inference,
+  // is_upcoming_auto/is_upcoming_final, is_missing, series_id +
+  // book_number) as the source for this badge, since those fields are no
+  // longer the authoritative source of truth and aren't guaranteed
+  // complete for every row the way is_read/availability_status are.
+  return getUnifiedBookStatus(book);
 }
 
 function getDisplayDate(book: BookRow) {

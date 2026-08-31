@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 
 from models import Series, Book
+from services.availability_bridge import normalize_availability_status
 
 
 OMNIBUS_RANGE_PATTERN = re.compile(r"\bbooks?\s+\d+(?:\.\d+)?\s*[-–]\s*\d+(?:\.\d+)?\b", re.IGNORECASE)
@@ -137,7 +138,17 @@ def recount_series_aggregates_for_series(db, series_id: int) -> dict:
 
     active_books = [book for book in books if str(getattr(book, "record_status", "active") or "active") != "deleted"]
     deleted_books = [book for book in books if str(getattr(book, "record_status", "active") or "active") == "deleted"]
-    upcoming_books = [book for book in active_books if str(getattr(book, "read_status", "") or "").strip().lower() == "upcoming"]
+    # Derived from availability_status (the authoritative field) rather
+    # than the legacy read_status bridge string -- see the "Two-Axis
+    # Status Architecture" design chat's finalized Phase-3 decision.
+    # read_status isn't guaranteed non-blank for every row the way
+    # availability_status is (services/availability_bridge.py enforces the
+    # latter on every write path), so this avoids depending on the bridge
+    # having run correctly for a given row.
+    upcoming_books = [
+        book for book in active_books
+        if normalize_availability_status(getattr(book, "availability_status", None)) == "upcoming"
+    ]
 
     numbered = []
     for book in active_books:
@@ -226,8 +237,16 @@ def compute_series_intelligence_for_series(db, series_id: int) -> dict:
     upcoming_candidates: list[float] = []
 
     for book in active_books:
-        status = str(getattr(book, "read_status", "") or "").strip().lower()
-        is_read = bool(getattr(book, "is_read", False)) or status == "read"
+        # Derived from is_read + availability_status (the authoritative
+        # fields) rather than the legacy read_status bridge string -- see
+        # the "Two-Axis Status Architecture" design chat's finalized
+        # Phase-3 decision. Preserves this function's existing semantics
+        # exactly (a not-yet-owned "available" book still counts toward
+        # unread_candidates, same as before -- this is a source swap, not
+        # a redefinition of "unread"), just sourced from fields that are
+        # guaranteed non-blank for every row, unlike read_status.
+        is_read = bool(getattr(book, "is_read", False))
+        availability = normalize_availability_status(getattr(book, "availability_status", None))
 
         if is_read:
             read_count += 1
@@ -239,10 +258,10 @@ def compute_series_intelligence_for_series(db, series_id: int) -> dict:
         except (TypeError, ValueError):
             number = None
 
-        if number is not None and number > 0 and not is_read and status != "upcoming" and float(number).is_integer():
+        if number is not None and number > 0 and not is_read and availability != "upcoming" and float(number).is_integer():
             unread_candidates.append(int(number))
 
-        if number is not None and number > 0 and status == "upcoming":
+        if number is not None and number > 0 and availability == "upcoming":
             upcoming_candidates.append(number)
 
     unread_count = max(len(active_books) - read_count, 0)

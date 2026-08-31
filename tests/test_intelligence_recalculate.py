@@ -56,6 +56,23 @@ class RecalculateIntelligenceTest(unittest.TestCase):
         return series
 
     def _add_book(self, series: Series, number, **overrides) -> Book:
+        # These fixtures predate the availability_status axis and still pass
+        # legacy read_status kwargs -- compute_series_intelligence_for_series
+        # now reads availability_status as its source of truth (see the
+        # "Two-Axis Status Architecture" design chat's finalized Phase-3
+        # decision), so backfill it here from the same legacy kwargs using
+        # the same mapping the real migration uses (see
+        # f1a2b3c4d5e6_add_availability_status_axis_to_books.py), unless a
+        # test explicitly overrides it directly.
+        if "availability_status" not in overrides:
+            read_status = str(overrides.get("read_status") or "").strip().lower()
+            if overrides.get("is_read") or read_status in ("read", "unread"):
+                overrides["availability_status"] = "owned"
+            elif read_status == "upcoming":
+                overrides["availability_status"] = "upcoming"
+            elif read_status == "available":
+                overrides["availability_status"] = "available"
+
         defaults = {
             "title": f"Some Series Book {number}",
             "author": series.author,
@@ -142,6 +159,41 @@ class RecalculateIntelligenceTest(unittest.TestCase):
         self.db.refresh(series)
         self.assertTrue(series.has_upcoming_books)
         self.assertEqual(series.next_upcoming_book_number, 2)
+
+    def test_available_not_yet_owned_book_counts_as_unread_option_a_semantics(self):
+        # Phase-3 "Two-Axis Status Architecture" decision, option A: switching
+        # the source field from legacy read_status to availability_status
+        # must not redefine what counts as "unread" -- a discovered-but-not-
+        # owned "available" book still counts toward next_unread_book_number/
+        # unread_count, exactly as it did when this was driven by
+        # read_status == "available".
+        series = self._make_series()
+        self._add_book(series, 1, is_read=True)
+        self._add_book(series, 2, availability_status="available")
+
+        result = intelligence.recalculate_intelligence(self.db, series.id)
+
+        self.assertEqual(result["next_unread_book_number"], 2)
+        self.assertIsNone(result["next_upcoming_book_number"])
+        self.assertEqual(result["upcoming_count"], 0)
+
+    def test_upcoming_classification_uses_availability_status_not_legacy_read_status(self):
+        # A book with a blank/stale read_status (the exact shape of the
+        # contaminated-row bug this phase's migration backfills) must still
+        # be classified correctly, because compute_series_intelligence_for_
+        # series now reads availability_status directly rather than
+        # depending on read_status having been derived.
+        series = self._make_series()
+        self._add_book(series, 1, is_read=True)
+        book = self._add_book(series, 2, availability_status="upcoming")
+        book.read_status = ""
+        self.db.commit()
+
+        result = intelligence.recalculate_intelligence(self.db, series.id)
+
+        self.assertEqual(result["next_upcoming_book_number"], 2)
+        self.assertEqual(result["upcoming_count"], 1)
+        self.assertIsNone(result["next_unread_book_number"])
 
     def test_is_finished_flows_through_to_series_status(self):
         series = self._make_series(is_finished=True)

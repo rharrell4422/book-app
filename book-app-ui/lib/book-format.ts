@@ -28,6 +28,49 @@ export function statusToAvailability(status: BookStatus | string): AvailabilityS
   return "upcoming";
 }
 
+/** The single source of truth for the unified status badge shown across the
+ * Library, Standalone, and Series views (see the "Two-Axis Status
+ * Architecture" design chat's finalized Phase-3 decision). This reads the
+ * authoritative is_read + availability_status fields directly instead of
+ * the legacy read_status bridge string -- unlike read_status, these two
+ * fields are guaranteed non-blank/canonical for every book (enforced by
+ * services/availability_bridge.py on every write path), so there is no
+ * fallback-heuristic branch here for a missing/unrecognized value the way
+ * the old getBookStatus() implementations had (release-date blind
+ * inference, is_upcoming_auto/is_upcoming_final, is_missing, series_id +
+ * book_number). The sole exception below (stale-upcoming) is a deliberate,
+ * narrow display-only self-heal, not a fallback for missing data. */
+export function getUnifiedBookStatus(book: {
+  is_read?: boolean | null;
+  availability_status?: string | null;
+  release_date?: string | null;
+  publication_date?: string | null;
+}): BookStatus {
+  if (book.is_read) return "read";
+
+  const availability = normalizeText(book.availability_status);
+
+  if (availability === "upcoming") {
+    // Stale-upcoming self-heal -- mirrors
+    // services.availability_bridge.should_self_heal_stale_upcoming: a
+    // stored "upcoming" whose release date has already passed is stale by
+    // definition, even if discovery/Check Now hasn't re-synced it yet.
+    // Display-only -- does not persist/unlock anything, unlike the
+    // backend's own self-heal.
+    const releaseDate = book.release_date || book.publication_date;
+    if (releaseDate && isPastOrTodayDate(releaseDate)) return "available";
+    return "upcoming";
+  }
+
+  if (availability === "owned") return "unread";
+
+  // "available", plus anything blank/unrecognized -- mirrors
+  // normalize_availability_status's own default (see
+  // services/availability_bridge.py), so an unexpected value here fails
+  // the same direction the backend already does.
+  return "available";
+}
+
 export function normalizeText(value: unknown): string {
   return String(value ?? "").trim().toLowerCase();
 }

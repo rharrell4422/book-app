@@ -22,9 +22,8 @@ import {
   formatDate,
   getCheckOnlineUrl,
   getStatusChipClass,
+  getUnifiedBookStatus,
   hasUnconfirmedReleaseDate,
-  isFutureDate,
-  isPastOrTodayDate,
 } from "@/lib/book-format";
 import { ConfirmDialog, type ConfirmDialogState } from "@/components/confirm-dialog";
 import { AddBookDialog } from "@/components/books/add-book-dialog";
@@ -58,6 +57,7 @@ type BookRecord = {
   author?: string | null;
   read_status?: string | null;
   is_read?: boolean | null;
+  availability_status?: string | null;
   is_missing?: boolean | null;
   is_upcoming_auto?: boolean | null;
   is_upcoming_final?: boolean | null;
@@ -309,67 +309,16 @@ function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function hasUpcomingBookSignals(book: BookRecord) {
-  const status = String(book.read_status || "").trim().toLowerCase();
-  if (status === "upcoming" || status === "tbr" || status === "to be read") {
-    return true;
-  }
-
-  if (book.is_read) {
-    return false;
-  }
-
-  if (book.release_date || book.publication_date) {
-    const parsedDate = new Date(book.release_date || book.publication_date || "");
-    if (!Number.isNaN(parsedDate.valueOf())) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      parsedDate.setHours(0, 0, 0, 0);
-      return parsedDate > today;
-    }
-  }
-
-  return false;
-}
-
+// Delegates to the shared is_read + availability_status derivation (see
+// book-format.ts's getUnifiedBookStatus docstring) -- Phase 3 of the
+// "Two-Axis Status Architecture" design removed this view's own fallback
+// heuristics (release-date blind inference, the "tbr"/"to be read"
+// read_status string-matching in the now-deleted hasUpcomingBookSignals)
+// as the source for this badge, since read_status guessing is no longer
+// the authoritative source of truth once availability_status is reliably
+// populated on every row.
 function getBookStatus(book: BookRecord) {
-  if (book.is_read || String(book.read_status || "").trim().toLowerCase() === "read") {
-    return "read";
-  }
-
-  const explicitStatus = String(book.read_status || "").trim().toLowerCase();
-  const releaseDate = String(book.release_date || book.publication_date || "").trim();
-
-  if (explicitStatus === "upcoming") {
-    // A stored "upcoming" flag can go stale -- e.g. a spreadsheet-imported
-    // date that was in the future at import time, or an old auto-discovery
-    // run -- so once we have an actual date and it has passed, trust the
-    // date over the flag. Mirrors the equivalent fix in library_sync.py,
-    // which re-syncs this on every "Check Now" run.
-    if (releaseDate && isPastOrTodayDate(releaseDate)) return "available";
-    return "upcoming";
-  }
-  if (explicitStatus === "available") {
-    return "available";
-  }
-  // Explicit "unread" must win outright -- previously there was no early
-  // return here, so an unread book would fall through to the date/flag
-  // inference below and get silently flipped to "available" once its
-  // release date passed (the bug this patch fixes). None of the inference
-  // branches below may run once any explicit status has matched above.
-  if (explicitStatus === "unread") {
-    return "unread";
-  }
-
-  if (releaseDate) {
-    return isFutureDate(releaseDate) ? "upcoming" : "available";
-  }
-
-  if (hasUpcomingBookSignals(book)) {
-    return "upcoming";
-  }
-
-  return "unread";
+  return getUnifiedBookStatus(book);
 }
 
 function getBookDate(book: BookRecord) {
@@ -1409,6 +1358,13 @@ export default function SeriesDetailPage() {
           id: bookId,
           is_read: Boolean(existing.is_read),
           read_status: String(existing.read_status || (existing.is_read ? "read" : "unread")),
+          // Carried forward unchanged -- this sync call only follows a
+          // title rename, but omitting it would make normalizePayload emit
+          // an explicit null, which subscribers' {...book, ...payload}
+          // merge would use to clobber the real availability_status they
+          // already have (see book-status-sync.ts's BookStatusSyncPayload
+          // docstring).
+          availability_status: existing.availability_status ?? null,
           read_date: existing.read_date ?? null,
           release_date: existing.release_date ?? null,
           publication_date: existing.publication_date ?? null,

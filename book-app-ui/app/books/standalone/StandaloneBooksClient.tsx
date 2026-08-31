@@ -16,8 +16,8 @@ import {
   formatDate,
   getCheckOnlineUrl,
   getStatusChipClass,
+  getUnifiedBookStatus,
   hasUnconfirmedReleaseDate,
-  isPastOrTodayDate,
   parseFlexibleDate,
 } from "@/lib/book-format";
 import { EditBookDialog } from "@/components/books/edit-book-dialog";
@@ -40,6 +40,7 @@ type BookRow = {
   author?: string | null;
   read_status?: string | null;
   is_read?: boolean | null;
+  availability_status?: string | null;
   release_date?: string | null;
   publication_date?: string | null;
   read_date?: string | null;
@@ -53,42 +54,14 @@ type BookRow = {
 type SortKey = "title" | "author" | "status" | "date";
 type SortDirection = "asc" | "desc";
 
-// Deliberately duplicated (rather than imported) from BooksClient.tsx -- this
-// view is intentionally kept small and standalone, with none of the
-// series-specific logic (next-book lookahead, KU/upcoming discovery, etc.)
-// that the series pages carry. It only ever needs the plain fields already
-// present on a book record.
+// Delegates to the shared is_read + availability_status derivation (see
+// book-format.ts's getUnifiedBookStatus docstring) -- Phase 3 of the
+// "Two-Axis Status Architecture" design removed this view's own
+// release-date-inference fallback as the source for this badge, since
+// read_status/release_date guessing is no longer the authoritative source
+// of truth once availability_status is reliably populated on every row.
 function getBookStatus(book: BookRow): BookStatus {
-  const explicitStatus = String(book.read_status || "").trim().toLowerCase();
-
-  if (book.is_read || explicitStatus === "read") {
-    return "read";
-  }
-
-  const releaseDate = book.release_date || book.publication_date;
-
-  if (explicitStatus === "upcoming") {
-    if (releaseDate && isPastOrTodayDate(releaseDate)) return "available";
-    return "upcoming";
-  }
-  if (explicitStatus === "available") return "available";
-  // Explicit "unread" must win outright -- previously there was no early
-  // return here, so an unread book would fall through to the date
-  // inference below and get silently flipped to "available" once its
-  // release date passed (the bug this patch fixes).
-  if (explicitStatus === "unread") return "unread";
-
-  if (releaseDate) {
-    const parsedDate = parseFlexibleDate(releaseDate);
-    if (parsedDate) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      parsedDate.setHours(0, 0, 0, 0);
-      return parsedDate > today ? "upcoming" : "available";
-    }
-  }
-
-  return "unread";
+  return getUnifiedBookStatus(book);
 }
 
 function getDisplayDate(book: BookRow): string | null {
