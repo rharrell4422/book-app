@@ -351,11 +351,28 @@ class SeriesAgentGateShadowWiringTest(unittest.TestCase):
             agent = SeriesIntelligenceAgent()
             result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
 
-        spy_gate.assert_called_once()
-        gate_call_args = spy_gate.call_args[0]
+        # Phase 2 dual execution mode (see tests/test_agentic_hooks.py's
+        # test_hooks_are_actually_invoked_during_a_real_run_without_
+        # changing_the_result for the full explanation): agents/
+        # agentic_series_agent.run_agentic_turn now also replays its own
+        # deterministic shadow_gate_trace/shadow_probe calls, once per
+        # skeleton candidate number (this fixture's owned books:
+        # 1-6/8/9 -- book 7 is still only a live-discovered candidate,
+        # not yet in the skeleton by the time the shadow replay runs),
+        # on the SAME shared `agentic_hooks` module these spies patch --
+        # so both fire more than once per run now. Assert on the ONE call
+        # carrying the live routing loop's own args (book_number=7)
+        # rather than an exact total call count tied to this fixture's
+        # owned-book count, which is what the shadow replay's own,
+        # separately-covered behavior determines, not this test's
+        # concern.
+        self.assertGreaterEqual(spy_gate.call_count, 1)
+        live_gate_calls = [call for call in spy_gate.call_args_list if call.args[1] == 7]
+        self.assertEqual(len(live_gate_calls), 1)
+        gate_call_args = live_gate_calls[0].args
         self.assertEqual(gate_call_args[1], 7)  # book_number
         self.assertTrue(gate_call_args[3]["belongs_to_series"])  # gate_output
-        spy_probe.assert_called_once()
+        self.assertGreaterEqual(spy_probe.call_count, 1)
 
         # Same outcome as an uninstrumented run.
         self.assertTrue(result["found"])

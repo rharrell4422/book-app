@@ -2014,7 +2014,31 @@ class SeriesIntelligenceAgent:
                 from services.agentic_evaluation_harness import _observe_live_pipeline
                 from services.agentic_skeleton_preview_store import store_agentic_skeleton_preview
 
-                dry_run_context = {"series_id": series_id, "timestamp": datetime.utcnow().isoformat()}
+                # CI hermeticity fix: this used to omit "db", so whenever
+                # AGENTIC_ROUTING_ENABLED is off (the default -- see the
+                # promotion block above, which DOES pass its own `db`)
+                # this call is the one that actually executes
+                # run_agentic_turn, and it fell back to opening a brand
+                # new SessionLocal() -- connecting to whatever real
+                # DATABASE_PATH file happens to exist on disk, completely
+                # unrelated to this run's own in-flight `db` transaction
+                # (or, in a test, to the test's own isolated session).
+                # That's harmless-by-luck on a dev machine whose local
+                # books.db happens to have a row at the same id the
+                # caller cares about, but produces a real, environment-
+                # dependent divergence anywhere that coincidence doesn't
+                # hold (a fresh CI checkout with no books.db at all: the
+                # stray session's query returns no matching series, so
+                # run_agentic_turn takes its early "series-not-found" exit
+                # instead of ever finishing its shadow pass --
+                # tests/test_agentic_hooks.py's
+                # test_hooks_are_actually_invoked_during_a_real_run_
+                # without_changing_the_result only ever caught this in CI,
+                # never locally, for exactly that reason). run_agentic_turn
+                # never writes through `db` (see its own docstring), so
+                # sharing this call's live session is exactly as safe as
+                # the promotion block already assumes it is.
+                dry_run_context = {"series_id": series_id, "timestamp": datetime.utcnow().isoformat(), "db": db}
                 agentic_trace = _run_agentic_turn_guarded(
                     run_agentic_turn, series_id, dry_run_context, shared_state=agentic_turn_state
                 )
