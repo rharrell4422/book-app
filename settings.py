@@ -82,3 +82,53 @@ def is_agentic_activated(series_id: int) -> bool:
         except ValueError:
             continue
     return series_id in activated
+
+
+# Series Fingerprint system (see discovery_agentic_fingerprint_
+# recommendation.md for the full ten-round design chain). A dedicated
+# two-tier gate, deliberately NOT a reuse of AGENTIC_ROUTING_ENABLED/
+# is_agentic_activated above -- those gate a different subsystem (the
+# agentic promotion evaluator's shadow-vs-live override), which does not
+# govern the always-live confidence_engine.py code path fingerprint
+# influence plugs into. Mirrors the same env-var-only shape (no DB-backed
+# activation table -- see the design chain's Round 3 catch: there is no
+# precedent anywhere in this codebase for a DB-driven flag, so this isn't
+# the place to introduce one).
+#
+# The fingerprint itself is always built, unconditionally, for every
+# series (Builder cost is zero -- it only reads this round's already-
+# computed delta/confidence output). This flag pair governs only whether
+# confidence_engine.compute_confidence is ever handed a non-None
+# `fingerprint` argument -- i.e. "shadow-first": compute and persist it
+# regardless, but only let it influence live scoring once explicitly
+# turned on.
+FINGERPRINT_INFLUENCE_ENABLED = bool(os.getenv("FINGERPRINT_INFLUENCE_ENABLED", "false").lower() == "true")
+
+# Comma-separated list of series_ids that may have fingerprint influence
+# active, e.g. "12,47,203". Empty/unset means no series is activated, even
+# if FINGERPRINT_INFLUENCE_ENABLED is on (see is_fingerprint_activated).
+FINGERPRINT_SERIES_ACTIVATION = os.getenv("FINGERPRINT_SERIES_ACTIVATION", "")
+
+
+def is_fingerprint_activated(series_id: int) -> bool:
+    """Per-series fingerprint-influence activation gate -- same shape and
+    same fail-soft rationale as is_agentic_activated above, but reading
+    the FINGERPRINT_* pair instead. `False` whenever
+    FINGERPRINT_INFLUENCE_ENABLED is off; otherwise `True` only if
+    `series_id` appears in the comma-separated FINGERPRINT_SERIES_
+    ACTIVATION allowlist. Reads both module attributes fresh on every
+    call, same reason as is_agentic_activated: tests need to flip them
+    without a process restart.
+    """
+    if not FINGERPRINT_INFLUENCE_ENABLED:
+        return False
+    activated: set[int] = set()
+    for raw in FINGERPRINT_SERIES_ACTIVATION.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            activated.add(int(raw))
+        except ValueError:
+            continue
+    return series_id in activated

@@ -704,29 +704,62 @@ def is_english_or_unknown(language: str | None) -> bool:
     return code in {"en", "eng", "en-us", "en-gb"}
 
 
-def parse_flexible_date(value: str | None) -> date | None:
-    """Best-effort parse of Google Books / OpenLibrary date strings, which
-    can be full dates, year-month, or just a year.
+_DATE_PRECISION_FULL = "FULL"
+_DATE_PRECISION_YEAR_MONTH = "YEAR_MONTH"
+_DATE_PRECISION_YEAR_ONLY = "YEAR_ONLY"
+
+
+def _parse_flexible_date_with_branch(value: str | None) -> tuple[date, str] | None:
+    """Private three-branch date-shape matcher shared by both
+    `parse_flexible_date` and `parse_flexible_date_with_precision` below --
+    extracted so the two never have to be kept in sync by hand as two
+    separate copies of the same three regexes (Series Fingerprint design
+    chain, `discovery_agentic_fingerprint_recommendation.md`: the cadence
+    feature needs to know *which* of the three shapes matched, but
+    `parse_flexible_date`'s existing bare-`date` return type is a real,
+    asserted contract for its four existing callers and
+    tests/test_series_discovery.py -- see that function's docstring -- so
+    this helper is additive, not a signature change).
     """
     raw = str(value or "").strip()
     if not raw:
         return None
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
         try:
-            return date.fromisoformat(raw)
+            return date.fromisoformat(raw), _DATE_PRECISION_FULL
         except ValueError:
             return None
     if re.fullmatch(r"\d{4}-\d{2}", raw):
         try:
-            return date.fromisoformat(f"{raw}-01")
+            return date.fromisoformat(f"{raw}-01"), _DATE_PRECISION_YEAR_MONTH
         except ValueError:
             return None
     if re.fullmatch(r"\d{4}", raw):
         try:
-            return date(int(raw), 1, 1)
+            return date(int(raw), 1, 1), _DATE_PRECISION_YEAR_ONLY
         except ValueError:
             return None
     return None
+
+
+def parse_flexible_date(value: str | None) -> date | None:
+    """Best-effort parse of Google Books / OpenLibrary date strings, which
+    can be full dates, year-month, or just a year.
+    """
+    parsed = _parse_flexible_date_with_branch(value)
+    return parsed[0] if parsed else None
+
+
+def parse_flexible_date_with_precision(value: str | None) -> tuple[date, str] | None:
+    """Same parse as `parse_flexible_date`, plus which of the three date
+    shapes actually matched (`"FULL"` | `"YEAR_MONTH"` | `"YEAR_ONLY"`) --
+    additive, used only by the Series Fingerprint cadence feature
+    (`confidence_engine._number_confidence`) to size its date-precision
+    safety margin per comparison instead of a flat worst-case constant.
+    Returns `None` under the exact same conditions `parse_flexible_date`
+    returns `None`.
+    """
+    return _parse_flexible_date_with_branch(value)
 
 
 def classify_upcoming(parsed_date: date | None, upcoming_hint: bool | None) -> bool:

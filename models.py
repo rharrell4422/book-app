@@ -404,6 +404,82 @@ class SeriesSkeleton(Base):
     series = relationship("Series")
 
 
+class SeriesFingerprint(Base):
+    """Durable per-series *identity/pattern* memory -- a narrow, additive
+    companion to `SeriesSkeleton`, not a replacement or a second copy of
+    it (see `discovery_agentic_fingerprint_recommendation.md` for the full
+    ten-round design chain this table implements).
+
+    Boundary, stated once here since it governs everything else about this
+    table: `SeriesSkeleton` remains the sole owner of titles, numbering,
+    status, confidence, sources, and gaps -- one row per known book.
+    `SeriesFingerprint` owns exactly the four signals that have no home on
+    `SeriesSkeleton` at all: who this series' author might also be
+    credited as, what branding noise this series' catalog listings tend
+    to carry, which providers' hits for *this* series have historically
+    turned out trustworthy, and how far apart this series' volumes tend to
+    release. One row per series (`series_id` is the primary key, same
+    shape as `SeriesSkeleton`) -- there is exactly one fingerprint per
+    series, same as there is exactly one skeleton.
+
+    Two independent write paths, both in `services/fingerprint_store.py`,
+    mirroring `SeriesSkeleton`'s own Builder/Consumer split:
+      - Builder (`apply_fingerprint_updates`): runs post-round, after
+        fusion/delta/confidence/persistence, from the same
+        `services/series_check_engine.py` call site that already calls
+        `apply_skeleton_updates`. Merges this round's observations
+        (`result["fingerprint_updates"]`, computed purely inside
+        `agents/series_agent.py` with no DB access of its own) into the
+        durable row.
+      - Consumer (`get_effective_fingerprint`): read once per job, before
+        confidence scoring, gated by `settings.FINGERPRINT_INFLUENCE_ENABLED`
+        + `settings.is_fingerprint_activated(series_id)` -- a dedicated
+        two-tier gate, deliberately *not* the pre-existing
+        `AGENTIC_ROUTING_ENABLED`/`is_agentic_activated` pair, which gates
+        an unrelated subsystem (the agentic promotion evaluator) and does
+        not govern the always-live `confidence_engine.py` code path this
+        table feeds. The fingerprint itself is always built (shadow-first,
+        zero cost -- it only reads this round's already-computed
+        delta/confidence output); the gate controls only whether
+        `confidence_engine.compute_confidence` is ever handed a non-`None`
+        `fingerprint` argument.
+
+    `fingerprint_json` shape (a single flat dict, not a list of entries --
+    unlike `SeriesSkeleton.skeleton_json`, there is no per-book axis here):
+        {
+          "author_aliases": [str, ...],
+          "naming_patterns": [str, ...],
+          "provider_bias": {provider_name: float, ...},   # 0.5-1.5 multiplier
+          "release_cadence": {
+              "mean_interval_days": float | None,
+              "stddev_interval_days": float | None,
+              "interval_count": int,
+          },
+        }
+    Every field is model-agnostic and provider-agnostic -- plain strings,
+    floats, and counts, never an LLM-specific shape -- per the design
+    chain's item 4 (model-agnostic schema).
+    """
+
+    __tablename__ = "series_fingerprint"
+
+    series_id = Column(Integer, ForeignKey("series.id"), primary_key=True)
+
+    fingerprint_json = Column(JSON, nullable=False, default=dict)
+
+    # Matches services/fingerprint_store.SCHEMA_VERSION.
+    schema_version = Column(Integer, nullable=False, default=1)
+
+    # Optimistic-concurrency token, same role as SeriesSkeleton.version --
+    # see services/fingerprint_store._upsert_fingerprint_row.
+    version = Column(Integer, nullable=False, default=0, server_default="0")
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    series = relationship("Series")
+
+
 class Notification(Base):
     """Durable series-level discovery notification (see the "Durable
     Series-Level Discovery Notifications" design chat's finalized spec).

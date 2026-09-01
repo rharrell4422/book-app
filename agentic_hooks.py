@@ -318,6 +318,56 @@ def shadow_skeleton_merge_trace(context: dict, before, after) -> None:
         logger.exception("agentic_hooks.shadow_skeleton_merge_trace failed; continuing")
 
 
+def shadow_fingerprint_merge_trace(context: dict, before: dict, after: dict) -> None:
+    """Series Fingerprint design chain (see
+    `discovery_agentic_fingerprint_recommendation.md`): the fingerprint
+    analogue of `shadow_skeleton_merge_trace` above, but with genuinely
+    different diff semantics -- `SeriesFingerprint.fingerprint_json` is a
+    single flat per-series dict (`author_aliases`, `naming_patterns`,
+    `provider_bias`, `release_cadence`), not a list of book-number-keyed
+    entries, so a book-number-set diff does not apply here. This function
+    diffs at the field level instead: list fields report which items were
+    added, `provider_bias` reports which provider keys changed value, and
+    `release_cadence` reports its own before/after dict wholesale (it's a
+    small, fully-recomputed stat blob each round, not worth a sub-diff).
+    `services/fingerprint_store.py` passes in the exact
+    `existing_fingerprint`/`new_fingerprint` dicts its own unmodified
+    `_upsert_fingerprint_row`/`merge_fn` logic already computed, strictly
+    after a successful commit -- same non-feedback guarantee as
+    `shadow_skeleton_merge_trace`.
+    """
+    try:
+        context = context if isinstance(context, dict) else {}
+        before_dict = before if isinstance(before, dict) else {}
+        after_dict = after if isinstance(after, dict) else {}
+
+        before_aliases = set(before_dict.get("author_aliases") or [])
+        after_aliases = set(after_dict.get("author_aliases") or [])
+        before_patterns = set(before_dict.get("naming_patterns") or [])
+        after_patterns = set(after_dict.get("naming_patterns") or [])
+        before_bias = before_dict.get("provider_bias") or {}
+        after_bias = after_dict.get("provider_bias") or {}
+        changed_bias = {
+            provider: {"before": before_bias.get(provider), "after": value}
+            for provider, value in after_bias.items()
+            if before_bias.get(provider) != value
+        }
+
+        entry = {
+            "turn_id": context.get("turn_id"),
+            "series_id": context.get("series_id"),
+            "added_author_aliases": sorted(after_aliases - before_aliases),
+            "added_naming_patterns": sorted(after_patterns - before_patterns),
+            "changed_provider_bias": changed_bias,
+            "release_cadence_before": before_dict.get("release_cadence"),
+            "release_cadence_after": after_dict.get("release_cadence"),
+            "recorded_at": _now_iso(),
+        }
+        logger.info("agentic_shadow_fingerprint_merge_trace %s", entry)
+    except Exception:
+        logger.exception("agentic_hooks.shadow_fingerprint_merge_trace failed; continuing")
+
+
 def shadow_gate_trace(context: dict, book_number: float | None, gate_input: dict, gate_output: dict) -> None:
     """PB-5: records the belongs-to-series gate's inputs (title/number
     match signals the caller already computed -- explicit/partial title

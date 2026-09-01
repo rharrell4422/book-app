@@ -18,6 +18,7 @@ from services import candidate_notifications
 from services.discovery_cache import DiscoveryCache
 from services.discovery_logging import log_discovery_summary
 from services.discovery_telemetry import DiscoveryTelemetry
+from services.fingerprint_store import build_fingerprint_observations, get_effective_fingerprint
 from services.identity import owned_title_for_identity
 from services.skeleton_store import backfill_skeleton_for_series
 
@@ -637,6 +638,12 @@ def _empty_result(series_id: int | None, series_name: str | None, reason: str) -
         # _needs_review_to_skeleton_updates for the populated case.
         "skeleton_updates": [],
         "probes": [],
+        # Series Fingerprint system (see discovery_agentic_fingerprint_
+        # recommendation.md): mirrors skeleton_updates' shape/rationale
+        # above -- always present so services/series_check_engine.py's
+        # apply_fingerprint_updates call has a real, empty-safe payload to
+        # reason about rather than relying on result.get(...) to default.
+        "fingerprint_updates": None,
         "found": False,
         "candidate": None,
         "provider_failures": [],
@@ -889,6 +896,7 @@ class SeriesIntelligenceAgent:
             # needs_review vs. dropped) an already-discovered candidate lands
             # in.
             series_confidence: dict = {"confidence": []}
+            fingerprint_updates_this_round: dict | None = None
             try:
                 # Rebuilt here rather than just read, so a stale/missing
                 # SeriesSkeleton row (e.g. between boot and the first Check
@@ -925,6 +933,16 @@ class SeriesIntelligenceAgent:
                 )
                 logger.info("series_delta: %s", json.dumps(series_delta, default=str))
 
+                # Series Fingerprint system (discovery_agentic_fingerprint_
+                # recommendation.md): resolved exactly once, here -- the
+                # two-tier activation gate (settings.
+                # FINGERPRINT_INFLUENCE_ENABLED + is_fingerprint_activated)
+                # is checked only inside get_effective_fingerprint, never
+                # by confidence_engine.py itself. None (gate closed, or no
+                # fingerprint row yet) reproduces compute_confidence's
+                # exact pre-fingerprint behavior.
+                effective_fingerprint = get_effective_fingerprint(db, series_id)
+
                 series_confidence = confidence_engine.compute_confidence(
                     series_id,
                     skeleton_entries,
@@ -937,8 +955,27 @@ class SeriesIntelligenceAgent:
                     # module's docstring for why shadow_context defaulting
                     # to None elsewhere changes nothing about this call.
                     shadow_context=agentic_context,
+                    fingerprint=effective_fingerprint,
                 )
                 logger.info("series_confidence: %s", json.dumps(series_confidence, default=str))
+
+                # Fingerprint Builder: pure, no DB access, computed from
+                # this round's already-computed skeleton/delta/confidence
+                # output alone (zero additional cost) -- threaded through
+                # result["fingerprint_updates"] below to
+                # services/series_check_engine.py, which is the only
+                # caller of fingerprint_store.apply_fingerprint_updates
+                # (post-persistence, same call site as
+                # skeleton_store.apply_skeleton_updates). Computed
+                # unconditionally, regardless of the activation gate above
+                # -- "shadow-first": the fingerprint is always built, only
+                # its *influence* on scoring is gated.
+                fingerprint_updates_this_round = build_fingerprint_observations(
+                    skeleton_entries,
+                    series_delta,
+                    series_confidence,
+                    series_author=series_author,
+                )
             except Exception:
                 # If this fails, `series_confidence` stays the empty default
                 # set above -- confidence_lookup below will then be empty,
@@ -1947,6 +1984,15 @@ class SeriesIntelligenceAgent:
                 # nothing invents one here.
                 "skeleton_updates": skeleton_updates_this_round,
                 "probes": [],
+                # Series Fingerprint system: wired through to
+                # services/series_check_engine.py's post-persistence
+                # apply_fingerprint_updates call the exact same way
+                # skeleton_updates above already flows to
+                # apply_skeleton_updates. None when the try/except above
+                # failed (see the empty default set at this function's
+                # top) -- fingerprint_store.apply_fingerprint_updates
+                # treats None the same as an empty payload.
+                "fingerprint_updates": fingerprint_updates_this_round,
                 "found": found,
                 "candidate": (available_missing[0] if available_missing else (upcoming_books[0] if upcoming_books else None)),
                 "provider_failures": provider_failures,

@@ -52,7 +52,7 @@ number nothing has seen before) and get auto-dropped by the routing
 below -- the exact regression this grade exists to prevent.
 """
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import agentic_hooks
 import discovery_engine
@@ -71,6 +71,181 @@ _PROVIDER_CONFIDENCE = {
     "apify": "medium",
     "web_search": "low",  # frontier web-search snippet (formerly Brave, now Serper), per spec
 }
+
+# Series Fingerprint system (see discovery_agentic_fingerprint_
+# recommendation.md for the full ten-round design chain). `fingerprint`
+# is always the caller-resolved *effective* fingerprint -- gated once,
+# upstream, by services.fingerprint_store.get_effective_fingerprint --
+# never a raw DB row and never something this module fetches itself.
+# `None` (the default, and every call site before this feature existed)
+# is a total no-op, identical to how `shadow_context=None` already works
+# in this module: nothing below ever imports `settings` or checks either
+# fingerprint activation flag directly, preserving this module's stated
+# purity guarantee (module docstring: "makes no LLM/network/DB calls").
+
+# Provider-bias grade nudge thresholds (design chain Iteration 3 item 3 /
+# Round 4's confirmation) -- a bias at/above the upper threshold nudges a
+# provider's own grade up one step; at/below the lower threshold, down
+# one step; the (0.85, 1.15) band in between is a no-op. Implementation-
+# time tuning constants within the pinned [0.5, 1.5] bias domain (see
+# services/fingerprint_store.py's PROVIDER_BIAS_MIN/MAX).
+_PROVIDER_BIAS_GRADE_UP_THRESHOLD = 1.15
+_PROVIDER_BIAS_GRADE_DOWN_THRESHOLD = 0.85
+
+# Cadence-based number_confidence nudge (design chain Rounds 4-11, the
+# most heavily-refined single piece of this whole design). Final,
+# ten-round-converged formula:
+#
+#   ref_entry = highest-numbered SeriesSkeleton entry with
+#       book_number < candidate_number, source_class == "library",
+#       release_date resolvable  (Round 11: "library", not "confirmed" --
+#       must match the same population fingerprint_store._compute_
+#       release_cadence itself draws mu/sigma from)
+#   gap_count = candidate_number - ref_entry.book_number
+#   base_interval = max(0, mu - k * sigma)
+#   M_eff = margin_per_precision[candidate_date_precision]   (Round 9:
+#       last_date is always FULL precision -- SeriesSkeleton stores
+#       release_date as a full ISO date string -- so only the
+#       candidate's own date precision needs a margin)
+#   expected_earliest_plausible_date =
+#       ref_entry.release_date + max(0, gap_count * base_interval - M_eff)
+#   candidate_date < expected_earliest_plausible_date
+#       -> nudge number_confidence "medium" -> "low" (downward only --
+#          Round 6/7: the upward direction is inert against
+#          _overall_confidence's "unverified"-ceiling rule for every
+#          candidate this feature can ever see, so it is not implemented
+#          at all, not merely unused)
+#
+# Minimum-history floor (Round 7/8): never fires with fewer than 2
+# intervals (3+ dated library skeleton entries) -- see
+# fingerprint_store._compute_release_cadence's own floor.
+#
+# k and the per-precision margins are the one deliberately-open tuning
+# surface the design chain left for implementation time (Round 11: "the
+# *formula* is now fully pinned; the *numbers* inside it are tuning
+# parameters to set at implementation/eval time"). Both are set here on
+# the conservative, under-flagging side per the chain's explicit,
+# accepted tradeoff (Round 7/8 item 1): a false "implausibly early"
+# verdict is number_confidence's *only* unconditional, no-escalation
+# auto-reject path, so k is set high enough to keep that rare even after
+# the margin below shrinks to near-zero for well-dated comparisons.
+_CADENCE_MIN_INTERVALS = 2
+_CADENCE_K = 2.0
+_CADENCE_MARGIN_DAYS_BY_PRECISION = {
+    "FULL": 0,
+    "YEAR_MONTH": 45,
+    "YEAR_ONLY": 365,
+}
+
+
+def _nudge_grade(grade: str, steps: int) -> str:
+    """Clamped one-step (or N-step) move along `_LEVEL_RANK`'s total
+    order -- the single shared primitive both the provider-bias grade
+    nudge and the cadence-based number_confidence nudge use (design chain
+    Round 5 item 3: "one shared helper ... rather than each independently
+    reinventing the same clamp-and-step logic"). `steps` may be negative;
+    the result is always clamped to a real grade name, never out of
+    range.
+    """
+    ranks_by_name = _LEVEL_RANK
+    names_by_rank = {rank: name for name, rank in ranks_by_name.items()}
+    max_rank = max(names_by_rank)
+    new_rank = max(0, min(max_rank, ranks_by_name[grade] + steps))
+    return names_by_rank[new_rank]
+
+
+def _apply_provider_bias_to_grade(base_grade: str, bias: float | None) -> str:
+    """Design chain Iteration 2/3 item 3-4 ("Provider Bias Integration" /
+    "Provider Bias Accessor and Value-Type Reconciliation"), grade-mode
+    half only (the float-weight half lives in `deterministic_fusion.py`'s
+    own `_PROVIDER_CONFIDENCE_WEIGHT`, and re-biasing that dict -- along
+    with `_PROVIDER_SORT_RANK` -- is deferred; see
+    discovery_agentic_fingerprint_recommendation.md's "Deferred to
+    follow-up" section for why). `bias is None` (no per-series signal yet
+    for this provider) is a no-op, same as `fingerprint is None`.
+    """
+    if bias is None:
+        return base_grade
+    if bias >= _PROVIDER_BIAS_GRADE_UP_THRESHOLD:
+        return _nudge_grade(base_grade, 1)
+    if bias <= _PROVIDER_BIAS_GRADE_DOWN_THRESHOLD:
+        return _nudge_grade(base_grade, -1)
+    return base_grade
+
+
+def _cadence_reference_entry(skeleton_entries: list[dict], candidate_number: float):
+    """Round 9-11's converged single reference-entry rule: the highest-
+    numbered `source_class == "library"` skeleton entry below
+    `candidate_number` with a resolvable `release_date` -- the exact same
+    population `fingerprint_store._compute_release_cadence` draws its
+    mu/sigma from, so the reference point and the statistics it's
+    compared against are never drawn from two different populations
+    (Round 10's catch). Returns `(release_date, book_number)` for the
+    winning entry, or `None` if no such entry exists (insufficient
+    history -- caller falls through to unmodified "medium", identical
+    treatment to a missing/unparseable candidate date).
+    """
+    best: tuple[date, float] | None = None
+    for entry in skeleton_entries or []:
+        if not isinstance(entry, dict) or entry.get("source_class") != "library":
+            continue
+        entry_number = _to_float_or_none(entry.get("book_number"))
+        if entry_number is None or entry_number >= candidate_number:
+            continue
+        release_date_raw = entry.get("release_date")
+        if not release_date_raw:
+            continue
+        try:
+            parsed_release_date = date.fromisoformat(str(release_date_raw))
+        except ValueError:
+            continue
+        if best is None or entry_number > best[1]:
+            best = (parsed_release_date, entry_number)
+    return best
+
+
+def _cadence_flags_implausibly_early(
+    candidate: dict,
+    number: float,
+    skeleton_entries: list[dict] | None,
+    fingerprint: dict | None,
+) -> bool:
+    """The downward-only cadence check itself -- see the module-level
+    comment above `_CADENCE_MIN_INTERVALS` for the full, ten-round-
+    converged formula this implements verbatim. Never raises; any
+    missing/unparseable input (no fingerprint, insufficient history, no
+    usable reference entry, no parseable candidate date) is treated as
+    "nothing to flag," not an error.
+    """
+    if not fingerprint or not skeleton_entries:
+        return False
+    cadence = fingerprint.get("release_cadence") or {}
+    interval_count = cadence.get("interval_count") or 0
+    if interval_count < _CADENCE_MIN_INTERVALS:
+        return False
+    mean_interval = cadence.get("mean_interval_days")
+    stddev_interval = cadence.get("stddev_interval_days")
+    if mean_interval is None or stddev_interval is None:
+        return False
+
+    reference = _cadence_reference_entry(skeleton_entries, number)
+    if reference is None:
+        return False
+    last_date, reference_number = reference
+    gap_count = number - reference_number
+    if gap_count <= 0:
+        return False
+
+    parsed = discovery_engine.parse_flexible_date_with_precision(candidate.get("published_date"))
+    if parsed is None:
+        return False
+    candidate_date, precision = parsed
+
+    margin_days = _CADENCE_MARGIN_DAYS_BY_PRECISION.get(precision, _CADENCE_MARGIN_DAYS_BY_PRECISION["YEAR_ONLY"])
+    base_interval = max(0.0, mean_interval - _CADENCE_K * stddev_interval)
+    expected_elapsed_days = max(0.0, gap_count * base_interval - margin_days)
+    expected_earliest_date = last_date + timedelta(days=expected_elapsed_days)
+    return candidate_date < expected_earliest_date
 
 
 def _candidate_key(candidate: dict) -> tuple:
@@ -132,7 +307,7 @@ def _skeleton_by_number(skeleton_entries: list[dict]) -> dict[float, dict]:
     return by_number
 
 
-def _provider_confidence(candidate: dict) -> str:
+def _provider_confidence(candidate: dict, fingerprint: dict | None = None) -> str:
     provenance = candidate.get("source_provenance") or []
     # Provenance entries key their provider name as "source" (see
     # discovery_engine.py's UnifiedCandidate provenance dicts, and
@@ -142,7 +317,11 @@ def _provider_confidence(candidate: dict) -> str:
     # branch below and graded every candidate's provider_confidence "low"
     # regardless of its real source, hardcover included.
     provider_names = {entry.get("source") for entry in provenance if entry.get("source")}
-    levels = [_PROVIDER_CONFIDENCE.get(name, "low") for name in provider_names]
+    provider_bias = (fingerprint or {}).get("provider_bias") or {}
+    levels = [
+        _apply_provider_bias_to_grade(_PROVIDER_CONFIDENCE.get(name, "low"), provider_bias.get(name))
+        for name in provider_names
+    ]
     if not levels:
         return "low"
     # Corroboration from multiple providers is worth at least as much as
@@ -205,7 +384,13 @@ def _title_confidence(
     return "low"
 
 
-def _number_confidence(candidate: dict, skeleton_numbers: set[float], delta_reasons: set[str]) -> str:
+def _number_confidence(
+    candidate: dict,
+    skeleton_numbers: set[float],
+    delta_reasons: set[str],
+    skeleton_entries: list[dict] | None = None,
+    fingerprint: dict | None = None,
+) -> str:
     # Phase 2 already caught invalid/negative/duplicate numbers -- a
     # duplicate specifically is a cross-candidate signal this function
     # can't see on its own (it only looks at one candidate's own value),
@@ -222,7 +407,19 @@ def _number_confidence(candidate: dict, skeleton_numbers: set[float], delta_reas
         return "low"
     if number in skeleton_numbers:
         return "high"
-    return "medium"  # valid, well-formed, but a number the skeleton doesn't have yet
+
+    # Valid, well-formed, but a number the skeleton doesn't have yet --
+    # this is also the exact population the Series Fingerprint cadence
+    # feature is scoped to (design chain Iteration 4/5's retarget away
+    # from delta_engine.numbering_gaps, which means something else
+    # entirely -- see that module's own docstring). Downward-only: an
+    # implausibly-early candidate nudges "medium" to "low"; there is no
+    # upward nudge (Round 6/7 -- inert against _overall_confidence's
+    # "unverified"-ceiling rule for every candidate reachable here, so
+    # not implemented at all rather than built-but-unused).
+    if _cadence_flags_implausibly_early(candidate, number, skeleton_entries, fingerprint):
+        return "low"
+    return "medium"
 
 
 def _series_alignment_confidence(candidate: dict, series_author: str | None) -> str:
@@ -392,6 +589,7 @@ def compute_confidence(
     series_name: str | None = None,
     series_author: str | None = None,
     shadow_context: dict | None = None,
+    fingerprint: dict | None = None,
 ) -> dict:
     """Pure scoring pass -- does not mutate skeleton_entries,
     provider_candidates, or delta, makes no LLM/network/DB calls, and
@@ -405,6 +603,14 @@ def compute_confidence(
     strictly after this function's own unmodified scoring logic below has
     already produced them. `None` (the default, and every call site
     before PB-5 existed) makes this a total no-op, same as before PB-5.
+
+    `fingerprint` (Series Fingerprint system, optional, defaults to
+    `None`): the caller-resolved *effective* fingerprint dict -- see
+    `services/fingerprint_store.get_effective_fingerprint`, which is the
+    only place the two-tier activation gate is ever checked. `None`
+    disables every fingerprint-informed nudge below and reproduces this
+    function's exact pre-fingerprint behavior; this module never reads
+    `settings`/the database/an LLM to decide that for itself.
     """
     skeleton_by_number = _skeleton_by_number(skeleton_entries)
     skeleton_numbers = set(skeleton_by_number.keys())
@@ -420,9 +626,11 @@ def compute_confidence(
     for candidate in provider_candidates:
         delta_reasons = reasons_by_candidate_key.get(_candidate_key(candidate), set())
 
-        provider_confidence = _provider_confidence(candidate)
+        provider_confidence = _provider_confidence(candidate, fingerprint)
         title_confidence = _title_confidence(candidate, skeleton_by_number, series_name, delta_reasons)
-        number_confidence = _number_confidence(candidate, skeleton_numbers, delta_reasons)
+        number_confidence = _number_confidence(
+            candidate, skeleton_numbers, delta_reasons, skeleton_entries, fingerprint
+        )
         series_alignment_confidence = _series_alignment_confidence(candidate, series_author)
 
         overall = _overall_confidence(

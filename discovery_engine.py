@@ -107,6 +107,7 @@ from discovery_text import (
     looks_like_non_new_release,
     is_english_or_unknown,
     parse_flexible_date,
+    parse_flexible_date_with_precision,
     classify_upcoming,
     split_author_names,
     primary_author_name,

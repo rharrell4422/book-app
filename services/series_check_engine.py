@@ -37,6 +37,7 @@ from services.identity import (
 )
 from services.availability_bridge import derive_legacy_fields
 from services.notifications import create_series_discovery_notification
+from services.fingerprint_store import apply_fingerprint_updates
 from services.skeleton_store import apply_skeleton_updates
 
 logger = logging.getLogger(__name__)
@@ -316,6 +317,11 @@ def run_series_check_job_full(series_id: int) -> None:
         # job dict / status endpoint response instead, still with NO
         # rollback of the already-committed Book persistence.
         skeleton_update_failures: list[str] = []
+        # Series Fingerprint system (discovery_agentic_fingerprint_
+        # recommendation.md): same never-fails-the-round discipline as
+        # skeleton_update_failures above -- a stale/un-merged fingerprint
+        # self-heals on the next round's Builder pass.
+        fingerprint_update_failures: list[str] = []
 
         # ---- Cheap pre-check for a recently-checked series (architecture
         # spec #7.2) ----
@@ -925,6 +931,26 @@ def run_series_check_job_full(series_id: int) -> None:
                     )
                     telemetry.record_gate_outcome("skeleton_update", "failed")
                     skeleton_update_failures.append(f"round {rounds_run}: {exc}")
+
+                # Series Fingerprint Builder write -- same call-site
+                # pattern as apply_skeleton_updates directly above
+                # (post-persistence, once per round), consuming
+                # result["fingerprint_updates"] the way apply_skeleton_
+                # updates consumes result["skeleton_updates"]/["probes"].
+                # Never allowed to fail the round itself.
+                try:
+                    apply_fingerprint_updates(
+                        db,
+                        series_id,
+                        updates=result.get("fingerprint_updates"),
+                    )
+                    telemetry.record_gate_outcome("fingerprint_update", "succeeded")
+                except Exception as exc:
+                    logger.exception(
+                        "Post-persistence fingerprint update failed for series_id=%s", series_id
+                    )
+                    telemetry.record_gate_outcome("fingerprint_update", "failed")
+                    fingerprint_update_failures.append(f"round {rounds_run}: {exc}")
             except Exception:
                 db.rollback()
                 raise
@@ -991,6 +1017,7 @@ def run_series_check_job_full(series_id: int) -> None:
         result["telemetry"] = telemetry.summary()
         result["cache"] = discovery_cache.summary()
         result["skeleton_update_failures"] = skeleton_update_failures
+        result["fingerprint_update_failures"] = fingerprint_update_failures
 
         db_series = db.query(models.Series).filter(models.Series.id == series_id).first()
         if not db_series:
@@ -1068,6 +1095,7 @@ def run_series_check_job_full(series_id: int) -> None:
             "rounds_run": rounds_run,
             "idle_check": idle_check,
             "skeleton_update_failures": skeleton_update_failures,
+            "fingerprint_update_failures": fingerprint_update_failures,
             "asin_discovery": result.get("asin_discovery") or {
                 "discovered": 0,
                 "processed": 0,
