@@ -216,6 +216,20 @@ export default function NotificationsPage() {
               {dismissingAll ? "Dismissing..." : "Dismiss all"}
             </Button>
           ) : null}
+          {/* Dismissing a notification removes its row -- and the series
+              link inside that row -- from this list, which previously left
+              "Back to Library" as the only way off this page even when what
+              the user actually wanted was to go review the series the
+              notification was about. This reuses the exact "/series?view=
+              ongoing" link the top nav already uses (see auth-gate.tsx's
+              "Unfinished" tab) -- the Series list's own default sort already
+              puts active (not-yet-caught-up) series first, so no query
+              param or extra state is needed to land on the right view. */}
+          <Link href="/series?view=ongoing">
+            <Button variant="outline" size="sm">
+              Return to Unfinished Series
+            </Button>
+          </Link>
           <Link href="/books">
             <Button variant="outline" size="sm">
               Back to Library

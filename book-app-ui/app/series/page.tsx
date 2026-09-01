@@ -139,11 +139,22 @@ function getSeriesState(row: Pick<SeriesRow, "has_new_available_books" | "has_ne
   };
 }
 
+// Active-vs-completed binary split (see the "Series Active/Completed UX
+// Resolution" design chat's finalized decision): "completed" means
+// is_caught_up=true -- the user has read/owns everything currently
+// available in this series, independent of whether the series itself
+// (is_finished) has ended. Everything else is "active" and sorts first,
+// including a series whose only issue is a numbering gap (is_caught_up
+// already folds missing_orders in on the backend -- see
+// intelligence/core.py's recalculate_series_state_for_series -- so no
+// separate gap check is needed here) and a series with only a not-yet-
+// owned "available" book (already folded into has_unread_books via the
+// "Two-Axis Status Architecture" design's Option A decision). Newly
+// discovered books (has_new_available_books/has_new_upcoming_books) no
+// longer get a separate top tier -- they're just one more reason a series
+// isn't caught up, same as any other unread/available/upcoming book.
 function getSeriesPriority(row: SeriesRow): number {
-  const state = getSeriesState(row);
-  if (state.has_new_available_books || state.has_new_upcoming_books) return 0;
-  if (state.has_unread_books) return 1;
-  return 2;
+  return getSeriesState(row).is_caught_up ? 1 : 0;
 }
 
 function summarizeCandidateDiagnostics(rawDiagnostics: unknown): string | null {
