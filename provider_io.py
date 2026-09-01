@@ -580,6 +580,34 @@ Target author: "{author}"
 
 Below are {count} web search results returned for this search. For EACH result that actually describes a specific book entry by {title_scope} (a released book, an upcoming/pre-order book, or a firm announcement of one) extract its data. Skip results that are: reviews or discussions of a book without any new release info,{skip_other_series} retailer category/search pages, fan wiki summaries of a whole series, news unrelated to a specific book, or fan speculation/discussion about a future book that has no confirmed title yet (e.g. only referred to as "the next book" or "an untitled sequel").
 
+Domain signal guidance:
+Use the domain of the URL as a reliability signal when deciding whether a result is likely to describe a real book entry.
+
+High-signal domains (more likely to describe real books):
+- amazon.com
+- goodreads.com
+- hardcover.app
+- books.google.com
+
+Treat results from these domains as more likely to be valid book entries, and be more willing to accept them when the snippet plausibly describes a specific book by {title_scope}.
+
+Low-signal domains (more likely to contain noise or non-book content):
+- reddit.com
+- *.fandom.com
+- wikipedia.org
+- *.wordpress.com
+- *.blogspot.com
+
+Treat results from these domains with greater skepticism, but do NOT discard them outright. If the snippet clearly describes a specific book (for example, it gives a title, author, volume number, release information, or other strong book-identifying signals), you should still accept the result. This is a soft bias, not a hard filter: always prioritize correctness. If a low-signal domain contains the earliest or only available information about a book, accept it.
+
+Genre-specific metadata guidance:
+- Series names may appear in multiple forms (abbreviations, alternate titles, renamed editions). When multiple series names appear for the same book, prefer the most complete or explicit series name.
+- Book numbering may be expressed in many formats: "Book N", "Volume N", "Part N", "Arc N", "Season N Episode M", or Roman numerals. Infer "book_number" whenever the numbering is explicit or clearly implied.
+- Fractional numbering (e.g., "3.5", "0.5", "Book 2.5", "Interlude", "Side Story", "Novella") should be accepted as valid book entries. Treat these as legitimate positions within the series.
+- Web-serial to book transitions are common. If a snippet describes a web-serial chapter bundle, arc, or season being released as a book, treat it as a valid book entry.
+- If a snippet shows multiple possible titles for the same book (e.g., a renamed volume or rebranded edition), prefer the title that appears in the URL or retailer listing.
+- Reject box sets or omnibus editions unless the snippet explicitly describes a new individual volume within the set.
+
 Search results:
 {snippets}
 
