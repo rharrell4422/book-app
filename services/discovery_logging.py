@@ -101,7 +101,8 @@ def log_discovery_summary(*, result: dict, terminal_error: str | None = None) ->
             f"total_web_search_calls={telemetry.get('total_web_search_calls', 0)} "
             f"total_llm_calls={telemetry.get('total_llm_calls', 0)} "
             f"total_tokens_in={telemetry.get('total_tokens_in', 0)} "
-            f"total_tokens_out={telemetry.get('total_tokens_out', 0)} ---"
+            f"total_tokens_out={telemetry.get('total_tokens_out', 0)} "
+            f"total_cost_usd={telemetry.get('total_cost_usd', 0)} ---"
         )
         by_pass = telemetry.get("by_pass") or {}
         for pass_name, stats in by_pass.items():
@@ -111,7 +112,29 @@ def log_discovery_summary(*, result: dict, terminal_error: str | None = None) ->
                 f"web_search_calls={stats.get('web_search_calls', 0)} "
                 f"(web_search_time={stats.get('web_search_duration_s', 0)}s) "
                 f"llm_calls={stats.get('llm_calls', 0)} (llm_time={stats.get('llm_duration_s', 0)}s) "
-                f"tokens_in={stats.get('tokens_in', 0)} tokens_out={stats.get('tokens_out', 0)}"
+                f"tokens_in={stats.get('tokens_in', 0)} tokens_out={stats.get('tokens_out', 0)} "
+                f"cost_usd={stats.get('cost_usd', 0)}"
+            )
+        # HTA Orchestrator Step 2/3: per-model/per-tier cost breakdown --
+        # during the Step 2->3 interim window (no second model wired in
+        # yet), any per-tier cost difference is purely a function of how
+        # many tokens each task type happens to use, not a real price
+        # difference between tiers -- see telemetry-step2-revised-evaluation
+        # canvas's "Forward look" note. Not evidence of a cheaper/pricier
+        # model split being in effect until a second model_id exists.
+        per_tier = telemetry.get("per_tier") or {}
+        for tier_name, stats in per_tier.items():
+            _console_log(
+                f"  TIER {tier_name}: calls={stats.get('calls', 0)} "
+                f"tokens_in={stats.get('tokens_in', 0)} tokens_out={stats.get('tokens_out', 0)} "
+                f"cost_usd={stats.get('cost_usd', 0)}"
+            )
+        per_model = telemetry.get("per_model") or {}
+        for model_name, stats in per_model.items():
+            _console_log(
+                f"  MODEL {model_name}: calls={stats.get('calls', 0)} "
+                f"tokens_in={stats.get('tokens_in', 0)} tokens_out={stats.get('tokens_out', 0)} "
+                f"cost_usd={stats.get('cost_usd', 0)}"
             )
         # by_gate surfaces labeled decision-point counters -- most notably
         # catalog_sufficiency (see deterministic_fusion.

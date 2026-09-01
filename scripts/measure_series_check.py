@@ -59,7 +59,8 @@ def main() -> None:
             print(
                 f"  telemetry: web_search_calls={telemetry.get('total_web_search_calls')} "
                 f"llm_calls={telemetry.get('total_llm_calls')} "
-                f"tokens_in={telemetry.get('total_tokens_in')} tokens_out={telemetry.get('total_tokens_out')}"
+                f"tokens_in={telemetry.get('total_tokens_in')} tokens_out={telemetry.get('total_tokens_out')} "
+                f"cost_usd={telemetry.get('total_cost_usd')}"
             )
             for pass_name, stats in (telemetry.get("by_pass") or {}).items():
                 print(f"    {pass_name}: {stats}")
@@ -88,6 +89,7 @@ def main() -> None:
     total_llm = sum((r["telemetry"] or {}).get("total_llm_calls", 0) for r in rounds)
     total_tokens_in = sum((r["telemetry"] or {}).get("total_tokens_in", 0) for r in rounds)
     total_tokens_out = sum((r["telemetry"] or {}).get("total_tokens_out", 0) for r in rounds)
+    total_cost_usd = sum((r["telemetry"] or {}).get("total_cost_usd", 0) for r in rounds)
     total_wall = sum(r["wall_time_s"] for r in rounds)
     for r in rounds:
         print(
@@ -95,7 +97,7 @@ def main() -> None:
             f"owned_after={r['owned_after']}, status={r['status']}"
         )
     print(f"TOTAL wall_time={total_wall:.2f}s web_search_calls={total_web_search} llm_calls={total_llm} "
-          f"tokens_in={total_tokens_in} tokens_out={total_tokens_out}")
+          f"tokens_in={total_tokens_in} tokens_out={total_tokens_out} cost_usd={total_cost_usd}")
 
 
 if __name__ == "__main__":

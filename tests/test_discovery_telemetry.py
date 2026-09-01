@@ -40,6 +40,89 @@ class RecordProviderCallTest(unittest.TestCase):
         self.assertEqual(summary["by_provider"]["google"]["calls"], 2)
 
 
+class RecordLlmCallCostAttributionTest(unittest.TestCase):
+    """HTA Orchestrator Step 2/3: model_id/tier/cost_usd/correlation_id
+    attribution on record_llm_call(), and their surfacing through
+    summary()'s per_model/per_tier/by_correlation_id breakdowns.
+    """
+
+    def test_computes_exact_cost_from_known_model_pricing(self):
+        telemetry = DiscoveryTelemetry()
+        telemetry.record_llm_call(
+            duration_s=1.0, tokens_in=1_000_000, tokens_out=1_000_000, model_id="claude-haiku-4-5-20251001"
+        )
+        summary = telemetry.summary()
+        # $1/M input + $5/M output at 1M tokens each.
+        self.assertAlmostEqual(summary["total_cost_usd"], 6.0)
+        self.assertAlmostEqual(summary["per_model"]["claude-haiku-4-5-20251001"]["cost_usd"], 6.0)
+
+    def test_unknown_model_id_fails_soft_to_zero_cost(self):
+        telemetry = DiscoveryTelemetry()
+        telemetry.record_llm_call(duration_s=1.0, tokens_in=1000, tokens_out=1000, model_id="some-future-model")
+        summary = telemetry.summary()
+        self.assertEqual(summary["total_cost_usd"], 0.0)
+        self.assertEqual(summary["per_model"]["some-future-model"]["cost_usd"], 0.0)
+        self.assertEqual(summary["per_model"]["some-future-model"]["calls"], 1)
+
+    def test_pre_existing_call_shape_without_model_id_still_works(self):
+        # Backward compatibility: callers that don't pass model_id (the
+        # shape every call site used before Step 2) must keep working, with
+        # sane defaults and no crash in summary().
+        telemetry = DiscoveryTelemetry()
+        telemetry.record_llm_call(duration_s=0.5, tokens_in=100, tokens_out=200)
+        summary = telemetry.summary()
+        self.assertEqual(summary["total_cost_usd"], 0.0)
+        self.assertEqual(summary["per_model"]["unknown"]["calls"], 1)
+        self.assertEqual(summary["per_tier"]["none"]["calls"], 1)
+
+    def test_distinct_models_and_tiers_tracked_independently(self):
+        telemetry = DiscoveryTelemetry()
+        with telemetry.pass_scope("targeted", tier="A"):
+            telemetry.record_llm_call(
+                duration_s=0.1, tokens_in=1000, tokens_out=1000, model_id="claude-haiku-4-5-20251001"
+            )
+        with telemetry.pass_scope("reconciliation", tier="B"):
+            telemetry.record_llm_call(
+                duration_s=0.1, tokens_in=2000, tokens_out=2000, model_id="claude-haiku-4-5-20251001"
+            )
+
+        summary = telemetry.summary()
+        self.assertEqual(summary["per_tier"]["A"]["tokens_in"], 1000)
+        self.assertEqual(summary["per_tier"]["B"]["tokens_in"], 2000)
+        self.assertEqual(summary["per_model"]["claude-haiku-4-5-20251001"]["calls"], 2)
+
+    def test_correlation_id_is_fresh_per_pass_scope_invocation(self):
+        telemetry = DiscoveryTelemetry()
+        with telemetry.pass_scope("targeted", tier="A"):
+            telemetry.record_llm_call(duration_s=0.1, tokens_in=10, tokens_out=10, model_id="claude-haiku-4-5-20251001")
+        with telemetry.pass_scope("targeted", tier="A"):
+            telemetry.record_llm_call(duration_s=0.1, tokens_in=10, tokens_out=10, model_id="claude-haiku-4-5-20251001")
+
+        summary = telemetry.summary()
+        # Two separate pass_scope() invocations -> two distinct
+        # correlation_ids, each with exactly one call.
+        self.assertEqual(len(summary["by_correlation_id"]), 2)
+        for entry in summary["by_correlation_id"].values():
+            self.assertEqual(entry["calls"], 1)
+            self.assertEqual(entry["tier"], "A")
+
+    def test_calls_outside_any_pass_scope_group_under_none(self):
+        telemetry = DiscoveryTelemetry()
+        telemetry.record_llm_call(duration_s=0.1, tokens_in=10, tokens_out=10, model_id="claude-haiku-4-5-20251001")
+        summary = telemetry.summary()
+        self.assertIn("none", summary["by_correlation_id"])
+        self.assertEqual(summary["by_correlation_id"]["none"]["calls"], 1)
+
+    def test_by_pass_bucket_sums_cost_usd_alongside_existing_token_fields(self):
+        telemetry = DiscoveryTelemetry()
+        with telemetry.pass_scope("targeted", tier="A"):
+            telemetry.record_llm_call(
+                duration_s=0.1, tokens_in=1_000_000, tokens_out=0, model_id="claude-haiku-4-5-20251001"
+            )
+        summary = telemetry.summary()
+        self.assertAlmostEqual(summary["by_pass"]["targeted"]["cost_usd"], 1.0)
+
+
 class RecordGateOutcomeTest(unittest.TestCase):
     def test_counts_distinct_outcomes_for_the_same_gate(self):
         telemetry = DiscoveryTelemetry()

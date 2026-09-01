@@ -38,6 +38,7 @@ from provider_protocol import (
 from services.discovery_cache import CACHE_MISS, DiscoveryCache
 from services.discovery_telemetry import DiscoveryTelemetry, maybe_pass_scope
 from services.identity import _normalize_series_name_for_identity
+from llm_client import call_llm
 
 from discovery_text import (
     _author_matches,
@@ -633,8 +634,6 @@ def _structure_web_results_with_llm(
     if not api_key or not raw_results:
         return []
 
-    import anthropic
-
     snippets = "\n\n".join(
         f"[{i}] Title: {r['title']}\nSnippet: {r['description']}\nURL: {r['url']}"
         for i, r in enumerate(raw_results)
@@ -664,12 +663,12 @@ def _structure_web_results_with_llm(
         title_scope=title_scope,
     )
 
-    client = anthropic.Anthropic(api_key=api_key)
     started = time.monotonic()
-    response = None
+    llm_response = None
     try:
-        response = client.messages.create(
-            model=ANTHROPIC_MODEL,
+        llm_response = call_llm(
+            ANTHROPIC_MODEL,
+            prompt,
             max_tokens=2000,
             # Deterministic extraction task (pull book_number/title/etc out of
             # unambiguous snippet text), not generative writing -- temperature=0
@@ -677,13 +676,13 @@ def _structure_web_results_with_llm(
             # correctly-worded candidate (see discovery_catchup_architecture_spec.md
             # recall-gap diagnostic).
             temperature=0,
-            messages=[{"role": "user", "content": prompt}],
             timeout=WEB_SEARCH_TIMEOUT_SECONDS,
         )
     except Exception as exc:  # CR-2: a failed structuring call must degrade to
         # "no candidates from this pass" like a JSON-parse failure below,
-        # not raise AttributeError from `response` staying None on the next
-        # line -- see _reconcile_candidates_with_llm for the same pattern.
+        # not raise AttributeError from `llm_response` staying None on the
+        # next line -- see _reconcile_candidates_with_llm for the same
+        # pattern.
         _log(f"LLM web-search structuring call failed: {exc}")
         _record_drop_diagnostic(
             "web_structuring",
@@ -694,13 +693,13 @@ def _structure_web_results_with_llm(
         return []
     finally:
         if telemetry is not None:
-            usage = getattr(response, "usage", None)
             telemetry.record_llm_call(
                 duration_s=time.monotonic() - started,
-                tokens_in=getattr(usage, "input_tokens", 0) or 0,
-                tokens_out=getattr(usage, "output_tokens", 0) or 0,
+                tokens_in=llm_response.tokens_in if llm_response is not None else 0,
+                tokens_out=llm_response.tokens_out if llm_response is not None else 0,
+                model_id=ANTHROPIC_MODEL,
             )
-    text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text").strip()
+    text = llm_response.text
 
     # The prompt asks for raw JSON, but strip markdown fences defensively in
     # case the model wraps its answer in one anyway.
@@ -752,8 +751,6 @@ def generate_series_overview(series_name: str, author: str, books: list[dict]) -
     if not usable_books:
         return None
 
-    import anthropic
-
     book_descriptions = "\n\n".join(
         f"- {str(b.get('title') or 'Untitled').strip()}: {str(b.get('description') or '').strip()}"
         for b in usable_books
@@ -764,12 +761,16 @@ def generate_series_overview(series_name: str, author: str, books: list[dict]) -
         book_descriptions=book_descriptions,
     )
 
-    client = anthropic.Anthropic(api_key=api_key)
     try:
-        response = client.messages.create(
-            model=ANTHROPIC_MODEL,
+        # Deliberately no `temperature` (this call wants the SDK's default,
+        # more-generative behavior for readable prose) and no `telemetry`
+        # (this on-demand call has never been tracked by DiscoveryTelemetry)
+        # -- both asymmetries vs. the other two call sites are intentional,
+        # not oversights; see llm-client-wrapper-evaluation canvas.
+        llm_response = call_llm(
+            ANTHROPIC_MODEL,
+            prompt,
             max_tokens=400,
-            messages=[{"role": "user", "content": prompt}],
             timeout=WEB_SEARCH_TIMEOUT_SECONDS,
         )
     except Exception as exc:  # CR-2: on-demand, best-effort call -- a failure
@@ -778,8 +779,7 @@ def generate_series_overview(series_name: str, author: str, books: list[dict]) -
         # "Series Overview" button.
         _log(f"LLM series overview call failed: {exc}")
         return None
-    text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text").strip()
-    return text or None
+    return llm_response.text or None
 
 
 def _refine_undated_web_search_results_batch(
@@ -1413,7 +1413,11 @@ def _fetch_web_search(
     pass_label: str = "web_search",
     apify_budget: "ApifyCallBudget | None" = None,
 ) -> list[dict]:
-    with maybe_pass_scope(telemetry, pass_label):
+    # HTA Orchestrator Step 3: tier="A" -- structuring's static tier binding.
+    # This scope also covers the raw Serper fetch above the structuring call
+    # (record_web_search_call doesn't read tier, so that's harmless); the
+    # only record_llm_call() made inside this scope is the structuring pass'.
+    with maybe_pass_scope(telemetry, pass_label, tier="A"):
         raw_results, query_errors = _fetch_raw_web_search_hits(queries, telemetry=telemetry, cache=cache)
 
         if not raw_results:
@@ -1434,7 +1438,11 @@ def _fetch_web_search(
 
     results = _parse_web_search_structured_items(structured_with_source, author)
 
-    with maybe_pass_scope(telemetry, f"{pass_label}_refinement"):
+    # Same tier="A" binding -- date refinement is still a structuring call
+    # (_refine_undated_web_search_results_batch -> _structure_with_verdict_
+    # cache -> _structure_web_results_with_llm), just a separate pass_scope()
+    # invocation/correlation_id from the one above.
+    with maybe_pass_scope(telemetry, f"{pass_label}_refinement", tier="A"):
         results = _refine_web_search_result_dates(
             results, series_name, author, telemetry=telemetry, cache=cache, scope_type=scope_type
         )
@@ -2040,8 +2048,6 @@ def _reconcile_candidates_with_llm(
     # through untouched below, rather than silently dropped.
     candidates = unified_candidates[:RECONCILIATION_MAX_CANDIDATES]
 
-    import anthropic
-
     candidate_listing = "\n".join(
         _format_candidate_for_reconciliation(index, candidate) for index, candidate in enumerate(candidates)
     )
@@ -2052,19 +2058,22 @@ def _reconcile_candidates_with_llm(
         max_index=len(candidates) - 1,
     )
 
-    with maybe_pass_scope(telemetry, "reconciliation"):
+    # HTA Orchestrator Step 3: tier="B" -- reconciliation's static tier
+    # binding. Behavior is unchanged (still ANTHROPIC_MODEL/Haiku); this
+    # only labels telemetry so per-tier cost can eventually be measured
+    # before any routing change.
+    with maybe_pass_scope(telemetry, "reconciliation", tier="B"):
         started = time.monotonic()
-        response = None
+        llm_response = None
         try:
-            client = anthropic.Anthropic(api_key=api_key)
-            response = client.messages.create(
-                model=ANTHROPIC_MODEL,
+            llm_response = call_llm(
+                ANTHROPIC_MODEL,
+                prompt,
                 max_tokens=3000,
                 # Deterministic normalize/merge/flag task, not generative writing --
                 # see _structure_web_results_with_llm's temperature=0 for the same
                 # rationale.
                 temperature=0,
-                messages=[{"role": "user", "content": prompt}],
                 timeout=WEB_SEARCH_TIMEOUT_SECONDS,
             )
         except Exception as exc:  # a reconciliation failure should never sink the candidates fusion already found
@@ -2072,14 +2081,14 @@ def _reconcile_candidates_with_llm(
             return unified_candidates
         finally:
             if telemetry is not None:
-                usage = getattr(response, "usage", None)
                 telemetry.record_llm_call(
                     duration_s=time.monotonic() - started,
-                    tokens_in=getattr(usage, "input_tokens", 0) or 0,
-                    tokens_out=getattr(usage, "output_tokens", 0) or 0,
+                    tokens_in=llm_response.tokens_in if llm_response is not None else 0,
+                    tokens_out=llm_response.tokens_out if llm_response is not None else 0,
+                    model_id=ANTHROPIC_MODEL,
                 )
 
-    text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text").strip()
+    text = llm_response.text
     if text.startswith("```"):
         text = text.strip("`").strip()
         if text.lower().startswith("json"):

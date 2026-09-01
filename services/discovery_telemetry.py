@@ -28,7 +28,10 @@ import json
 import logging
 import threading
 import time
+import uuid
 from contextlib import contextmanager
+
+from services.llm_pricing import get_price_per_million
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +159,13 @@ class DiscoveryTelemetry:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._current_pass = "unlabeled"
+        # HTA Orchestrator Step 3: tier/correlation_id context, set for the
+        # duration of a `pass_scope()` block the same way `_current_pass`
+        # already is -- see `pass_scope`'s own docstring for why both are
+        # tracked as nested, save/restore state rather than being passed
+        # explicitly to every `record_llm_call()` call site.
+        self._current_tier: str | None = None
+        self._current_correlation_id: str | None = None
         self.passes: list[dict] = []
         self.web_search_calls: list[dict] = []
         self.llm_calls: list[dict] = []
@@ -178,10 +188,30 @@ class DiscoveryTelemetry:
         self.tool_calls: list[dict] = []
 
     @contextmanager
-    def pass_scope(self, name: str):
+    def pass_scope(self, name: str, *, tier: str | None = None):
+        """`tier` (HTA Orchestrator Step 3, e.g. `"A"` for a structuring
+        pass, `"B"` for reconciliation) is an explicit label attached to
+        every `record_llm_call()` made while this scope is active -- not
+        inferred from `name`, since `name` already varies dynamically
+        (`targeted`/`author_fallback`/`missing_volume`/their `_refinement`
+        siblings/`reconciliation`) in ways that don't map 1:1 onto a tier.
+
+        A fresh `correlation_id` is generated on every entry into this
+        context manager -- once per actual pass *invocation*, not once per
+        pass name/type -- so a job with multiple rounds produces multiple
+        correlation_ids per pass type, one per real firing (see `summary()`'s
+        `by_correlation_id` breakdown). `tier`/`correlation_id` nest and
+        restore exactly like `_current_pass` already does, so a caller that
+        doesn't pass `tier` (or that nests scopes) sees unchanged behavior.
+        """
+        correlation_id = uuid.uuid4().hex
         with self._lock:
-            previous = self._current_pass
+            previous_pass = self._current_pass
+            previous_tier = self._current_tier
+            previous_correlation_id = self._current_correlation_id
             self._current_pass = name
+            self._current_tier = tier
+            self._current_correlation_id = correlation_id
         started = time.monotonic()
         started_wall = time.time()
         try:
@@ -196,7 +226,9 @@ class DiscoveryTelemetry:
                         "duration_s": round(duration, 3),
                     }
                 )
-                self._current_pass = previous
+                self._current_pass = previous_pass
+                self._current_tier = previous_tier
+                self._current_correlation_id = previous_correlation_id
 
     def record_web_search_call(self, *, query: str, duration_s: float) -> None:
         with self._lock:
@@ -204,14 +236,52 @@ class DiscoveryTelemetry:
                 {"pass": self._current_pass, "query": query, "duration_s": round(duration_s, 3)}
             )
 
-    def record_llm_call(self, *, duration_s: float, tokens_in: int = 0, tokens_out: int = 0) -> None:
+    def record_llm_call(
+        self,
+        *,
+        duration_s: float,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+        model_id: str | None = None,
+    ) -> None:
+        """`model_id` (HTA Orchestrator Step 2) is optional and purely
+        additive -- an existing caller that doesn't pass it keeps working
+        exactly as before, with `cost_usd` recorded as `0.0` and no tier/
+        model attribution. `tier`/`correlation_id` are never passed in
+        directly here; they're read from whatever `pass_scope()` is
+        currently active (see that method's docstring) so this call shape
+        doesn't grow a parameter for every future piece of pass-scoped
+        context.
+
+        Cost is computed here, not by the caller, so the fail-soft
+        guarantee for an unrecognized `model_id` (`cost_usd=0.0`, a logged
+        warning, never a raised exception -- see `services/llm_pricing.py`)
+        has exactly one implementation rather than being duplicated at
+        every call site.
+        """
+        tokens_in = int(tokens_in or 0)
+        tokens_out = int(tokens_out or 0)
+        cost_usd = 0.0
+        if model_id:
+            pricing = get_price_per_million(model_id)
+            if pricing is None:
+                logger.warning(
+                    "record_llm_call: no pricing entry for model_id=%s; recording cost_usd=0.0", model_id
+                )
+            else:
+                price_in_per_million, price_out_per_million = pricing
+                cost_usd = (tokens_in * price_in_per_million + tokens_out * price_out_per_million) / 1_000_000
         with self._lock:
             self.llm_calls.append(
                 {
                     "pass": self._current_pass,
                     "duration_s": round(duration_s, 3),
-                    "tokens_in": int(tokens_in or 0),
-                    "tokens_out": int(tokens_out or 0),
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "model_id": model_id,
+                    "tier": self._current_tier,
+                    "correlation_id": self._current_correlation_id,
+                    "cost_usd": cost_usd,
                 }
             )
 
@@ -281,6 +351,7 @@ class DiscoveryTelemetry:
                     "llm_duration_s": 0.0,
                     "tokens_in": 0,
                     "tokens_out": 0,
+                    "cost_usd": 0.0,
                 },
             )
 
@@ -291,12 +362,56 @@ class DiscoveryTelemetry:
             bucket = _bucket(call["pass"])
             bucket["web_search_calls"] += 1
             bucket["web_search_duration_s"] = round(bucket["web_search_duration_s"] + call["duration_s"], 3)
+        # HTA Orchestrator Step 2/3: model_id/tier/cost_usd/correlation_id
+        # are all optional -- entries recorded before this change (or by a
+        # caller that still doesn't pass model_id) simply have `None` for
+        # each and fall into the "unknown"/"none" buckets below, exactly
+        # like an untagged `by_provider`/`by_gate` entry would.
+        per_model: dict[str, dict] = {}
+        per_tier: dict[str, dict] = {}
+        by_correlation_id: dict[str, dict] = {}
+        total_cost_usd = 0.0
+
+        def _cost_bucket(bucket_map: dict[str, dict], key: str) -> dict:
+            return bucket_map.setdefault(
+                key, {"calls": 0, "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}
+            )
+
         for call in llm_calls:
             bucket = _bucket(call["pass"])
             bucket["llm_calls"] += 1
             bucket["llm_duration_s"] = round(bucket["llm_duration_s"] + call["duration_s"], 3)
             bucket["tokens_in"] += call["tokens_in"]
             bucket["tokens_out"] += call["tokens_out"]
+            bucket["cost_usd"] = round(bucket["cost_usd"] + call["cost_usd"], 6)
+
+            total_cost_usd += call["cost_usd"]
+
+            for bucket_map, key in (
+                (per_model, call.get("model_id") or "unknown"),
+                (per_tier, call.get("tier") or "none"),
+            ):
+                dim_bucket = _cost_bucket(bucket_map, key)
+                dim_bucket["calls"] += 1
+                dim_bucket["tokens_in"] += call["tokens_in"]
+                dim_bucket["tokens_out"] += call["tokens_out"]
+                dim_bucket["cost_usd"] = round(dim_bucket["cost_usd"] + call["cost_usd"], 6)
+
+            # by_correlation_id is inherently single-tier per key -- a
+            # correlation_id is minted once per pass_scope() entry, and
+            # `tier` doesn't change mid-scope -- so a plain `tier` string
+            # is stored here rather than a tier_counts breakdown (see the
+            # Step 3 final-precision review for why the conditional shape
+            # had no reachable case to serve).
+            corr_key = call.get("correlation_id") or "none"
+            corr_bucket = by_correlation_id.setdefault(
+                corr_key,
+                {"calls": 0, "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0, "tier": call.get("tier")},
+            )
+            corr_bucket["calls"] += 1
+            corr_bucket["tokens_in"] += call["tokens_in"]
+            corr_bucket["tokens_out"] += call["tokens_out"]
+            corr_bucket["cost_usd"] = round(corr_bucket["cost_usd"] + call["cost_usd"], 6)
 
         by_provider: dict[str, dict] = {}
         for call in provider_calls:
@@ -316,10 +431,19 @@ class DiscoveryTelemetry:
             "by_pass": by_pass,
             "by_provider": by_provider,
             "by_gate": by_gate,
+            # HTA Orchestrator Step 2/3: per-model and per-tier cost/token
+            # breakdowns (mirrors by_provider's shape, including a "calls"
+            # count so average-cost-per-call is computable), plus a
+            # per-correlation_id breakdown keyed to a single pass_scope()
+            # invocation -- see pass_scope()'s docstring.
+            "per_model": per_model,
+            "per_tier": per_tier,
+            "by_correlation_id": by_correlation_id,
             "total_web_search_calls": len(web_search_calls),
             "total_llm_calls": len(llm_calls),
             "total_tokens_in": sum(c["tokens_in"] for c in llm_calls),
             "total_tokens_out": sum(c["tokens_out"] for c in llm_calls),
+            "total_cost_usd": round(total_cost_usd, 6),
             # RT-1b: additive-only counter for agentic_hooks.py's tool-call
             # tracing -- not consumed by anything routing/confidence-related,
             # purely informational.
@@ -636,12 +760,14 @@ def record_agentic_safety_violation(series_id: int, book_number, reason: str) ->
 
 
 @contextmanager
-def maybe_pass_scope(telemetry: "DiscoveryTelemetry | None", name: str):
+def maybe_pass_scope(telemetry: "DiscoveryTelemetry | None", name: str, *, tier: str | None = None):
     """No-op passthrough when telemetry is None, so call sites don't need
-    an `if telemetry:` guard around every pass boundary.
+    an `if telemetry:` guard around every pass boundary. `tier` is forwarded
+    to `DiscoveryTelemetry.pass_scope` unchanged -- see that method's
+    docstring (HTA Orchestrator Step 3).
     """
     if telemetry is None:
         yield
     else:
-        with telemetry.pass_scope(name):
+        with telemetry.pass_scope(name, tier=tier):
             yield
