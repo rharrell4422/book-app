@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import date, datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -13,7 +14,9 @@ import delta_engine
 import discovery_engine
 import intelligence
 import settings
+from llm_client import TIER_MODEL_MAP, LLMCallError, call_llm
 from models import Book, Series, SeriesSkeleton
+from prompts import build_belongs_to_series_prompt
 from services import candidate_notifications
 from services.discovery_cache import DiscoveryCache
 from services.discovery_logging import log_discovery_summary
@@ -1459,6 +1462,99 @@ class SeriesIntelligenceAgent:
                 overall_grade = confidence_entry.get("overall") if confidence_entry else None
                 if telemetry is not None:
                     telemetry.record_gate_outcome("confidence_grade", str(overall_grade or "none"))
+
+                # HTA Orchestrator Step 5: Tier C shadow LLM call. Fires
+                # ONLY when all three are true -- mirrors the live routing
+                # predicate just below (low_confidence_ambiguous and
+                # overall_grade in {"medium", None}) plus excluding the two
+                # downgrade flags already computed by the gate above, so
+                # this never fires on a candidate the gate already
+                # confidently rejected as a universe tie-in or a
+                # compilation of owned titles. A second, distinct
+                # pass_scope from the "belongs_to_series" one that wraps
+                # only the deterministic gate (see that scope's own
+                # comment) -- kept separate so summary()["by_pass"] can
+                # measure Tier C shadow cost in isolation from gate
+                # evaluation, per the Step 5 architecture review's item 2/
+                # Round 3-4 resolution. Placed here, not immediately after
+                # the gate call, because the predicate needs overall_grade,
+                # which isn't resolved until the confidence_lookup access
+                # just above. Shadow-only: this call cannot change
+                # belongs_to_series, overall_grade, or routing -- its
+                # result is only ever recorded via record_shadow_llm_call.
+                tier_c_shadow_predicate = (
+                    low_confidence_ambiguous
+                    and (overall_grade == "medium" or overall_grade is None)
+                    and not is_universe_tie_in
+                    and not is_compilation_of_owned_titles
+                )
+                if tier_c_shadow_predicate:
+                    with maybe_pass_scope(telemetry, "belongs_to_series_shadow_check", tier="C"):
+                        candidate_id = isbn13 or f"{raw.get('source')}:{raw.get('source_id')}"
+                        _console_log(
+                            f"Tier C shadow triggered for candidate_id={candidate_id!r} (reason=ambiguity)"
+                        )
+                        # Provider metadata bundle: reuses the same
+                        # correlation_key lookup already built above
+                        # (confidence_entry) rather than a new lookup --
+                        # confidence_entry["candidate"] is the PRE-filter
+                        # UnifiedCandidate.model_dump(), which still has
+                        # source_provenance intact (unlike `raw`, which
+                        # finalize_discovery_output has already stripped
+                        # it from by this point).
+                        provider_metadata = (
+                            (confidence_entry.get("candidate") or {}).get("source_provenance") or []
+                            if confidence_entry
+                            else []
+                        )
+                        sibling_candidates = [
+                            {"title": other.get("title"), "number": other.get("series_number_hint")}
+                            for other_index, other in enumerate(candidates)
+                            if other_index != index
+                        ]
+                        tier_c_prompt = build_belongs_to_series_prompt(
+                            title=title,
+                            series_name=series.name,
+                            inferred_number=inferred_number,
+                            provider_metadata=provider_metadata,
+                            known_series_titles=known_series_titles,
+                            owned_core_title_texts=owned_core_title_texts,
+                            highest_owned_book_number=highest_owned_book_number,
+                            candidate_confidence=raw.get("confidence"),
+                            reason_flags={
+                                "explicit_series_match": explicit_series_match,
+                                "partial_match": partial_match,
+                                "continues_numbering": continues_numbering,
+                                "is_universe_tie_in": is_universe_tie_in,
+                                "is_compilation_of_owned_titles": is_compilation_of_owned_titles,
+                            },
+                            description=raw.get("description"),
+                            sibling_candidates=sibling_candidates,
+                        )
+                        started_tier_c = time.monotonic()
+                        tier_c_response = None
+                        try:
+                            tier_c_response = call_llm(
+                                tier="C",
+                                prompt=tier_c_prompt,
+                                shadow=True,
+                                max_tokens=500,
+                                temperature=0,
+                            )
+                        except LLMCallError as exc:
+                            # Fail-soft, same convention as every other LLM
+                            # call site in this codebase (see provider_io.py's
+                            # CR-2 comment) -- a shadow-only call must never
+                            # sink a real Check Now run.
+                            _console_log(f"Tier C shadow LLM call failed: {exc}")
+                        finally:
+                            if telemetry is not None:
+                                telemetry.record_shadow_llm_call(
+                                    duration_s=time.monotonic() - started_tier_c,
+                                    tokens_in=tier_c_response.tokens_in if tier_c_response is not None else 0,
+                                    tokens_out=tier_c_response.tokens_out if tier_c_response is not None else 0,
+                                    model_id=TIER_MODEL_MAP.get("C"),
+                                )
 
                 if overall_grade in ("low", "zero"):
                     # PB-11 diagnostic (Percy Jackson books 4/5 investigation,

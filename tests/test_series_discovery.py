@@ -21,6 +21,7 @@ from agents.series_agent import (
 from database import Base
 from models import Book, Series, SeriesCandidateNotification, SeriesSkeleton
 from services.discovery_cache import DiscoveryCache
+from services.discovery_telemetry import DiscoveryTelemetry
 
 
 class DiscoveryEngineHelperTest(unittest.TestCase):
@@ -4818,6 +4819,328 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
             agent2 = SeriesIntelligenceAgent()
             second_result = agent2.run_series_check(self.db, self.series.id, emit_summary=False)
         self.assertEqual(second_result["highest_owned_book_number"], 12)
+
+
+def _mock_anthropic_client(response_text, *, input_tokens=10, output_tokens=20):
+    mock_text_block = MagicMock()
+    mock_text_block.type = "text"
+    mock_text_block.text = response_text
+    mock_usage = MagicMock()
+    mock_usage.input_tokens = input_tokens
+    mock_usage.output_tokens = output_tokens
+    mock_message = MagicMock()
+    mock_message.content = [mock_text_block]
+    mock_message.usage = mock_usage
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_message
+    return mock_client
+
+
+class TierCShadowLlmTest(unittest.TestCase):
+    """HTA Orchestrator Step 5: coverage for the Tier C shadow LLM call in
+    run_series_check's classification loop -- fires only when
+    low_confidence_ambiguous is True, overall_grade is "medium"/missing,
+    and neither downgrade flag (is_universe_tie_in/is_compilation_of_
+    owned_titles) is set; never affects belongs_to_series, overall_grade,
+    or routing; recorded exclusively via DiscoveryTelemetry's shadow
+    section (never llm_calls/total_cost_usd).
+
+    A plain sibling of SeriesCheckIntegrationTest rather than a subclass,
+    per that class's own note above Phase4DiagnosticsTest -- the
+    owned-books fixture (1-6, 8, 9) is duplicated deliberately so this
+    class's tests don't re-run the parent's whole suite.
+
+    tests/conftest.py's `_no_real_anthropic_key_during_tests` autouse
+    fixture already blanks a developer's real local ANTHROPIC_API_KEY for
+    every test -- the tests below that actually want the shadow call to
+    fire re-supply their own fake key plus a mocked anthropic.Anthropic,
+    the same pattern tests/test_llm_client.py uses.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=cls.engine)
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        Base.metadata.drop_all(bind=cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        self.db = self.SessionLocal()
+        series = Series(name="Cherry Blossom Girls", author="Harmon Cooper", profile_id="robbie")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+        self.series = series
+
+        for number in [1, 2, 3, 4, 5, 6, 8, 9]:
+            self.db.add(
+                Book(
+                    title=f"Cherry Blossom Girls Book {number}",
+                    author="Harmon Cooper",
+                    series_id=series.id,
+                    profile_id=series.profile_id,
+                    series_order=number,
+                    book_number=float(number),
+                    record_status="active",
+                    is_read=False,
+                )
+            )
+        self.db.commit()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _mock_discovery(self, candidates, **overrides):
+        result = {
+            "candidates": candidates,
+            "provider_failures": [],
+            "all_providers_failed": False,
+            "used_author_fallback": False,
+        }
+        result.update(overrides)
+        return patch("discovery_engine.discover_candidates_for_series", return_value=result)
+
+    def test_fires_for_an_ambiguous_medium_confidence_candidate(self):
+        # Same fixture as SeriesCheckIntegrationTest's
+        # test_medium_confidence_candidate_creates_candidate_notification_
+        # with_series_name_hint: no textual tie to the series, not
+        # "targeted"/"missing_volume_recovery", number (7) doesn't clear
+        # the highest owned (9) -- belongs_to_series is False, and with no
+        # confidence_lookup entry for it (no `unified_candidates` override
+        # below) overall_grade is None. Both satisfy the Tier C predicate.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "Desert Protocol",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "author_fallback",
+                "series_number_hint": 7,
+                "series_name_hint": "Cherry Blossom Girls",
+                "upcoming_hint": False,
+            }
+        ]
+        telemetry = DiscoveryTelemetry()
+        with self._mock_discovery(candidates), patch.dict(
+            os.environ, {"ANTHROPIC_API_KEY": "test-key"}
+        ), patch("anthropic.Anthropic", return_value=_mock_anthropic_client('{"belongs_to_series": false}')):
+            agent = SeriesIntelligenceAgent()
+            agent.run_series_check(self.db, self.series.id, emit_summary=False, telemetry=telemetry)
+
+        summary = telemetry.summary()
+        self.assertEqual(summary["shadow"]["total_llm_calls"], 1)
+        self.assertEqual(summary["shadow"]["per_tier"]["C"]["calls"], 1)
+        self.assertIn("belongs_to_series_shadow_check", summary["by_pass"])
+        # Shadow calls must never leak into the production counters.
+        self.assertEqual(summary["total_llm_calls"], 0)
+        self.assertEqual(summary["total_cost_usd"], 0.0)
+
+    def test_does_not_fire_when_belongs_to_series_is_true(self):
+        # Explicit title match + a real series-position number --
+        # belongs_to_series is True, so low_confidence_ambiguous is False
+        # and the predicate can never be satisfied, regardless of grade.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "Cherry Blossom Girls Book 7",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 7,
+                "upcoming_hint": False,
+            }
+        ]
+        telemetry = DiscoveryTelemetry()
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            agent.run_series_check(self.db, self.series.id, emit_summary=False, telemetry=telemetry)
+
+        self.assertEqual(telemetry.summary()["shadow"]["total_llm_calls"], 0)
+
+    def test_does_not_fire_for_a_zero_confidence_author_mismatch(self):
+        # No textual tie to the series (ambiguous, belongs_to_series
+        # False) AND a confirmed author mismatch drives overall_grade to
+        # "zero" -- predicate excludes anything but "medium"/None.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "The Silver Falcon",
+                "authors": ["A Totally Different Author"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "author_fallback",
+                "series_number_hint": 7,
+                "upcoming_hint": False,
+            }
+        ]
+        unified_candidate = discovery_engine.UnifiedCandidate(
+            title="The Silver Falcon",
+            authors=["A Totally Different Author"],
+            series_name="Cherry Blossom Girls",
+            series_number=7.0,
+            metadata_completeness_score=1.0,
+            source_provenance=[{"source": "hardcover"}],
+        )
+        telemetry = DiscoveryTelemetry()
+        with self._mock_discovery(candidates, unified_candidates=[unified_candidate]):
+            agent = SeriesIntelligenceAgent()
+            agent.run_series_check(self.db, self.series.id, emit_summary=False, telemetry=telemetry)
+
+        summary = telemetry.summary()
+        self.assertEqual(summary["by_gate"]["confidence_grade"], {"zero": 1})
+        self.assertEqual(summary["shadow"]["total_llm_calls"], 0)
+
+    def test_does_not_fire_for_a_universe_tie_in_candidate(self):
+        # Same fixture as test_universe_tie_in_spinoff_series_is_not_
+        # pulled_into_flagship_series: both tie-in candidates get
+        # is_universe_tie_in=True (excluded by the predicate's clause (c))
+        # and the third is a clean, non-ambiguous accept -- shadow calls
+        # must stay at 0 across the whole batch.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-interstellar-mage",
+                "title": "Interstellar Mage: A Cherry Blossom Girls Universe Novel",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2017-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            },
+            {
+                "source": "hardcover",
+                "source_id": "hc-book10",
+                "title": "Cherry Blossom Girls Book 10",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            },
+        ]
+        telemetry = DiscoveryTelemetry()
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            agent.run_series_check(self.db, self.series.id, emit_summary=False, telemetry=telemetry)
+
+        self.assertEqual(telemetry.summary()["shadow"]["total_llm_calls"], 0)
+
+    def test_does_not_fire_for_a_compilation_of_owned_titles(self):
+        # Same fixture shape as test_compilation_listing_naming_multiple_
+        # owned_titles_is_rejected: strings together several owned titles
+        # by name with no bundle keyword -- is_compilation_of_owned_titles
+        # excludes it from the shadow predicate too.
+        series = Series(name="Safehold", author="David Weber", profile_id="robbie")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+
+        owned_titles = [
+            "Off Armageddon Reef",
+            "By Schism Rent Asunder",
+            "By Heresies Distressed",
+            "A Mighty Fortress",
+            "How Firm a Foundation",
+        ]
+        for index, title in enumerate(owned_titles, start=1):
+            self.db.add(
+                Book(
+                    title=f"{title}: (Safehold Book {index})",
+                    author="David Weber",
+                    series_id=series.id,
+                    profile_id=series.profile_id,
+                    series_order=index,
+                    book_number=float(index),
+                    record_status="active",
+                    is_read=True,
+                )
+            )
+        self.db.commit()
+
+        candidates = [
+            {
+                "source": "google_books",
+                "source_id": "gb-compilation-no-keyword",
+                "title": (
+                    "David Weber Reader's Companion: Off Armageddon Reef and By Schism Rent Asunder"
+                ),
+                "authors": ["David Weber"],
+                "published_date": "2015-01-01",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": None,
+                "upcoming_hint": False,
+            }
+        ]
+        telemetry = DiscoveryTelemetry()
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            agent.run_series_check(self.db, series.id, emit_summary=False, telemetry=telemetry)
+
+        self.assertEqual(telemetry.summary()["shadow"]["total_llm_calls"], 0)
+
+    def test_shadow_call_failure_does_not_sink_the_check_now_run(self):
+        # Fail-soft: a missing/invalid ANTHROPIC_API_KEY (the default in
+        # this suite, per conftest.py) must raise LLMCallError inside the
+        # shadow block and be swallowed there -- run_series_check must
+        # still complete and still create the candidate notification.
+        # The attempt itself is still recorded (same "record a zero-token
+        # entry on failure" convention record_llm_call already uses at
+        # every other LLM call site, via the shared `finally` block), just
+        # with zero tokens/cost -- see the assertion below.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "Desert Protocol",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "author_fallback",
+                "series_number_hint": 7,
+                "series_name_hint": "Cherry Blossom Girls",
+                "upcoming_hint": False,
+            }
+        ]
+        telemetry = DiscoveryTelemetry()
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False, telemetry=telemetry)
+
+        self.assertFalse(result["found"])
+        shadow_summary = telemetry.summary()["shadow"]
+        self.assertEqual(shadow_summary["total_llm_calls"], 1)
+        self.assertEqual(shadow_summary["total_tokens_in"], 0)
+        self.assertEqual(shadow_summary["total_cost_usd"], 0.0)
+        rows = self.db.query(SeriesCandidateNotification).filter(
+            SeriesCandidateNotification.series_id == self.series.id
+        ).all()
+        self.assertEqual(len(rows), 1)
 
 
 class Phase4DiagnosticsTest(unittest.TestCase):

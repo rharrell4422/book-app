@@ -39,6 +39,17 @@ from services.discovery_cache import CACHE_MISS, DiscoveryCache
 from services.discovery_telemetry import DiscoveryTelemetry, maybe_pass_scope
 from services.identity import _normalize_series_name_for_identity
 from llm_client import call_llm
+# HTA Orchestrator Step 5: Tier A/B prompt assembly now lives in
+# prompts.py -- these two names are re-exported here unchanged so
+# discovery_engine.py's existing `from provider_io import
+# _WEB_SEARCH_STRUCTURING_PROMPT, _LLM_RECONCILIATION_PROMPT` keeps
+# working with no import changes needed there.
+from prompts import (
+    _WEB_SEARCH_STRUCTURING_PROMPT,
+    _LLM_RECONCILIATION_PROMPT,
+    build_extraction_prompt,
+    build_reconciliation_prompt,
+)
 
 from discovery_text import (
     _author_matches,
@@ -574,54 +585,6 @@ def _fetch_serper_web_search(
     return results
 
 
-_WEB_SEARCH_STRUCTURING_PROMPT = """You are extracting structured book-release data from live web search results.
-
-{scope_line}
-Target author: "{author}"
-
-Below are {count} web search results returned for this search. For EACH result that actually describes a specific book entry by {title_scope} (a released book, an upcoming/pre-order book, or a firm announcement of one) extract its data. Skip results that are: reviews or discussions of a book without any new release info,{skip_other_series} retailer category/search pages, fan wiki summaries of a whole series, news unrelated to a specific book, or fan speculation/discussion about a future book that has no confirmed title yet (e.g. only referred to as "the next book" or "an untitled sequel").
-
-Domain signal guidance:
-Use the domain of the URL as a reliability signal when deciding whether a result is likely to describe a real book entry.
-
-High-signal domains (more likely to describe real books):
-- amazon.com
-- goodreads.com
-- hardcover.app
-- books.google.com
-
-Treat results from these domains as more likely to be valid book entries, and be more willing to accept them when the snippet plausibly describes a specific book by {title_scope}.
-
-Low-signal domains (more likely to contain noise or non-book content):
-- reddit.com
-- *.fandom.com
-- wikipedia.org
-- *.wordpress.com
-- *.blogspot.com
-
-Treat results from these domains with greater skepticism, but do NOT discard them outright. If the snippet clearly describes a specific book (for example, it gives a title, author, volume number, release information, or other strong book-identifying signals), you should still accept the result. This is a soft bias, not a hard filter: always prioritize correctness. If a low-signal domain contains the earliest or only available information about a book, accept it.
-
-Genre-specific metadata guidance:
-- Series names may appear in multiple forms (abbreviations, alternate titles, renamed editions). When multiple series names appear for the same book, prefer the most complete or explicit series name.
-- Book numbering may be expressed in many formats: "Book N", "Volume N", "Part N", "Arc N", "Season N Episode M", or Roman numerals. Infer "book_number" whenever the numbering is explicit or clearly implied.
-- Fractional numbering (e.g., "3.5", "0.5", "Book 2.5", "Interlude", "Side Story", "Novella") should be accepted as valid book entries. Treat these as legitimate positions within the series.
-- Web-serial to book transitions are common. If a snippet describes a web-serial chapter bundle, arc, or season being released as a book, treat it as a valid book entry.
-- If a snippet shows multiple possible titles for the same book (e.g., a renamed volume or rebranded edition), prefer the title that appears in the URL or retailer listing.
-- Reject box sets or omnibus editions unless the snippet explicitly describes a new individual volume within the set.
-
-Search results:
-{snippets}
-
-A retailer listing existing (e.g. a Kindle Store page) is NOT proof a book has already been released -- pre-order listings look identical to a snippet with no date. If the snippet/title does not explicitly confirm a release date or that the book is already out, set "is_upcoming" to true and "published_date" to null rather than guessing it's already available -- it's far more useful to flag a book as "coming soon, exact date unconfirmed" than to wrongly tell a reader something is ready to read.
-
-Respond with ONLY a JSON array (no prose, no markdown code fences). Each element must have this shape:
-{{"result_index": <int, the [N] index above>, "title": <string, the clean book title without the series name or a "Book N" suffix -- BUT if the book has no title of its own beyond its series name and position (i.e. the only title given for it IS "<Series Name> <N>", with no separate subtitle at all), output that full "<Series Name> <N>" text as-is instead of stripping it down to just the bare series name>, "series_name": <string or null, the name of the series this book belongs to, if any -- null if it's a standalone>, "book_number": <int or null, this book's position in its series if stated or clearly implied>, "author_names": [<string>, ...], "published_date": <string, "YYYY-MM-DD"/"YYYY-MM"/"YYYY" if EXPLICITLY stated in the snippet, else null>, "is_upcoming": <bool, see rule above>, "isbn13": <string or null>}}
-
-If none of the results are genuine matches, respond with exactly: []"""
-
-
-
-
 def _structure_web_results_with_llm(
     series_name: str | None,
     author: str,
@@ -654,7 +617,10 @@ def _structure_web_results_with_llm(
         skip_other_series = " unrelated books by other authors,"
         title_scope = "this author"
 
-    prompt = _WEB_SEARCH_STRUCTURING_PROMPT.format(
+    # HTA Orchestrator Step 5: Tier A prompt builder -- see prompts.py's
+    # build_extraction_prompt docstring; zero behavior change from the
+    # inline .format() call this replaces.
+    prompt = build_extraction_prompt(
         scope_line=scope_line,
         author=author,
         count=len(raw_results),
@@ -1990,27 +1956,6 @@ def _apply_reconciliation_entry(entry: dict, members: list["UnifiedCandidate"]) 
     )
 
 
-# Deliberately a completely separate prompt from _WEB_SEARCH_STRUCTURING_PROMPT
-# -- that one extracts book data from raw web-search snippets; this one takes
-# already-structured UnifiedCandidates and reconciles disagreements between
-# them. Changing one should never risk affecting the other.
-_LLM_RECONCILIATION_PROMPT = """You are reconciling a messy, possibly-duplicated list of book candidates for one series, assembled from several different data providers (catalog APIs and web search) that don't always agree with each other.
-
-Series: "{series_name}"
-
-Below are {count} candidates. Each may be missing information, and two or more entries may actually describe the SAME real book (e.g. one provider has "Book Three" as the title with no ISBN, another has the real subtitle and an ISBN but no book number). Some candidates may also not actually belong to this series at all -- a prolific author often has several different series, and a same-author candidate can slip in here even though it's really from one of those other series.
-
-Candidates:
-{candidate_listing}
-
-For EACH candidate above, first decide whether it actually belongs to the series named above, "{series_name}". If a candidate clearly belongs to a different, distinct series by the same author (or to a different series entirely), put its index in "excluded_indices" instead of a resolved entry -- do not guess an exclusion just because a field is missing or a series name is slightly differently worded/branded; only exclude when the candidate's own title/series_name clearly point to a genuinely different series.
-
-For every remaining candidate (the ones that do belong to this series), decide which other such candidates (if any) describe the same real book, and merge them into one resolved entry. Every candidate index 0-{max_index} must appear in EXACTLY ONE of: a resolved entry's "source_indices", or "excluded_indices" -- never both, and never omitted entirely. A candidate that belongs to the series but doesn't match any other is still its own resolved entry with just its own index. For each resolved entry, normalize the book number to a plain number (e.g. "Three"/"Vol. 3"/"#3" -> 3) and pick the most complete/likely-correct value for each field across whichever candidates you merged into it, resolving any disagreement (e.g. two different book numbers) by picking the value supported by more of the merged candidates, or the more specific/authoritative-looking one if it's a tie. If a candidate appears to be a bundle/omnibus of multiple existing volumes rather than a single new one, set "is_bundle" to true.
-
-Respond with ONLY a JSON object (no prose, no markdown code fences) of this exact shape:
-{{"resolved_candidates": [{{"source_indices": [<int>, ...], "title": <string>, "series_name": <string or null>, "series_number": <number or null>, "isbn13": <string or null>, "author_names": [<string>, ...], "published_date": <string or null>, "is_bundle": <bool>, "notes": <short string explaining what changed, or "" if nothing did>}}, ...], "excluded_indices": [<int, index of a candidate that does NOT belong to this series>, ...], "missing_volume_suggestions": [<int, a book number you suspect exists but isn't in the candidate list above, based on the candidates' own text>, ...]}}"""
-
-
 def _reconcile_candidates_with_llm(
     unified_candidates: list["UnifiedCandidate"],
     series_name: str | None,
@@ -2051,7 +1996,10 @@ def _reconcile_candidates_with_llm(
     candidate_listing = "\n".join(
         _format_candidate_for_reconciliation(index, candidate) for index, candidate in enumerate(candidates)
     )
-    prompt = _LLM_RECONCILIATION_PROMPT.format(
+    # HTA Orchestrator Step 5: Tier B prompt builder -- see prompts.py's
+    # build_reconciliation_prompt docstring; zero behavior change from the
+    # inline .format() call this replaces.
+    prompt = build_reconciliation_prompt(
         series_name=series_name or "unknown",
         count=len(candidates),
         candidate_listing=candidate_listing,
