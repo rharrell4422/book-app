@@ -1,5 +1,6 @@
 """Provider-agnostic LLM client wrapper (HTA Orchestrator Step 1; Groq
-added as a second provider in Step 7).
+added as a second provider in Step 7; OpenAI added as a third in Step 10
+Phase 2).
 
 Originally every LLM call in this codebase went through a single
 Anthropic SDK call, duplicated near-identically across provider_io.py's
@@ -11,7 +12,13 @@ output_tokens`. This module centralizes that dispatch. Step 7 adds Groq
 (`_call_groq`, OpenAI-compatible SDK shape) alongside Anthropic
 (`_call_anthropic`) -- no `TIER_MODEL_MAP` entry points at Groq yet, so
 its dispatch path exists and is tested but nothing routes to it in
-production today.
+production today. Step 10 Phase 2 adds a third provider, OpenAI itself
+(`_call_openai`, the same SDK shape Groq already mirrors), plus an
+optional `response_format` parameter on `call_llm` for requesting native
+JSON mode from whichever OpenAI-compatible provider is dispatched to --
+same "wired ahead of use" status as Groq's own addition: nothing routes
+to OpenAI, and no caller passes `response_format` yet, until a later
+Step 10 phase's multi-provider Tier C fan-out exists.
 
 Deliberately thin, by design (see `llm-client-wrapper-evaluation` canvas
 from the Step 1 review):
@@ -81,9 +88,19 @@ TIER_MODEL_MAP: dict[str, dict[str, str]] = {
 # by anything yet (no caller branches on context length or JSON mode
 # today); exists so a future tier-selection or prompt-sizing decision has
 # a single place to look this up rather than hardcoding it again.
+#
+# Step 10 Phase 2 (Multi-Provider Tier C): `openai` added alongside
+# Anthropic/Groq, same "wired ahead of use" convention as Groq's own
+# entry above -- no `TIER_MODEL_MAP` tier points at OpenAI yet either.
+# `supports_json_mode=True` is what a future caller (a later Step 10
+# phase's orchestrator) would consult before passing `call_llm(...,
+# response_format="json")` for a given provider -- see that parameter's
+# own docstring below. Not consulted by `call_llm` itself in Phase 2;
+# nothing routes to OpenAI in production today.
 PROVIDER_METADATA: dict[str, dict] = {
     "anthropic": {"context_length": 200_000, "supports_json_mode": False},
     "groq": {"context_length": 128_000, "supports_json_mode": True},
+    "openai": {"context_length": 128_000, "supports_json_mode": True},
 }
 
 
@@ -140,6 +157,7 @@ def call_llm(
     max_tokens: int,
     temperature: float | None = None,
     timeout: float | None = None,
+    response_format: str | None = None,
 ) -> LLMResponse:
     """Dispatches one LLM call and returns a normalized `LLMResponse`
     (plain text plus `(tokens_in, tokens_out)`).
@@ -173,6 +191,26 @@ def call_llm(
     deliberate "let the SDK default apply" behavior; see this module's
     docstring.
 
+    `response_format` (Step 10 Phase 2, Multi-Provider Tier C): optional,
+    `None` (the default) or `"json"`. Forwarded only to `_call_groq`/
+    `_call_openai`, which translate `"json"` into that SDK's native
+    `response_format={"type": "json_object"}` chat-completions parameter
+    -- both providers are OpenAI-compatible in this regard (see `_call_
+    groq`'s own docstring). Anthropic has no equivalent native parameter
+    (`PROVIDER_METADATA["anthropic"]["supports_json_mode"]` is already
+    `False`), so the Anthropic dispatch branch below never receives this
+    argument at all -- passing `response_format="json"` alongside
+    `provider="anthropic"` is accepted without error, simply has no
+    effect, and does not appear in the exact kwargs sent to `anthropic.
+    Anthropic().messages.create(...)` (preserves this module's documented
+    "roughly a dozen tests assert exact kwargs" compatibility
+    constraint). This function does not itself validate `response_format`
+    against `PROVIDER_METADATA[provider]["supports_json_mode"]` -- a
+    caller deciding whether to request JSON mode for a given provider
+    should consult that dict first; no caller does so yet in Phase 2
+    (nothing routes to OpenAI, and the existing Tier C shadow call site
+    never passes this parameter).
+
     Raises `LLMCallError` on any failure (missing credentials, network/
     SDK error, unrecognized model_id/tier, missing/mismatched provider)
     -- never returns a partial/None response. Callers that need "record
@@ -189,7 +227,21 @@ def call_llm(
         )
     if resolved_provider == "groq":
         return _call_groq(
-            resolved_model_id, prompt, max_tokens=max_tokens, temperature=temperature, timeout=timeout
+            resolved_model_id,
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=timeout,
+            response_format=response_format,
+        )
+    if resolved_provider == "openai":
+        return _call_openai(
+            resolved_model_id,
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=timeout,
+            response_format=response_format,
         )
     raise LLMCallError(
         f"no dispatch implemented for provider={resolved_provider!r} (model_id={resolved_model_id!r})"
@@ -243,6 +295,7 @@ def _call_groq(
     max_tokens: int,
     temperature: float | None,
     timeout: float | None,
+    response_format: str | None = None,
 ) -> LLMResponse:
     """HTA Orchestrator Step 7: Groq's Python SDK is OpenAI-compatible
     (`chat.completions.create`, `usage.prompt_tokens`/`completion_tokens`)
@@ -253,6 +306,12 @@ def _call_groq(
     No `TIER_MODEL_MAP` entry points at Groq yet (see that map's own
     comment) -- this dispatch path exists so it's wired and testable
     ahead of that, not because anything routes to it in production today.
+
+    `response_format` (Step 10 Phase 2): `call_llm`'s `"json"` sentinel
+    translates to Groq's native `{"type": "json_object"}` chat-
+    completions parameter -- see `call_llm`'s own docstring for the full
+    contract. `None` (the default) omits the kwarg entirely, identical to
+    every existing caller's behavior before Phase 2.
     """
     # Lazy import, same convention as `_call_anthropic` above -- only
     # touched when a key is actually present and this branch actually runs.
@@ -271,8 +330,71 @@ def _call_groq(
         kwargs["temperature"] = temperature
     if timeout is not None:
         kwargs["timeout"] = timeout
+    if response_format == "json":
+        kwargs["response_format"] = {"type": "json_object"}
 
     client = groq.Groq(api_key=api_key)
+    try:
+        response = client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        raise LLMCallError(str(exc)) from exc
+
+    choices = getattr(response, "choices", None) or []
+    text = ""
+    if choices:
+        message = getattr(choices[0], "message", None)
+        text = (getattr(message, "content", None) or "").strip()
+    usage = getattr(response, "usage", None)
+    tokens_in = int(getattr(usage, "prompt_tokens", 0) or 0)
+    tokens_out = int(getattr(usage, "completion_tokens", 0) or 0)
+    return LLMResponse(text=text, tokens_in=tokens_in, tokens_out=tokens_out, model_id=model_id)
+
+
+def _call_openai(
+    model_id: str,
+    prompt: str,
+    *,
+    max_tokens: int,
+    temperature: float | None,
+    timeout: float | None,
+    response_format: str | None = None,
+) -> LLMResponse:
+    """Step 10 Phase 2 (Multi-Provider Tier C): OpenAI's Python SDK is the
+    same `chat.completions.create`/`usage.prompt_tokens`/
+    `completion_tokens` shape `_call_groq` above already normalizes (Groq
+    deliberately mirrors OpenAI's own API) -- this function is that same
+    normalization applied to the real OpenAI SDK instead of an
+    OpenAI-compatible one. No `TIER_MODEL_MAP` entry points at OpenAI yet
+    (see `PROVIDER_METADATA`'s own comment) -- wired and testable ahead
+    of that, same "wire ahead of use" convention as Groq's own dispatch
+    path in Step 7.
+
+    `response_format`: see `_call_groq`'s docstring immediately above --
+    identical contract, translated to OpenAI's own native
+    `{"type": "json_object"}` parameter.
+    """
+    # Lazy import, same convention as `_call_anthropic`/`_call_groq`
+    # above -- only touched when a key is actually present and this
+    # branch actually runs.
+    import openai
+
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise LLMCallError("OPENAI_API_KEY is not set")
+
+    kwargs: dict = {
+        "model": model_id,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    if response_format == "json":
+        kwargs["response_format"] = {"type": "json_object"}
+
+    client = openai.OpenAI(api_key=api_key)
     try:
         response = client.chat.completions.create(**kwargs)
     except Exception as exc:

@@ -20,18 +20,25 @@ without anyone noticing.
 
 from __future__ import annotations
 
-# Source: platform.claude.com and console.groq.com pricing pages,
-# standard (non-batch, non-cached) rates. Update this table -- and only
-# this table -- when a new model_id is wired into `llm_client.py`.
+# Source: platform.claude.com, console.groq.com, and platform.openai.com
+# pricing pages, standard (non-batch, non-cached) rates. Update this
+# table -- and only this table -- when a new model_id is wired into
+# `llm_client.py`.
 #
 # HTA Orchestrator Step 7: `llama-3.3-70b-versatile` has a pricing entry
 # even though no `TIER_MODEL_MAP` tier points at it yet (`llm_client.py`'s
 # `_call_groq` dispatch path is wired and tested ahead of any tier
 # actually using it) -- this is the model any ad hoc/smoke-test Groq call
 # should use until a tier is deliberately pointed at Groq.
+#
+# Step 10 Phase 2: `gpt-4o-mini` is the OpenAI counterpart -- same
+# "wired ahead of any tier actually using it" status as the Groq entry
+# immediately above (`llm_client._call_openai` is tested but nothing
+# routes to it in production yet).
 PRICING_PER_MILLION_TOKENS: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5-20251001": (1.00, 5.00),
     "llama-3.3-70b-versatile": (0.59, 0.79),
+    "gpt-4o-mini": (0.15, 0.60),
 }
 
 
