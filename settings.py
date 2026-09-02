@@ -299,3 +299,47 @@ PARSE_FAILURE_WINDOW_SIZE = int(os.environ.get("PARSE_FAILURE_WINDOW_SIZE", "100
 # consistently ignoring the JSON-mode/prompt instructions), not
 # individual flaky responses.
 PARSE_FAILURE_ALERT_THRESHOLD = float(os.environ.get("PARSE_FAILURE_ALERT_THRESHOLD", "0.15"))
+
+# Step 11 Phase 4 (Provider/Model Scorecard & Tier C Confidence Signals,
+# consensus-based signal): default False -- opt-in, matching this
+# module's `_ENABLED` convention (`AGENTIC_ROUTING_ENABLED`,
+# `FINGERPRINT_INFLUENCE_ENABLED`). When enabled, a series showing
+# SUSTAINED low multi-provider-only cross-provider consensus (Step 11
+# Phase 2's `cross_provider_avg_consensus_score_multi_provider_only`)
+# gets a "hold": `_decide_transition` will not promote that series
+# further (shadow_only -> shadow_advisory, or shadow_advisory -> live)
+# until consensus recovers. Deliberately NEVER causes an active
+# demotion by itself -- the finalized Step 11 spec's own "never demote
+# solely on consensus" instruction -- gate-disagreement (`TIER_C_
+# DEMOTION_DISAGREEMENT_THRESHOLD`) remains the only path that can move
+# a series backward. See `services/tier_c_promotion_engine.py`'s
+# docstring for the full rationale, including why "hold, never demote"
+# was chosen over the spec's other offered shape ("soft demotion vote").
+TIER_C_CONSENSUS_SIGNAL_ENABLED = bool(
+    os.getenv("TIER_C_CONSENSUS_SIGNAL_ENABLED", "false").lower() == "true"
+)
+
+# A promotion-history entry's multi-provider-only consensus_score below
+# this counts as "low" for `TIER_C_CONSENSUS_SIGNAL_ENABLED`'s purposes.
+# 0.7 is a deliberately loose default: a 2-out-of-3 provider split is
+# exactly 0.667 (`consensus_score = max(true_count, false_count) /
+# len(decision_rows)`, see `_build_candidate_aggregate`), so this sits
+# just above "one dissenting voice out of three" -- catching genuine,
+# recurring disagreement without demanding unanimous 1.0-only consensus,
+# which providers reasonably & harmlessly dip below now and then on
+# truly ambiguous candidates.
+TIER_C_CONSENSUS_LOW_THRESHOLD = float(os.environ.get("TIER_C_CONSENSUS_LOW_THRESHOLD", "0.7"))
+
+# How many of a series' most recent promotion-history entries that
+# actually had multi-provider evidence (`cross_provider_multi_provider_
+# candidate_count > 0`) must ALL show low consensus before the hold
+# triggers -- "sustained," not a single bad evaluation window. Entries
+# with zero multi-provider candidates (today's common case at the
+# current `TIER_C_PARALLEL_SHADOW_SAMPLE_RATE`) are skipped over
+# entirely when counting toward this -- not treated as "not low" and not
+# treated as "low" either, simply not evidence either way. Fewer than
+# this many qualifying entries in a series' history means the hold can
+# never trigger yet (insufficient multi-provider evidence, same
+# "innocent until enough evidence exists" posture as `TIER_C_PROMOTION_
+# MIN_CALLS`).
+TIER_C_CONSENSUS_SIGNAL_LOOKBACK = int(os.environ.get("TIER_C_CONSENSUS_SIGNAL_LOOKBACK", "3"))

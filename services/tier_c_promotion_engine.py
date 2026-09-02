@@ -83,6 +83,31 @@ Metrics input:
     diluted into near-uselessness by the single-provider majority. Still
     purely additive/observational here too -- not consulted by `_decide_
     transition`.
+  - Step 11 Phase 4 addition: `_decide_transition` NOW consults one more
+    signal, gated behind `settings.TIER_C_CONSENSUS_SIGNAL_ENABLED`
+    (default `False`): `_has_sustained_low_consensus` (below) reads a
+    series' last `settings.TIER_C_CONSENSUS_SIGNAL_LOOKBACK` promotion-
+    history entries that had multi-provider evidence and, if ALL of them
+    show `cross_provider_avg_consensus_score_multi_provider_only` below
+    `settings.TIER_C_CONSENSUS_LOW_THRESHOLD`, sets a `consensus_hold`
+    flag for this evaluation.
+
+    The finalized Step 11 spec offered two possible shapes for this
+    signal -- "a soft demotion vote OR a hold flag... never demote
+    solely on consensus." This implementation picked the HOLD shape,
+    not the demotion-vote shape: `consensus_hold=True` can only ever
+    *block a promotion* (`shadow_only -> shadow_advisory` or
+    `shadow_advisory -> live`) that would otherwise have happened on
+    gate-agreement grounds alone -- it can NEVER cause a series to move
+    backward. This trivially and completely satisfies "never demote
+    solely on consensus" (it demotes never, solely on consensus or
+    otherwise), whereas a "soft demotion vote" shape would have required
+    deciding how much weight consensus gets when combined with gate-
+    disagreement evidence -- an under-specified design question this
+    phase deliberately avoids by not needing an answer to it at all.
+    Gate-disagreement (`TIER_C_DEMOTION_DISAGREEMENT_THRESHOLD`) remains
+    the ONLY path that can move a series backward, completely unchanged
+    by this phase.
   - Latency (`duration_ms`) and override tracking (`tier_c_state_at_
     call`) are persisted (Step 9 schema additions) but not yet consulted
     by the transition rules below -- extension points, not gaps: a future
@@ -121,8 +146,21 @@ REASON_STABLE = "stable"
 REASON_AGREEMENT_HIGH = "shadow_agreement_high"
 REASON_DISAGREEMENT_HIGH = "disagreement_high"
 REASON_MANUAL_OVERRIDE_ACTIVE = "manual_override_active"
+# Step 11 Phase 4: a promotion that would otherwise have happened on
+# gate-agreement grounds alone was held back due to sustained low
+# multi-provider consensus -- see this module's docstring. Only ever
+# produced when settings.TIER_C_CONSENSUS_SIGNAL_ENABLED is True.
+REASON_CONSENSUS_HOLD = "consensus_hold"
 
 _VALID_STATES = ("shadow_only", "shadow_advisory", "live")
+# Defensive cap on how many TierCPromotionHistory rows _has_sustained_
+# low_consensus will ever scan for one series -- generous enough that it
+# should never actually bind in practice (multi-provider-having entries
+# are the rare case at today's sample rate, so most real series will
+# exhaust this before finding settings.TIER_C_CONSENSUS_SIGNAL_LOOKBACK
+# qualifying entries), purely a defensive bound against an unbounded
+# query on a series with an extremely long evaluation history.
+_CONSENSUS_HOLD_HISTORY_SCAN_LIMIT = 500
 
 
 def _decide_transition(
@@ -134,6 +172,7 @@ def _decide_transition(
     min_calls: int,
     agreement_threshold: float,
     disagreement_threshold: float,
+    consensus_hold: bool = False,
 ) -> tuple[str, str]:
     """Single, testable, pure decision function (Step 9 spec's explicit
     requirement) -- no DB access, no side effects. Returns
@@ -149,6 +188,17 @@ def _decide_transition(
     An unrecognized `current_state` (defensive only -- every real caller
     goes through `get_tier_c_promotion_state`, which always returns one of
     `_VALID_STATES`) HOLDs rather than guessing.
+
+    `consensus_hold` (Step 11 Phase 4, default `False` -- every pre-Phase-
+    4 caller/test keeps its exact prior behavior unchanged): when `True`,
+    blocks ONLY a promotion this call would otherwise have made
+    (`shadow_only -> shadow_advisory` or `shadow_advisory -> live`),
+    reporting `REASON_CONSENSUS_HOLD` instead. Checked strictly AFTER the
+    disagreement/demotion check in each branch, so it can never mask or
+    interfere with a demotion -- see this module's docstring for why the
+    hold shape (vs. a "soft demotion vote") was chosen specifically so
+    this parameter could never move `current_state` backward, only
+    prevent it from moving forward.
     """
     if current_state not in _VALID_STATES:
         return current_state, "unknown_state"
@@ -158,6 +208,8 @@ def _decide_transition(
 
     if current_state == "shadow_only":
         if agreement_rate is not None and agreement_rate >= agreement_threshold:
+            if consensus_hold:
+                return current_state, REASON_CONSENSUS_HOLD
             return "shadow_advisory", REASON_AGREEMENT_HIGH
         return current_state, REASON_STABLE
 
@@ -165,14 +217,19 @@ def _decide_transition(
         # Checked before promotion: a window that's simultaneously "high
         # agreement" and "high disagreement" can't happen (they're
         # complementary rates over the same calls), but disagreement is
-        # the safety-relevant direction -- always resolve it first.
+        # the safety-relevant direction -- always resolve it first, and
+        # unconditionally on consensus_hold (a hold only ever blocks the
+        # promotion branch below, never this one).
         if disagreement_rate is not None and disagreement_rate >= disagreement_threshold:
             return "shadow_only", REASON_DISAGREEMENT_HIGH
         if agreement_rate is not None and agreement_rate >= agreement_threshold:
+            if consensus_hold:
+                return current_state, REASON_CONSENSUS_HOLD
             return "live", REASON_AGREEMENT_HIGH
         return current_state, REASON_STABLE
 
-    # current_state == "live"
+    # current_state == "live" -- no promotion branch exists here for
+    # consensus_hold to ever block; this state can only stay or demote.
     if disagreement_rate is not None and disagreement_rate >= disagreement_threshold:
         return "shadow_advisory", REASON_DISAGREEMENT_HIGH
     return current_state, REASON_STABLE
@@ -245,12 +302,14 @@ def evaluate_tier_c_promotion(series_id: int, *, budget_blocked: bool = False) -
         )
 
         # Cross-provider consensus/conflict: additive-only (spec's own
-        # wording) -- computed here purely for metrics_snapshot visibility,
-        # never passed into _decide_transition below. conflict_candidate_
-        # count/avg_consensus_score stay None-safe when no candidate in
-        # this window had more than one provider respond (today's only
-        # case), matching every other "no evidence yet" field in this
-        # snapshot.
+        # wording) -- computed here purely for metrics_snapshot
+        # visibility. conflict_candidate_count/avg_consensus_score stay
+        # None-safe when no candidate in this window had more than one
+        # provider respond (today's only case), matching every other "no
+        # evidence yet" field in this snapshot. (The multi-provider-only
+        # variant below IS consulted by _decide_transition, but only via
+        # _has_sustained_low_consensus's own separate, cross-evaluation
+        # read below -- never these single-evaluation values directly.)
         conflict_candidate_count = sum(1 for agg in recent_aggregates if agg["conflict_flag"])
         consensus_scores = [
             agg["consensus_score"] for agg in recent_aggregates if agg["consensus_score"] is not None
@@ -276,6 +335,13 @@ def evaluate_tier_c_promotion(series_id: int, *, budget_blocked: bool = False) -
             else None
         )
 
+        # Step 11 Phase 4: reads THIS series' past promotion-history rows
+        # (i.e. excludes the evaluation being computed right now, which
+        # hasn't been written yet) -- see _has_sustained_low_consensus's
+        # own docstring. False (a no-op) whenever settings.TIER_C_
+        # CONSENSUS_SIGNAL_ENABLED is False, its own default.
+        consensus_hold = _has_sustained_low_consensus(db, series_id)
+
         new_state, reason = _decide_transition(
             current_state=current_state,
             shadow_calls_considered=shadow_calls_considered,
@@ -284,6 +350,7 @@ def evaluate_tier_c_promotion(series_id: int, *, budget_blocked: bool = False) -
             min_calls=settings.TIER_C_PROMOTION_MIN_CALLS,
             agreement_threshold=settings.TIER_C_PROMOTION_AGREEMENT_THRESHOLD,
             disagreement_threshold=settings.TIER_C_DEMOTION_DISAGREEMENT_THRESHOLD,
+            consensus_hold=consensus_hold,
         )
 
         _write_history(
@@ -319,6 +386,14 @@ def evaluate_tier_c_promotion(series_id: int, *, budget_blocked: bool = False) -
                 "cross_provider_avg_consensus_score_multi_provider_only": (
                     avg_cross_provider_consensus_score_multi_provider_only
                 ),
+                # Step 11 Phase 4: whether THIS evaluation's promotion (if
+                # any) was blocked by _has_sustained_low_consensus -- see
+                # this module's docstring. consensus_signal_enabled is
+                # recorded alongside it so a historical row is
+                # self-describing even after the setting is later
+                # flipped/tuned.
+                "consensus_signal_enabled": settings.TIER_C_CONSENSUS_SIGNAL_ENABLED,
+                "consensus_hold_active": consensus_hold,
             },
         )
         upsert_tier_c_promotion_state(db, series_id, tier_c_state=new_state, last_evaluated_at=now)
@@ -363,6 +438,71 @@ def _check_parse_failure_spikes_fail_soft(db) -> None:
         check_parse_failure_spikes(db)
     except Exception:
         logger.exception("evaluate_tier_c_promotion: parse-failure spike check failed")
+
+
+def _has_sustained_low_consensus(db, series_id: int) -> bool:
+    """Step 11 Phase 4: `False` immediately (no query at all) when
+    `settings.TIER_C_CONSENSUS_SIGNAL_ENABLED` is `False` -- its own
+    default, so this is a complete no-op for every deployment that
+    hasn't explicitly opted in.
+
+    When enabled: scans `series_id`'s `TierCPromotionHistory` rows, most
+    recent first (capped at `_CONSENSUS_HOLD_HISTORY_SCAN_LIMIT` as a
+    defensive bound -- see that constant's own comment), collecting only
+    the entries whose `metrics_snapshot["cross_provider_multi_provider_
+    candidate_count"]` is truthy (i.e. actually had >=1 candidate with
+    >=2 providers responding that evaluation -- see Step 11 Phase 2).
+    Entries with zero multi-provider evidence are skipped over entirely,
+    not counted as "not low" -- they simply aren't evidence either way
+    (today's common case at the current `TIER_C_PARALLEL_SHADOW_SAMPLE_
+    RATE`).
+
+    Returns `True` only when AT LEAST `settings.TIER_C_CONSENSUS_SIGNAL_
+    LOOKBACK` such qualifying entries exist AND EVERY one of the most
+    recent `LOOKBACK` of them has `cross_provider_avg_consensus_score_
+    multi_provider_only` below `settings.TIER_C_CONSENSUS_LOW_THRESHOLD`
+    -- "sustained," not a single bad evaluation window. Fewer than
+    `LOOKBACK` qualifying entries in the scanned history (including zero)
+    returns `False` -- insufficient multi-provider evidence to call
+    anything "sustained" yet, same "innocent until enough evidence
+    exists" posture as `TIER_C_PROMOTION_MIN_CALLS` itself.
+
+    Read-only; uses the caller's own session (this is called from inside
+    `evaluate_tier_c_promotion`'s existing try/except, so a query error
+    here propagates up to that function's own fail-soft handling rather
+    than needing its own -- unlike `_check_parse_failure_spikes_fail_
+    soft`, which wraps a call site that runs BEFORE anything else in this
+    function has had a chance to do real work).
+    """
+    if not settings.TIER_C_CONSENSUS_SIGNAL_ENABLED:
+        return False
+
+    lookback = settings.TIER_C_CONSENSUS_SIGNAL_LOOKBACK
+    if lookback <= 0:
+        return False
+
+    rows = (
+        db.query(models.TierCPromotionHistory)
+        .filter(models.TierCPromotionHistory.series_id == series_id)
+        .order_by(models.TierCPromotionHistory.id.desc())
+        .limit(_CONSENSUS_HOLD_HISTORY_SCAN_LIMIT)
+        .all()
+    )
+
+    qualifying_consensus_scores: list[float | None] = []
+    for row in rows:
+        snapshot = row.metrics_snapshot or {}
+        if not snapshot.get("cross_provider_multi_provider_candidate_count"):
+            continue
+        qualifying_consensus_scores.append(snapshot.get("cross_provider_avg_consensus_score_multi_provider_only"))
+        if len(qualifying_consensus_scores) >= lookback:
+            break
+
+    if len(qualifying_consensus_scores) < lookback:
+        return False
+
+    threshold = settings.TIER_C_CONSENSUS_LOW_THRESHOLD
+    return all(score is not None and score < threshold for score in qualifying_consensus_scores)
 
 
 def _write_history(
