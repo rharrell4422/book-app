@@ -1,20 +1,21 @@
 """Step 10 (Multi-Provider Tier C): incremental test coverage, one phase
 at a time, mirroring how tests/test_tier_c_shadow_store.py grew across
 Steps 8 and 9. Phase 1 (schema + settings scaffolding), Phase 3
-(TierCOrchestrator extraction), and Phase 4 (parallel fan-out) so far --
-later phases extend this same file rather than starting a new one per
-phase.
+(TierCOrchestrator extraction), Phase 4 (parallel fan-out), and Phase 5
+(per-candidate aggregation + Step 9 wiring) so far -- later phases extend
+this same file rather than starting a new one per phase.
 """
 
 import os
 import unittest
+import uuid
 from unittest.mock import MagicMock, patch
 
 import settings
 from database import Base
 from models import Series, ShadowLLMCall
 from services.discovery_telemetry import DiscoveryTelemetry
-from services.tier_c_shadow_store import persist_tier_c_shadow_call
+from services.tier_c_shadow_store import get_recent_candidate_aggregates, persist_tier_c_shadow_call
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -545,6 +546,286 @@ class Phase4ParallelFanOutTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].shadow_provider, "anthropic")
         self.assertEqual(rows[0].tier_c_state_at_call, "live")
+
+
+class Phase5CandidateAggregationTest(unittest.TestCase):
+    """Step 10 Phase 5: direct, unit-level coverage of `services.tier_c_
+    shadow_store.get_recent_candidate_aggregates` -- the read-time
+    counterpart to Phase 4's in-process `_aggregate_gate_comparison_
+    votes`, exercised here against real persisted rows instead of
+    hand-built score dicts.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=cls.engine)
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        Base.metadata.drop_all(bind=cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        self.db = self.SessionLocal()
+        series = Series(name="Test Series", author="Test Author", profile_id="robbie")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+        self.series = series
+
+    def tearDown(self):
+        self.db.close()
+
+    def _add_row(
+        self,
+        *,
+        candidate_request_id: str | None,
+        provider: str = "anthropic",
+        belongs_to_series_agreement: bool | None,
+        shadow_belongs_to_series: bool | None = None,
+        parsed_ok: bool = True,
+        created_at=None,
+    ) -> None:
+        from datetime import datetime
+
+        self.db.add(
+            ShadowLLMCall(
+                series_id=self.series.id,
+                run_id="job-1",
+                tier="C",
+                gate_belongs_to_series=False,
+                shadow_provider=provider,
+                shadow_model_id="some-model",
+                shadow_belongs_to_series=(
+                    shadow_belongs_to_series if shadow_belongs_to_series is not None else belongs_to_series_agreement
+                ),
+                parsed_ok=parsed_ok,
+                belongs_to_series_agreement=belongs_to_series_agreement,
+                candidate_request_id=candidate_request_id,
+                created_at=created_at or datetime.utcnow(),
+            )
+        )
+        self.db.commit()
+
+    def _aggregates(self, limit=10):
+        return get_recent_candidate_aggregates(self.db, self.series.id, limit)
+
+    def test_single_provider_candidate_aggregates_trivially(self):
+        cand = uuid.uuid4().hex
+        self._add_row(candidate_request_id=cand, belongs_to_series_agreement=True)
+
+        aggregates = self._aggregates()
+        self.assertEqual(len(aggregates), 1)
+        agg = aggregates[0]
+        self.assertEqual(agg["candidate_request_id"], cand)
+        self.assertEqual(agg["provider_count"], 1)
+        self.assertEqual(agg["voter_count"], 1)
+        self.assertTrue(agg["gate_agreement"])
+        self.assertEqual(agg["consensus_score"], 1.0)
+        self.assertFalse(agg["conflict_flag"])
+
+    def test_three_provider_unanimous_agreement(self):
+        cand = uuid.uuid4().hex
+        for provider in ("anthropic", "groq", "openai"):
+            self._add_row(candidate_request_id=cand, provider=provider, belongs_to_series_agreement=True)
+
+        agg = self._aggregates()[0]
+        self.assertEqual(agg["provider_count"], 3)
+        self.assertTrue(agg["gate_agreement"])
+        self.assertEqual(agg["consensus_score"], 1.0)
+        self.assertFalse(agg["conflict_flag"])
+
+    def test_two_one_split_follows_majority_and_flags_conflict(self):
+        cand = uuid.uuid4().hex
+        self._add_row(candidate_request_id=cand, provider="anthropic", belongs_to_series_agreement=True)
+        self._add_row(candidate_request_id=cand, provider="groq", belongs_to_series_agreement=True)
+        self._add_row(candidate_request_id=cand, provider="openai", belongs_to_series_agreement=False)
+
+        agg = self._aggregates()[0]
+        self.assertEqual(agg["provider_count"], 3)
+        self.assertTrue(agg["gate_agreement"])
+        # Providers disagreed with each other (2 said "agrees with gate",
+        # 1 said "disagrees with gate") -- cross-provider conflict, even
+        # though the gate-comparison vote itself was decisive.
+        self.assertTrue(agg["conflict_flag"])
+        self.assertAlmostEqual(agg["consensus_score"], 2 / 3)
+
+    def test_exact_two_way_tie_resolves_to_disagreement(self):
+        cand = uuid.uuid4().hex
+        self._add_row(candidate_request_id=cand, provider="anthropic", belongs_to_series_agreement=True)
+        self._add_row(candidate_request_id=cand, provider="groq", belongs_to_series_agreement=False)
+
+        agg = self._aggregates()[0]
+        self.assertFalse(agg["gate_agreement"])
+        self.assertTrue(agg["conflict_flag"])
+
+    def test_unparseable_row_counts_toward_provider_count_not_votes(self):
+        cand = uuid.uuid4().hex
+        self._add_row(candidate_request_id=cand, provider="anthropic", belongs_to_series_agreement=True)
+        self._add_row(
+            candidate_request_id=cand,
+            provider="groq",
+            belongs_to_series_agreement=None,
+            shadow_belongs_to_series=None,
+            parsed_ok=False,
+        )
+
+        agg = self._aggregates()[0]
+        self.assertEqual(agg["provider_count"], 2)
+        self.assertEqual(agg["voter_count"], 1)
+        self.assertTrue(agg["gate_agreement"])
+        # Only 1 comparable shadow_belongs_to_series value -- trivially
+        # "consensus" with itself.
+        self.assertEqual(agg["consensus_score"], 1.0)
+        self.assertFalse(agg["conflict_flag"])
+
+    def test_rows_with_no_candidate_request_id_are_excluded(self):
+        # Historical, pre-Phase-4 rows -- see get_recent_candidate_
+        # aggregates' docstring for why these are deliberately excluded
+        # rather than synthesized into singleton groups.
+        self._add_row(candidate_request_id=None, belongs_to_series_agreement=True)
+
+        self.assertEqual(self._aggregates(), [])
+
+    def test_respects_limit_and_orders_most_recent_candidate_first(self):
+        from datetime import datetime, timedelta
+
+        base = datetime.utcnow()
+        older_cand = uuid.uuid4().hex
+        newer_cand = uuid.uuid4().hex
+        self._add_row(candidate_request_id=older_cand, belongs_to_series_agreement=True, created_at=base)
+        self._add_row(
+            candidate_request_id=newer_cand,
+            belongs_to_series_agreement=False,
+            created_at=base + timedelta(seconds=10),
+        )
+
+        all_aggregates = self._aggregates(limit=10)
+        self.assertEqual([a["candidate_request_id"] for a in all_aggregates], [newer_cand, older_cand])
+
+        limited = self._aggregates(limit=1)
+        self.assertEqual([a["candidate_request_id"] for a in limited], [newer_cand])
+
+    def test_no_rows_returns_empty_list(self):
+        self.assertEqual(self._aggregates(), [])
+
+
+class Phase5PromotionEngineWiringTest(unittest.TestCase):
+    """Step 10 Phase 5: end-to-end coverage that `evaluate_tier_c_
+    promotion` now counts per-candidate votes, not raw rows -- the actual
+    behavior-change point of this phase. `tests/test_tier_c_promotion_
+    engine.py`'s existing single-provider-shaped tests already confirm
+    "no change for today's only real traffic shape"; this class confirms
+    the new multi-provider-aware counting itself.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=cls.engine)
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        Base.metadata.drop_all(bind=cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        self.db = self.SessionLocal()
+        series = Series(name="Test Series", author="Test Author", profile_id="robbie")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+        self.series = series
+
+        self._session_local_patch = patch("services.tier_c_promotion_engine.SessionLocal", self.SessionLocal)
+        self._session_local_patch.start()
+        self._settings_patches = [
+            patch.object(settings, "TIER_C_PROMOTION_MIN_CALLS", 2),
+            patch.object(settings, "TIER_C_PROMOTION_AGREEMENT_THRESHOLD", 0.9),
+            patch.object(settings, "TIER_C_DEMOTION_DISAGREEMENT_THRESHOLD", 0.3),
+        ]
+        for p in self._settings_patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._settings_patches:
+            p.stop()
+        self._session_local_patch.stop()
+        self.db.close()
+
+    def _add_fan_out_candidate(self, *, candidate_request_id, agreements: list[bool]) -> None:
+        from datetime import datetime
+
+        for i, agreement in enumerate(agreements):
+            self.db.add(
+                ShadowLLMCall(
+                    series_id=self.series.id,
+                    run_id="job-1",
+                    tier="C",
+                    gate_belongs_to_series=False,
+                    shadow_provider=["anthropic", "groq", "openai"][i],
+                    shadow_model_id="some-model",
+                    shadow_belongs_to_series=agreement,
+                    parsed_ok=True,
+                    belongs_to_series_agreement=agreement,
+                    candidate_request_id=candidate_request_id,
+                    created_at=datetime.utcnow(),
+                )
+            )
+        self.db.commit()
+
+    def _history_last(self):
+        from models import TierCPromotionHistory
+
+        return (
+            self.db.query(TierCPromotionHistory)
+            .filter(TierCPromotionHistory.series_id == self.series.id)
+            .order_by(TierCPromotionHistory.id.desc())
+            .first()
+        )
+
+    def test_a_three_provider_candidate_counts_as_one_vote_not_three(self):
+        from services.tier_c_promotion_engine import evaluate_tier_c_promotion
+
+        # 2 candidates, min_calls=2 -- if this incorrectly counted raw
+        # rows (3 + 1 = 4), it would still clear min_calls, but the
+        # *rate* would differ: 3 rows agree + 1 disagrees = 75% raw-row
+        # agreement vs. this test's actual 1 agree-candidate + 1
+        # disagree-candidate = 50% per-candidate agreement. Asserting the
+        # 50% figure proves candidates, not rows, are being counted.
+        self._add_fan_out_candidate(
+            candidate_request_id=uuid.uuid4().hex, agreements=[True, True, True]
+        )
+        self._add_fan_out_candidate(candidate_request_id=uuid.uuid4().hex, agreements=[False])
+
+        evaluate_tier_c_promotion(self.series.id)
+
+        history = self._history_last()
+        self.assertEqual(history.shadow_calls_considered, 2)
+        self.assertEqual(history.agreement_rate, 0.5)
+        self.assertEqual(history.metrics_snapshot["agreement_count"], 1)
+        self.assertEqual(history.metrics_snapshot["disagreement_count"], 1)
+
+    def test_cross_provider_metrics_land_in_metrics_snapshot_only(self):
+        from services.tier_c_promotion_engine import evaluate_tier_c_promotion
+
+        self._add_fan_out_candidate(
+            candidate_request_id=uuid.uuid4().hex, agreements=[True, True, False]
+        )
+        self._add_fan_out_candidate(candidate_request_id=uuid.uuid4().hex, agreements=[True])
+
+        evaluate_tier_c_promotion(self.series.id)
+
+        history = self._history_last()
+        self.assertEqual(history.metrics_snapshot["cross_provider_conflict_candidate_count"], 1)
+        self.assertIsNotNone(history.metrics_snapshot["cross_provider_avg_consensus_score"])
+        # Both candidates voted "agree" (majority of [T, T, F] is
+        # agreement) -- promotion decision itself is untouched by the
+        # conflict signal above.
+        self.assertEqual(history.agreement_rate, 1.0)
 
 
 if __name__ == "__main__":

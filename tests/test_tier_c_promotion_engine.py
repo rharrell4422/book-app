@@ -7,6 +7,7 @@ TierCPromotionPathTest).
 """
 
 import unittest
+import uuid
 from datetime import datetime
 from unittest.mock import patch
 
@@ -178,6 +179,15 @@ class EvaluateTierCPromotionTest(unittest.TestCase):
         self.db.close()
 
     def _add_shadow_calls(self, *, agreements: list[bool]) -> None:
+        # Step 10 Phase 5: each call below is its own Tier C *candidate*
+        # (a distinct candidate_request_id) -- matching every real row
+        # `run_tier_c_shadow_call` persists from Phase 4 onward, single-
+        # provider included (see that function's docstring). One row per
+        # candidate here means get_recent_candidate_aggregates' per-
+        # candidate vote count stays numerically identical to this
+        # helper's pre-Phase-5 raw-row count, so every existing assertion
+        # in this file (`shadow_calls_considered == len(agreements)`,
+        # etc.) keeps meaning exactly what it always meant.
         for agreement in agreements:
             self.db.add(
                 ShadowLLMCall(
@@ -190,6 +200,7 @@ class EvaluateTierCPromotionTest(unittest.TestCase):
                     shadow_belongs_to_series=agreement,
                     parsed_ok=True,
                     belongs_to_series_agreement=agreement,
+                    candidate_request_id=uuid.uuid4().hex,
                     created_at=datetime.utcnow(),
                 )
             )

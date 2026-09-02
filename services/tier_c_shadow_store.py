@@ -232,11 +232,16 @@ def get_recent_scored_shadow_calls(db: Session, series_id: int, limit: int) -> l
     that actually carry a comparable agreement signal (`belongs_to_series_
     agreement IS NOT NULL` -- excludes failed/unparseable shadow calls,
     which `_score_tier_c_shadow_response` already leaves NULL rather than
-    guessing), most recent first. This is TierCPromotionPolicyEngine's
-    only metrics input for Step 9 -- see services/tier_c_promotion_engine.
-    py's module docstring for why `limit` doubles as both the lookback
-    window and the minimum sample size (`settings.TIER_C_PROMOTION_MIN_
-    CALLS`).
+    guessing), most recent first.
+
+    Superseded as `TierCPromotionPolicyEngine`'s metrics input by Step 10
+    Phase 5's `get_recent_candidate_aggregates` below (raw-row lookback
+    can't distinguish "3 rows, 3 different candidates" from "3 rows, one
+    multi-provider fan-out candidate" -- see that function's docstring).
+    Kept here, unchanged, as a general-purpose raw-row read -- still
+    covered by its own test in `tests/test_tier_c_shadow_store.py` -- for
+    any future caller that genuinely wants row-level rather than
+    candidate-level data.
     """
     return (
         db.query(models.ShadowLLMCall)
@@ -246,6 +251,135 @@ def get_recent_scored_shadow_calls(db: Session, series_id: int, limit: int) -> l
         .limit(limit)
         .all()
     )
+
+
+def _build_candidate_aggregate(candidate_request_id: str, rows: list[models.ShadowLLMCall]) -> dict:
+    """Step 10 Phase 5: collapses every `shadow_llm_calls` row sharing one
+    `candidate_request_id` into a single per-candidate aggregate dict.
+    `rows` is every row for that id (not pre-filtered on agreement/
+    parseability) -- both metrics computed here apply their own filtering
+    independently, exactly mirroring `services.tier_c_orchestrator.
+    _aggregate_gate_comparison_votes`'s "unparseable responses don't get a
+    vote" rule (this is the read-time counterpart of that same rule,
+    applied to already-persisted rows instead of in-process response
+    dicts):
+
+      - `gate_agreement` (the "gate-comparison vote" the spec calls for):
+        majority vote of `belongs_to_series_agreement` among rows where
+        it's not `None`, with an exact 2-way tie resolved as disagreement
+        -- `agree_count > disagree_count` already encodes this correctly
+        for every N (see `_aggregate_gate_comparison_votes`'s docstring
+        for why no separate tie special-case is needed). `None` only when
+        every row for this id is unparseable, which the caller
+        (`get_recent_candidate_aggregates`) never actually produces since
+        it only selects ids that had at least one non-NULL agreement row
+        -- kept as a real `None` case here anyway so this function stays
+        correct as a standalone unit, not just correct given its one
+        caller's current filtering.
+      - `consensus_score`/`conflict_flag` (the spec's separate "cross-
+        provider consensus/conflict metrics" -- an ADDITIVE signal, not
+        folded into `gate_agreement`): measures whether the providers
+        agreed with EACH OTHER on `shadow_belongs_to_series`, independent
+        of whether that agreed-upon answer matched the gate. A candidate
+        where all 3 providers unanimously said `True` has
+        `consensus_score=1.0` (perfect cross-provider agreement) even if
+        the gate said `False` (so `gate_agreement=False` for that same
+        candidate) -- these two metrics deliberately measure different
+        things: "did Tier C (in aggregate) disagree with the
+        deterministic gate" vs. "were the different LLM providers
+        internally consistent with each other". A single-provider
+        candidate (today's only real case -- see `settings.TIER_C_
+        PARALLEL_SHADOW_SAMPLE_RATE`'s docstring) trivially has
+        `consensus_score=1.0`/`conflict_flag=False` (one voice can't
+        conflict with itself).
+    """
+    voters = [row for row in rows if row.belongs_to_series_agreement is not None]
+    agree_count = sum(1 for row in voters if row.belongs_to_series_agreement is True)
+    disagree_count = len(voters) - agree_count
+    gate_agreement = (agree_count > disagree_count) if voters else None
+
+    decision_rows = [row for row in rows if row.shadow_belongs_to_series is not None]
+    consensus_score = None
+    conflict_flag = False
+    if decision_rows:
+        true_count = sum(1 for row in decision_rows if row.shadow_belongs_to_series is True)
+        false_count = len(decision_rows) - true_count
+        consensus_score = max(true_count, false_count) / len(decision_rows)
+        conflict_flag = true_count > 0 and false_count > 0
+
+    return {
+        "candidate_request_id": candidate_request_id,
+        "provider_count": len(rows),
+        "providers": sorted({row.shadow_provider for row in rows}),
+        "voter_count": len(voters),
+        "gate_agreement": gate_agreement,
+        "consensus_score": consensus_score,
+        "conflict_flag": conflict_flag,
+    }
+
+
+def get_recent_candidate_aggregates(db: Session, series_id: int, limit: int) -> list[dict]:
+    """Step 10 Phase 5: the per-candidate counterpart to `get_recent_
+    scored_shadow_calls` above -- `TierCPromotionPolicyEngine`'s metrics
+    input from this phase onward (see `services.tier_c_promotion_engine`'s
+    module docstring). Two-step query, per the finalized spec:
+
+      1. Select the most recent `limit` DISTINCT `candidate_request_id`
+         values for `series_id` that have at least one row with
+         `belongs_to_series_agreement IS NOT NULL` -- "most recent" means
+         by that candidate's own most recent row (`MAX(created_at)` per
+         group), not by any single row's timestamp. Rows with a `NULL`
+         `candidate_request_id` are excluded from this selection entirely
+         (see below).
+      2. Fetch every `shadow_llm_calls` row for those selected ids
+         (unfiltered this time -- an unparseable third provider in an
+         otherwise-scoreable 3-way fan-out still counts toward `provider_
+         count`/cost, just not toward the vote), then collapse each id's
+         rows via `_build_candidate_aggregate`.
+
+    Returns one dict per candidate (see `_build_candidate_aggregate`'s
+    docstring for shape), most-recent-candidate-first -- the same order
+    `get_recent_scored_shadow_calls` already returned raw rows in, so
+    `evaluate_tier_c_promotion`'s "last N, most recent first" semantics
+    carry over unchanged, just at candidate granularity instead of row
+    granularity.
+
+    `candidate_request_id IS NOT NULL` is a deliberate, permanent filter,
+    not a defensive stopgap: Step 10 Phase 4 mints a real
+    `candidate_request_id` for every `shadow_llm_calls` row it ever
+    writes -- single-provider included -- specifically so this query
+    could stay this simple (see `tier_c_orchestrator.run_tier_c_shadow_
+    call`'s docstring). The only rows that can ever lack one are historical
+    rows written between Phase 3's deploy and Phase 4's -- a small, aging-
+    out window that naturally falls out of "most recent `limit`" as real
+    evaluations accumulate, not a case this function needs to special-case
+    for.
+    """
+    recent_candidate_ids = (
+        db.query(models.ShadowLLMCall.candidate_request_id)
+        .filter(models.ShadowLLMCall.series_id == series_id)
+        .filter(models.ShadowLLMCall.candidate_request_id.isnot(None))
+        .filter(models.ShadowLLMCall.belongs_to_series_agreement.isnot(None))
+        .group_by(models.ShadowLLMCall.candidate_request_id)
+        .order_by(func.max(models.ShadowLLMCall.created_at).desc())
+        .limit(limit)
+        .all()
+    )
+    candidate_ids = [row[0] for row in recent_candidate_ids]
+    if not candidate_ids:
+        return []
+
+    all_rows = (
+        db.query(models.ShadowLLMCall)
+        .filter(models.ShadowLLMCall.series_id == series_id)
+        .filter(models.ShadowLLMCall.candidate_request_id.in_(candidate_ids))
+        .all()
+    )
+    rows_by_candidate: dict[str, list[models.ShadowLLMCall]] = {cid: [] for cid in candidate_ids}
+    for row in all_rows:
+        rows_by_candidate[row.candidate_request_id].append(row)
+
+    return [_build_candidate_aggregate(cid, rows_by_candidate[cid]) for cid in candidate_ids]
 
 
 def _window_start(now: datetime, *, monthly: bool) -> datetime:

@@ -31,17 +31,33 @@ new shadow call happened this job*; historical `shadow_llm_calls` rows
 from earlier jobs are still valid evidence -- budget gates the expensive
 call, never the evaluation itself).
 
-Metrics input, deliberately limited to what's actually persisted today:
-  - `shadow_llm_calls` agreement/disagreement over the last `settings.
-    TIER_C_PROMOTION_MIN_CALLS` scored calls (`tier_c_shadow_store.
-    get_recent_scored_shadow_calls`).
-  - Hallucination detection and cross-provider disagreement are explicit
-    future inputs (Step 10/11) -- no detector for either exists yet, so
-    neither is referenced here. Latency (`duration_ms`) and override
-    tracking (`tier_c_state_at_call`) are persisted (Step 9 schema
-    additions) but not yet consulted by the transition rules below --
-    extension points, not gaps: a future revision can fold them into
-    `_decide_transition` without a schema change.
+Metrics input:
+  - Step 9 (single-provider): `shadow_llm_calls` agreement/disagreement
+    over the last `settings.TIER_C_PROMOTION_MIN_CALLS` scored calls
+    (`tier_c_shadow_store.get_recent_scored_shadow_calls`).
+  - Step 10 Phase 5 (multi-provider): replaced the above with `tier_c_
+    shadow_store.get_recent_candidate_aggregates` -- the same `agreement_
+    rate`/`disagreement_rate` semantics (Tier C vs. the deterministic
+    gate), now computed over the last `TIER_C_PROMOTION_MIN_CALLS`
+    per-candidate gate-comparison votes instead of raw rows, so a sampled
+    3-way fan-out candidate contributes exactly one vote to these rates,
+    not three. Numerically identical to Step 9's behavior for every
+    single-provider candidate (today's only kind -- see `settings.
+    TIER_C_PARALLEL_SHADOW_SAMPLE_RATE`'s docstring), so this is a no-op
+    until Phase 6 raises that sample rate above `0.0`.
+  - Cross-provider consensus/conflict (Step 10 Phase 5, per the spec's
+    "additive signal" instruction): recorded in `TierCPromotionHistory.
+    metrics_snapshot` alongside the existing agreement/disagreement
+    fields, but never consulted by `_decide_transition` -- promotion/
+    demotion still turns on Tier-C-vs-gate agreement alone. A genuine
+    hallucination detector is still explicit future work (Step 11+); this
+    only surfaces "the providers didn't agree with each other," not "one
+    of them is wrong."
+  - Latency (`duration_ms`) and override tracking (`tier_c_state_at_
+    call`) are persisted (Step 9 schema additions) but not yet consulted
+    by the transition rules below -- extension points, not gaps: a future
+    revision can fold them into `_decide_transition` without a schema
+    change.
 
 Every evaluation writes a `models.TierCPromotionHistory` row, even a HOLD
 or a manual-override skip -- see that model's docstring. Uses its own
@@ -59,7 +75,7 @@ import models
 import settings
 from database import SessionLocal
 from services.tier_c_shadow_store import (
-    get_recent_scored_shadow_calls,
+    get_recent_candidate_aggregates,
     get_tier_c_promotion_state,
     upsert_tier_c_promotion_state,
 )
@@ -178,15 +194,36 @@ def evaluate_tier_c_promotion(series_id: int, *, budget_blocked: bool = False) -
             db.commit()
             return
 
-        recent_calls = get_recent_scored_shadow_calls(db, series_id, settings.TIER_C_PROMOTION_MIN_CALLS)
-        shadow_calls_considered = len(recent_calls)
-        agreement_count = sum(1 for c in recent_calls if c.belongs_to_series_agreement is True)
-        disagreement_count = sum(1 for c in recent_calls if c.belongs_to_series_agreement is False)
+        # Step 10 Phase 5: one entry per Tier C *candidate* (a sampled
+        # multi-provider fan-out collapses to one gate-comparison vote
+        # here, per `_build_candidate_aggregate`'s tie-break rule) rather
+        # than one entry per raw `shadow_llm_calls` row -- see this
+        # module's docstring for why that's a no-op for every single-
+        # provider candidate that exists in production today.
+        recent_aggregates = get_recent_candidate_aggregates(db, series_id, settings.TIER_C_PROMOTION_MIN_CALLS)
+        shadow_calls_considered = len(recent_aggregates)
+        agreement_count = sum(1 for agg in recent_aggregates if agg["gate_agreement"] is True)
+        disagreement_count = sum(1 for agg in recent_aggregates if agg["gate_agreement"] is False)
         agreement_rate = (
             agreement_count / shadow_calls_considered if shadow_calls_considered > 0 else None
         )
         disagreement_rate = (
             disagreement_count / shadow_calls_considered if shadow_calls_considered > 0 else None
+        )
+
+        # Cross-provider consensus/conflict: additive-only (spec's own
+        # wording) -- computed here purely for metrics_snapshot visibility,
+        # never passed into _decide_transition below. conflict_candidate_
+        # count/avg_consensus_score stay None-safe when no candidate in
+        # this window had more than one provider respond (today's only
+        # case), matching every other "no evidence yet" field in this
+        # snapshot.
+        conflict_candidate_count = sum(1 for agg in recent_aggregates if agg["conflict_flag"])
+        consensus_scores = [
+            agg["consensus_score"] for agg in recent_aggregates if agg["consensus_score"] is not None
+        ]
+        avg_cross_provider_consensus_score = (
+            sum(consensus_scores) / len(consensus_scores) if consensus_scores else None
         )
 
         new_state, reason = _decide_transition(
@@ -219,6 +256,11 @@ def evaluate_tier_c_promotion(series_id: int, *, budget_blocked: bool = False) -
                 "agreement_threshold": settings.TIER_C_PROMOTION_AGREEMENT_THRESHOLD,
                 "disagreement_threshold": settings.TIER_C_DEMOTION_DISAGREEMENT_THRESHOLD,
                 "budget_blocked": budget_blocked,
+                # Step 10 Phase 5: additive cross-provider signal only --
+                # see this module's docstring. Not consulted by
+                # _decide_transition above.
+                "cross_provider_conflict_candidate_count": conflict_candidate_count,
+                "cross_provider_avg_consensus_score": avg_cross_provider_consensus_score,
             },
         )
         upsert_tier_c_promotion_state(db, series_id, tier_c_state=new_state, last_evaluated_at=now)

@@ -185,6 +185,16 @@ TIER_C_LIVE_TIMEOUT_SECONDS = float(os.environ.get("TIER_C_LIVE_TIMEOUT_SECONDS"
 # that spans (Tier C shadow calls are sparse -- only ambiguous candidates
 # trigger one -- so counting by job would be meaningless for a low-
 # activity series; see the Step 9 design chat's resolution).
+#
+# Step 10 Phase 5 (Multi-Provider Tier C, per-candidate aggregation): now
+# counts distinct Tier C *candidates* (`get_recent_candidate_aggregates`),
+# not raw `shadow_llm_calls` rows -- a sampled multi-provider fan-out
+# candidate contributes up to 3 rows but still only 1 unit toward this
+# count. Numerically identical to the pre-Phase-5 row-count meaning for
+# every single-provider candidate (today's only kind, since
+# TIER_C_PARALLEL_SHADOW_SAMPLE_RATE still defaults to 0.0), so this is a
+# no-op for existing deployments and only starts to matter once Phase 6
+# raises the sample rate above zero.
 TIER_C_PROMOTION_MIN_CALLS = int(os.environ.get("TIER_C_PROMOTION_MIN_CALLS", "10"))
 
 # Promote (shadow_only -> shadow_advisory, or shadow_advisory -> live)
