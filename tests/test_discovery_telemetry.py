@@ -198,5 +198,68 @@ class RecordShadowLlmCallTest(unittest.TestCase):
         self.assertEqual(summary["shadow"]["per_tier"], {})
 
 
+class RecordTierCShadowScoreTest(unittest.TestCase):
+    """HTA Orchestrator Step 7: record_tier_c_shadow_score() and
+    summary()'s "tier_c_shadow" section -- per-run-only agreement/
+    disagreement counts against the deterministic gate, kept separate
+    from the cost/token-shaped "shadow" section above.
+    """
+
+    def test_agreements_and_disagreements_are_counted_separately(self):
+        telemetry = DiscoveryTelemetry()
+        telemetry.record_tier_c_shadow_score(
+            parsed_ok=True, belongs_to_series_agreement=True, inferred_number_agreement=True
+        )
+        telemetry.record_tier_c_shadow_score(
+            parsed_ok=True,
+            belongs_to_series_agreement=False,
+            inferred_number_agreement=False,
+            tier_c_confidence="high",
+            confidence_aligned=True,
+        )
+
+        summary = telemetry.summary()["tier_c_shadow"]
+        self.assertEqual(summary["total_scored"], 2)
+        self.assertEqual(summary["parse_failures"], 0)
+        self.assertEqual(summary["belongs_to_series_agreements"], 1)
+        self.assertEqual(summary["belongs_to_series_disagreements"], 1)
+        self.assertEqual(summary["inferred_number_agreements"], 1)
+        self.assertEqual(summary["inferred_number_disagreements"], 1)
+        self.assertEqual(summary["confidence_aligned_on_disagreement"], 1)
+        self.assertEqual(summary["confidence_misaligned_on_disagreement"], 0)
+
+    def test_parse_failure_is_counted_but_not_scored_as_a_disagreement(self):
+        telemetry = DiscoveryTelemetry()
+        telemetry.record_tier_c_shadow_score(parsed_ok=False)
+
+        summary = telemetry.summary()["tier_c_shadow"]
+        self.assertEqual(summary["total_scored"], 1)
+        self.assertEqual(summary["parse_failures"], 1)
+        self.assertEqual(summary["belongs_to_series_agreements"], 0)
+        self.assertEqual(summary["belongs_to_series_disagreements"], 0)
+
+    def test_alternate_title_flag_is_counted_separately_from_agreement(self):
+        telemetry = DiscoveryTelemetry()
+        telemetry.record_tier_c_shadow_score(
+            parsed_ok=True,
+            belongs_to_series_agreement=True,
+            inferred_number_agreement=True,
+            tier_c_alternate_title_flag=True,
+        )
+
+        summary = telemetry.summary()["tier_c_shadow"]
+        self.assertEqual(summary["alternate_title_flagged"], 1)
+        # The alternate-title signal has no gate counterpart -- it must
+        # never be folded into the belongs_to_series agreement count.
+        self.assertEqual(summary["belongs_to_series_agreements"], 1)
+
+    def test_no_scores_reports_zeroed_out_section(self):
+        summary = DiscoveryTelemetry().summary()
+        self.assertEqual(summary["tier_c_shadow"]["total_scored"], 0)
+        self.assertEqual(summary["tier_c_shadow"]["parse_failures"], 0)
+        self.assertEqual(summary["tier_c_shadow"]["belongs_to_series_agreements"], 0)
+        self.assertEqual(summary["tier_c_shadow"]["alternate_title_flagged"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -610,6 +610,98 @@ def evaluate_belongs_to_series_gate(
     }
 
 
+def _score_tier_c_shadow_response(
+    response_text: str,
+    *,
+    gate_belongs_to_series: bool,
+    gate_inferred_number_int: int | None,
+) -> dict:
+    """HTA Orchestrator Step 7: parses one Tier C shadow LLM response
+    (`build_belongs_to_series_prompt`'s documented JSON shape -- see
+    prompts.py) and scores it against the deterministic gate's
+    already-computed decision for the same candidate. Per-run, in-memory
+    only -- the caller (the shadow call site below) hands this straight
+    to `DiscoveryTelemetry.record_tier_c_shadow_score`, which never
+    persists across runs (see Step 7's architectural diff, section 5, for
+    why cross-run/per-series accuracy is explicit future work, not this
+    one).
+
+    Fail-soft on a malformed/unparseable response, same convention as
+    every other LLM response parse site in this codebase (see
+    provider_io.py's CR-2 comment): returns `{"parsed_ok": False, ...}`
+    with every other field `None` rather than raising, so a single bad
+    shadow response can never sink the classification loop it's shadowing.
+
+    Field-by-field scoring rationale (Step 7 architectural diff,
+    clarification 1):
+      - `belongs_to_series`/`inferred_number` both have a deterministic-
+        gate counterpart, so both get a real agreement/disagreement bool.
+        `inferred_number` agreement is exact-match (both `None` counts as
+        agreement; one `None` and the other not counts as disagreement) --
+        these are discrete series-position numbers, not a continuous
+        quantity a fuzzy tolerance would make sense for.
+      - `confidence` is scored relative to disagreement, not compared to
+        anything on the gate (the gate has no confidence-grade concept of
+        its own at this layer -- see `confidence_engine` for the
+        separate, unrelated overall_grade this doesn't touch):
+        `confidence_aligned` is only meaningful when Tier C disagreed
+        with the gate on `belongs_to_series`, and asks whether Tier C's
+        own self-reported confidence was "medium"/"high" for that
+        disagreement (as opposed to "low", which would mean Tier C
+        wasn't even confident in its own dissent). `None` when Tier C
+        agreed (the question doesn't apply).
+      - `is_alternate_title_of_known_book` is recorded only -- the gate
+        has no alternate-title concept to compare against, so this is
+        never folded into the agreement/disagreement metrics above.
+    """
+    text = (response_text or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        parsed = None
+    if not isinstance(parsed, dict):
+        return {
+            "parsed_ok": False,
+            "belongs_to_series_agreement": None,
+            "inferred_number_agreement": None,
+            "tier_c_confidence": None,
+            "confidence_aligned": None,
+            "tier_c_alternate_title_flag": None,
+        }
+
+    tier_c_belongs_to_series = parsed.get("belongs_to_series")
+    belongs_to_series_agreement = (
+        bool(tier_c_belongs_to_series) == bool(gate_belongs_to_series)
+        if isinstance(tier_c_belongs_to_series, bool)
+        else None
+    )
+
+    tier_c_inferred_number_int = discovery_engine._to_int_or_none(parsed.get("inferred_number"))
+    inferred_number_agreement = tier_c_inferred_number_int == gate_inferred_number_int
+
+    tier_c_confidence = parsed.get("confidence") if isinstance(parsed.get("confidence"), str) else None
+    confidence_aligned = None
+    if belongs_to_series_agreement is False and tier_c_confidence is not None:
+        confidence_aligned = tier_c_confidence in ("medium", "high")
+
+    tier_c_alternate_title_flag = parsed.get("is_alternate_title_of_known_book")
+    if not isinstance(tier_c_alternate_title_flag, bool):
+        tier_c_alternate_title_flag = None
+
+    return {
+        "parsed_ok": True,
+        "belongs_to_series_agreement": belongs_to_series_agreement,
+        "inferred_number_agreement": inferred_number_agreement,
+        "tier_c_confidence": tier_c_confidence,
+        "confidence_aligned": confidence_aligned,
+        "tier_c_alternate_title_flag": tier_c_alternate_title_flag,
+    }
+
+
 def _empty_result(series_id: int | None, series_name: str | None, reason: str) -> dict:
     return {
         "series_id": series_id,
@@ -1553,8 +1645,37 @@ class SeriesIntelligenceAgent:
                                     duration_s=time.monotonic() - started_tier_c,
                                     tokens_in=tier_c_response.tokens_in if tier_c_response is not None else 0,
                                     tokens_out=tier_c_response.tokens_out if tier_c_response is not None else 0,
-                                    model_id=TIER_MODEL_MAP.get("C"),
+                                    # HTA Orchestrator Step 7: TIER_MODEL_MAP["C"]
+                                    # is now a {"provider", "model_id"} dict, not
+                                    # a bare model_id string -- prefer the
+                                    # response's own resolved model_id when the
+                                    # call succeeded, falling back to the tier's
+                                    # mapped model_id on failure (mirrors every
+                                    # other call site's "record a zero-token
+                                    # entry attributed to what would have been
+                                    # called" convention).
+                                    model_id=(
+                                        tier_c_response.model_id
+                                        if tier_c_response is not None
+                                        else TIER_MODEL_MAP["C"]["model_id"]
+                                    ),
                                 )
+                        # HTA Orchestrator Step 7: scores the shadow response
+                        # against the deterministic gate's already-computed
+                        # belongs_to_series/inferred_number_int for this same
+                        # candidate -- shadow-only, per-run, in-memory (see
+                        # _score_tier_c_shadow_response's and
+                        # record_tier_c_shadow_score's docstrings). Only
+                        # attempted when the call actually succeeded; a
+                        # failed call has nothing to score beyond the
+                        # zero-token entry already recorded above.
+                        if telemetry is not None and tier_c_response is not None:
+                            tier_c_score = _score_tier_c_shadow_response(
+                                tier_c_response.text,
+                                gate_belongs_to_series=belongs_to_series,
+                                gate_inferred_number_int=inferred_number_int,
+                            )
+                            telemetry.record_tier_c_shadow_score(**tier_c_score)
 
                 if overall_grade in ("low", "zero"):
                     # PB-11 diagnostic (Percy Jackson books 4/5 investigation,

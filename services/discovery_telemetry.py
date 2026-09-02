@@ -177,6 +177,14 @@ class DiscoveryTelemetry:
         # `record_shadow_llm_call`'s docstring for why this mirrors
         # `record_llm_call` field-for-field rather than reusing it.
         self.shadow_llm_calls: list[dict] = []
+        # HTA Orchestrator Step 7: Tier C shadow responses scored against
+        # the deterministic gate they shadowed -- kept as its own list,
+        # separate from `shadow_llm_calls` above (which is cost/token-
+        # shaped only), since this holds the semantic agreement/
+        # disagreement comparison instead. Per-run, in-memory only; see
+        # `record_tier_c_shadow_score`'s docstring for why no cross-run
+        # aggregate (e.g. "per-series accuracy") is computed here.
+        self.tier_c_shadow_scores: list[dict] = []
         # PB-9: per-provider call/failure counts (google/openlibrary/
         # hardcover/web/apify/fixture -- whatever `provider_protocol.py`
         # adapter name is passed) and named decision-point outcomes
@@ -343,6 +351,47 @@ class DiscoveryTelemetry:
                 }
             )
 
+    def record_tier_c_shadow_score(
+        self,
+        *,
+        parsed_ok: bool,
+        belongs_to_series_agreement: bool | None = None,
+        inferred_number_agreement: bool | None = None,
+        tier_c_confidence: str | None = None,
+        confidence_aligned: bool | None = None,
+        tier_c_alternate_title_flag: bool | None = None,
+    ) -> None:
+        """HTA Orchestrator Step 7: records one Tier C shadow call's
+        agreement/disagreement against the deterministic gate it shadowed
+        (see `agents/series_agent.py`'s `_score_tier_c_shadow_response`,
+        which computes every field this accepts). Same `pass`/
+        `correlation_id` attribution convention as `record_llm_call`/
+        `record_shadow_llm_call` -- read from whichever `pass_scope()` is
+        currently active, not passed in directly.
+
+        Deliberately per-run, in-memory only, same as every other list on
+        this object -- `summary()`'s `tier_c_shadow` section below reports
+        totals for *this* run's candidates, not a cross-run/per-series
+        accuracy figure. Computing that requires a persisted store (a
+        `shadow_llm_calls` DB table, per Step 7's architectural diff,
+        section 5) that does not exist yet; until it does, promotion
+        decisions must not be based on any aggregate derived from this
+        method across multiple runs.
+        """
+        with self._lock:
+            self.tier_c_shadow_scores.append(
+                {
+                    "pass": self._current_pass,
+                    "correlation_id": self._current_correlation_id,
+                    "parsed_ok": bool(parsed_ok),
+                    "belongs_to_series_agreement": belongs_to_series_agreement,
+                    "inferred_number_agreement": inferred_number_agreement,
+                    "tier_c_confidence": tier_c_confidence,
+                    "confidence_aligned": confidence_aligned,
+                    "tier_c_alternate_title_flag": tier_c_alternate_title_flag,
+                }
+            )
+
     def record_provider_call(self, provider: str, *, ok: bool, duration_s: float) -> None:
         """PB-9: one entry per `provider_protocol.py` adapter call --
         `ok` mirrors that adapter's own `ProviderFetchResult.ok` (see
@@ -393,6 +442,7 @@ class DiscoveryTelemetry:
             web_search_calls = list(self.web_search_calls)
             llm_calls = list(self.llm_calls)
             shadow_llm_calls = list(self.shadow_llm_calls)
+            tier_c_shadow_scores = list(self.tier_c_shadow_scores)
             provider_calls = list(self.provider_calls)
             gate_outcomes = list(self.gate_outcomes)
             tool_calls = list(self.tool_calls)
@@ -508,6 +558,35 @@ class DiscoveryTelemetry:
                 dim_bucket["tokens_out"] += call["tokens_out"]
                 dim_bucket["cost_usd"] = round(dim_bucket["cost_usd"] + call["cost_usd"], 6)
 
+        # HTA Orchestrator Step 7: per-run-only Tier C shadow scoring
+        # totals -- counts, not a persisted/cross-run accuracy percentage
+        # (see `record_tier_c_shadow_score`'s docstring for why). Every
+        # `*_agreements`/`*_disagreements` pair only counts entries where
+        # that specific comparison was actually possible (`agreement is
+        # not None`), so an unparseable or partially-missing response
+        # contributes to `parse_failures` without silently skewing the
+        # agreement rate for the fields it did resolve.
+        tier_c_parse_failures = sum(1 for s in tier_c_shadow_scores if not s["parsed_ok"])
+        tier_c_belongs_agreements = sum(
+            1 for s in tier_c_shadow_scores if s["belongs_to_series_agreement"] is True
+        )
+        tier_c_belongs_disagreements = sum(
+            1 for s in tier_c_shadow_scores if s["belongs_to_series_agreement"] is False
+        )
+        tier_c_number_agreements = sum(
+            1 for s in tier_c_shadow_scores if s["inferred_number_agreement"] is True
+        )
+        tier_c_number_disagreements = sum(
+            1 for s in tier_c_shadow_scores if s["inferred_number_agreement"] is False
+        )
+        tier_c_confidence_aligned = sum(1 for s in tier_c_shadow_scores if s["confidence_aligned"] is True)
+        tier_c_confidence_misaligned = sum(
+            1 for s in tier_c_shadow_scores if s["confidence_aligned"] is False
+        )
+        tier_c_alternate_title_flagged = sum(
+            1 for s in tier_c_shadow_scores if s["tier_c_alternate_title_flag"] is True
+        )
+
         return {
             "by_pass": by_pass,
             "by_provider": by_provider,
@@ -542,6 +621,21 @@ class DiscoveryTelemetry:
                 "total_cost_usd": round(shadow_total_cost_usd, 6),
                 "per_model": shadow_per_model,
                 "per_tier": shadow_per_tier,
+            },
+            # HTA Orchestrator Step 7: Tier C shadow-vs-gate agreement
+            # scoring, this run only -- see `record_tier_c_shadow_score`'s
+            # docstring for why this is deliberately not a cross-run/
+            # per-series accuracy percentage yet.
+            "tier_c_shadow": {
+                "total_scored": len(tier_c_shadow_scores),
+                "parse_failures": tier_c_parse_failures,
+                "belongs_to_series_agreements": tier_c_belongs_agreements,
+                "belongs_to_series_disagreements": tier_c_belongs_disagreements,
+                "inferred_number_agreements": tier_c_number_agreements,
+                "inferred_number_disagreements": tier_c_number_disagreements,
+                "confidence_aligned_on_disagreement": tier_c_confidence_aligned,
+                "confidence_misaligned_on_disagreement": tier_c_confidence_misaligned,
+                "alternate_title_flagged": tier_c_alternate_title_flagged,
             },
         }
 

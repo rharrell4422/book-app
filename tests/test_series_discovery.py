@@ -15,6 +15,7 @@ import provider_io
 from agents.series_agent import (
     SeriesIntelligenceAgent,
     _needs_review_to_skeleton_updates,
+    _score_tier_c_shadow_response,
     discover_more_by_author,
     discover_series_by_name,
 )
@@ -4836,6 +4837,101 @@ def _mock_anthropic_client(response_text, *, input_tokens=10, output_tokens=20):
     return mock_client
 
 
+class ScoreTierCShadowResponseTest(unittest.TestCase):
+    """HTA Orchestrator Step 7: unit coverage for
+    _score_tier_c_shadow_response -- the pure scoring function that
+    compares a parsed Tier C shadow response against the deterministic
+    gate's already-computed decision. Isolated from the full Check Now
+    integration path (see TierCShadowLlmTest below for that).
+    """
+
+    def test_agreement_on_belongs_to_series_and_inferred_number(self):
+        result = _score_tier_c_shadow_response(
+            '{"belongs_to_series": true, "confidence": "high", "inferred_number": 7, '
+            '"is_alternate_title_of_known_book": false, "reasoning": "matches"}',
+            gate_belongs_to_series=True,
+            gate_inferred_number_int=7,
+        )
+        self.assertTrue(result["parsed_ok"])
+        self.assertTrue(result["belongs_to_series_agreement"])
+        self.assertTrue(result["inferred_number_agreement"])
+        # Tier C agreed with the gate -- confidence-vs-disagreement isn't
+        # a meaningful question here.
+        self.assertIsNone(result["confidence_aligned"])
+        self.assertFalse(result["tier_c_alternate_title_flag"])
+
+    def test_disagreement_with_high_confidence_is_aligned(self):
+        result = _score_tier_c_shadow_response(
+            '{"belongs_to_series": true, "confidence": "high", "inferred_number": null, '
+            '"is_alternate_title_of_known_book": false, "reasoning": "latent match"}',
+            gate_belongs_to_series=False,
+            gate_inferred_number_int=None,
+        )
+        self.assertFalse(result["belongs_to_series_agreement"])
+        # Both None -- exact-match agreement even though belongs_to_series
+        # disagreed; the two comparisons are independent.
+        self.assertTrue(result["inferred_number_agreement"])
+        self.assertTrue(result["confidence_aligned"])
+
+    def test_disagreement_with_low_confidence_is_not_aligned(self):
+        result = _score_tier_c_shadow_response(
+            '{"belongs_to_series": false, "confidence": "low", "inferred_number": null, '
+            '"is_alternate_title_of_known_book": false, "reasoning": "uncertain"}',
+            gate_belongs_to_series=True,
+            gate_inferred_number_int=3,
+        )
+        self.assertFalse(result["belongs_to_series_agreement"])
+        self.assertFalse(result["confidence_aligned"])
+        # inferred_number: gate had 3, Tier C had none -- disagreement.
+        self.assertFalse(result["inferred_number_agreement"])
+
+    def test_alternate_title_flag_is_recorded_but_never_compared(self):
+        result = _score_tier_c_shadow_response(
+            '{"belongs_to_series": true, "confidence": "medium", "inferred_number": 2, '
+            '"is_alternate_title_of_known_book": true, "reasoning": "reprint title"}',
+            gate_belongs_to_series=True,
+            gate_inferred_number_int=2,
+        )
+        self.assertTrue(result["tier_c_alternate_title_flag"])
+        # The gate has no alternate-title concept -- this must never leak
+        # into the agreement fields.
+        self.assertTrue(result["belongs_to_series_agreement"])
+        self.assertTrue(result["inferred_number_agreement"])
+
+    def test_malformed_json_fails_soft_with_parsed_ok_false(self):
+        result = _score_tier_c_shadow_response(
+            "not json at all", gate_belongs_to_series=True, gate_inferred_number_int=1
+        )
+        self.assertFalse(result["parsed_ok"])
+        self.assertIsNone(result["belongs_to_series_agreement"])
+        self.assertIsNone(result["inferred_number_agreement"])
+        self.assertIsNone(result["confidence_aligned"])
+        self.assertIsNone(result["tier_c_alternate_title_flag"])
+
+    def test_markdown_fenced_json_is_stripped_before_parsing(self):
+        result = _score_tier_c_shadow_response(
+            '```json\n{"belongs_to_series": true, "confidence": "high", "inferred_number": 5, '
+            '"is_alternate_title_of_known_book": false, "reasoning": "ok"}\n```',
+            gate_belongs_to_series=True,
+            gate_inferred_number_int=5,
+        )
+        self.assertTrue(result["parsed_ok"])
+        self.assertTrue(result["belongs_to_series_agreement"])
+
+    def test_missing_belongs_to_series_field_leaves_that_agreement_none(self):
+        # A response missing/mistyping one field must not crash scoring of
+        # the other fields -- see this function's fail-soft docstring.
+        result = _score_tier_c_shadow_response(
+            '{"confidence": "medium", "inferred_number": 4, '
+            '"is_alternate_title_of_known_book": false, "reasoning": "partial"}',
+            gate_belongs_to_series=True,
+            gate_inferred_number_int=4,
+        )
+        self.assertTrue(result["parsed_ok"])
+        self.assertIsNone(result["belongs_to_series_agreement"])
+        self.assertTrue(result["inferred_number_agreement"])
+
+
 class TierCShadowLlmTest(unittest.TestCase):
     """HTA Orchestrator Step 5: coverage for the Tier C shadow LLM call in
     run_series_check's classification loop -- fires only when
@@ -4942,6 +5038,50 @@ class TierCShadowLlmTest(unittest.TestCase):
         # Shadow calls must never leak into the production counters.
         self.assertEqual(summary["total_llm_calls"], 0)
         self.assertEqual(summary["total_cost_usd"], 0.0)
+
+    def test_shadow_response_is_scored_against_the_gate(self):
+        # HTA Orchestrator Step 7: same ambiguous fixture as
+        # test_fires_for_an_ambiguous_medium_confidence_candidate above
+        # (gate's belongs_to_series is False, inferred_number_int is 7),
+        # but with a full Tier C JSON response this time so the scoring
+        # path (_score_tier_c_shadow_response, wired into the shadow call
+        # site) has something real to compare -- Tier C disagrees
+        # (belongs_to_series=true) with high confidence and agrees on the
+        # number.
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "Desert Protocol",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "author_fallback",
+                "series_number_hint": 7,
+                "series_name_hint": "Cherry Blossom Girls",
+                "upcoming_hint": False,
+            }
+        ]
+        tier_c_response_text = (
+            '{"belongs_to_series": true, "confidence": "high", "inferred_number": 7, '
+            '"is_alternate_title_of_known_book": false, "reasoning": "same author, plausible tie-in"}'
+        )
+        telemetry = DiscoveryTelemetry()
+        with self._mock_discovery(candidates), patch.dict(
+            os.environ, {"ANTHROPIC_API_KEY": "test-key"}
+        ), patch("anthropic.Anthropic", return_value=_mock_anthropic_client(tier_c_response_text)):
+            agent = SeriesIntelligenceAgent()
+            agent.run_series_check(self.db, self.series.id, emit_summary=False, telemetry=telemetry)
+
+        tier_c_shadow_summary = telemetry.summary()["tier_c_shadow"]
+        self.assertEqual(tier_c_shadow_summary["total_scored"], 1)
+        self.assertEqual(tier_c_shadow_summary["parse_failures"], 0)
+        self.assertEqual(tier_c_shadow_summary["belongs_to_series_disagreements"], 1)
+        self.assertEqual(tier_c_shadow_summary["inferred_number_agreements"], 1)
+        self.assertEqual(tier_c_shadow_summary["confidence_aligned_on_disagreement"], 1)
+        self.assertEqual(tier_c_shadow_summary["alternate_title_flagged"], 0)
 
     def test_does_not_fire_when_belongs_to_series_is_true(self):
         # Explicit title match + a real series-position number --
@@ -5137,6 +5277,10 @@ class TierCShadowLlmTest(unittest.TestCase):
         self.assertEqual(shadow_summary["total_llm_calls"], 1)
         self.assertEqual(shadow_summary["total_tokens_in"], 0)
         self.assertEqual(shadow_summary["total_cost_usd"], 0.0)
+        # A failed shadow call has no response to score -- scoring must
+        # only be attempted after a successful call (see the shadow call
+        # site's own comment).
+        self.assertEqual(telemetry.summary()["tier_c_shadow"]["total_scored"], 0)
         rows = self.db.query(SeriesCandidateNotification).filter(
             SeriesCandidateNotification.series_id == self.series.id
         ).all()

@@ -632,9 +632,13 @@ def _structure_web_results_with_llm(
     started = time.monotonic()
     llm_response = None
     try:
+        # HTA Orchestrator Step 7: dispatches via tier="A" now instead of a
+        # positional ANTHROPIC_MODEL -- TIER_MODEL_MAP["A"] still resolves
+        # to the same Haiku model, so this is a zero-behavior-change
+        # migration off the positional call shape onto tier-based dispatch.
         llm_response = call_llm(
-            ANTHROPIC_MODEL,
-            prompt,
+            tier="A",
+            prompt=prompt,
             max_tokens=2000,
             # Deterministic extraction task (pull book_number/title/etc out of
             # unambiguous snippet text), not generative writing -- temperature=0
@@ -733,9 +737,17 @@ def generate_series_overview(series_name: str, author: str, books: list[dict]) -
         # (this on-demand call has never been tracked by DiscoveryTelemetry)
         # -- both asymmetries vs. the other two call sites are intentional,
         # not oversights; see llm-client-wrapper-evaluation canvas.
+        #
+        # HTA Orchestrator Step 7: stays outside the tier system entirely
+        # (no `tier=`, no `pass_scope`) -- this call was and remains a
+        # deliberate exception, not something Step 7 folds into Tier A/B.
+        # `provider="anthropic"` is now required alongside the explicit
+        # `model_id` (llm_client.call_llm no longer infers provider from
+        # the model_id string).
         llm_response = call_llm(
-            ANTHROPIC_MODEL,
-            prompt,
+            provider="anthropic",
+            model_id=ANTHROPIC_MODEL,
+            prompt=prompt,
             max_tokens=400,
             timeout=WEB_SEARCH_TIMEOUT_SECONDS,
         )
@@ -2014,9 +2026,13 @@ def _reconcile_candidates_with_llm(
         started = time.monotonic()
         llm_response = None
         try:
+            # HTA Orchestrator Step 7: dispatches via tier="B" now instead
+            # of a positional ANTHROPIC_MODEL -- TIER_MODEL_MAP["B"] still
+            # resolves to the same Haiku model, so this is a zero-
+            # behavior-change migration onto tier-based dispatch.
             llm_response = call_llm(
-                ANTHROPIC_MODEL,
-                prompt,
+                tier="B",
+                prompt=prompt,
                 max_tokens=3000,
                 # Deterministic normalize/merge/flag task, not generative writing --
                 # see _structure_web_results_with_llm's temperature=0 for the same
