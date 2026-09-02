@@ -53,6 +53,27 @@ Metrics input:
     hallucination detector is still explicit future work (Step 11+); this
     only surfaces "the providers didn't agree with each other," not "one
     of them is wrong."
+  - Step 11 Phase 2 addition: `cross_provider_avg_consensus_score` above
+    is a BLENDED average across every candidate in the window, including
+    single-provider candidates, which trivially score `consensus_score=
+    1.0` (see `_build_candidate_aggregate`'s docstring -- "one voice can't
+    conflict with itself"). At `settings.TIER_C_PARALLEL_SHADOW_SAMPLE_
+    RATE`'s current low value, most candidates in any window are single-
+    provider, so that blended average sits close to 1.0 almost
+    regardless of how badly the rare multi-provider candidates disagreed
+    -- diluted, not wrong. `cross_provider_avg_consensus_score_multi_
+    provider_only`/`cross_provider_multi_provider_candidate_count` below
+    are the same underlying `consensus_score` values, filtered to
+    candidates where `voter_count >= 2` (i.e. at least two providers
+    actually produced a comparable, parseable decision for that
+    candidate -- see `_build_candidate_aggregate`'s `voter_count` field),
+    added alongside the blended field rather than replacing it: the
+    blended field keeps its own "how noisy is Tier C output overall"
+    meaning, while this filtered one is what a future consensus-based
+    demotion signal (Step 11 Phase 4) should read instead, so it isn't
+    diluted into near-uselessness by the single-provider majority. Still
+    purely additive/observational here too -- not consulted by `_decide_
+    transition`.
   - Latency (`duration_ms`) and override tracking (`tier_c_state_at_
     call`) are persisted (Step 9 schema additions) but not yet consulted
     by the transition rules below -- extension points, not gaps: a future
@@ -226,6 +247,23 @@ def evaluate_tier_c_promotion(series_id: int, *, budget_blocked: bool = False) -
             sum(consensus_scores) / len(consensus_scores) if consensus_scores else None
         )
 
+        # Step 11 Phase 2: same consensus_score values, filtered to
+        # candidates where >=2 providers actually responded with a
+        # parseable decision (voter_count >= 2) -- see this module's
+        # docstring for why the blended average above is too diluted by
+        # single-provider candidates to serve as a real signal.
+        multi_provider_consensus_scores = [
+            agg["consensus_score"]
+            for agg in recent_aggregates
+            if agg["consensus_score"] is not None and agg["voter_count"] >= 2
+        ]
+        multi_provider_candidate_count = len(multi_provider_consensus_scores)
+        avg_cross_provider_consensus_score_multi_provider_only = (
+            sum(multi_provider_consensus_scores) / multi_provider_candidate_count
+            if multi_provider_candidate_count > 0
+            else None
+        )
+
         new_state, reason = _decide_transition(
             current_state=current_state,
             shadow_calls_considered=shadow_calls_considered,
@@ -261,6 +299,14 @@ def evaluate_tier_c_promotion(series_id: int, *, budget_blocked: bool = False) -
                 # _decide_transition above.
                 "cross_provider_conflict_candidate_count": conflict_candidate_count,
                 "cross_provider_avg_consensus_score": avg_cross_provider_consensus_score,
+                # Step 11 Phase 2: multi-provider-only variant of the two
+                # fields above -- see this module's docstring for why this
+                # is a separate field, not a replacement. Still additive/
+                # observational only; not consulted by _decide_transition.
+                "cross_provider_multi_provider_candidate_count": multi_provider_candidate_count,
+                "cross_provider_avg_consensus_score_multi_provider_only": (
+                    avg_cross_provider_consensus_score_multi_provider_only
+                ),
             },
         )
         upsert_tier_c_promotion_state(db, series_id, tier_c_state=new_state, last_evaluated_at=now)
