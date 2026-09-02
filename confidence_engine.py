@@ -486,9 +486,25 @@ def _given_names_are_initials_variant(tokens_a: set[str], tokens_b: set[str]) ->
     different person who happens to share a surname, so that case falls
     through to "zero" in the caller rather than over-crediting a
     coincidental surname match.
+
+    Dungeon Duel incident (2026-09-02): a catalog-fused candidate authored
+    by "James A. Hunter" (a real, published middle initial -- e.g.
+    Hardcover's own catalog entry for this author) was scoring "zero"
+    against a series row whose stored author is the plainer "James
+    Hunter", because neither given-name set is a character-level
+    abbreviation of the other ({"james","a"} doesn't start with "james"
+    read as one joined string, since "a" sorts first) -- this silently
+    dropped a two-provider, confidence_score=1.00 exact-number match
+    before it ever reached persistence. A literal middle initial/extra
+    given name added on one side is a strict superset relationship, not
+    an abbreviation, so it needs its own check: if the shorter side's
+    given-name tokens are wholly contained in the longer side's, every
+    name they both have an opinion about already agrees.
     """
     if not tokens_a or not tokens_b:
         return True  # one side has no given name at all -- not a contradiction
+    if tokens_a <= tokens_b or tokens_b <= tokens_a:
+        return True  # one side is a subset of the other (e.g. a middle initial)
     joined_a = "".join(sorted(tokens_a))
     joined_b = "".join(sorted(tokens_b))
     shorter, longer = (joined_a, joined_b) if len(joined_a) <= len(joined_b) else (joined_b, joined_a)

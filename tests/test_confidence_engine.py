@@ -9,7 +9,7 @@ its acceptance/escalation/rejection classification.
 import unittest
 
 import delta_engine
-from confidence_engine import _overall_confidence, compute_confidence
+from confidence_engine import _overall_confidence, _series_alignment_confidence, compute_confidence
 
 
 class OverallConfidenceUnverifiedTableTest(unittest.TestCase):
@@ -266,6 +266,78 @@ class PercyJacksonMissingVolumeIncidentTest(unittest.TestCase):
                 )
                 self.assertNotIn(novel_scored["overall"], ("low", "zero"))
                 self.assertEqual(novel_scored["number_confidence"], "medium")
+
+
+class DungeonDuelMiddleInitialIncidentTest(unittest.TestCase):
+    """Dungeon Duel incident (2026-09-02): deleting the owned "Dungeon
+    Duel" (The Rogue Dungeon, book 5) and running Check Now re-discovered
+    it via catalog providers with a perfect confidence_score=1.00 fusion
+    (hardcover + google_books both hit, exact title/number) -- but it was
+    still auto-dropped before persistence because
+    series_alignment_confidence scored "zero": the series' stored author
+    is "James Hunter", while the catalog candidate's author came back as
+    "James A. Hunter" (a real published middle initial). The two names
+    were never actually in conflict -- see _given_names_are_initials_
+    variant's own docstring for the fix -- so this is the end-to-end
+    regression test that a plain middle-initial difference no longer
+    reads as a confirmed author mismatch.
+    """
+
+    def test_middle_initial_addition_is_not_a_mismatch(self):
+        self.assertEqual(
+            _series_alignment_confidence(
+                {"authors": ["James A. Hunter", "eden Hudson"]}, "James Hunter"
+            ),
+            "medium",
+        )
+
+    def test_middle_initial_addition_the_other_direction(self):
+        self.assertEqual(
+            _series_alignment_confidence(
+                {"authors": ["James Hunter"]}, "James A. Hunter"
+            ),
+            "medium",
+        )
+
+    def test_genuinely_different_given_name_with_same_surname_still_zero(self):
+        # Guards against the fix above being so loose it stops catching a
+        # real mismatch -- "David Hunter" is not "James Hunter" just
+        # because they share a surname (and, unlike "John" vs "James",
+        # doesn't even share a first letter, so the pre-existing
+        # abbreviation check can't paper over this assertion either).
+        self.assertEqual(
+            _series_alignment_confidence({"authors": ["David Hunter"]}, "James Hunter"),
+            "zero",
+        )
+
+    def test_dungeon_duel_candidate_scores_medium_overall_not_zero(self):
+        candidate = {
+            "title": "Dungeon Duel",
+            "authors": ["James A. Hunter", "eden Hudson"],
+            "isbn13": "9798721060007",
+            "series_number": 5.0,
+            "metadata_completeness_score": 0.9,
+            "source_provenance": [{"source": "hardcover"}, {"source": "google_books"}],
+        }
+        delta = delta_engine.compute_series_delta(
+            series_id=138,
+            skeleton_entries=[],
+            provider_candidates=[candidate],
+            series_name="The Rogue Dungeon",
+        )
+        self.assertEqual(delta["malformed_books"], [])
+
+        result = compute_confidence(
+            series_id=138,
+            skeleton_entries=[],
+            provider_candidates=[candidate],
+            delta=delta,
+            series_name="The Rogue Dungeon",
+            series_author="James Hunter",
+        )
+        scored = result["confidence"][0]
+        self.assertEqual(scored["series_alignment_confidence"], "medium")
+        self.assertNotIn(scored["overall"], ("low", "zero"))
 
 
 if __name__ == "__main__":
