@@ -1,8 +1,9 @@
 """Step 10 (Multi-Provider Tier C): incremental test coverage, one phase
 at a time, mirroring how tests/test_tier_c_shadow_store.py grew across
-Steps 8 and 9. Phase 1 (schema + settings scaffolding) and Phase 3
-(TierCOrchestrator extraction) so far -- later phases extend this same
-file rather than starting a new one per phase.
+Steps 8 and 9. Phase 1 (schema + settings scaffolding), Phase 3
+(TierCOrchestrator extraction), and Phase 4 (parallel fan-out) so far --
+later phases extend this same file rather than starting a new one per
+phase.
 """
 
 import os
@@ -284,6 +285,266 @@ class Phase3ScoreFunctionReExportTest(unittest.TestCase):
         from services.tier_c_orchestrator import _score_tier_c_shadow_response as original
 
         self.assertIs(reexported, original)
+
+
+def _mock_groq_or_openai_client(response_text, *, prompt_tokens=10, completion_tokens=20):
+    # Same OpenAI-compatible shape tests/test_llm_client.py's own
+    # `_mock_groq_client`/`_mock_openai_client` helpers use -- duplicated
+    # rather than imported, matching this file's existing "self-contained
+    # per phase" convention (see `_mock_anthropic_client` above).
+    mock_message = MagicMock()
+    mock_message.content = response_text
+    mock_choice = MagicMock()
+    mock_choice.message = mock_message
+    mock_usage = MagicMock()
+    mock_usage.prompt_tokens = prompt_tokens
+    mock_usage.completion_tokens = completion_tokens
+    mock_completion = MagicMock()
+    mock_completion.choices = [mock_choice]
+    mock_completion.usage = mock_usage
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = mock_completion
+    return mock_client
+
+
+class Phase4SamplingGateTest(unittest.TestCase):
+    """Step 10 Phase 4: `_should_fan_out`'s live-state short-circuit and
+    sample-rate roll, in isolation from any actual LLM dispatch.
+    """
+
+    def test_live_state_never_fans_out_even_at_full_sample_rate(self):
+        from services.tier_c_orchestrator import _should_fan_out
+
+        with patch.object(settings, "TIER_C_PARALLEL_SHADOW_SAMPLE_RATE", 1.0), patch(
+            "services.tier_c_orchestrator.random.random"
+        ) as mock_random:
+            self.assertFalse(_should_fan_out("live"))
+            # The whole point of the short-circuit: a "live" candidate
+            # must never even consume a random draw.
+            mock_random.assert_not_called()
+
+    def test_default_zero_sample_rate_never_fans_out_non_live_states(self):
+        from services.tier_c_orchestrator import _should_fan_out
+
+        for state in ("shadow_only", "shadow_advisory"):
+            with self.subTest(state=state):
+                self.assertFalse(_should_fan_out(state))
+
+    def test_non_live_state_fans_out_when_the_roll_beats_the_sample_rate(self):
+        from services.tier_c_orchestrator import _should_fan_out
+
+        with patch.object(settings, "TIER_C_PARALLEL_SHADOW_SAMPLE_RATE", 0.5), patch(
+            "services.tier_c_orchestrator.random.random", return_value=0.1
+        ):
+            self.assertTrue(_should_fan_out("shadow_only"))
+
+        with patch.object(settings, "TIER_C_PARALLEL_SHADOW_SAMPLE_RATE", 0.5), patch(
+            "services.tier_c_orchestrator.random.random", return_value=0.9
+        ):
+            self.assertFalse(_should_fan_out("shadow_advisory"))
+
+
+class Phase4AggregationTest(unittest.TestCase):
+    """Step 10 Phase 4: `_aggregate_gate_comparison_votes`'s partial-
+    failure + majority-vote/tie-break rule, exercised directly against
+    hand-built `_score_tier_c_shadow_response`-shaped dicts so each case
+    from the finalized spec gets its own unambiguous assertion.
+    """
+
+    @staticmethod
+    def _score(agreement, *, parsed_ok=True, tag=None):
+        return {
+            "parsed_ok": parsed_ok,
+            "belongs_to_series_agreement": agreement,
+            "inferred_number_agreement": True,
+            "tier_c_confidence": "high",
+            "confidence_aligned": None,
+            "tier_c_alternate_title_flag": False,
+            "tier_c_belongs_to_series": True,
+            "tier_c_inferred_number": 7,
+            "_tag": tag,
+        }
+
+    def test_zero_responses_returns_none(self):
+        from services.tier_c_orchestrator import _aggregate_gate_comparison_votes
+
+        self.assertIsNone(_aggregate_gate_comparison_votes([]))
+
+    def test_one_response_is_returned_verbatim(self):
+        from services.tier_c_orchestrator import _aggregate_gate_comparison_votes
+
+        only = self._score(True, tag="solo")
+        self.assertIs(_aggregate_gate_comparison_votes([only]), only)
+
+    def test_three_zero_and_two_zero_are_unanimous_agreement(self):
+        from services.tier_c_orchestrator import _aggregate_gate_comparison_votes
+
+        result = _aggregate_gate_comparison_votes([self._score(True), self._score(True), self._score(True)])
+        self.assertTrue(result["belongs_to_series_agreement"])
+
+        result = _aggregate_gate_comparison_votes([self._score(True), self._score(True)])
+        self.assertTrue(result["belongs_to_series_agreement"])
+
+    def test_two_one_split_follows_the_majority(self):
+        from services.tier_c_orchestrator import _aggregate_gate_comparison_votes
+
+        result = _aggregate_gate_comparison_votes([self._score(True), self._score(True), self._score(False)])
+        self.assertTrue(result["belongs_to_series_agreement"])
+
+        result = _aggregate_gate_comparison_votes([self._score(False), self._score(False), self._score(True)])
+        self.assertFalse(result["belongs_to_series_agreement"])
+
+    def test_exact_two_way_tie_resolves_to_disagreement(self):
+        from services.tier_c_orchestrator import _aggregate_gate_comparison_votes
+
+        result = _aggregate_gate_comparison_votes([self._score(True), self._score(False)])
+        self.assertFalse(result["belongs_to_series_agreement"])
+
+    def test_unparseable_responses_do_not_get_a_vote(self):
+        from services.tier_c_orchestrator import _aggregate_gate_comparison_votes
+
+        # 2 raw responses, only 1 comparable (parsed) -- treated as a
+        # single-provider result, not a tie.
+        unparseable = self._score(None, parsed_ok=False, tag="unparseable")
+        parseable = self._score(True, tag="parseable")
+        result = _aggregate_gate_comparison_votes([unparseable, parseable])
+        self.assertIs(result, parseable)
+
+    def test_all_responses_unparseable_returns_first_as_a_no_op(self):
+        from services.tier_c_orchestrator import _aggregate_gate_comparison_votes
+
+        first = self._score(None, parsed_ok=False, tag="first")
+        second = self._score(None, parsed_ok=False, tag="second")
+        result = _aggregate_gate_comparison_votes([first, second])
+        self.assertIs(result, first)
+        self.assertFalse(result["parsed_ok"])
+
+
+class Phase4ParallelFanOutTest(unittest.TestCase):
+    """Step 10 Phase 4: end-to-end coverage of `run_tier_c_shadow_call`
+    actually taking the fan-out branch -- sample rate forced to `1.0` so
+    the roll always fans out, all three provider SDKs mocked so real
+    dispatch happens through `call_llm` exactly as production would.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=cls.engine)
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        Base.metadata.drop_all(bind=cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        self.db = self.SessionLocal()
+        series = Series(name="Test Series", author="Test Author", profile_id="robbie")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+        self.series = series
+
+        self._session_local_patch = patch("services.tier_c_shadow_store.SessionLocal", self.SessionLocal)
+        self._session_local_patch.start()
+        self._sample_rate_patch = patch.object(settings, "TIER_C_PARALLEL_SHADOW_SAMPLE_RATE", 1.0)
+        self._sample_rate_patch.start()
+
+    def tearDown(self):
+        self._sample_rate_patch.stop()
+        self._session_local_patch.stop()
+        self.db.close()
+
+    def _call(self, *, tier_c_state="shadow_only", telemetry=None):
+        from services.tier_c_orchestrator import run_tier_c_shadow_call
+
+        return run_tier_c_shadow_call(
+            series_id=self.series.id,
+            run_id="job-1",
+            tier_c_state=tier_c_state,
+            prompt="does this belong to the series?",
+            candidate_id="isbn-123",
+            gate_belongs_to_series=False,
+            gate_inferred_number_int=7,
+            gate_confidence="medium",
+            telemetry=telemetry,
+        )
+
+    def _rows(self):
+        return (
+            self.db.query(ShadowLLMCall)
+            .filter(ShadowLLMCall.series_id == self.series.id)
+            .order_by(ShadowLLMCall.id.asc())
+            .all()
+        )
+
+    def test_all_three_providers_succeed_persists_three_rows_sharing_one_candidate_request_id(self):
+        agree_text = '{"belongs_to_series": false, "confidence": "high", "inferred_number": 7}'
+        env = {"ANTHROPIC_API_KEY": "test-key", "GROQ_API_KEY": "test-key", "OPENAI_API_KEY": "test-key"}
+        with patch.dict(os.environ, env), patch(
+            "anthropic.Anthropic", return_value=_mock_anthropic_client(agree_text)
+        ), patch("groq.Groq", return_value=_mock_groq_or_openai_client(agree_text)), patch(
+            "openai.OpenAI", return_value=_mock_groq_or_openai_client(agree_text)
+        ):
+            tier_c_score = self._call()
+
+        rows = self._rows()
+        self.assertEqual(len(rows), 3)
+        self.assertEqual({row.shadow_provider for row in rows}, {"anthropic", "groq", "openai"})
+
+        candidate_request_ids = {row.candidate_request_id for row in rows}
+        self.assertEqual(len(candidate_request_ids), 1)
+        self.assertIsNotNone(next(iter(candidate_request_ids)))
+
+        # All three agree with the gate (gate_belongs_to_series=False,
+        # shadow reported false too) -> unanimous agreement.
+        self.assertIsNotNone(tier_c_score)
+        self.assertTrue(tier_c_score["belongs_to_series_agreement"])
+
+    def test_one_provider_failing_still_persists_the_other_two_and_aggregates_them(self):
+        agree_text = '{"belongs_to_series": false, "confidence": "high", "inferred_number": 7}'
+        # OPENAI_API_KEY intentionally omitted -- that provider's call_llm
+        # raises LLMCallError, exercising the partial-failure path.
+        env = {"ANTHROPIC_API_KEY": "test-key", "GROQ_API_KEY": "test-key"}
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop("OPENAI_API_KEY", None)
+            with patch("anthropic.Anthropic", return_value=_mock_anthropic_client(agree_text)), patch(
+                "groq.Groq", return_value=_mock_groq_or_openai_client(agree_text)
+            ):
+                tier_c_score = self._call()
+
+        rows = self._rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row.shadow_provider for row in rows}, {"anthropic", "groq"})
+        self.assertIsNotNone(tier_c_score)
+        self.assertTrue(tier_c_score["belongs_to_series_agreement"])
+
+    def test_all_providers_failing_returns_none_and_persists_nothing(self):
+        # No provider API keys patched -- conftest.py blanks
+        # ANTHROPIC_API_KEY already; GROQ_API_KEY/OPENAI_API_KEY are
+        # simply unset in this sandboxed test environment.
+        for key in ("GROQ_API_KEY", "OPENAI_API_KEY"):
+            os.environ.pop(key, None)
+
+        tier_c_score = self._call()
+
+        self.assertIsNone(tier_c_score)
+        self.assertEqual(len(self._rows()), 0)
+
+    def test_live_state_stays_single_provider_even_at_full_sample_rate(self):
+        # settings.TIER_C_PARALLEL_SHADOW_SAMPLE_RATE is patched to 1.0 in
+        # setUp -- this asserts "live" is still forced single-provider
+        # regardless, per Step 10's finalized live-state exclusion rule.
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), patch(
+            "anthropic.Anthropic", return_value=_mock_anthropic_client('{"belongs_to_series": true}')
+        ):
+            self._call(tier_c_state="live")
+
+        rows = self._rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].shadow_provider, "anthropic")
+        self.assertEqual(rows[0].tier_c_state_at_call, "live")
 
 
 if __name__ == "__main__":
