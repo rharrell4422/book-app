@@ -214,3 +214,39 @@ TIER_C_DEMOTION_DISAGREEMENT_THRESHOLD = float(
 TIER_C_MANUAL_OVERRIDE_HONORED = bool(
     os.getenv("TIER_C_MANUAL_OVERRIDE_HONORED", "true").lower() == "true"
 )
+
+# Step 10 Phase 1 (Multi-Provider Tier C, schema/settings scaffolding):
+# both default to fully inactive -- no call site reads either of these
+# yet (that starts in a later phase), and even once the parallel fan-out
+# code exists, this value must stay 0.0 until the per-candidate
+# aggregation layer (Step 10 Phase 5) is merged AND deployed, so Step 9's
+# promotion engine is never exposed to multi-provider rows while it's
+# still reading them as flat per-call rows. Raising it above 0.0 is a
+# deliberate, standalone config change made only after that phase ships
+# -- never implied by any code merge on its own. Same opt-in-by-value,
+# off-by-default convention as every other Tier C setting in this module
+# (see TIER_C_SHADOW_MAX_DAILY_COST_USD above).
+#
+# Fraction (0.0-1.0) of Tier-C-shadow-eligible candidates that fan out to
+# every configured provider in parallel, rather than the existing
+# single-provider Anthropic-only shadow call. Never consulted for a
+# candidate whose TierCPromotionState is "live" -- see that call site's
+# own future comment for why live-state fan-out is out of scope for
+# Step 10 entirely (safety-critical routing stays single-provider).
+TIER_C_PARALLEL_SHADOW_SAMPLE_RATE = float(
+    os.environ.get("TIER_C_PARALLEL_SHADOW_SAMPLE_RATE", "0.0")
+)
+
+# Per-call timeout applied to EVERY provider call in a parallel Tier C
+# fan-out, regardless of tier_c_state -- deliberately not reusing
+# TIER_C_LIVE_TIMEOUT_SECONDS's semantics (that one bounds a single,
+# no-fan-out call on the live decision path). A fan-out orchestrator
+# waits on the slowest of several concurrent calls, so an unbounded call
+# here would block collection of already-finished sibling providers'
+# results too, not just its own -- shorter than the live timeout on
+# purpose, to limit how much any one slow provider can eat into the
+# shared per-job round budget (SERIES_CHECK_HARD_TIMEOUT_SECONDS) now
+# that up to 3 provider calls are in flight at once instead of one.
+TIER_C_PARALLEL_CALL_TIMEOUT_SECONDS = float(
+    os.environ.get("TIER_C_PARALLEL_CALL_TIMEOUT_SECONDS", "8")
+)

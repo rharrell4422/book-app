@@ -852,6 +852,23 @@ class ShadowLLMCall(Base):
     # tier_c_state can change between calls for the same series.
     tier_c_state_at_call = Column(String, nullable=True)
 
+    # Step 10 Phase 1 (Multi-Provider Tier C, schema/settings scaffolding):
+    # a per-invocation correlation key, NOT a book-identity key -- the same
+    # real candidate re-classified in a later catch-up round gets a fresh
+    # id, since each is a distinct Tier C invocation. Minted once per
+    # candidate per Tier C shadow invocation (one value shared by every
+    # provider row produced by that single invocation), so a future
+    # multi-provider fan-out can group "these N rows are the same
+    # candidate's shadow call" without relying on `run_id` (job-level,
+    # shared by every candidate in a Check Now job) or timestamp proximity.
+    # Nullable and unwritten by any call site yet -- Phase 1 only adds the
+    # column and threads it through `persist_tier_c_shadow_call` as an
+    # optional, defaulted-to-None kwarg; nothing mints a real value until
+    # the Tier C shadow call site itself is updated in a later phase (same
+    # "wire ahead of use" sequencing as `duration_ms`/`tier_c_state_at_call`
+    # above, and as Groq's dispatch path in llm_client.py).
+    candidate_request_id = Column(String, nullable=True, index=True)
+
 
 class TierCPromotionState(Base):
     """Step 8 (Tier C Shadow Scoring Persistence + Promotion Path):

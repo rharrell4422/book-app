@@ -72,6 +72,7 @@ def persist_tier_c_shadow_call(
     total_cost_usd: float = 0.0,
     duration_ms: float | None = None,
     tier_c_state_at_call: str | None = None,
+    candidate_request_id: str | None = None,
     db_session: Session | None = None,
 ) -> None:
     """Inserts one row into `shadow_llm_calls`. Fail-soft: any exception
@@ -87,6 +88,14 @@ def persist_tier_c_shadow_call(
     omitted (the expected call shape from `agents/series_agent.py`), a
     fresh session is opened, committed, and always closed, independent of
     whatever session the caller's own discovery transaction is using.
+
+    `candidate_request_id` (Step 10 Phase 1, Multi-Provider Tier C):
+    optional and `None` by default, matching every prior additive column
+    this function has grown (`duration_ms`/`tier_c_state_at_call` for
+    Step 9). No call site passes a real value yet -- see `models.
+    ShadowLLMCall.candidate_request_id`'s own docstring for why minting
+    one is deferred to the phase that actually needs to group multiple
+    providers' rows for the same candidate.
     """
     caller_supplied_db = db_session is not None
     db: Session = db_session if caller_supplied_db else SessionLocal()
@@ -113,6 +122,7 @@ def persist_tier_c_shadow_call(
             total_cost_usd=float(total_cost_usd or 0.0),
             duration_ms=float(duration_ms) if duration_ms is not None else None,
             tier_c_state_at_call=tier_c_state_at_call,
+            candidate_request_id=candidate_request_id,
             created_at=datetime.utcnow(),
         )
         db.add(row)
