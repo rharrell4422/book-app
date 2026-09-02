@@ -1,6 +1,9 @@
 import os
+from unittest.mock import patch
 
 import pytest
+
+import settings
 
 
 @pytest.fixture(autouse=True)
@@ -55,3 +58,31 @@ def _no_real_anthropic_key_during_tests():
     finally:
         if previous is not None:
             os.environ["ANTHROPIC_API_KEY"] = previous
+
+
+@pytest.fixture(autouse=True)
+def _no_parallel_shadow_fan_out_during_tests():
+    """Step 10 Phase 6 (Multi-Provider Tier C, activation): `settings.
+    TIER_C_PARALLEL_SHADOW_SAMPLE_RATE` is no longer 0.0 by default in
+    production (see that setting's own docstring) -- `services.tier_c_
+    orchestrator._should_fan_out` rolls `random.random()` against it on
+    every non-"live" Tier C shadow call. Without this fixture, any test
+    anywhere in this suite that reaches `run_tier_c_shadow_call` without
+    explicitly patching the sample rate itself (nearly all of `tests/
+    test_series_discovery.py`'s Tier C shadow coverage, most of `tests/
+    test_tier_c_multi_provider.py`'s Phase 3 class) would have a ~1-in-20
+    chance per call of silently taking the fan-out branch instead of the
+    single-provider one it was written to assert on -- an intermittent,
+    hard-to-reproduce flake, not a real bug.
+
+    Pins the rate to `0.0` for the duration of every test by default, same
+    pattern as `_no_real_anthropic_key_during_tests` above -- a test that
+    specifically wants to exercise fan-out (`Phase4ParallelFanOutTest`,
+    `Phase6ConcurrencyAndTimeoutTest`, etc.) already re-patches `settings.
+    TIER_C_PARALLEL_SHADOW_SAMPLE_RATE` to a real value itself; that
+    per-test override layers fine on top of this one (whichever patch is
+    innermost/most-recently-entered wins, same as any other nested
+    `unittest.mock.patch`).
+    """
+    with patch.object(settings, "TIER_C_PARALLEL_SHADOW_SAMPLE_RATE", 0.0):
+        yield

@@ -4,6 +4,14 @@ Steps 8 and 9. Phase 1 (schema + settings scaffolding), Phase 3
 (TierCOrchestrator extraction), Phase 4 (parallel fan-out), and Phase 5
 (per-candidate aggregation + Step 9 wiring) so far -- later phases extend
 this same file rather than starting a new one per phase.
+
+Step 11 Phase 2 (Provider/Model Scorecard & Tier C Confidence Signals)
+addition: two new test methods on `Phase5PromotionEngineWiringTest`
+below covering the multi-provider-only consensus fields added to
+`evaluate_tier_c_promotion`'s `metrics_snapshot` -- kept in that same
+class (not a new one) since it's exercising the exact same function via
+the exact same multi-provider fan-out fixtures, just asserting on two
+additional dict keys.
 """
 
 import os
@@ -101,14 +109,42 @@ class Phase1SchemaAndSettingsTest(unittest.TestCase):
 
 
 class Phase1SettingsDefaultsTest(unittest.TestCase):
-    def test_parallel_shadow_sample_rate_defaults_to_zero(self):
-        """Must default to fully inactive -- Step 10's activation rule
-        (Phase 6) requires this to stay 0.0 until the per-candidate
-        aggregation layer (Phase 5) has shipped, so no code merge before
-        then can accidentally turn on multi-provider fan-out in
-        production.
+    def test_parallel_shadow_sample_rate_defaults_to_a_small_nonzero_fraction(self):
+        """Step 10 Phase 6 (activation): raised from Phase 1-5's 0.0 to a
+        small, non-zero default now that the per-candidate aggregation
+        layer (Phase 5) has shipped -- see settings.py's own comment for
+        why 0.05 specifically (the finalized plan's own "start low to cap
+        cost" instruction) and `Phase6ConcurrencyAndTimeoutTest`/`tests/
+        test_tier_c_multi_provider.py`'s Phase 4/5 classes for the broader
+        safety-net coverage (live-state exclusion, partial-failure
+        handling, promotion-engine parity) this activation leans on.
+
+        `tests/conftest.py`'s autouse `_no_parallel_shadow_fan_out_during_
+        tests` fixture pins the *runtime* module attribute to `0.0` for
+        every test in this suite (a deliberate safety net against flaky,
+        randomly-fanning-out tests -- see that fixture's own docstring),
+        so this test can't just read `settings.TIER_C_PARALLEL_SHADOW_
+        SAMPLE_RATE` directly -- it would always see `0.0` here regardless
+        of what settings.py itself defaults to. Reloading the module with
+        the env var unset re-executes settings.py's own default-resolution
+        code, bypassing that safety-net patch for the duration of the
+        reload only (the module object itself is unchanged by `reload` --
+        only its attributes are recomputed -- so the conftest fixture's
+        own `patch.object` teardown afterward is unaffected either way).
         """
-        self.assertEqual(settings.TIER_C_PARALLEL_SHADOW_SAMPLE_RATE, 0.0)
+        import importlib
+
+        previous_env_value = os.environ.pop("TIER_C_PARALLEL_SHADOW_SAMPLE_RATE", None)
+        try:
+            importlib.reload(settings)
+            default_value = settings.TIER_C_PARALLEL_SHADOW_SAMPLE_RATE
+        finally:
+            if previous_env_value is not None:
+                os.environ["TIER_C_PARALLEL_SHADOW_SAMPLE_RATE"] = previous_env_value
+            importlib.reload(settings)
+
+        self.assertGreater(default_value, 0.0)
+        self.assertLessEqual(default_value, 0.1)
 
     def test_parallel_call_timeout_has_a_sane_positive_default(self):
         self.assertGreater(settings.TIER_C_PARALLEL_CALL_TIMEOUT_SECONDS, 0.0)
@@ -826,6 +862,190 @@ class Phase5PromotionEngineWiringTest(unittest.TestCase):
         # agreement) -- promotion decision itself is untouched by the
         # conflict signal above.
         self.assertEqual(history.agreement_rate, 1.0)
+
+    def test_multi_provider_only_consensus_excludes_single_provider_candidates(self):
+        """Step 11 Phase 2: the blended `cross_provider_avg_consensus_
+        score` averages in the trivial single-provider candidate's
+        consensus_score=1.0, diluting the real 3-provider disagreement --
+        the multi_provider_only variant must not.
+        """
+        from services.tier_c_promotion_engine import evaluate_tier_c_promotion
+
+        # 3-provider candidate: 2 agree, 1 disagrees -> consensus_score =
+        # 2/3, conflict_flag=True.
+        self._add_fan_out_candidate(
+            candidate_request_id=uuid.uuid4().hex, agreements=[True, True, False]
+        )
+        # Single-provider candidate: trivially consensus_score=1.0,
+        # conflict_flag=False.
+        self._add_fan_out_candidate(candidate_request_id=uuid.uuid4().hex, agreements=[True])
+
+        evaluate_tier_c_promotion(self.series.id)
+
+        snapshot = self._history_last().metrics_snapshot
+        # Blended: (2/3 + 1.0) / 2 -- diluted toward 1.0 by the trivial
+        # single-provider candidate.
+        self.assertAlmostEqual(snapshot["cross_provider_avg_consensus_score"], (2 / 3 + 1.0) / 2)
+        # Multi-provider-only: just the one real 3-provider candidate's
+        # 2/3, undiluted.
+        self.assertEqual(snapshot["cross_provider_multi_provider_candidate_count"], 1)
+        self.assertAlmostEqual(
+            snapshot["cross_provider_avg_consensus_score_multi_provider_only"], 2 / 3
+        )
+
+    def test_multi_provider_only_consensus_is_none_when_no_candidate_has_two_providers(self):
+        """Step 11 Phase 2: when every candidate in the window is single-
+        provider (today's actual production traffic shape), the
+        multi-provider-only field must be `None` -- NOT silently fall
+        back to the blended (trivially 1.0) average, which would make it
+        look like "perfect consensus" when there's really zero multi-
+        provider evidence at all.
+        """
+        from services.tier_c_promotion_engine import evaluate_tier_c_promotion
+
+        self._add_fan_out_candidate(candidate_request_id=uuid.uuid4().hex, agreements=[True])
+        self._add_fan_out_candidate(candidate_request_id=uuid.uuid4().hex, agreements=[False])
+
+        evaluate_tier_c_promotion(self.series.id)
+
+        snapshot = self._history_last().metrics_snapshot
+        self.assertEqual(snapshot["cross_provider_multi_provider_candidate_count"], 0)
+        self.assertIsNone(snapshot["cross_provider_avg_consensus_score_multi_provider_only"])
+        # Blended field is unaffected by this phase -- still the trivial
+        # 1.0 it always was for single-provider-only windows.
+        self.assertEqual(snapshot["cross_provider_avg_consensus_score"], 1.0)
+
+
+class Phase6ConcurrencyAndTimeoutTest(unittest.TestCase):
+    """Step 10 Phase 6 (tuning & safety checks): the two coverage items
+    from the finalized plan's own checklist that no earlier phase's tests
+    actually exercised yet -- Phase 4/5's fan-out tests all use instant-
+    return mocks, which prove correctness but not genuine concurrency, and
+    prove the *value* of `TIER_C_PARALLEL_CALL_TIMEOUT_SECONDS` gets used
+    (via `_aggregate_gate_comparison_votes`'s partial-failure handling)
+    without ever proving it's actually *passed* to every provider call.
+    This class closes both gaps directly. Partial-failure/tie-break logic,
+    live-state-always-single-provider, and promotion-engine parity under
+    both single- and multi-provider data are already covered by `Phase4AggregationTest`/
+    `Phase4ParallelFanOutTest`/`Phase5PromotionEngineWiringTest` and
+    `tests/test_tier_c_promotion_engine.py` -- not re-duplicated here.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=cls.engine)
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        Base.metadata.drop_all(bind=cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        self.db = self.SessionLocal()
+        series = Series(name="Test Series", author="Test Author", profile_id="robbie")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+        self.series = series
+
+        self._session_local_patch = patch("services.tier_c_shadow_store.SessionLocal", self.SessionLocal)
+        self._session_local_patch.start()
+        self._sample_rate_patch = patch.object(settings, "TIER_C_PARALLEL_SHADOW_SAMPLE_RATE", 1.0)
+        self._sample_rate_patch.start()
+
+    def tearDown(self):
+        self._sample_rate_patch.stop()
+        self._session_local_patch.stop()
+        self.db.close()
+
+    def _call(self, *, tier_c_state="shadow_only"):
+        from services.tier_c_orchestrator import run_tier_c_shadow_call
+
+        return run_tier_c_shadow_call(
+            series_id=self.series.id,
+            run_id="job-1",
+            tier_c_state=tier_c_state,
+            prompt="does this belong to the series?",
+            candidate_id="isbn-123",
+            gate_belongs_to_series=False,
+            gate_inferred_number_int=7,
+            gate_confidence="medium",
+        )
+
+    def test_three_providers_are_called_concurrently_not_sequentially(self):
+        import time
+
+        per_call_delay_s = 0.2
+        agree_text = '{"belongs_to_series": false, "confidence": "high", "inferred_number": 7}'
+
+        def slow_anthropic(api_key):
+            time.sleep(per_call_delay_s)
+            return _mock_anthropic_client(agree_text)
+
+        def slow_openai_shaped(*, api_key=None):
+            time.sleep(per_call_delay_s)
+            return _mock_groq_or_openai_client(agree_text)
+
+        env = {"ANTHROPIC_API_KEY": "test-key", "GROQ_API_KEY": "test-key", "OPENAI_API_KEY": "test-key"}
+        with patch.dict(os.environ, env), patch("anthropic.Anthropic", side_effect=slow_anthropic), patch(
+            "groq.Groq", side_effect=slow_openai_shaped
+        ), patch("openai.OpenAI", side_effect=slow_openai_shaped):
+            started = time.monotonic()
+            self._call()
+            elapsed = time.monotonic() - started
+
+        # Sequential execution would take >= 3 * per_call_delay_s (0.6s);
+        # genuine concurrency should finish close to a single call's
+        # delay. The threshold (1.5x one call) leaves generous headroom
+        # for scheduling/GIL overhead while still failing hard if the
+        # three calls were run one after another.
+        self.assertLess(elapsed, per_call_delay_s * 1.5)
+
+    def test_parallel_call_timeout_is_passed_to_every_provider(self):
+        captured_timeouts: dict[str, float | None] = {}
+        agree_text = '{"belongs_to_series": false, "confidence": "high", "inferred_number": 7}'
+
+        def capture_anthropic(api_key):
+            client = _mock_anthropic_client(agree_text)
+
+            def capture_create(**kwargs):
+                captured_timeouts["anthropic"] = kwargs.get("timeout")
+                return client.messages.create.return_value
+
+            client.messages.create.side_effect = capture_create
+            return client
+
+        def make_capture_openai_shaped(name):
+            def capture(api_key=None):
+                client = _mock_groq_or_openai_client(agree_text)
+
+                def capture_create(**kwargs):
+                    captured_timeouts[name] = kwargs.get("timeout")
+                    return client.chat.completions.create.return_value
+
+                client.chat.completions.create.side_effect = capture_create
+                return client
+
+            return capture
+
+        env = {"ANTHROPIC_API_KEY": "test-key", "GROQ_API_KEY": "test-key", "OPENAI_API_KEY": "test-key"}
+        with patch.dict(os.environ, env), patch(
+            "anthropic.Anthropic", side_effect=capture_anthropic
+        ), patch("groq.Groq", side_effect=make_capture_openai_shaped("groq")), patch(
+            "openai.OpenAI", side_effect=make_capture_openai_shaped("openai")
+        ):
+            self._call()
+
+        self.assertEqual(
+            captured_timeouts,
+            {
+                "anthropic": settings.TIER_C_PARALLEL_CALL_TIMEOUT_SECONDS,
+                "groq": settings.TIER_C_PARALLEL_CALL_TIMEOUT_SECONDS,
+                "openai": settings.TIER_C_PARALLEL_CALL_TIMEOUT_SECONDS,
+            },
+        )
 
 
 if __name__ == "__main__":
