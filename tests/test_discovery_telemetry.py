@@ -147,5 +147,56 @@ class RecordGateOutcomeTest(unittest.TestCase):
         self.assertEqual(summary["by_gate"], {})
 
 
+class RecordShadowLlmCallTest(unittest.TestCase):
+    """HTA Orchestrator Step 4: record_shadow_llm_call() and summary()'s
+    "shadow" section -- mirrors record_llm_call()'s cost/token attribution,
+    but must never be mixed into the production totals/per_model/per_tier
+    keys record_llm_call() already populates.
+    """
+
+    def test_shadow_call_is_costed_like_a_production_call(self):
+        telemetry = DiscoveryTelemetry()
+        telemetry.record_shadow_llm_call(
+            duration_s=1.0, tokens_in=1_000_000, tokens_out=1_000_000, model_id="claude-haiku-4-5-20251001"
+        )
+        summary = telemetry.summary()
+        self.assertAlmostEqual(summary["shadow"]["total_cost_usd"], 6.0)
+        self.assertEqual(summary["shadow"]["total_llm_calls"], 1)
+        self.assertEqual(summary["shadow"]["total_tokens_in"], 1_000_000)
+        self.assertEqual(summary["shadow"]["total_tokens_out"], 1_000_000)
+        self.assertAlmostEqual(summary["shadow"]["per_model"]["claude-haiku-4-5-20251001"]["cost_usd"], 6.0)
+
+    def test_shadow_calls_never_leak_into_production_totals(self):
+        telemetry = DiscoveryTelemetry()
+        telemetry.record_llm_call(
+            duration_s=0.1, tokens_in=1000, tokens_out=1000, model_id="claude-haiku-4-5-20251001"
+        )
+        telemetry.record_shadow_llm_call(
+            duration_s=0.1, tokens_in=5000, tokens_out=5000, model_id="claude-haiku-4-5-20251001"
+        )
+        summary = telemetry.summary()
+        self.assertEqual(summary["total_llm_calls"], 1)
+        self.assertEqual(summary["total_tokens_in"], 1000)
+        self.assertEqual(summary["per_model"]["claude-haiku-4-5-20251001"]["calls"], 1)
+        self.assertEqual(summary["shadow"]["total_llm_calls"], 1)
+        self.assertEqual(summary["shadow"]["total_tokens_in"], 5000)
+
+    def test_shadow_call_is_tagged_with_current_pass_scope_tier(self):
+        telemetry = DiscoveryTelemetry()
+        with telemetry.pass_scope("belongs_to_series", tier="C"):
+            telemetry.record_shadow_llm_call(
+                duration_s=0.1, tokens_in=10, tokens_out=10, model_id="claude-haiku-4-5-20251001"
+            )
+        summary = telemetry.summary()
+        self.assertEqual(summary["shadow"]["per_tier"]["C"]["calls"], 1)
+
+    def test_no_shadow_calls_reports_zeroed_out_section(self):
+        summary = DiscoveryTelemetry().summary()
+        self.assertEqual(summary["shadow"]["total_llm_calls"], 0)
+        self.assertEqual(summary["shadow"]["total_cost_usd"], 0.0)
+        self.assertEqual(summary["shadow"]["per_model"], {})
+        self.assertEqual(summary["shadow"]["per_tier"], {})
+
+
 if __name__ == "__main__":
     unittest.main()

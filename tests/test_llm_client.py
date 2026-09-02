@@ -2,12 +2,16 @@
 dispatch wrapper -- normalized text/token-usage extraction, the
 temperature-omission behavior generate_series_overview relies on, and
 fail-soft error wrapping.
+
+HTA Orchestrator Step 4 additions: tier -> model_id resolution when
+`model_id` is omitted (TIER_MODEL_MAP), its two LLMCallError cases, and
+the `shadow` parameter's no-op contract.
 """
 import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-from llm_client import LLMCallError, call_llm
+from llm_client import TIER_MODEL_MAP, LLMCallError, call_llm
 
 
 def _mock_anthropic_client(response_text, *, input_tokens=10, output_tokens=20):
@@ -117,6 +121,46 @@ class CallLlmDispatchTest(unittest.TestCase):
     def test_unrecognized_model_id_raises_llm_call_error(self):
         with self.assertRaises(LLMCallError):
             call_llm("some-unknown-model", "prompt", max_tokens=100)
+
+
+class CallLlmTierResolutionTest(unittest.TestCase):
+    """HTA Orchestrator Step 4: tier -> model_id resolution when a caller
+    omits `model_id` and passes `tier` instead.
+    """
+
+    def test_tier_resolves_to_the_mapped_model_id(self):
+        for tier in ("A", "B", "C"):
+            with self.subTest(tier=tier):
+                with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), patch(
+                    "anthropic.Anthropic", return_value=_mock_anthropic_client("ok")
+                ):
+                    result = call_llm(tier=tier, prompt="prompt", max_tokens=100)
+                self.assertEqual(result.model_id, TIER_MODEL_MAP[tier])
+
+    def test_explicit_model_id_wins_over_tier(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), patch(
+            "anthropic.Anthropic", return_value=_mock_anthropic_client("ok")
+        ):
+            result = call_llm(
+                "claude-haiku-4-5-20251001", "prompt", tier="B", max_tokens=100
+            )
+        self.assertEqual(result.model_id, "claude-haiku-4-5-20251001")
+
+    def test_missing_tier_and_model_id_raises_llm_call_error(self):
+        with self.assertRaises(LLMCallError):
+            call_llm(prompt="prompt", max_tokens=100)
+
+    def test_unrecognized_tier_raises_llm_call_error(self):
+        with self.assertRaises(LLMCallError):
+            call_llm(tier="Z", prompt="prompt", max_tokens=100)
+
+    def test_shadow_flag_is_a_no_op_and_does_not_alter_dispatch(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), patch(
+            "anthropic.Anthropic", return_value=_mock_anthropic_client("ok")
+        ):
+            result = call_llm(tier="A", prompt="prompt", max_tokens=100, shadow=True)
+        self.assertEqual(result.model_id, TIER_MODEL_MAP["A"])
+        self.assertEqual(result.text, "ok")
 
 
 if __name__ == "__main__":

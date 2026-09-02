@@ -169,6 +169,14 @@ class DiscoveryTelemetry:
         self.passes: list[dict] = []
         self.web_search_calls: list[dict] = []
         self.llm_calls: list[dict] = []
+        # HTA Orchestrator Step 4: shadow-mode LLM calls (`call_llm(...,
+        # shadow=True)`), recorded via `record_shadow_llm_call` -- kept as
+        # its own list, entirely separate from `llm_calls` above, so a
+        # shadow call can never be double-counted into (or silently
+        # inflate) production `total_llm_calls`/`total_cost_usd`. See
+        # `record_shadow_llm_call`'s docstring for why this mirrors
+        # `record_llm_call` field-for-field rather than reusing it.
+        self.shadow_llm_calls: list[dict] = []
         # PB-9: per-provider call/failure counts (google/openlibrary/
         # hardcover/web/apify/fixture -- whatever `provider_protocol.py`
         # adapter name is passed) and named decision-point outcomes
@@ -285,6 +293,56 @@ class DiscoveryTelemetry:
                 }
             )
 
+    def record_shadow_llm_call(
+        self,
+        *,
+        duration_s: float,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+        model_id: str | None = None,
+    ) -> None:
+        """HTA Orchestrator Step 4: shadow-mode counterpart to `record_
+        llm_call` above -- same fields, same fail-soft `cost_usd`
+        computation, same `pass`/`tier`/`correlation_id` read from
+        whichever `pass_scope()` is currently active. The only
+        difference is *where* the entry lands: `self.shadow_llm_calls`
+        instead of `self.llm_calls`, so `summary()` can report shadow
+        totals in their own section without ever mixing them into
+        production `total_llm_calls`/`total_cost_usd`/`per_model`/
+        `per_tier`.
+
+        Callers choose this over `record_llm_call` themselves -- this
+        module has no opinion on when a call is "shadow"; that's decided
+        entirely by whoever calls `call_llm(..., shadow=True)` and then
+        picks which of these two recording functions to call with the
+        result (see `llm_client.call_llm`'s `shadow` docstring).
+        """
+        tokens_in = int(tokens_in or 0)
+        tokens_out = int(tokens_out or 0)
+        cost_usd = 0.0
+        if model_id:
+            pricing = get_price_per_million(model_id)
+            if pricing is None:
+                logger.warning(
+                    "record_shadow_llm_call: no pricing entry for model_id=%s; recording cost_usd=0.0", model_id
+                )
+            else:
+                price_in_per_million, price_out_per_million = pricing
+                cost_usd = (tokens_in * price_in_per_million + tokens_out * price_out_per_million) / 1_000_000
+        with self._lock:
+            self.shadow_llm_calls.append(
+                {
+                    "pass": self._current_pass,
+                    "duration_s": round(duration_s, 3),
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "model_id": model_id,
+                    "tier": self._current_tier,
+                    "correlation_id": self._current_correlation_id,
+                    "cost_usd": cost_usd,
+                }
+            )
+
     def record_provider_call(self, provider: str, *, ok: bool, duration_s: float) -> None:
         """PB-9: one entry per `provider_protocol.py` adapter call --
         `ok` mirrors that adapter's own `ProviderFetchResult.ok` (see
@@ -334,6 +392,7 @@ class DiscoveryTelemetry:
             passes = list(self.passes)
             web_search_calls = list(self.web_search_calls)
             llm_calls = list(self.llm_calls)
+            shadow_llm_calls = list(self.shadow_llm_calls)
             provider_calls = list(self.provider_calls)
             gate_outcomes = list(self.gate_outcomes)
             tool_calls = list(self.tool_calls)
@@ -427,6 +486,28 @@ class DiscoveryTelemetry:
             outcomes = by_gate.setdefault(entry["gate"], {})
             outcomes[entry["outcome"]] = outcomes.get(entry["outcome"], 0) + 1
 
+        # HTA Orchestrator Step 4: shadow-mode LLM calls get their own,
+        # separate aggregation -- deliberately NOT folded into `per_model`/
+        # `per_tier`/`total_llm_calls`/`total_cost_usd` above (those stay
+        # exactly what they were pre-Step-4: production-only), so a shadow
+        # call can never inflate what an admin reads as "real" cost/call
+        # counts. Same per_model/per_tier shape as the production
+        # breakdown, reusing `_cost_bucket` for identical bucket shape.
+        shadow_per_model: dict[str, dict] = {}
+        shadow_per_tier: dict[str, dict] = {}
+        shadow_total_cost_usd = 0.0
+        for call in shadow_llm_calls:
+            shadow_total_cost_usd += call["cost_usd"]
+            for bucket_map, key in (
+                (shadow_per_model, call.get("model_id") or "unknown"),
+                (shadow_per_tier, call.get("tier") or "none"),
+            ):
+                dim_bucket = _cost_bucket(bucket_map, key)
+                dim_bucket["calls"] += 1
+                dim_bucket["tokens_in"] += call["tokens_in"]
+                dim_bucket["tokens_out"] += call["tokens_out"]
+                dim_bucket["cost_usd"] = round(dim_bucket["cost_usd"] + call["cost_usd"], 6)
+
         return {
             "by_pass": by_pass,
             "by_provider": by_provider,
@@ -448,6 +529,20 @@ class DiscoveryTelemetry:
             # tracing -- not consumed by anything routing/confidence-related,
             # purely informational.
             "total_tool_calls": len(tool_calls),
+            # HTA Orchestrator Step 4: shadow-mode LLM call totals, kept in
+            # their own section rather than merged into any of the
+            # production keys above -- see the aggregation loop's own
+            # comment for why. A run with no shadow calls at all reports
+            # zeroed-out counts here, exactly like an empty `llm_calls`
+            # would for the production section.
+            "shadow": {
+                "total_llm_calls": len(shadow_llm_calls),
+                "total_tokens_in": sum(c["tokens_in"] for c in shadow_llm_calls),
+                "total_tokens_out": sum(c["tokens_out"] for c in shadow_llm_calls),
+                "total_cost_usd": round(shadow_total_cost_usd, 6),
+                "per_model": shadow_per_model,
+                "per_tier": shadow_per_tier,
+            },
         }
 
 

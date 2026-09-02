@@ -3521,6 +3521,40 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         self.assertEqual(result["available_missing"][0]["series_number"], 7)
         self.assertEqual(result["upcoming_books"], [])
 
+    def test_belongs_to_series_gate_is_wrapped_in_a_tier_c_pass_scope(self):
+        # HTA Orchestrator Step 4: the belongs_to_series gate (run once
+        # per candidate, inside run_series_check's classification loop)
+        # must be wrapped in a maybe_pass_scope(telemetry, "belongs_to_
+        # series", tier="C") boundary -- telemetry-only, no LLM call yet.
+        # Observable via summary()["by_pass"] picking up a "belongs_to_
+        # series" bucket with zero llm_calls (nothing inside the scope
+        # calls call_llm), one entry per candidate classified.
+        from services.discovery_telemetry import DiscoveryTelemetry
+
+        candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "Cherry Blossom Girls Book 7",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 7,
+                "upcoming_hint": False,
+            }
+        ]
+        telemetry = DiscoveryTelemetry()
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            agent.run_series_check(self.db, self.series.id, emit_summary=False, telemetry=telemetry)
+
+        summary = telemetry.summary()
+        self.assertIn("belongs_to_series", summary["by_pass"])
+        self.assertEqual(summary["by_pass"]["belongs_to_series"]["llm_calls"], 0)
+
     def test_string_series_number_hint_past_highest_owned_does_not_crash(self):
         # Regression test for a live crash (2026-08-24): Apify's (and
         # potentially other providers') series_number_hint comes back as

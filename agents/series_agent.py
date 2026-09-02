@@ -17,7 +17,7 @@ from models import Book, Series, SeriesSkeleton
 from services import candidate_notifications
 from services.discovery_cache import DiscoveryCache
 from services.discovery_logging import log_discovery_summary
-from services.discovery_telemetry import DiscoveryTelemetry
+from services.discovery_telemetry import DiscoveryTelemetry, maybe_pass_scope
 from services.fingerprint_store import build_fingerprint_observations, get_effective_fingerprint
 from services.identity import owned_title_for_identity
 from services.skeleton_store import backfill_skeleton_for_series
@@ -1257,15 +1257,24 @@ class SeriesIntelligenceAgent:
                 # unmodified logic instead of duplicating it. Zero behavior
                 # change from before this extraction -- same inputs, same
                 # branching, just named and callable.
-                gate_result = evaluate_belongs_to_series_gate(
-                    title=title,
-                    inferred_number=inferred_number,
-                    candidate_confidence=raw.get("confidence"),
-                    series_name=series.name,
-                    known_series_titles=known_series_titles,
-                    owned_core_title_texts=owned_core_title_texts,
-                    highest_owned_book_number=highest_owned_book_number,
-                )
+                # HTA Orchestrator Step 4: tier="C" -- belongs_to_series'
+                # static tier binding. Telemetry-only for now: this scope
+                # exists so per-tier call/duration data can eventually be
+                # measured (see pass_scope()'s docstring), but no LLM call
+                # is made inside it here -- evaluate_belongs_to_series_gate
+                # below is the same deterministic, non-LLM logic as before
+                # this scope was added. An actual LLM call inside this
+                # boundary is explicit future work (Step 5/6), not this one.
+                with maybe_pass_scope(telemetry, "belongs_to_series", tier="C"):
+                    gate_result = evaluate_belongs_to_series_gate(
+                        title=title,
+                        inferred_number=inferred_number,
+                        candidate_confidence=raw.get("confidence"),
+                        series_name=series.name,
+                        known_series_titles=known_series_titles,
+                        owned_core_title_texts=owned_core_title_texts,
+                        highest_owned_book_number=highest_owned_book_number,
+                    )
                 explicit_series_match = gate_result["explicit_series_match"]
                 partial_match = gate_result["partial_match"]
                 inferred_number_int = gate_result["inferred_number_int"]
