@@ -831,6 +831,27 @@ class ShadowLLMCall(Base):
     total_cost_usd = Column(Float, nullable=False, default=0.0)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
+    # Step 9 (Tier C Promotion Policy Engine) additions. Both nullable:
+    # existing pre-Step-9 rows have neither, and TierCPromotionPolicyEngine
+    # treats their absence as "no evidence" the same way a NULL agreement
+    # flag already means "unscoreable" (see services/tier_c_promotion_
+    # engine.py).
+    #
+    # duration_ms: wall-clock time of this shadow call. Was already
+    # computed at the call site (agents/series_agent.py's
+    # `time.monotonic() - started_tier_c`) and handed to the per-run
+    # in-memory telemetry, just never threaded into this durable row
+    # before Step 9 needed a cross-run latency signal.
+    duration_ms = Column(Float, nullable=True)
+    # tier_c_state_at_call: snapshot of TierCPromotionState.tier_c_state
+    # at the moment this call was made -- NOT derived from this row's own
+    # `gate_belongs_to_series`/agreement fields, which are unaffected by
+    # state. Without this, a disagreement row read later can't be told
+    # apart as "this was an actual live override" vs. "just a shadow
+    # disagreement recorded while shadow_only/shadow_advisory", since
+    # tier_c_state can change between calls for the same series.
+    tier_c_state_at_call = Column(String, nullable=True)
+
 
 class TierCPromotionState(Base):
     """Step 8 (Tier C Shadow Scoring Persistence + Promotion Path):
@@ -872,3 +893,68 @@ class TierCPromotionState(Base):
     tier_c_provider = Column(String, nullable=True)
     tier_c_model_id = Column(String, nullable=True)
     last_evaluated_at = Column(DateTime, nullable=True)
+    # Step 9 (Tier C Promotion Policy Engine): an admin freeze flag, NOT
+    # itself a state. Once TierCPromotionPolicyEngine (services/tier_c_
+    # promotion_engine.py) starts writing tier_c_state automatically every
+    # Check Now job, a manually-set state needs a way to survive the next
+    # automated evaluation -- without this flag, an admin's deliberate
+    # write would just get silently overwritten by the next job's
+    # evaluation as soon as new evidence disagreed with it. When True, the
+    # engine skips its decision logic entirely for this series (still
+    # writes a `manual_override_active` TierCPromotionHistory row, so the
+    # freeze itself is auditable) until an admin explicitly clears it.
+    # Set via direct DB write today, same as tier_c_state itself before
+    # Step 9 -- no admin endpoint yet (explicit future work, matching Step
+    # 8's own precedent for tier_c_state).
+    is_manual_override = Column(Boolean, nullable=False, default=False)
+
+
+class TierCPromotionHistory(Base):
+    """Step 9 (Tier C Promotion Policy Engine): one durable row per
+    `services.tier_c_promotion_engine.evaluate_tier_c_promotion` run --
+    i.e. one per series per Check Now job (the "Phase 8b future work"
+    transition log `models.TierCPromotionState`'s own docstring deferred).
+    Written even when the evaluation results in no state change (HOLD) or
+    is skipped outright due to `TierCPromotionState.is_manual_override`
+    (`manual_override_active=True`, `evaluation_reason="manual_override_
+    active"`) -- every evaluation is auditable, not just transitions.
+
+    This is a distinct concept from two other "promotion"s in this
+    codebase:
+      - `AgenticPromotionDecision` (live-vs-agentic routing per turn) --
+        unrelated subsystem, same word, different axis entirely.
+      - A future global provider/model scorecard (Step 10/11 territory,
+        not yet built) -- this table is per-*series* Tier C state only,
+        exactly like `TierCPromotionState` it's the history of.
+
+    `evaluation_reason` is a small fixed vocabulary (not free text):
+    "insufficient_evidence", "stable", "shadow_agreement_high",
+    "disagreement_high", "manual_override_active" -- optionally suffixed
+    with ",budget_blocked" when this job's Tier C shadow budget
+    (`services.tier_c_shadow_store.check_tier_c_shadow_budget`) was
+    exhausted (informational only; budget blocks new shadow *calls*, it
+    never blocks this *evaluation*, which reads historical shadow_llm_
+    calls rows regardless -- see the engine module's docstring).
+
+    `metrics_snapshot` (JSON) holds the full computed inputs (agreement/
+    disagreement counts, rates) behind `evaluation_reason` and
+    `agreement_rate` -- kept as a bag rather than more dedicated columns
+    since Step 10/11 will extend what's considered without needing a
+    migration for every new signal.
+
+    One row per (series_id, evaluation), not unique per series -- history
+    accumulates across jobs, same shape as `AgenticPromotionDecision`.
+    """
+
+    __tablename__ = "tier_c_promotion_history"
+
+    id = Column(Integer, primary_key=True)
+    series_id = Column(Integer, ForeignKey("series.id"), nullable=False, index=True)
+    evaluated_at = Column(DateTime, default=datetime.utcnow, index=True)
+    previous_state = Column(String, nullable=False)
+    new_state = Column(String, nullable=False)
+    evaluation_reason = Column(String, nullable=False)
+    shadow_calls_considered = Column(Integer, nullable=False, default=0)
+    agreement_rate = Column(Float, nullable=True)
+    manual_override_active = Column(Boolean, nullable=False, default=False)
+    metrics_snapshot = Column(JSON, nullable=True)

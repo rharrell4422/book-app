@@ -166,3 +166,51 @@ TIER_C_SHADOW_MAX_MONTHLY_COST_USD: float | None = (
 # unavailable" and falls back to the deterministic gate's own decision --
 # see that call site's own comment for why this is safe.
 TIER_C_LIVE_TIMEOUT_SECONDS = float(os.environ.get("TIER_C_LIVE_TIMEOUT_SECONDS", "20"))
+
+# Step 9 (Tier C Promotion Policy Engine): thresholds for services/tier_c_
+# promotion_engine.py's state-transition rules -- see that module's
+# docstring for the full rule table. Same opt-in-by-value-not-by-code
+# philosophy as every other setting in this module: these have sane
+# defaults so the engine is live and evaluating from the moment it ships,
+# not gated behind a separate on/off flag (unlike AGENTIC_ROUTING_ENABLED,
+# this isn't a behavior change to a *live* routing path -- shadow_only is
+# always the safe starting state, and the engine can only ever move a
+# series one step at a time from wherever it already is).
+#
+# TIER_C_PROMOTION_MIN_CALLS is deliberately both the lookback window size
+# AND the minimum sample size required to decide anything -- "last N
+# shadow_llm_calls rows" from the Step 9 spec, not two separate knobs.
+# Below this many scored calls, the engine always HOLDs
+# ("insufficient_evidence"), regardless of how few/many Check Now jobs
+# that spans (Tier C shadow calls are sparse -- only ambiguous candidates
+# trigger one -- so counting by job would be meaningless for a low-
+# activity series; see the Step 9 design chat's resolution).
+TIER_C_PROMOTION_MIN_CALLS = int(os.environ.get("TIER_C_PROMOTION_MIN_CALLS", "10"))
+
+# Promote (shadow_only -> shadow_advisory, or shadow_advisory -> live)
+# when the agreement rate over the last TIER_C_PROMOTION_MIN_CALLS scored
+# calls is at or above this threshold.
+TIER_C_PROMOTION_AGREEMENT_THRESHOLD = float(
+    os.environ.get("TIER_C_PROMOTION_AGREEMENT_THRESHOLD", "0.9")
+)
+
+# Demote (live -> shadow_advisory, or shadow_advisory -> shadow_only) when
+# the disagreement rate over the same window is at or above this
+# threshold. Deliberately not required to be `1 - TIER_C_PROMOTION_
+# AGREEMENT_THRESHOLD` -- promotion and demotion sensitivity are
+# independent knobs (asymmetric hysteresis is the point: a series should
+# be harder to knock out of "live" than it was to promote into it, or
+# vice versa, depending on how these two are tuned).
+TIER_C_DEMOTION_DISAGREEMENT_THRESHOLD = float(
+    os.environ.get("TIER_C_DEMOTION_DISAGREEMENT_THRESHOLD", "0.3")
+)
+
+# Global kill-switch for whether the engine honors TierCPromotionState.
+# is_manual_override at all -- distinct from that per-series column
+# itself. Defaults to True (freezes are honored, as intended); sits
+# behind its own flag only so a stuck/mis-set freeze can be neutralized
+# codebase-wide via one env var without needing per-series DB writes to
+# undo it.
+TIER_C_MANUAL_OVERRIDE_HONORED = bool(
+    os.getenv("TIER_C_MANUAL_OVERRIDE_HONORED", "true").lower() == "true"
+)

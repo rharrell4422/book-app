@@ -70,6 +70,8 @@ def persist_tier_c_shadow_call(
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     total_cost_usd: float = 0.0,
+    duration_ms: float | None = None,
+    tier_c_state_at_call: str | None = None,
     db_session: Session | None = None,
 ) -> None:
     """Inserts one row into `shadow_llm_calls`. Fail-soft: any exception
@@ -109,6 +111,8 @@ def persist_tier_c_shadow_call(
             prompt_tokens=int(prompt_tokens or 0),
             completion_tokens=int(completion_tokens or 0),
             total_cost_usd=float(total_cost_usd or 0.0),
+            duration_ms=float(duration_ms) if duration_ms is not None else None,
+            tier_c_state_at_call=tier_c_state_at_call,
             created_at=datetime.utcnow(),
         )
         db.add(row)
@@ -134,11 +138,11 @@ def persist_tier_c_shadow_call(
 def get_tier_c_promotion_state(db: Session, series_id: int) -> dict:
     """Returns the current Tier C promotion state for `series_id` as a
     plain dict (`tier_c_state`/`tier_c_provider`/`tier_c_model_id`/
-    `last_evaluated_at`). No row for `series_id` -- the common case in
-    Phase 8a, since no automated promotion policy exists yet to ever
-    create one -- returns the `"shadow_only"` default with every other
-    field `None`, matching pre-Step-8 behavior exactly (see `models.
-    TierCPromotionState`'s docstring).
+    `last_evaluated_at`/`is_manual_override`). No row for `series_id` --
+    the common case for a series TierCPromotionPolicyEngine (Step 9) has
+    never evaluated yet -- returns the `"shadow_only"` default with every
+    other field `None`/`False`, matching pre-Step-8 behavior exactly (see
+    `models.TierCPromotionState`'s docstring).
 
     Read-only; safe to call with the caller's shared discovery session.
     Fail-soft: any DB error returns the same `"shadow_only"` default
@@ -160,13 +164,78 @@ def get_tier_c_promotion_state(db: Session, series_id: int) -> dict:
             "tier_c_provider": None,
             "tier_c_model_id": None,
             "last_evaluated_at": None,
+            "is_manual_override": False,
         }
     return {
         "tier_c_state": row.tier_c_state or DEFAULT_TIER_C_STATE,
         "tier_c_provider": row.tier_c_provider,
         "tier_c_model_id": row.tier_c_model_id,
         "last_evaluated_at": row.last_evaluated_at,
+        "is_manual_override": bool(row.is_manual_override),
     }
+
+
+def upsert_tier_c_promotion_state(
+    db: Session,
+    series_id: int,
+    *,
+    tier_c_state: str,
+    last_evaluated_at: datetime,
+) -> None:
+    """Step 9: writes `tier_c_state`/`last_evaluated_at` for `series_id`,
+    creating the row if it doesn't exist yet (first-ever evaluation for a
+    series that's been sitting on the implicit `"shadow_only"` default).
+    Only called by `services.tier_c_promotion_engine.evaluate_tier_c_
+    promotion`, never directly from a call site that also needs the
+    caller's own discovery transaction to stay healthy -- see that
+    module's docstring for why it uses its own independent session, same
+    convention as `persist_tier_c_shadow_call` above.
+
+    Leaves `tier_c_provider`/`tier_c_model_id`/`is_manual_override`
+    untouched on an existing row -- this function only ever changes
+    `tier_c_state` and `last_evaluated_at`, never the provider/model
+    columns (still unused placeholders -- Step 10 territory) or the
+    manual-override flag (an admin's own write, never the engine's).
+
+    Does not commit -- the caller (the policy engine, writing a
+    TierCPromotionHistory row in the same transaction) commits once for
+    both writes, so a single evaluation's state change and its audit row
+    can never be observed out of sync with each other.
+    """
+    row = db.query(models.TierCPromotionState).filter(
+        models.TierCPromotionState.series_id == series_id
+    ).first()
+    if row is None:
+        row = models.TierCPromotionState(
+            series_id=series_id,
+            tier_c_state=tier_c_state,
+            is_manual_override=False,
+        )
+        db.add(row)
+    else:
+        row.tier_c_state = tier_c_state
+    row.last_evaluated_at = last_evaluated_at
+
+
+def get_recent_scored_shadow_calls(db: Session, series_id: int, limit: int) -> list[models.ShadowLLMCall]:
+    """Step 9: the last `limit` `shadow_llm_calls` rows for `series_id`
+    that actually carry a comparable agreement signal (`belongs_to_series_
+    agreement IS NOT NULL` -- excludes failed/unparseable shadow calls,
+    which `_score_tier_c_shadow_response` already leaves NULL rather than
+    guessing), most recent first. This is TierCPromotionPolicyEngine's
+    only metrics input for Step 9 -- see services/tier_c_promotion_engine.
+    py's module docstring for why `limit` doubles as both the lookback
+    window and the minimum sample size (`settings.TIER_C_PROMOTION_MIN_
+    CALLS`).
+    """
+    return (
+        db.query(models.ShadowLLMCall)
+        .filter(models.ShadowLLMCall.series_id == series_id)
+        .filter(models.ShadowLLMCall.belongs_to_series_agreement.isnot(None))
+        .order_by(models.ShadowLLMCall.created_at.desc())
+        .limit(limit)
+        .all()
+    )
 
 
 def _window_start(now: datetime, *, monthly: bool) -> datetime:

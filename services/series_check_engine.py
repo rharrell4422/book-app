@@ -41,6 +41,7 @@ from services.notifications import create_series_discovery_notification
 from services.fingerprint_store import apply_fingerprint_updates
 from services.skeleton_store import apply_skeleton_updates
 from services.tier_c_shadow_store import check_tier_c_shadow_budget
+from services.tier_c_promotion_engine import evaluate_tier_c_promotion
 
 logger = logging.getLogger(__name__)
 
@@ -1013,6 +1014,18 @@ def run_series_check_job_full(series_id: int) -> None:
                 break
             if timed_out:
                 break
+
+        # Step 9 (Tier C Promotion Policy Engine): piggybacks on this job
+        # trigger point rather than a separate scheduler (see services.
+        # tier_c_promotion_engine's module docstring) -- runs exactly once
+        # per Check Now job, unconditionally, including precheck-short-
+        # circuited jobs (run_full_loop False, tier_c_shadow_allowed still
+        # its True default) and budget-blocked ones. Fail-soft internally
+        # (never raises), so no try/except needed at this call site --
+        # same convention as every other Tier C shadow-table write in this
+        # function (see check_tier_c_shadow_budget above, called the same
+        # unwrapped way).
+        evaluate_tier_c_promotion(series_id, budget_blocked=not tier_c_shadow_allowed)
 
         # ---- Finalization: runs exactly once, after the loop ----
         # discovery_delta_count and its title list are both derived from

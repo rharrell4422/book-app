@@ -1819,6 +1819,17 @@ class SeriesIntelligenceAgent:
                                 prompt_tokens=tier_c_response.tokens_in,
                                 completion_tokens=tier_c_response.tokens_out,
                                 total_cost_usd=tier_c_cost_usd,
+                                # Step 9: both already available locally at
+                                # this call site -- duration_ms from the
+                                # same started_tier_c/time.monotonic() pair
+                                # record_shadow_llm_call above already uses,
+                                # tier_c_state_at_call from the tier_c_state
+                                # read once per run_series_check call at the
+                                # top of this function. See models.
+                                # ShadowLLMCall's docstring for why both are
+                                # needed by TierCPromotionPolicyEngine.
+                                duration_ms=(time.monotonic() - started_tier_c) * 1000,
+                                tier_c_state_at_call=tier_c_state,
                             )
 
                 # Step 8, section 4.3: "live" state makes Tier C the
