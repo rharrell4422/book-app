@@ -748,6 +748,209 @@ class Phase5CandidateAggregationTest(unittest.TestCase):
         self.assertEqual(self._aggregates(), [])
 
 
+class Step11Phase5RiskFlagsTest(unittest.TestCase):
+    """Step 11 Phase 5: unit coverage for `services.tier_c_shadow_store.
+    get_candidate_risk_flags` -- a read-time-only risk-flag lookup built
+    on the same `_build_candidate_aggregate` output `get_recent_candidate_
+    aggregates` uses. No persistence, no routing/promotion wiring.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=cls.engine)
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        Base.metadata.drop_all(bind=cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        self.db = self.SessionLocal()
+        series = Series(name="Test Series", author="Test Author", profile_id="robbie")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+        self.series = series
+
+    def tearDown(self):
+        self.db.close()
+
+    def _add_row(
+        self,
+        *,
+        candidate_request_id: str,
+        provider: str = "anthropic",
+        belongs_to_series_agreement: bool | None = True,
+        shadow_belongs_to_series: bool | None = None,
+        parsed_ok: bool = True,
+        shadow_confidence: str | None = "high",
+    ) -> None:
+        from datetime import datetime
+
+        self.db.add(
+            ShadowLLMCall(
+                series_id=self.series.id,
+                run_id="job-1",
+                tier="C",
+                gate_belongs_to_series=False,
+                shadow_provider=provider,
+                shadow_model_id="some-model",
+                shadow_belongs_to_series=(
+                    shadow_belongs_to_series if shadow_belongs_to_series is not None else belongs_to_series_agreement
+                ),
+                shadow_confidence=shadow_confidence,
+                parsed_ok=parsed_ok,
+                belongs_to_series_agreement=belongs_to_series_agreement,
+                candidate_request_id=candidate_request_id,
+                created_at=datetime.utcnow(),
+            )
+        )
+        self.db.commit()
+
+    def _flags(self, candidate_request_id: str) -> list[str]:
+        from services.tier_c_shadow_store import get_candidate_risk_flags
+
+        return get_candidate_risk_flags(self.db, candidate_request_id)
+
+    def test_unknown_candidate_id_returns_no_flags(self):
+        self.assertEqual(self._flags(uuid.uuid4().hex), [])
+
+    def test_clean_agreeing_candidate_has_no_flags(self):
+        cand = uuid.uuid4().hex
+        self._add_row(candidate_request_id=cand, belongs_to_series_agreement=True, shadow_confidence="high")
+
+        self.assertEqual(self._flags(cand), [])
+
+    def test_gate_disagreement_flag(self):
+        cand = uuid.uuid4().hex
+        self._add_row(candidate_request_id=cand, belongs_to_series_agreement=False)
+
+        self.assertEqual(self._flags(cand), ["gate_disagreement"])
+
+    def test_unparseable_flag_fires_even_when_the_candidate_still_has_a_usable_vote(self):
+        """A partial parse failure (1 of 2 rows) still gets flagged, even
+        though the candidate's overall gate_agreement is perfectly valid
+        (computed from the one parseable row) -- "unparseable" surfaces
+        ANY parse failure, not just a total one.
+        """
+        cand = uuid.uuid4().hex
+        self._add_row(candidate_request_id=cand, provider="anthropic", belongs_to_series_agreement=True)
+        self._add_row(
+            candidate_request_id=cand,
+            provider="groq",
+            belongs_to_series_agreement=None,
+            shadow_belongs_to_series=None,
+            parsed_ok=False,
+            shadow_confidence=None,
+        )
+
+        flags = self._flags(cand)
+        self.assertIn("unparseable", flags)
+        self.assertNotIn("gate_disagreement", flags)
+
+    def test_fully_unparseable_candidate_gets_unparseable_not_gate_disagreement(self):
+        cand = uuid.uuid4().hex
+        self._add_row(
+            candidate_request_id=cand,
+            belongs_to_series_agreement=None,
+            shadow_belongs_to_series=None,
+            parsed_ok=False,
+            shadow_confidence=None,
+        )
+
+        flags = self._flags(cand)
+        self.assertEqual(flags, ["unparseable"])
+
+    def test_cross_provider_conflict_flag(self):
+        cand = uuid.uuid4().hex
+        self._add_row(
+            candidate_request_id=cand,
+            provider="anthropic",
+            belongs_to_series_agreement=True,
+            shadow_belongs_to_series=True,
+        )
+        self._add_row(
+            candidate_request_id=cand,
+            provider="groq",
+            belongs_to_series_agreement=False,
+            shadow_belongs_to_series=False,
+        )
+
+        self.assertIn("cross_provider_conflict", self._flags(cand))
+
+    def test_low_confidence_primary_flag_reads_the_anthropic_row_specifically(self):
+        cand = uuid.uuid4().hex
+        self._add_row(
+            candidate_request_id=cand,
+            provider="anthropic",
+            belongs_to_series_agreement=True,
+            shadow_confidence="low",
+        )
+        # Non-primary provider's OWN low confidence must not trigger this
+        # flag -- it's scoped to the primary provider's row specifically.
+        self._add_row(
+            candidate_request_id=cand,
+            provider="groq",
+            belongs_to_series_agreement=True,
+            shadow_confidence="high",
+        )
+
+        self.assertIn("low_confidence_primary", self._flags(cand))
+
+    def test_non_primary_low_confidence_alone_does_not_trigger_the_flag(self):
+        cand = uuid.uuid4().hex
+        self._add_row(
+            candidate_request_id=cand, provider="anthropic", belongs_to_series_agreement=True, shadow_confidence="high"
+        )
+        self._add_row(
+            candidate_request_id=cand, provider="groq", belongs_to_series_agreement=True, shadow_confidence="low"
+        )
+
+        self.assertNotIn("low_confidence_primary", self._flags(cand))
+
+    def test_missing_primary_row_does_not_error_or_flag(self):
+        cand = uuid.uuid4().hex
+        self._add_row(
+            candidate_request_id=cand, provider="groq", belongs_to_series_agreement=True, shadow_confidence="low"
+        )
+
+        # No anthropic row at all for this candidate -- must not raise,
+        # and must not flag (nothing to check confidence on).
+        self.assertNotIn("low_confidence_primary", self._flags(cand))
+
+    def test_all_four_flags_can_coexist(self):
+        cand = uuid.uuid4().hex
+        self._add_row(
+            candidate_request_id=cand,
+            provider="anthropic",
+            belongs_to_series_agreement=False,
+            shadow_belongs_to_series=True,
+            shadow_confidence="low",
+        )
+        self._add_row(
+            candidate_request_id=cand,
+            provider="groq",
+            belongs_to_series_agreement=False,
+            shadow_belongs_to_series=False,
+        )
+        self._add_row(
+            candidate_request_id=cand,
+            provider="openai",
+            belongs_to_series_agreement=None,
+            shadow_belongs_to_series=None,
+            parsed_ok=False,
+            shadow_confidence=None,
+        )
+
+        flags = set(self._flags(cand))
+        self.assertEqual(
+            flags,
+            {"unparseable", "gate_disagreement", "cross_provider_conflict", "low_confidence_primary"},
+        )
+
+
 class Phase5PromotionEngineWiringTest(unittest.TestCase):
     """Step 10 Phase 5: end-to-end coverage that `evaluate_tier_c_
     promotion` now counts per-candidate votes, not raw rows -- the actual

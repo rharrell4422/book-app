@@ -30,6 +30,16 @@ writes against the same two Step 8 tables (`models.ShadowLLMCall`/
     cap: a job that starts under budget may finish over it by up to that
     job's own Tier C shadow spend (see the Step 8 diff's section 4.2 for
     why this is an accepted Phase 8a tradeoff, not a bug).
+
+Step 10 Phase 5 additions: `_build_candidate_aggregate`/`get_recent_
+candidate_aggregates` -- per-candidate (not per-row) read model for the
+Tier C promotion engine, once multi-provider fan-out means a single
+candidate can span multiple rows.
+
+Step 11 Phase 5 addition: `get_candidate_risk_flags` -- a read-time-only
+risk-flag lookup for one candidate, built on the same `_build_candidate_
+aggregate` output. Observability only (logs/future Step 12 dashboards);
+never persisted, never consulted by any routing/promotion decision.
 """
 
 from __future__ import annotations
@@ -43,6 +53,7 @@ from sqlalchemy.orm import Session
 import models
 import settings
 from database import SessionLocal
+from llm_client import TIER_MODEL_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -380,6 +391,116 @@ def get_recent_candidate_aggregates(db: Session, series_id: int, limit: int) -> 
         rows_by_candidate[row.candidate_request_id].append(row)
 
     return [_build_candidate_aggregate(cid, rows_by_candidate[cid]) for cid in candidate_ids]
+
+
+# Step 11 Phase 5 (Provider/Model Scorecard & Tier C Confidence Signals,
+# risk flags vocabulary): a small, fixed set of strings a candidate's
+# `shadow_llm_calls` rows can be tagged with, layered on top of
+# conditions this codebase already computes -- observability only, per
+# the finalized spec ("do not change routing behavior yet... for logs or
+# future Step 12 dashboards"). Never persisted (see `get_candidate_risk_
+# flags`'s docstring for why); not consulted by `tier_c_promotion_engine.
+# _decide_transition` or any other routing/promotion logic.
+RISK_FLAG_UNPARSEABLE = "unparseable"
+RISK_FLAG_GATE_DISAGREEMENT = "gate_disagreement"
+RISK_FLAG_CROSS_PROVIDER_CONFLICT = "cross_provider_conflict"
+RISK_FLAG_LOW_CONFIDENCE_PRIMARY = "low_confidence_primary"
+
+
+def _compute_candidate_risk_flags(candidate_request_id: str, rows: list[models.ShadowLLMCall]) -> list[str]:
+    """Pure computation half of `get_candidate_risk_flags` below -- same
+    `(candidate_request_id, rows)` split `_build_candidate_aggregate`
+    uses, and for the same reason (easy to unit-test against hand-built
+    rows without a DB). Four independent, non-exclusive checks (a
+    candidate can carry any combination of these, including all four at
+    once) -- deliberately NOT an if/elif chain:
+
+      - `RISK_FLAG_UNPARSEABLE`: at least one of this candidate's rows
+        failed to parse (`voter_count < provider_count` on the
+        `_build_candidate_aggregate` output -- fewer rows produced a
+        comparable agreement value than rows exist at all), even if the
+        candidate still produced a usable majority vote from its other,
+        parseable rows. Distinct from "no usable vote at all"
+        (`gate_agreement is None`, only possible when EVERY row is
+        unparseable) -- this flag fires on ANY parse failure, not just a
+        total one, since a partial failure is still worth surfacing for
+        a future dashboard even when it didn't change the outcome.
+      - `RISK_FLAG_GATE_DISAGREEMENT`: `gate_agreement is False` --
+        Tier C's (aggregate) vote disagreed with the deterministic gate.
+      - `RISK_FLAG_CROSS_PROVIDER_CONFLICT`: `conflict_flag is True` --
+        the providers disagreed with EACH OTHER, independent of whether
+        they agreed with the gate (see `_build_candidate_aggregate`'s own
+        docstring for why these are deliberately different signals).
+      - `RISK_FLAG_LOW_CONFIDENCE_PRIMARY`: the PRIMARY provider's
+        (`llm_client.TIER_MODEL_MAP["C"]["provider"]` -- Anthropic today)
+        OWN row for this candidate self-reported `shadow_confidence ==
+        "low"`. Deliberately scoped to the primary provider's row only,
+        not any/all providers -- "primary" is the provider this
+        candidate would have used had it not been sampled into a Phase 4
+        fan-out, so its own self-reported confidence is the one that
+        matters for this flag. Silently produces no flag (not an error)
+        when the primary provider's row is missing for this candidate
+        (e.g. Anthropic itself failed/timed out and never persisted a
+        row) -- nothing to check confidence on.
+
+    Returns `[]` for an empty `rows` list (e.g. an unknown/typo'd
+    `candidate_request_id`) -- no rows means no evidence for any flag,
+    same "absence isn't an error" posture as `_build_candidate_
+    aggregate`'s own `None`-when-no-voters case.
+    """
+    if not rows:
+        return []
+
+    aggregate = _build_candidate_aggregate(candidate_request_id, rows)
+
+    flags: list[str] = []
+    if aggregate["voter_count"] < aggregate["provider_count"]:
+        flags.append(RISK_FLAG_UNPARSEABLE)
+    if aggregate["gate_agreement"] is False:
+        flags.append(RISK_FLAG_GATE_DISAGREEMENT)
+    if aggregate["conflict_flag"]:
+        flags.append(RISK_FLAG_CROSS_PROVIDER_CONFLICT)
+
+    primary_provider = TIER_MODEL_MAP["C"]["provider"]
+    primary_row = next((row for row in rows if row.shadow_provider == primary_provider), None)
+    if primary_row is not None and primary_row.shadow_confidence == "low":
+        flags.append(RISK_FLAG_LOW_CONFIDENCE_PRIMARY)
+
+    return flags
+
+
+def get_candidate_risk_flags(db: Session, candidate_request_id: str) -> list[str]:
+    """Step 11 Phase 5: read-time-only risk-flag lookup for one Tier C
+    candidate, built on the SAME candidate-level aggregation
+    (`_build_candidate_aggregate`) `get_recent_candidate_aggregates`
+    already uses -- see the finalized spec's own instruction to avoid
+    changing Phase 4's fan-out persistence sequencing (scoring+persisting
+    one provider's row at a time as its call completes) just to attach a
+    consensus-derived flag at write time. Computing flags here, on
+    demand, from whatever rows already exist for `candidate_request_id`,
+    needs no schema change and no reordering of that write path.
+
+    Fetches every `shadow_llm_calls` row for `candidate_request_id`
+    (unfiltered -- same convention as `get_recent_candidate_aggregates`'s
+    own second query) and delegates the actual flag logic to
+    `_compute_candidate_risk_flags` above. Returns `[]` for an unknown
+    `candidate_request_id` (not an error) -- exactly what "no rows" means
+    to that pure function too.
+
+    Intended for logs or a future Step 12 dashboard (per the finalized
+    spec) -- nothing in this codebase calls this yet, and it must never
+    be wired into `tier_c_promotion_engine._decide_transition` or any
+    other routing/promotion decision (that stays Step 11 Phase 4's
+    `_has_sustained_low_consensus`'s job, which reads pre-aggregated
+    `TierCPromotionHistory.metrics_snapshot` history rather than
+    per-candidate flags like these).
+    """
+    rows = (
+        db.query(models.ShadowLLMCall)
+        .filter(models.ShadowLLMCall.candidate_request_id == candidate_request_id)
+        .all()
+    )
+    return _compute_candidate_risk_flags(candidate_request_id, rows)
 
 
 def _window_start(now: datetime, *, monthly: bool) -> datetime:
