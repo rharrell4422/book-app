@@ -601,6 +601,19 @@ class SeriesCandidateNotification(Base):
     last_seen_at = Column(DateTime, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)
 
+    # Step 8 (Tier C Shadow Scoring Persistence + Promotion Path): set only
+    # when this row was created/refreshed while the series' Tier C
+    # promotion state was "shadow_advisory" AND the Tier C shadow call for
+    # this same candidate disagreed with the deterministic gate on
+    # belongs_to_series (see agents/series_agent.py's shadow call site).
+    # Purely informational -- never read by any routing/dedupe logic in
+    # this table, only surfaced to a human reviewer. Null for every row
+    # written before this column existed and for every row where no
+    # disagreement occurred (i.e. almost all rows -- shadow_only is the
+    # only state anything will realistically be in until an explicit
+    # promotion policy exists).
+    tier_c_disagreement = Column(JSON, nullable=True)
+
 
 class AgenticSkeletonPreview(Base):
     """Phase 2 dual-write shadow table (`discovery_agentic_phase1_plan.md`/
@@ -742,3 +755,120 @@ class AgenticPromotionDecision(Base):
     agentic_gate = Column(JSON, nullable=False)
 
     promotion_outcome = Column(String, nullable=False)
+
+
+class ShadowLLMCall(Base):
+    """Step 8 (Tier C Shadow Scoring Persistence + Promotion Path): one
+    durable row per Tier C shadow LLM call made in `agents/series_agent.py`'s
+    classification loop -- the persisted counterpart to Step 7's per-run,
+    in-memory-only `DiscoveryTelemetry.tier_c_shadow_scores`/
+    `record_tier_c_shadow_score`. Turns Tier C from a per-run diagnostic
+    into a cross-run, queryable signal (accuracy over time, cost over
+    time) without changing what's scored or how -- every field below is
+    produced by the existing `_score_tier_c_shadow_response`/gate
+    computation at that call site; this table only stores those outputs,
+    it never recomputes them (Step 8 architectural diff, section 1.2).
+
+    Written only from the Tier C shadow call site, immediately after
+    `_score_tier_c_shadow_response` succeeds (i.e. only when the shadow
+    call itself returned a response -- a failed/timed-out shadow call has
+    nothing to score and gets no row here, same gating as `record_tier_c_
+    shadow_score`). Write failures are fail-soft (logged, never raised)
+    -- same dual-write convention as `agentic/confidence_gate_store.py`
+    and friends: a persistence hiccup must never sink the Check Now run
+    it's shadowing.
+
+    `run_id` (Step 8 diff, revision 2/section 1.1) is minted once per
+    Check Now job in `services/series_check_engine.run_series_check_job_
+    full`, alongside `telemetry`/`discovery_cache`, and threaded into
+    `series_agent.run_series_check` as a parameter -- NOT regenerated per
+    round, since a single job's multiple catch-up rounds must share one
+    durable identifier (mirrors how `telemetry` is already cumulative
+    across rounds for the whole job).
+
+    `series_id` is NOT NULL: the only call site that exists today always
+    has a concrete series (Step 8 diff, section 1.3). A future call site
+    that fires before a `Series` row exists should add its own nullable
+    field (e.g. `candidate_series_name`) rather than relaxing this
+    constraint.
+    """
+
+    __tablename__ = "shadow_llm_calls"
+
+    id = Column(Integer, primary_key=True)
+    series_id = Column(Integer, ForeignKey("series.id"), nullable=False, index=True)
+    run_id = Column(String, nullable=False, index=True)
+    tier = Column(String, nullable=False, default="C")
+
+    # Gate context: the deterministic gate's already-computed decision for
+    # this same candidate, at the moment the shadow call was made.
+    gate_belongs_to_series = Column(Boolean, nullable=False)
+    gate_inferred_number = Column(Integer, nullable=True)
+    gate_confidence = Column(String, nullable=True)  # confidence_engine overall_grade bucket
+
+    # Shadow output: the Tier C response itself, normalized via
+    # llm_client.LLMResponse and parsed by _score_tier_c_shadow_response.
+    shadow_provider = Column(String, nullable=False)
+    shadow_model_id = Column(String, nullable=False)
+    shadow_belongs_to_series = Column(Boolean, nullable=True)  # null if unparseable
+    shadow_inferred_number = Column(Integer, nullable=True)
+    shadow_confidence = Column(String, nullable=True)
+    # Recorded, never compared -- the gate has no alternate-title concept
+    # (see _score_tier_c_shadow_response's docstring).
+    shadow_is_alternate_title_of_known_book = Column(Boolean, nullable=True)
+
+    # Scoring: _score_tier_c_shadow_response's derived comparison output,
+    # stored as-is (see class docstring, section 1.2 -- single source of
+    # truth, never recomputed here).
+    parsed_ok = Column(Boolean, nullable=False)
+    belongs_to_series_agreement = Column(Boolean, nullable=True)
+    inferred_number_agreement = Column(Boolean, nullable=True)
+    confidence_aligned = Column(Boolean, nullable=True)
+
+    # Cost and meta.
+    prompt_tokens = Column(Integer, nullable=False, default=0)
+    completion_tokens = Column(Integer, nullable=False, default=0)
+    total_cost_usd = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class TierCPromotionState(Base):
+    """Step 8 (Tier C Shadow Scoring Persistence + Promotion Path):
+    current Tier C promotion state for one series -- `series_id` is the
+    "route" (Step 8 diff, revision 1/section 1.1 dropped the standalone
+    "route" concept: this codebase has no routing unit distinct from a
+    series, so promotion state is keyed directly on `series_id`).
+
+    One row per series (PK = `series_id`), current-state only -- no
+    transition history in Phase 8a (an optional `tier_c_promotion_
+    transitions` log is explicit Phase 8b future work, see the Step 8
+    diff's section 2.2). Mirrors `SeriesSkeleton`/`SeriesFingerprint`'s
+    existing one-row-per-series shape rather than bolting another nullable
+    column onto `Series` itself.
+
+    Absence of a row for a given `series_id` means `"shadow_only"` --
+    every series defaults to shadow_only until a row is explicitly created
+    (see `services/tier_c_shadow_store.get_tier_c_promotion_state`).
+    Phase 8a has no automated policy that ever creates/updates a row here
+    (that's explicit Phase 8b future work); until one exists, the only way
+    a series reaches `shadow_advisory`/`live` is a manual write to this
+    table.
+
+    States (Step 8 diff, section 2.1):
+      - "shadow_only": Tier C runs in parallel, never affects routing.
+      - "shadow_advisory": disagreements are recorded on
+        SeriesCandidateNotification.tier_c_disagreement; deterministic
+        gate still drives routing.
+      - "live": Tier C's belongs_to_series decision overrides the gate's
+        (deterministic gate stays computed and persisted for audit/
+        fallback) for the specific ambiguous candidates Tier C already
+        shadows in every other state.
+    """
+
+    __tablename__ = "tier_c_promotion_state"
+
+    series_id = Column(Integer, ForeignKey("series.id"), primary_key=True)
+    tier_c_state = Column(String, nullable=False, default="shadow_only")
+    tier_c_provider = Column(String, nullable=True)
+    tier_c_model_id = Column(String, nullable=True)
+    last_evaluated_at = Column(DateTime, nullable=True)

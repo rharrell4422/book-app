@@ -20,7 +20,14 @@ from agents.series_agent import (
     discover_series_by_name,
 )
 from database import Base
-from models import Book, Series, SeriesCandidateNotification, SeriesSkeleton
+from models import (
+    Book,
+    Series,
+    SeriesCandidateNotification,
+    SeriesSkeleton,
+    ShadowLLMCall,
+    TierCPromotionState,
+)
 from services.discovery_cache import DiscoveryCache
 from services.discovery_telemetry import DiscoveryTelemetry
 
@@ -5285,6 +5292,250 @@ class TierCShadowLlmTest(unittest.TestCase):
             SeriesCandidateNotification.series_id == self.series.id
         ).all()
         self.assertEqual(len(rows), 1)
+
+
+class TierCPromotionPathTest(unittest.TestCase):
+    """Step 8 ("Tier C Shadow Scoring Persistence + Promotion Path"):
+    persistence (shadow_llm_calls), Mechanism B budget gating, and the
+    three promotion states (shadow_only/shadow_advisory/live) -- built on
+    the same ambiguous-candidate fixture as TierCShadowLlmTest above.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=cls.engine)
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        Base.metadata.drop_all(bind=cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        self.db = self.SessionLocal()
+        series = Series(name="Cherry Blossom Girls", author="Harmon Cooper", profile_id="robbie")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+        self.series = series
+
+        for number in [1, 2, 3, 4, 5, 6, 8, 9]:
+            self.db.add(
+                Book(
+                    title=f"Cherry Blossom Girls Book {number}",
+                    author="Harmon Cooper",
+                    series_id=series.id,
+                    profile_id=series.profile_id,
+                    series_order=number,
+                    book_number=float(number),
+                    record_status="active",
+                    is_read=False,
+                )
+            )
+        self.db.commit()
+
+        self.candidates = [
+            {
+                "source": "hardcover",
+                "source_id": "hc-7",
+                "title": "Desert Protocol",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": None,
+                "language": "",
+                "confidence": "author_fallback",
+                "series_number_hint": 7,
+                "series_name_hint": "Cherry Blossom Girls",
+                "upcoming_hint": False,
+            }
+        ]
+
+        # persist_tier_c_shadow_call opens its OWN independent session
+        # when the caller doesn't pass one (see that module's docstring
+        # for why -- fail-soft isolation from the shared discovery
+        # transaction), which by default resolves to the real app DB, not
+        # this test's in-memory engine. Same convention tests/test_
+        # agentic_confidence_gate_store.py's own integration tests use:
+        # patch the module-level SessionLocal so persistence writes land
+        # in the same in-memory engine this test asserts against.
+        self._session_local_patch = patch("services.tier_c_shadow_store.SessionLocal", self.SessionLocal)
+        self._session_local_patch.start()
+
+    def tearDown(self):
+        self._session_local_patch.stop()
+        self.db.close()
+
+    def _mock_discovery(self, candidates, **overrides):
+        result = {
+            "candidates": candidates,
+            "provider_failures": [],
+            "all_providers_failed": False,
+            "used_author_fallback": False,
+        }
+        result.update(overrides)
+        return patch("discovery_engine.discover_candidates_for_series", return_value=result)
+
+    def _set_promotion_state(self, tier_c_state: str) -> None:
+        self.db.add(TierCPromotionState(series_id=self.series.id, tier_c_state=tier_c_state))
+        self.db.commit()
+
+    def test_persists_shadow_llm_call_row_with_scoring_and_cost(self):
+        # Same disagreement fixture as TierCShadowLlmTest's
+        # test_shadow_response_is_scored_against_the_gate -- here we
+        # assert the persisted row, not just the telemetry summary.
+        tier_c_response_text = (
+            '{"belongs_to_series": true, "confidence": "high", "inferred_number": 7, '
+            '"is_alternate_title_of_known_book": false, "reasoning": "same author, plausible tie-in"}'
+        )
+        telemetry = DiscoveryTelemetry()
+        with self._mock_discovery(self.candidates), patch.dict(
+            os.environ, {"ANTHROPIC_API_KEY": "test-key"}
+        ), patch("anthropic.Anthropic", return_value=_mock_anthropic_client(tier_c_response_text)):
+            agent = SeriesIntelligenceAgent()
+            agent.run_series_check(
+                self.db, self.series.id, emit_summary=False, telemetry=telemetry, run_id="job-123"
+            )
+
+        rows = self.db.query(ShadowLLMCall).filter(ShadowLLMCall.series_id == self.series.id).all()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row.run_id, "job-123")
+        self.assertEqual(row.tier, "C")
+        self.assertFalse(row.gate_belongs_to_series)
+        self.assertEqual(row.gate_inferred_number, 7)
+        self.assertEqual(row.shadow_provider, "anthropic")
+        self.assertTrue(row.shadow_belongs_to_series)
+        self.assertEqual(row.shadow_inferred_number, 7)
+        self.assertEqual(row.shadow_confidence, "high")
+        self.assertTrue(row.parsed_ok)
+        self.assertFalse(row.belongs_to_series_agreement)
+        self.assertTrue(row.inferred_number_agreement)
+        self.assertGreater(row.prompt_tokens, 0)
+        self.assertGreaterEqual(row.total_cost_usd, 0.0)
+
+    def test_budget_gate_blocks_the_shadow_call_entirely(self):
+        # tier_c_shadow_allowed=False must short-circuit the predicate
+        # before call_llm is ever invoked -- no LLM call, no persisted row.
+        telemetry = DiscoveryTelemetry()
+        with self._mock_discovery(self.candidates), patch.dict(
+            os.environ, {"ANTHROPIC_API_KEY": "test-key"}
+        ), patch("anthropic.Anthropic", return_value=_mock_anthropic_client('{"belongs_to_series": true}')):
+            agent = SeriesIntelligenceAgent()
+            agent.run_series_check(
+                self.db,
+                self.series.id,
+                emit_summary=False,
+                telemetry=telemetry,
+                tier_c_shadow_allowed=False,
+            )
+
+        self.assertEqual(telemetry.summary()["shadow"]["total_llm_calls"], 0)
+        rows = self.db.query(ShadowLLMCall).filter(ShadowLLMCall.series_id == self.series.id).all()
+        self.assertEqual(rows, [])
+        # The candidate is still ambiguous -- it must still land in
+        # needs_review, exactly as if Tier C had never existed.
+        notifications = self.db.query(SeriesCandidateNotification).filter(
+            SeriesCandidateNotification.series_id == self.series.id
+        ).all()
+        self.assertEqual(len(notifications), 1)
+
+    def test_default_promotion_state_is_shadow_only_and_behaves_like_before(self):
+        # No TierCPromotionState row for this series -- must default to
+        # shadow_only and reproduce pre-Step-8 routing/notification
+        # behavior exactly, even when Tier C disagrees.
+        tier_c_response_text = '{"belongs_to_series": true, "confidence": "high", "inferred_number": 7}'
+        telemetry = DiscoveryTelemetry()
+        with self._mock_discovery(self.candidates), patch.dict(
+            os.environ, {"ANTHROPIC_API_KEY": "test-key"}
+        ), patch("anthropic.Anthropic", return_value=_mock_anthropic_client(tier_c_response_text)):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False, telemetry=telemetry)
+
+        # shadow_only: no override -- still ambiguous, still needs_review.
+        self.assertEqual(result["available_missing"], [])
+        notification = (
+            self.db.query(SeriesCandidateNotification)
+            .filter(SeriesCandidateNotification.series_id == self.series.id)
+            .one()
+        )
+        self.assertIsNone(notification.tier_c_disagreement)
+
+    def test_shadow_advisory_annotates_notification_without_changing_routing(self):
+        self._set_promotion_state("shadow_advisory")
+        tier_c_response_text = (
+            '{"belongs_to_series": true, "confidence": "high", "inferred_number": 7, '
+            '"is_alternate_title_of_known_book": false, "reasoning": "plausible tie-in"}'
+        )
+        telemetry = DiscoveryTelemetry()
+        with self._mock_discovery(self.candidates), patch.dict(
+            os.environ, {"ANTHROPIC_API_KEY": "test-key"}
+        ), patch("anthropic.Anthropic", return_value=_mock_anthropic_client(tier_c_response_text)):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False, telemetry=telemetry)
+
+        # Routing is unaffected -- shadow_advisory never overrides.
+        self.assertEqual(result["available_missing"], [])
+        notification = (
+            self.db.query(SeriesCandidateNotification)
+            .filter(SeriesCandidateNotification.series_id == self.series.id)
+            .one()
+        )
+        self.assertIsNotNone(notification.tier_c_disagreement)
+        self.assertTrue(notification.tier_c_disagreement["tier_c_belongs_to_series"])
+        self.assertEqual(notification.tier_c_disagreement["tier_c_confidence"], "high")
+
+    def test_live_state_overrides_the_gate_when_tier_c_disagrees_toward_acceptance(self):
+        self._set_promotion_state("live")
+        tier_c_response_text = (
+            '{"belongs_to_series": true, "confidence": "high", "inferred_number": 7, '
+            '"is_alternate_title_of_known_book": false, "reasoning": "plausible tie-in"}'
+        )
+        telemetry = DiscoveryTelemetry()
+        with self._mock_discovery(self.candidates), patch.dict(
+            os.environ, {"ANTHROPIC_API_KEY": "test-key"}
+        ), patch("anthropic.Anthropic", return_value=_mock_anthropic_client(tier_c_response_text)):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False, telemetry=telemetry)
+
+        # "live": Tier C's decision (belongs_to_series=True) overrides the
+        # gate's False -- the candidate is auto-accepted, never reaches
+        # needs_review.
+        self.assertEqual(len(result["available_missing"]), 1)
+        self.assertTrue(result["found"])
+        notifications = self.db.query(SeriesCandidateNotification).filter(
+            SeriesCandidateNotification.series_id == self.series.id
+        ).all()
+        self.assertEqual(notifications, [])
+        # The deterministic gate's own decision is still persisted for
+        # audit, unaffected by the override.
+        row = self.db.query(ShadowLLMCall).filter(ShadowLLMCall.series_id == self.series.id).one()
+        self.assertFalse(row.gate_belongs_to_series)
+        self.assertTrue(row.shadow_belongs_to_series)
+
+    def test_live_state_falls_back_to_the_gate_when_tier_c_is_unavailable(self):
+        self._set_promotion_state("live")
+        # No ANTHROPIC_API_KEY patched -- conftest.py's autouse fixture
+        # blanks it, so call_llm raises LLMCallError immediately, exactly
+        # like TierCShadowLlmTest.test_shadow_call_failure_does_not_sink_
+        # the_check_now_run.
+        telemetry = DiscoveryTelemetry()
+        with self._mock_discovery(self.candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False, telemetry=telemetry)
+
+        # Tier C unavailable -- deterministic gate's own False decision is
+        # used, unchanged: still ambiguous, still needs_review.
+        self.assertEqual(result["available_missing"], [])
+        notifications = self.db.query(SeriesCandidateNotification).filter(
+            SeriesCandidateNotification.series_id == self.series.id
+        ).all()
+        self.assertEqual(len(notifications), 1)
+        # A failed shadow call has nothing to score/persist.
+        self.assertEqual(
+            self.db.query(ShadowLLMCall).filter(ShadowLLMCall.series_id == self.series.id).count(), 0
+        )
 
 
 class Phase4DiagnosticsTest(unittest.TestCase):

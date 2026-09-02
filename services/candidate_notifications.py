@@ -97,6 +97,7 @@ def create_or_refresh_candidate_notification(
     provider_confidence: str | None,
     series_name_hint: str | None,
     reason_flags: list[str],
+    tier_c_disagreement: dict | None = None,
 ) -> "models.SeriesCandidateNotification | None":
     """Creates a new unresolved row for this candidate, refreshes an
     existing unresolved row's `last_seen_at`/metadata in place when the
@@ -107,6 +108,16 @@ def create_or_refresh_candidate_notification(
     matching rule. Returns `None` only in the ignored case; does not
     commit (piggybacks on the caller's own commit, same convention as
     `services/notifications.create_series_discovery_notification`).
+
+    `tier_c_disagreement` (Step 8, "Tier C Shadow Scoring Persistence +
+    Promotion Path"): optional, purely additive -- `None` for every
+    existing caller (unchanged behavior) and for every candidate where
+    either Tier C shadow didn't fire or agreed with the deterministic
+    gate. Only ever populated by `agents/series_agent.py`'s Tier C shadow
+    call site when a series' Tier C promotion state is "shadow_advisory"
+    and Tier C disagreed with the gate on `belongs_to_series` for this
+    exact candidate -- see `models.SeriesCandidateNotification.tier_c_
+    disagreement`'s docstring.
     """
     title = str(canonical.get("title") or "").strip()
     isbn13 = str(canonical.get("isbn13") or "").strip() or None
@@ -156,6 +167,8 @@ def create_or_refresh_candidate_notification(
         existing.provider = canonical.get("provider") or existing.provider
         existing.series_name_hint = series_name_hint or existing.series_name_hint
         existing.reason_flags = list(reason_flags)
+        if tier_c_disagreement is not None:
+            existing.tier_c_disagreement = tier_c_disagreement
         db.flush()
         return existing
 
@@ -180,6 +193,7 @@ def create_or_refresh_candidate_notification(
         resolution=None,
         created_at=now,
         last_seen_at=now,
+        tier_c_disagreement=tier_c_disagreement,
     )
     db.add(row)
     # autoflush is off for this app's sessions (see database.py) --

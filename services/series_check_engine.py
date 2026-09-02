@@ -9,6 +9,7 @@ intelligence, and tracks job progress/status for the polling endpoints.
 import logging
 import re
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import date, datetime
 
@@ -39,6 +40,7 @@ from services.availability_bridge import derive_legacy_fields
 from services.notifications import create_series_discovery_notification
 from services.fingerprint_store import apply_fingerprint_updates
 from services.skeleton_store import apply_skeleton_updates
+from services.tier_c_shadow_store import check_tier_c_shadow_budget
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +274,15 @@ def run_series_check_job_full(series_id: int) -> None:
         # whole job, not reset each round (see discovery_catchup_
         # architecture_spec.md #2.5).
         telemetry = DiscoveryTelemetry()
+        # Step 8 ("Tier C Shadow Scoring Persistence + Promotion Path",
+        # revision 2/section 1.1): minted ONCE per job, right alongside
+        # `telemetry` above, for the same reason -- a job's multiple
+        # catch-up rounds (see the loop below) must all persist their
+        # shadow_llm_calls rows under one durable identifier, not a fresh
+        # one per round. Deliberately NOT generated inside `series_agent.
+        # run_series_check` itself (that function runs once per round, not
+        # once per job -- see this same section's own corrected wording).
+        run_id = uuid.uuid4().hex
         # Also per-job/in-memory/shared-across-rounds, and always active
         # (no policy gate -- see spec #7.1): dedupes provider fetches and
         # LLM verdicts that repeat identically across rounds/passes within
@@ -372,6 +383,22 @@ def run_series_check_job_full(series_id: int) -> None:
                         "all_providers_failed": False,
                     }
 
+        # Step 8, section 9.1: Mechanism B's budget check runs ONCE per
+        # job, only when precheck didn't already short-circuit the whole
+        # job -- a precheck-short-circuited job never reaches the
+        # classification loop that would fire a Tier C shadow call at all,
+        # so checking the budget for it would just be a wasted query (the
+        # common case for a healthy library -- see precheck's own
+        # docstring). The resulting decision is cached here and passed
+        # unchanged into every round below (Mechanism B is a soft,
+        # per-job cap -- see check_tier_c_shadow_budget's own docstring
+        # for why a job that starts under budget can still finish over
+        # it).
+        tier_c_shadow_allowed = True
+        if run_full_loop:
+            tier_c_shadow_allowed = check_tier_c_shadow_budget(db, series_id)
+            telemetry.record_gate_outcome("tier_c_budget", "allowed" if tier_c_shadow_allowed else "blocked")
+
         for _round_num in range(1, SERIES_CHECK_MAX_ROUNDS + 1) if run_full_loop else []:
             # The shared timeout bounds *scheduling of new rounds for the
             # whole job*, not each round individually -- prevents a naive
@@ -389,7 +416,15 @@ def run_series_check_job_full(series_id: int) -> None:
 
             executor = ThreadPoolExecutor(max_workers=1)
             future = executor.submit(
-                series_agent.run_series_check, db, series_id, update_progress, False, telemetry, discovery_cache
+                series_agent.run_series_check,
+                db,
+                series_id,
+                update_progress,
+                False,
+                telemetry,
+                discovery_cache,
+                run_id,
+                tier_c_shadow_allowed,
             )
             try:
                 result = future.result(timeout=remaining_budget)

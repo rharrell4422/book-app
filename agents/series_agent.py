@@ -17,12 +17,13 @@ import settings
 from llm_client import TIER_MODEL_MAP, LLMCallError, call_llm
 from models import Book, Series, SeriesSkeleton
 from prompts import build_belongs_to_series_prompt
-from services import candidate_notifications
+from services import candidate_notifications, tier_c_shadow_store
 from services.discovery_cache import DiscoveryCache
 from services.discovery_logging import log_discovery_summary
 from services.discovery_telemetry import DiscoveryTelemetry, maybe_pass_scope
 from services.fingerprint_store import build_fingerprint_observations, get_effective_fingerprint
 from services.identity import owned_title_for_identity
+from services.llm_pricing import get_price_per_million
 from services.skeleton_store import backfill_skeleton_for_series
 
 
@@ -653,6 +654,17 @@ def _score_tier_c_shadow_response(
       - `is_alternate_title_of_known_book` is recorded only -- the gate
         has no alternate-title concept to compare against, so this is
         never folded into the agreement/disagreement metrics above.
+
+    Step 8 ("Tier C Shadow Scoring Persistence + Promotion Path", section
+    1.2) addition: also returns Tier C's own raw, normalized
+    `belongs_to_series`/`inferred_number` values (`tier_c_belongs_to_
+    series`/`tier_c_inferred_number`), not just the agreement booleans
+    above. Needed so the shadow call site's persistence write and "live"
+    promotion-state override can use Tier C's actual decision without
+    re-parsing `response_text` a second time -- this function stays the
+    single source of truth for everything derived from one shadow
+    response (section 1.2's "do not re-implement scoring" rule extends to
+    "do not re-parse the response", not just the comparison booleans).
     """
     text = (response_text or "").strip()
     if text.startswith("```"):
@@ -671,12 +683,16 @@ def _score_tier_c_shadow_response(
             "tier_c_confidence": None,
             "confidence_aligned": None,
             "tier_c_alternate_title_flag": None,
+            "tier_c_belongs_to_series": None,
+            "tier_c_inferred_number": None,
         }
 
     tier_c_belongs_to_series = parsed.get("belongs_to_series")
+    if not isinstance(tier_c_belongs_to_series, bool):
+        tier_c_belongs_to_series = None
     belongs_to_series_agreement = (
         bool(tier_c_belongs_to_series) == bool(gate_belongs_to_series)
-        if isinstance(tier_c_belongs_to_series, bool)
+        if tier_c_belongs_to_series is not None
         else None
     )
 
@@ -699,6 +715,8 @@ def _score_tier_c_shadow_response(
         "tier_c_confidence": tier_c_confidence,
         "confidence_aligned": confidence_aligned,
         "tier_c_alternate_title_flag": tier_c_alternate_title_flag,
+        "tier_c_belongs_to_series": tier_c_belongs_to_series,
+        "tier_c_inferred_number": tier_c_inferred_number_int,
     }
 
 
@@ -793,7 +811,30 @@ class SeriesIntelligenceAgent:
         emit_summary: bool = True,
         telemetry: "DiscoveryTelemetry | None" = None,
         cache: "DiscoveryCache | None" = None,
+        run_id: str | None = None,
+        tier_c_shadow_allowed: bool = True,
     ) -> dict:
+        """`run_id`/`tier_c_shadow_allowed` (Step 8, "Tier C Shadow
+        Scoring Persistence + Promotion Path"): both optional and default
+        to values that reproduce pre-Step-8 behavior exactly for any
+        caller that doesn't pass them (same convention as `telemetry`/
+        `cache` above).
+
+        `run_id` is minted ONCE per Check Now job in `services.series_
+        check_engine.run_series_check_job_full` (alongside `telemetry`),
+        not regenerated per round -- see `models.ShadowLLMCall`'s
+        docstring for why a job's multiple catch-up rounds must share one
+        durable identifier. `None` here just means "no persisted
+        shadow_llm_calls row will carry a real run_id" (falls back to a
+        literal `"unknown"` at the persistence call site), which is fine
+        for tests/call sites that don't care about cross-round grouping.
+
+        `tier_c_shadow_allowed` is Mechanism B's cached per-job budget
+        decision (`services.tier_c_shadow_store.check_tier_c_shadow_
+        budget`), computed once at job start and passed in unchanged for
+        every round -- defaults to `True` (allowed) so omitting it never
+        silently disables Tier C shadow.
+        """
         series = db.query(Series).filter(Series.id == series_id).first()
         if not series:
             result = _empty_result(None, None, "series-not-found")
@@ -872,6 +913,15 @@ class SeriesIntelligenceAgent:
                 str(book.isbn13 or "").strip() for book in active_series_books if str(book.isbn13 or "").strip()
             }
             owned_core_title_texts = _build_owned_core_title_texts(active_series_books)
+
+            # Step 8 ("Tier C Shadow Scoring Persistence + Promotion
+            # Path", section 2.2): read ONCE per run, not per candidate --
+            # routing code only ever *reads* this state; the state itself
+            # is written by a separate policy/analysis layer (explicit
+            # Phase 8b future work), never computed inline here. Defaults
+            # to "shadow_only" (see get_tier_c_promotion_state's
+            # docstring), which reproduces pre-Step-8 behavior exactly.
+            tier_c_state = tier_c_shadow_store.get_tier_c_promotion_state(db, series_id)["tier_c_state"]
 
             # Exclude titles the user already owns anywhere by this exact
             # author (any series), so a same-author's other tracked series
@@ -1556,7 +1606,7 @@ class SeriesIntelligenceAgent:
                     telemetry.record_gate_outcome("confidence_grade", str(overall_grade or "none"))
 
                 # HTA Orchestrator Step 5: Tier C shadow LLM call. Fires
-                # ONLY when all three are true -- mirrors the live routing
+                # ONLY when all four are true -- mirrors the live routing
                 # predicate just below (low_confidence_ambiguous and
                 # overall_grade in {"medium", None}) plus excluding the two
                 # downgrade flags already computed by the gate above, so
@@ -1571,15 +1621,31 @@ class SeriesIntelligenceAgent:
                 # Round 3-4 resolution. Placed here, not immediately after
                 # the gate call, because the predicate needs overall_grade,
                 # which isn't resolved until the confidence_lookup access
-                # just above. Shadow-only: this call cannot change
-                # belongs_to_series, overall_grade, or routing -- its
-                # result is only ever recorded via record_shadow_llm_call.
+                # just above.
+                #
+                # Step 8 addition: `tier_c_shadow_allowed` is Mechanism
+                # B's cached per-job budget decision (see this method's
+                # own docstring) -- when the job started over budget, this
+                # predicate can never be satisfied for the whole job,
+                # exactly like the two downgrade flags already do per
+                # candidate.
+                #
+                # In every state EXCEPT "live", this call still cannot
+                # change belongs_to_series, overall_grade, or routing --
+                # its result is only ever recorded (telemetry, and now
+                # persisted via tier_c_shadow_store). In "live" state, see
+                # the override below: it CAN change `low_confidence_
+                # ambiguous` for this candidate, which is the only lever
+                # that actually drives auto-accept vs needs_review/drop.
                 tier_c_shadow_predicate = (
                     low_confidence_ambiguous
                     and (overall_grade == "medium" or overall_grade is None)
                     and not is_universe_tie_in
                     and not is_compilation_of_owned_titles
+                    and tier_c_shadow_allowed
                 )
+                tier_c_score: dict | None = None
+                tier_c_disagreement_payload: dict | None = None
                 if tier_c_shadow_predicate:
                     with maybe_pass_scope(telemetry, "belongs_to_series_shadow_check", tier="C"):
                         candidate_id = isbn13 or f"{raw.get('source')}:{raw.get('source_id')}"
@@ -1623,6 +1689,24 @@ class SeriesIntelligenceAgent:
                             description=raw.get("description"),
                             sibling_candidates=sibling_candidates,
                         )
+                        # Step 8, section 5.1: only "live" state gets an
+                        # explicit timeout -- every other state keeps
+                        # today's best-effort, no-timeout behavior
+                        # unchanged (a slow shadow call in shadow_only/
+                        # shadow_advisory costs latency, not correctness,
+                        # since nothing downstream waits on its result to
+                        # make a decision). "live" state's Tier C call sits
+                        # on the actual decision path for this candidate,
+                        # so it needs the same explicit bound every other
+                        # live, user-visible outbound call in this
+                        # codebase gets (see settings.TIER_C_LIVE_TIMEOUT_
+                        # SECONDS's docstring) -- a timeout here raises
+                        # LLMCallError exactly like any other provider
+                        # failure, so it's handled by the same except
+                        # clause below with no special-casing.
+                        tier_c_call_timeout = (
+                            settings.TIER_C_LIVE_TIMEOUT_SECONDS if tier_c_state == "live" else None
+                        )
                         started_tier_c = time.monotonic()
                         tier_c_response = None
                         try:
@@ -1632,12 +1716,19 @@ class SeriesIntelligenceAgent:
                                 shadow=True,
                                 max_tokens=500,
                                 temperature=0,
+                                timeout=tier_c_call_timeout,
                             )
                         except LLMCallError as exc:
                             # Fail-soft, same convention as every other LLM
                             # call site in this codebase (see provider_io.py's
                             # CR-2 comment) -- a shadow-only call must never
-                            # sink a real Check Now run.
+                            # sink a real Check Now run. In "live" state this
+                            # is also exactly "Tier C unavailable" (Step 8,
+                            # section 5.1) -- the override below only ever
+                            # fires when tier_c_response is not None, so a
+                            # timeout/failure here always falls back to the
+                            # deterministic gate's own belongs_to_series,
+                            # with no separate handling needed.
                             _console_log(f"Tier C shadow LLM call failed: {exc}")
                         finally:
                             if telemetry is not None:
@@ -1660,22 +1751,116 @@ class SeriesIntelligenceAgent:
                                         else TIER_MODEL_MAP["C"]["model_id"]
                                     ),
                                 )
-                        # HTA Orchestrator Step 7: scores the shadow response
-                        # against the deterministic gate's already-computed
-                        # belongs_to_series/inferred_number_int for this same
-                        # candidate -- shadow-only, per-run, in-memory (see
-                        # _score_tier_c_shadow_response's and
-                        # record_tier_c_shadow_score's docstrings). Only
-                        # attempted when the call actually succeeded; a
-                        # failed call has nothing to score beyond the
-                        # zero-token entry already recorded above.
-                        if telemetry is not None and tier_c_response is not None:
+                        # HTA Orchestrator Step 7 / Step 8: scores the shadow
+                        # response against the deterministic gate's already-
+                        # computed belongs_to_series/inferred_number_int for
+                        # this same candidate. Only attempted when the call
+                        # actually succeeded; a failed call has nothing to
+                        # score beyond the zero-token entry already recorded
+                        # above.
+                        #
+                        # Deliberately NOT gated on `telemetry is not None`
+                        # (Step 7's original gate) -- `maybe_pass_scope`'s own
+                        # docstring guarantees "a caller that doesn't pass a
+                        # DiscoveryTelemetry instance ... changes no
+                        # behavior", and the "live" override below is real
+                        # behavior, not observability. Scoring itself must
+                        # not depend on whether telemetry happens to be
+                        # attached; only *recording* it (below) does.
+                        if tier_c_response is not None:
                             tier_c_score = _score_tier_c_shadow_response(
                                 tier_c_response.text,
                                 gate_belongs_to_series=belongs_to_series,
                                 gate_inferred_number_int=inferred_number_int,
                             )
-                            telemetry.record_tier_c_shadow_score(**tier_c_score)
+                            if telemetry is not None:
+                                telemetry.record_tier_c_shadow_score(
+                                    parsed_ok=tier_c_score["parsed_ok"],
+                                    belongs_to_series_agreement=tier_c_score["belongs_to_series_agreement"],
+                                    inferred_number_agreement=tier_c_score["inferred_number_agreement"],
+                                    tier_c_confidence=tier_c_score["tier_c_confidence"],
+                                    confidence_aligned=tier_c_score["confidence_aligned"],
+                                    tier_c_alternate_title_flag=tier_c_score["tier_c_alternate_title_flag"],
+                                )
+                            # Step 8, section 1: persist this shadow call --
+                            # own independent DB session (see tier_c_shadow_
+                            # store's module docstring for why), fail-soft,
+                            # never raises back into this loop. Cost is
+                            # computed the same way record_shadow_llm_call
+                            # already computes it (services.llm_pricing),
+                            # just also captured here since that function
+                            # doesn't return its own cost_usd.
+                            tier_c_cost_usd = 0.0
+                            tier_c_pricing = get_price_per_million(tier_c_response.model_id)
+                            if tier_c_pricing is not None:
+                                price_in, price_out = tier_c_pricing
+                                tier_c_cost_usd = (
+                                    tier_c_response.tokens_in * price_in
+                                    + tier_c_response.tokens_out * price_out
+                                ) / 1_000_000
+                            tier_c_shadow_store.persist_tier_c_shadow_call(
+                                series_id=series.id,
+                                run_id=run_id or "unknown",
+                                gate_belongs_to_series=belongs_to_series,
+                                gate_inferred_number=inferred_number_int,
+                                gate_confidence=overall_grade,
+                                shadow_provider=TIER_MODEL_MAP["C"]["provider"],
+                                shadow_model_id=tier_c_response.model_id,
+                                shadow_belongs_to_series=tier_c_score["tier_c_belongs_to_series"],
+                                shadow_inferred_number=tier_c_score["tier_c_inferred_number"],
+                                shadow_confidence=tier_c_score["tier_c_confidence"],
+                                shadow_is_alternate_title_of_known_book=tier_c_score[
+                                    "tier_c_alternate_title_flag"
+                                ],
+                                parsed_ok=tier_c_score["parsed_ok"],
+                                belongs_to_series_agreement=tier_c_score["belongs_to_series_agreement"],
+                                inferred_number_agreement=tier_c_score["inferred_number_agreement"],
+                                confidence_aligned=tier_c_score["confidence_aligned"],
+                                prompt_tokens=tier_c_response.tokens_in,
+                                completion_tokens=tier_c_response.tokens_out,
+                                total_cost_usd=tier_c_cost_usd,
+                            )
+
+                # Step 8, section 4.3: "live" state makes Tier C the
+                # primary decision path for the same ambiguous candidates
+                # it already shadows in every other state -- it can never
+                # fire for a candidate the predicate above wouldn't have
+                # already selected. Only overrides when Tier C actually
+                # produced a usable, parsed boolean; a failed call or an
+                # unparseable response leaves low_confidence_ambiguous
+                # exactly as the deterministic gate computed it (the
+                # required fallback -- Step 8, section 4.3/5.1). This can
+                # only ever flip an ambiguous candidate toward acceptance
+                # (Tier C saying "yes it belongs"), never the reverse --
+                # the predicate above only ever fires when the gate already
+                # said belongs_to_series=False, mirroring the deterministic
+                # gate's own one-directional design (see the "low_
+                # confidence_ambiguous = not belongs_to_series" comment
+                # above).
+                if (
+                    tier_c_state == "live"
+                    and tier_c_score is not None
+                    and tier_c_score["parsed_ok"]
+                    and tier_c_score["tier_c_belongs_to_series"] is not None
+                ):
+                    low_confidence_ambiguous = not tier_c_score["tier_c_belongs_to_series"]
+
+                # Step 8, section 4.2: "shadow_advisory" state never
+                # changes routing -- it only annotates the candidate
+                # notification a human is about to review (if this
+                # candidate still reaches that branch below) with "Tier C
+                # would have disagreed". Only meaningful on an actual
+                # disagreement; agreement or an unscoreable/failed call
+                # leaves this None, same as every prior state.
+                if (
+                    tier_c_state == "shadow_advisory"
+                    and tier_c_score is not None
+                    and tier_c_score["belongs_to_series_agreement"] is False
+                ):
+                    tier_c_disagreement_payload = {
+                        "tier_c_belongs_to_series": tier_c_score["tier_c_belongs_to_series"],
+                        "tier_c_confidence": tier_c_score["tier_c_confidence"],
+                    }
 
                 if overall_grade in ("low", "zero"):
                     # PB-11 diagnostic (Percy Jackson books 4/5 investigation,
@@ -1761,6 +1946,7 @@ class SeriesIntelligenceAgent:
                         ),
                         series_name_hint=raw.get("series_name_hint"),
                         reason_flags=reason_flags,
+                        tier_c_disagreement=tier_c_disagreement_payload,
                     )
                     agentic_hooks.record_reasoning_step(
                         agentic_context,

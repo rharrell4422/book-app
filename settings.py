@@ -132,3 +132,37 @@ def is_fingerprint_activated(series_id: int) -> bool:
         except ValueError:
             continue
     return series_id in activated
+
+
+# Step 8 (Tier C Shadow Scoring Persistence + Promotion Path): budget
+# ceilings for Tier C shadow calls, enforced via Mechanism B (Step 8 diff,
+# "Mechanism B Selection" revision) -- a single aggregation of persisted
+# `shadow_llm_calls` cost for the relevant window, checked once at the
+# start of a Check Now job (services/series_check_engine.run_series_check_
+# job_full) and cached for that job's duration, not re-checked per
+# candidate. `None` (the default, unset) means "no ceiling" -- same
+# opt-in-by-default-off philosophy as every other flag in this module;
+# setting one of these to a positive float is what actually turns
+# enforcement on for that window. See services/tier_c_shadow_store.
+# check_tier_c_shadow_budget.
+TIER_C_SHADOW_MAX_DAILY_COST_USD: float | None = (
+    float(os.environ["TIER_C_SHADOW_MAX_DAILY_COST_USD"])
+    if os.getenv("TIER_C_SHADOW_MAX_DAILY_COST_USD", "").strip()
+    else None
+)
+TIER_C_SHADOW_MAX_MONTHLY_COST_USD: float | None = (
+    float(os.environ["TIER_C_SHADOW_MAX_MONTHLY_COST_USD"])
+    if os.getenv("TIER_C_SHADOW_MAX_MONTHLY_COST_USD", "").strip()
+    else None
+)
+
+# Step 8: only consulted when a series' Tier C promotion state is "live"
+# (see agents/series_agent.py's Tier C shadow call site) -- in every other
+# state, Tier C stays the existing best-effort, no-timeout shadow call
+# (behavior-preserving). Mirrors provider_io.WEB_SEARCH_TIMEOUT_SECONDS'
+# role: the one place in this codebase a live, user-visible decision path
+# waits on a single outbound call, it gets an explicit bound. A timeout
+# (or any other LLMCallError) in "live" state is treated as "Tier C
+# unavailable" and falls back to the deterministic gate's own decision --
+# see that call site's own comment for why this is safe.
+TIER_C_LIVE_TIMEOUT_SECONDS = float(os.environ.get("TIER_C_LIVE_TIMEOUT_SECONDS", "20"))
