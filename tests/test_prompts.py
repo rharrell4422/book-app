@@ -131,6 +131,21 @@ class BuildBelongsToSeriesPromptTest(unittest.TestCase):
         self.assertIn('"inferred_number"', prompt)
         self.assertIn("ONLY a JSON object", prompt)
 
+    def test_is_alternate_title_of_known_book_stays_a_bool(self):
+        # HTA Orchestrator Step 6: the refined instructional wording must
+        # not drift the output contract -- this field stays a bool (not a
+        # title-or-null string) so no future consumer of this prompt's
+        # response can be misled by the schema shown to the model.
+        prompt = build_belongs_to_series_prompt(title="X", series_name="Y", inferred_number=None)
+        self.assertIn('"is_alternate_title_of_known_book": <bool>', prompt)
+
+    def test_forbids_chain_of_thought_and_intermediate_steps(self):
+        # HTA Orchestrator Step 6: explicit determinism instructions added
+        # to the Tier C prompt -- these didn't exist in the Step 5 prompt.
+        prompt = build_belongs_to_series_prompt(title="X", series_name="Y", inferred_number=None)
+        self.assertIn("chain-of-thought", prompt)
+        self.assertIn("intermediate reasoning steps", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

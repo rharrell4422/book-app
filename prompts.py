@@ -159,12 +159,11 @@ def build_belongs_to_series_prompt(
 ) -> str:
     """Tier C prompt builder: deep reasoning over rich context to determine
     `belongs_to_series` in ambiguous cases, infer latent ordering, detect
-    alternate titles, resolve contradictory metadata. Shadow-only in
-    Step 5 -- see this call's one call site (`agents/series_agent.py`'s
-    classification loop, inside the `"belongs_to_series_shadow_check"`
-    pass_scope) for the exact trigger predicate and why its output is
-    recorded via `record_shadow_llm_call` rather than ever feeding live
-    routing.
+    alternate titles, resolve contradictory metadata. Shadow-only -- see
+    this call's one call site (`agents/series_agent.py`'s classification
+    loop, inside the `"belongs_to_series_shadow_check"` pass_scope) for
+    the exact trigger predicate and why its output is recorded via
+    `record_shadow_llm_call` rather than ever feeding live routing.
 
     Deliberately takes richer inputs than the deterministic gate
     (`evaluate_belongs_to_series_gate`) sees -- raw per-provider metadata,
@@ -175,6 +174,17 @@ def build_belongs_to_series_prompt(
     attempt. `description` may legitimately be `None` (many providers,
     e.g. OpenLibrary, never populate it) -- this degrades gracefully by
     saying so in the prompt rather than omitting the field.
+
+    HTA Orchestrator Step 6: refines only the instructional wording below
+    (explicit deterministic-reasoning bullets, an explicit no-chain-of-
+    thought/no-intermediate-steps instruction) -- every interpolated value,
+    every graceful-degradation fallback string, the builder's own
+    signature, and the output schema (including `is_alternate_title_of_
+    known_book` staying a bool) are unchanged from Step 5. This call site
+    still isn't consumed by anything beyond `record_shadow_llm_call`'s
+    token/cost accounting, so this step only changes what's sent to the
+    model and what's available for future shadow-data review -- it cannot
+    change live behavior.
     """
     provider_metadata = provider_metadata or []
     sibling_candidates = sibling_candidates or []
@@ -227,7 +237,18 @@ Raw metadata from every provider that returned this candidate:
 Other candidates discovered in this same batch (titles/number hints only -- context for possible latent ordering or alternate/duplicate titles):
 {sibling_lines}
 
-Decide whether this candidate genuinely belongs to the target series, reasoning beyond simple textual/numeric matching: consider whether it might be the same book as one of the known/owned titles under an alternate or rebranded title, whether its narrative content (if a description is given) is consistent with the series, and whether its position in the series can be inferred even though the deterministic gate could not confirm it.
+Perform deep but deterministic reasoning over the context above:
+- Compare the candidate's title against the known series titles and owned book titles above for alternate, rebranded, or variant-title matches.
+- Compare the candidate's inferred/highest-owned numbering against the sibling candidates to detect latent ordering the deterministic gate couldn't confirm.
+- Use the book description, when available, to judge narrative continuity with the series; if it is unavailable, degrade gracefully and rely on titles, numbering, and sibling candidates alone instead.
+- Weigh the deterministic-gate signals listed above as inputs to your judgment rather than re-deriving them from scratch.
+- Decide whether the candidate is likely part of the series despite missing explicit metadata, or likely NOT part of it due to a narrative or structural mismatch.
+
+Do NOT:
+- invent metadata that isn't present above
+- hallucinate plot details beyond what the description states
+- use chain-of-thought or step-by-step reasoning
+- output intermediate reasoning steps
 
 Respond with ONLY a JSON object (no prose, no markdown code fences) of this exact shape:
 {{"belongs_to_series": <bool>, "confidence": "low"|"medium"|"high", "inferred_number": <number or null>, "is_alternate_title_of_known_book": <bool>, "reasoning": <short string>}}"""
