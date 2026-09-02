@@ -31,6 +31,15 @@ new shadow call happened this job*; historical `shadow_llm_calls` rows
 from earlier jobs are still valid evidence -- budget gates the expensive
 call, never the evaluation itself).
 
+Step 11 Phase 3 addition: this function's own per-Check-Now-job cadence
+is also where `services.provider_model_scorecard.
+check_parse_failure_spikes` (a GLOBAL, cross-series check, unlike
+everything else in this function) piggybacks -- same "no new scheduler"
+rationale, just reused a second time for an unrelated global signal
+rather than introducing its own trigger point. Alert-only (logs, never
+demotes); wrapped in its own fail-soft try/except so a scorecard-query
+bug can never prevent THIS series' own evaluation below from running.
+
 Metrics input:
   - Step 9 (single-provider): `shadow_llm_calls` agreement/disagreement
     over the last `settings.TIER_C_PROMOTION_MIN_CALLS` scored calls
@@ -95,6 +104,7 @@ from datetime import datetime
 import models
 import settings
 from database import SessionLocal
+from services.provider_model_scorecard import check_parse_failure_spikes
 from services.tier_c_shadow_store import (
     get_recent_candidate_aggregates,
     get_tier_c_promotion_state,
@@ -192,6 +202,8 @@ def evaluate_tier_c_promotion(series_id: int, *, budget_blocked: bool = False) -
     """
     db = SessionLocal()
     try:
+        _check_parse_failure_spikes_fail_soft(db)
+
         state = get_tier_c_promotion_state(db, series_id)
         current_state = state["tier_c_state"]
         now = datetime.utcnow()
@@ -332,6 +344,25 @@ def evaluate_tier_c_promotion(series_id: int, *, budget_blocked: bool = False) -
 
 def _with_budget_suffix(reason: str, budget_blocked: bool) -> str:
     return f"{reason},budget_blocked" if budget_blocked else reason
+
+
+def _check_parse_failure_spikes_fail_soft(db) -> None:
+    """Step 11 Phase 3: runs once per call to `evaluate_tier_c_promotion`
+    (i.e. once per Check Now job, per this module's docstring), before
+    that call's series-specific evaluation below -- global, so it's not
+    scoped to `series_id` at all. Deliberately wrapped in its OWN try/
+    except, separate from the outer function's: a scorecard-query bug
+    here must never be able to prevent THIS series' own promotion
+    evaluation from running, any more than that evaluation itself is
+    allowed to sink the Check Now job it rides along with. Uses the
+    caller's own `db` session (read-only queries, no writes -- unlike
+    every other DB access in this module, this never needs its own
+    independent session).
+    """
+    try:
+        check_parse_failure_spikes(db)
+    except Exception:
+        logger.exception("evaluate_tier_c_promotion: parse-failure spike check failed")
 
 
 def _write_history(

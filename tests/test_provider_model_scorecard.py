@@ -1,19 +1,27 @@
-"""Step 11 Phase 1 (Provider/Model Scorecard & Tier C Confidence Signals):
-unit coverage for `services.provider_model_scorecard.
-get_provider_model_scorecard` -- a read-only, computed-on-read
+"""Step 11 (Provider/Model Scorecard & Tier C Confidence Signals): unit
+coverage for `services.provider_model_scorecard`. Phase 1:
+`get_provider_model_scorecard` -- a read-only, computed-on-read
 aggregation over `shadow_llm_calls`, grouped across ALL series by
-`(shadow_provider, shadow_model_id)`. No behavior change anywhere else in
-the codebase; nothing calls this function yet (later Step 11 phases wire
-it up).
+`(shadow_provider, shadow_model_id)`. Phase 3: `check_parse_failure_
+spikes`, an alert-only detector built on top of it. No behavior change
+to any routing/promotion decision from either phase; `evaluate_tier_c_
+promotion` calls the Phase 3 detector as of Step 11 Phase 3 (see
+tests/test_tier_c_multi_provider.py for that wiring's own coverage), but
+nothing consumes its return value to change behavior.
 """
 
+import logging
 import unittest
 import uuid
 from datetime import datetime, timedelta
 
 from database import Base
 from models import Series, ShadowLLMCall
-from services.provider_model_scorecard import get_provider_model_scorecard
+from services.provider_model_scorecard import (
+    ProviderModelMetricsAlert,
+    check_parse_failure_spikes,
+    get_provider_model_scorecard,
+)
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -294,6 +302,124 @@ class ProviderModelScorecardTest(unittest.TestCase):
         from services.provider_model_scorecard import DEFAULT_SCORECARD_WINDOW
 
         self.assertEqual(DEFAULT_SCORECARD_WINDOW, 100)
+
+
+class ParseFailureSpikeDetectorTest(unittest.TestCase):
+    """Step 11 Phase 3: unit coverage for `check_parse_failure_spikes` --
+    alert-only, built directly on `get_provider_model_scorecard`'s
+    `parse_failure_rate`. Same per-test fresh-engine pattern as
+    `ProviderModelScorecardTest` above, for the same reason (no
+    series_id scoping to isolate test data by).
+    """
+
+    def setUp(self):
+        # Any test module that imports `main` runs Alembic on import, and
+        # Alembic's fileConfig() disables every logger that already
+        # exists -- including this one, which assertLogs (used by the
+        # alert test below) cannot see through. So whether that test
+        # passes would otherwise depend on which other files pytest
+        # happened to collect alongside this one (same fix already
+        # applied in tests/test_skeleton_store.py/tests/test_series_
+        # discovery.py for their own loggers).
+        scorecard_logger = logging.getLogger("services.provider_model_scorecard")
+        was_disabled = scorecard_logger.disabled
+        scorecard_logger.disabled = False
+        self.addCleanup(setattr, scorecard_logger, "disabled", was_disabled)
+
+        self.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=self.engine)
+        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+        self.db = self.SessionLocal()
+        series = Series(name="Test Series", author="Test Author", profile_id="robbie")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+        self.series = series
+
+    def tearDown(self):
+        self.db.close()
+        Base.metadata.drop_all(bind=self.engine)
+        self.engine.dispose()
+
+    def _add_row(self, *, provider: str, model_id: str, parsed_ok: bool) -> None:
+        self.db.add(
+            ShadowLLMCall(
+                series_id=self.series.id,
+                run_id="job-1",
+                tier="C",
+                gate_belongs_to_series=False,
+                shadow_provider=provider,
+                shadow_model_id=model_id,
+                shadow_belongs_to_series=True if parsed_ok else None,
+                parsed_ok=parsed_ok,
+                belongs_to_series_agreement=True if parsed_ok else None,
+                created_at=datetime.utcnow(),
+            )
+        )
+        self.db.commit()
+
+    def test_no_alert_when_parse_failure_rate_is_at_or_below_threshold(self):
+        for _ in range(9):
+            self._add_row(provider="anthropic", model_id="claude-haiku-4-5-20251001", parsed_ok=True)
+        self._add_row(provider="anthropic", model_id="claude-haiku-4-5-20251001", parsed_ok=False)
+        # 1/10 = 0.10 failure rate, exactly at a 0.10 threshold -- ">"
+        # threshold means this must NOT alert (see docstring's ">="-vs-">"
+        # note).
+        alerts = check_parse_failure_spikes(self.db, threshold=0.10)
+
+        self.assertEqual(alerts, [])
+
+    def test_alert_when_parse_failure_rate_exceeds_threshold(self):
+        for _ in range(7):
+            self._add_row(provider="groq", model_id="llama-3.1-8b-instant", parsed_ok=True)
+        for _ in range(3):
+            self._add_row(provider="groq", model_id="llama-3.1-8b-instant", parsed_ok=False)
+        # 3/10 = 0.30 > 0.15 threshold.
+
+        with self.assertLogs("services.provider_model_scorecard", level="WARNING") as captured:
+            alerts = check_parse_failure_spikes(self.db, threshold=0.15)
+
+        self.assertEqual(len(alerts), 1)
+        alert = alerts[0]
+        self.assertIsInstance(alert, ProviderModelMetricsAlert)
+        self.assertEqual(alert.provider, "groq")
+        self.assertEqual(alert.model_id, "llama-3.1-8b-instant")
+        self.assertEqual(alert.call_count, 10)
+        self.assertAlmostEqual(alert.parse_failure_rate, 0.3)
+        self.assertEqual(alert.threshold, 0.15)
+        self.assertTrue(any("ProviderModelMetricsAlert" in message for message in captured.output))
+
+    def test_only_offending_providers_are_included_when_multiple_exist(self):
+        for _ in range(10):
+            self._add_row(provider="anthropic", model_id="claude-haiku-4-5-20251001", parsed_ok=True)
+        for _ in range(5):
+            self._add_row(provider="openai", model_id="gpt-4o-mini", parsed_ok=True)
+        for _ in range(5):
+            self._add_row(provider="openai", model_id="gpt-4o-mini", parsed_ok=False)
+
+        alerts = check_parse_failure_spikes(self.db, threshold=0.15)
+
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0].provider, "openai")
+
+    def test_uses_settings_defaults_when_window_and_threshold_omitted(self):
+        import settings
+        from unittest.mock import patch
+
+        for _ in range(3):
+            self._add_row(provider="anthropic", model_id="claude-haiku-4-5-20251001", parsed_ok=True)
+        for _ in range(2):
+            self._add_row(provider="anthropic", model_id="claude-haiku-4-5-20251001", parsed_ok=False)
+        # 2/5 = 0.40 -- exceeds the real default threshold (0.15) but
+        # would NOT exceed an artificially high one, proving the default
+        # is actually read from settings rather than some other constant.
+        with patch.object(settings, "PARSE_FAILURE_ALERT_THRESHOLD", 0.9):
+            self.assertEqual(check_parse_failure_spikes(self.db), [])
+        with patch.object(settings, "PARSE_FAILURE_ALERT_THRESHOLD", 0.15):
+            self.assertEqual(len(check_parse_failure_spikes(self.db)), 1)
+
+    def test_no_rows_produces_no_alerts(self):
+        self.assertEqual(check_parse_failure_spikes(self.db), [])
 
 
 if __name__ == "__main__":

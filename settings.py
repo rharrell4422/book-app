@@ -270,3 +270,32 @@ TIER_C_PARALLEL_SHADOW_SAMPLE_RATE = float(
 TIER_C_PARALLEL_CALL_TIMEOUT_SECONDS = float(
     os.environ.get("TIER_C_PARALLEL_CALL_TIMEOUT_SECONDS", "8")
 )
+
+# Step 11 Phase 3 (Provider/Model Scorecard & Tier C Confidence Signals,
+# parse-failure spike detector): global, not per-series or per-tenant --
+# `services.provider_model_scorecard.get_provider_model_scorecard`
+# aggregates across every series, and this detector piggybacks on
+# `services.tier_c_promotion_engine.evaluate_tier_c_promotion`'s existing
+# per-Check-Now-job cadence (Step 9's own precedent for "no new
+# scheduler/cron infrastructure") rather than introducing a second
+# trigger point. Alert-only in Step 11: a provider/model crossing this
+# threshold is logged for a human to notice, never auto-demoted or
+# routed around -- see `services.provider_model_scorecard.
+# ProviderModelMetricsAlert`'s docstring.
+#
+# PARSE_FAILURE_WINDOW_SIZE deliberately matches `services.provider_
+# model_scorecard.DEFAULT_SCORECARD_WINDOW`'s own default (100) -- not a
+# coincidence, just two independent settings that happen to agree today;
+# each can be tuned independently without affecting the other.
+PARSE_FAILURE_WINDOW_SIZE = int(os.environ.get("PARSE_FAILURE_WINDOW_SIZE", "100"))
+
+# Fraction (0.0-1.0) of a provider/model's last PARSE_FAILURE_WINDOW_SIZE
+# shadow calls that must be unparseable (`parsed_ok=False`) before an
+# alert is logged for that provider/model. 0.15 (the finalized spec's own
+# example) is a deliberately loose default -- occasional unparseable
+# responses are already expected/tolerated by every downstream consumer
+# of `parsed_ok` (see `_score_tier_c_shadow_response`'s docstring); this
+# threshold is meant to catch a genuine, sustained spike (a provider
+# consistently ignoring the JSON-mode/prompt instructions), not
+# individual flaky responses.
+PARSE_FAILURE_ALERT_THRESHOLD = float(os.environ.get("PARSE_FAILURE_ALERT_THRESHOLD", "0.15"))

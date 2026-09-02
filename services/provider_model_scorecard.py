@@ -19,14 +19,27 @@ No new infra: no embeddings, no time-series store, no scheduler. Reuses
 Step 10 Phase 5 is the single source of truth for what "conflict" means
 for a Tier C candidate, and this module must never be able to drift from
 it.
+
+Step 11 Phase 3 addition: `check_parse_failure_spikes`, an alert-only
+(never auto-demoting) detector built directly on top of
+`get_provider_model_scorecard`'s `parse_failure_rate` -- piggybacks on
+`services.tier_c_promotion_engine.evaluate_tier_c_promotion`'s existing
+per-Check-Now-job cadence rather than introducing a second trigger point
+(see `settings.PARSE_FAILURE_WINDOW_SIZE`'s docstring for why).
 """
 
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
+
 from sqlalchemy.orm import Session
 
 import models
+import settings
 from services.tier_c_shadow_store import _build_candidate_aggregate
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_SCORECARD_WINDOW = 100
 
@@ -155,3 +168,80 @@ def _conflict_involvement_rate(db: Session, rows: list[models.ShadowLLMCall]) ->
     considered = [row for row in rows if row.candidate_request_id is not None]
     conflicted = sum(1 for row in considered if conflict_by_candidate[row.candidate_request_id])
     return conflicted / len(considered)
+
+
+@dataclass(frozen=True)
+class ProviderModelMetricsAlert:
+    """One provider/model pair whose recent `parse_failure_rate` crossed
+    `settings.PARSE_FAILURE_ALERT_THRESHOLD` -- alert-only (Step 11
+    scope): nothing reads this to change routing/promotion behavior, it
+    exists purely so a human can notice a provider/model consistently
+    ignoring the JSON-mode/prompt instructions. Same shape as one entry
+    of `get_provider_model_scorecard`'s output, just narrowed to the
+    fields relevant to this specific alert.
+    """
+
+    provider: str
+    model_id: str
+    window_size: int
+    call_count: int
+    parse_failure_rate: float
+    threshold: float
+
+
+def check_parse_failure_spikes(
+    db: Session,
+    *,
+    window: int | None = None,
+    threshold: float | None = None,
+) -> list[ProviderModelMetricsAlert]:
+    """Step 11 Phase 3: computes `get_provider_model_scorecard(db,
+    window=window)` and logs (`logger.warning`) one `ProviderModelMetricsAlert`
+    for every provider/model pair whose `parse_failure_rate` exceeds
+    `threshold` -- strictly greater than, so a pair sitting exactly at
+    the threshold does not alert (matches `_decide_transition`'s own ">="
+    -vs- plain "<"/">" conventions being deliberate per-rule choices, not
+    an accident). No side effects beyond logging: never touches
+    `TierCPromotionState`/`TierCPromotionHistory`, never raises on a
+    healthy scorecard.
+
+    `window`/`threshold` default to `settings.PARSE_FAILURE_WINDOW_SIZE`/
+    `settings.PARSE_FAILURE_ALERT_THRESHOLD` when omitted -- the real call
+    site (`services.tier_c_promotion_engine.evaluate_tier_c_promotion`)
+    doesn't need to pass them explicitly, but tests/future ad-hoc callers
+    can still override either independently of the global config.
+
+    Returns the list of alerts raised (empty when nothing crossed the
+    threshold) purely so tests/callers can assert on it directly without
+    needing to capture log output -- the logged warning is still the
+    primary, intended side effect for Step 11 (no dashboard/UI consumes
+    this return value yet).
+    """
+    window = window if window is not None else settings.PARSE_FAILURE_WINDOW_SIZE
+    threshold = threshold if threshold is not None else settings.PARSE_FAILURE_ALERT_THRESHOLD
+
+    alerts: list[ProviderModelMetricsAlert] = []
+    for entry in get_provider_model_scorecard(db, window=window):
+        rate = entry["parse_failure_rate"]
+        if rate is None or rate <= threshold:
+            continue
+        alert = ProviderModelMetricsAlert(
+            provider=entry["provider"],
+            model_id=entry["model_id"],
+            window_size=window,
+            call_count=entry["call_count"],
+            parse_failure_rate=rate,
+            threshold=threshold,
+        )
+        alerts.append(alert)
+        logger.warning(
+            "ProviderModelMetricsAlert: provider=%s model_id=%s parse_failure_rate=%.3f "
+            "exceeds threshold=%.3f over last %d calls (window=%d)",
+            alert.provider,
+            alert.model_id,
+            alert.parse_failure_rate,
+            alert.threshold,
+            alert.call_count,
+            alert.window_size,
+        )
+    return alerts

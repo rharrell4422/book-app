@@ -916,6 +916,86 @@ class Phase5PromotionEngineWiringTest(unittest.TestCase):
         self.assertEqual(snapshot["cross_provider_avg_consensus_score"], 1.0)
 
 
+class Step11Phase3ParseFailureSpikeWiringTest(unittest.TestCase):
+    """Step 11 Phase 3: confirms `evaluate_tier_c_promotion` actually
+    invokes `services.provider_model_scorecard.check_parse_failure_spikes`
+    once per call, and that the wiring is fail-soft -- a spike-check
+    failure must never prevent THIS series' own promotion evaluation
+    (the `TierCPromotionHistory` row) from still being written. Detailed
+    behavior of the detector itself (threshold comparison, alert shape,
+    etc.) is covered in tests/test_provider_model_scorecard.py; this
+    class only covers the wiring.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=cls.engine)
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+
+    @classmethod
+    def tearDownClass(cls):
+        Base.metadata.drop_all(bind=cls.engine)
+        cls.engine.dispose()
+
+    def setUp(self):
+        self.db = self.SessionLocal()
+        series = Series(name="Test Series", author="Test Author", profile_id="robbie")
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+        self.series = series
+
+        self._session_local_patch = patch("services.tier_c_promotion_engine.SessionLocal", self.SessionLocal)
+        self._session_local_patch.start()
+
+    def tearDown(self):
+        self._session_local_patch.stop()
+        self.db.close()
+
+    def _history_last(self):
+        from models import TierCPromotionHistory
+
+        return (
+            self.db.query(TierCPromotionHistory)
+            .filter(TierCPromotionHistory.series_id == self.series.id)
+            .order_by(TierCPromotionHistory.id.desc())
+            .first()
+        )
+
+    def test_check_parse_failure_spikes_is_called_once_per_evaluation(self):
+        from services.tier_c_promotion_engine import evaluate_tier_c_promotion
+
+        with patch(
+            "services.tier_c_promotion_engine.check_parse_failure_spikes", return_value=[]
+        ) as mock_check:
+            evaluate_tier_c_promotion(self.series.id)
+
+        mock_check.assert_called_once()
+        # Called with the caller's own db session (read-only, no
+        # independent session needed) -- not `self.db` directly (that's
+        # the test's handle on the SAME session `SessionLocal()` returns
+        # inside evaluate_tier_c_promotion, per the class-level patch
+        # above), so assert on the type instead of identity.
+        (call_args, _call_kwargs) = mock_check.call_args
+        self.assertEqual(len(call_args), 1)
+
+    def test_a_spike_check_failure_does_not_prevent_the_series_evaluation_from_completing(self):
+        from services.tier_c_promotion_engine import evaluate_tier_c_promotion
+
+        with patch(
+            "services.tier_c_promotion_engine.check_parse_failure_spikes",
+            side_effect=RuntimeError("scorecard query boom"),
+        ):
+            evaluate_tier_c_promotion(self.series.id)
+
+        # The series' own evaluation still ran and wrote its history row,
+        # completely unaffected by the global spike-check's failure.
+        history = self._history_last()
+        self.assertIsNotNone(history)
+        self.assertEqual(history.evaluation_reason, "insufficient_evidence")
+
+
 class Phase6ConcurrencyAndTimeoutTest(unittest.TestCase):
     """Step 10 Phase 6 (tuning & safety checks): the two coverage items
     from the finalized plan's own checklist that no earlier phase's tests
