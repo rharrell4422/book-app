@@ -1,5 +1,7 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func, inspect
+
+from discovery_text import _series_names_compatible, normalize_text, split_author_names
 from models import Series, Book
 
 # SeriesBase (the create/update schema) also carries a handful of derived,
@@ -11,9 +13,75 @@ from models import Series, Book
 _SERIES_COLUMN_NAMES = {column.key for column in inspect(Series).columns}
 
 
+def _authors_plausibly_same(existing_author: str | None, candidate_author: str | None) -> bool:
+    """Lenient author check for series-creation dedup below -- deliberately
+    looser than services.identity._authors_match_exact/agents.series_agent.
+    _authors_match_exact (both require the *whole* string to match). A real
+    co-author added/dropped between two attempts to track the same series,
+    or one side simply left blank, must not read as "different author," or
+    every retry with a slightly different exact author string creates a
+    fresh duplicate series row instead of being recognized as the one
+    already tracked (see the Jonathan Hunt Thriller Series incident,
+    2026-09-02: "Georgia Wagner" vs "Georgia Wagner; Scott Cook;" spawned two
+    separate empty series shells for what both are the same tracked series).
+    No author on either side is "nothing to contradict," not a mismatch --
+    same convention confidence_engine._series_alignment_confidence uses.
+    """
+    existing_names = {normalize_text(name) for name in split_author_names(existing_author)}
+    candidate_names = {normalize_text(name) for name in split_author_names(candidate_author)}
+    if not existing_names or not candidate_names:
+        return True
+    return bool(existing_names & candidate_names)
+
+
+def _find_series_for_dedup(db: Session, profile_id: str, name: str | None, author: str | None) -> Series | None:
+    """Looks for an existing series (same profile) that plausibly IS the
+    one about to be created, tolerating exactly the kind of drift a human
+    re-typing a series name/author across multiple attempts introduces --
+    a typo ("Jonathan" vs "Jonathon"), a dropped/added generic suffix word
+    ("... Thriller Series" vs "... Thriller"), or a co-author added/missing.
+    Reuses discovery's own `_series_names_compatible` (already proven
+    against exactly this kind of cross-provider name drift) rather than a
+    second, competing normalization scheme.
+
+    Deliberately does NOT require an exact match on anything -- that's
+    already what the pre-existing exact-name lookup (`get_series_by_name`,
+    used by the importer) does, and it's exactly what let three near-
+    duplicate empty shells get created for one series in the first place.
+    """
+    cleaned_name = str(name or "").strip()
+    if not cleaned_name:
+        return None
+    for existing in db.query(Series).filter(Series.profile_id == profile_id).all():
+        if not _series_names_compatible(cleaned_name, existing.name):
+            continue
+        if not _authors_plausibly_same(existing.author, author):
+            continue
+        return existing
+    return None
+
+
 def create_series(db: Session, series, profile_id: str):
     payload = {k: v for k, v in series.model_dump().items() if k in _SERIES_COLUMN_NAMES}
     payload["profile_id"] = profile_id
+
+    existing = _find_series_for_dedup(db, profile_id, payload.get("name"), payload.get("author"))
+    if existing is not None:
+        # Backfill only, never overwrite -- same "fill gaps, don't clobber"
+        # convention as services/series_check_engine.py's
+        # _merge_loser_fields_into_keeper. An existing empty-shell series
+        # with no author recorded yet adopts this attempt's author instead
+        # of staying permanently blank; an existing series that already has
+        # an author keeps it untouched even if this attempt's string is
+        # differently formatted (e.g. missing a co-author) -- there's no
+        # reliable way to tell "more complete" from "just different" here,
+        # so the first non-empty value wins and stays.
+        if not str(existing.author or "").strip() and payload.get("author"):
+            existing.author = payload["author"]
+            db.commit()
+            db.refresh(existing)
+        return existing
+
     db_series = Series(**payload)
     db.add(db_series)
     db.commit()
