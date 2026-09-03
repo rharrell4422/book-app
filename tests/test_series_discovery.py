@@ -7614,6 +7614,87 @@ class ReconstructSeriesSkeletonGuidedDiscoveryTest(unittest.TestCase):
             )
         mock_apify.assert_called_once()
 
+    def test_canonical_recovery_finds_land_in_recovered_numbers_even_without_lookahead(self):
+        # Live production incident (Jonathan Hunt Thriller / Goodreads,
+        # 2026-09-03): a routine NEW_RELEASE check (enable_missing_volume_
+        # lookahead=False -- the normal case once a series has more than
+        # one owned book) never runs the web-search lookahead that used to
+        # be the ONLY thing populating "recovered_numbers". Canonical
+        # recovery ran unconditionally (as always) and genuinely found 7
+        # brand-new numbers the caller had never seen before, but with the
+        # lookahead skipped, recovered_numbers stayed [] pre-fix -- and
+        # series_agent.py only re-merges skeleton["candidates"] into its
+        # working candidate list when `skeleton["recovered_numbers"]` is
+        # truthy, so those 7 real, well-formed candidates were silently
+        # discarded on every run despite compute_confidence never even
+        # seeing them (added_count stayed 0 indefinitely). This is the
+        # end-to-end regression test for the fix: canonical recovery's own
+        # finds must land in recovered_numbers too, independent of the
+        # lookahead.
+        unified_candidates = [self._unified(1), self._unified(2)]
+        canonical_hit_8 = {
+            "source": "canonical_page",
+            "title": "Book 8",
+            "authors": ["Some Author"],
+            "series_number_hint": 8,
+            "source_url": "https://www.goodreads.com/series/12345",
+        }
+        with patch.object(discovery_engine, "fetch_canonical_page_candidates", return_value=[canonical_hit_8]):
+            result = discovery_engine._reconstruct_series_skeleton(
+                unified_candidates,
+                [],
+                series_name="Some Series",
+                author="Some Author",
+                # The exact NEW_RELEASE production condition: lookahead
+                # disabled, so nothing else could ever populate
+                # recovered_numbers pre-fix.
+                enable_missing_volume_lookahead=False,
+                canonical_url="https://www.goodreads.com/series/12345",
+                canonical_source="Goodreads",
+            )
+        self.assertEqual(result["recovered_numbers"], [8])
+        self.assertIn("Book 8", [c.title for c in result["candidates"]])
+
+    def test_canonical_recovery_and_lookahead_recovered_numbers_are_unioned(self):
+        # Both recovery sources contribute in the same call -- neither
+        # should shadow or overwrite the other's contribution to
+        # recovered_numbers.
+        unified_candidates = [self._unified(1), self._unified(2)]
+        canonical_hit_8 = {
+            "source": "canonical_page",
+            "title": "Book 8",
+            "authors": ["Some Author"],
+            "series_number_hint": 8,
+            "source_url": "https://www.goodreads.com/series/12345",
+        }
+        lookahead_hit_3 = {
+            "source": "web_search",
+            "source_id": "https://example.com/3",
+            "title": "Book 3",
+            "authors": ["Some Author"],
+            "published_date": "2022-01-01",
+            "description": None,
+            "isbn13": None,
+            "source_url": "https://example.com/3",
+            "language": "",
+            "series_number_hint": 3,
+            "upcoming_hint": False,
+            "series_name_hint": "Some Series",
+        }
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+            discovery_engine, "fetch_canonical_page_candidates", return_value=[canonical_hit_8]
+        ), patch.object(discovery_engine, "_fetch_web_search", return_value=[lookahead_hit_3]):
+            result = discovery_engine._reconstruct_series_skeleton(
+                unified_candidates,
+                [],
+                series_name="Some Series",
+                author="Some Author",
+                canonical_url="https://www.goodreads.com/series/12345",
+                canonical_source="Goodreads",
+                verified_volume_count=8,
+            )
+        self.assertEqual(sorted(result["recovered_numbers"]), [3, 8])
+
 
 if __name__ == "__main__":
     unittest.main()

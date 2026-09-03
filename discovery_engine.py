@@ -316,7 +316,17 @@ def _reconstruct_series_skeleton(
     Returns {"candidates": [...], "expected_total": int | None,
     "missing_numbers": [...], "recovered_numbers": [...],
     "discovery_contract_mismatch": dict | None}. "candidates" is
-    unified_candidates with any newly-recovered volumes fused in; when
+    unified_candidates with any newly-recovered volumes fused in.
+    "recovered_numbers" (2026-09-03 fix, production incident) covers
+    every number this call newly surfaced beyond what was already
+    known -- canonical-source recovery's own finds included, unioned with
+    whatever the web-search lookahead/retail-search recovery separately
+    found -- specifically so callers (series_agent.py) that gate a
+    re-merge of "candidates" on "did this call recover anything new" via
+    `if skeleton["recovered_numbers"]:` see canonical recovery's
+    contribution too, not just the lookahead's; canonical recovery runs
+    unconditionally on every call (see below), independent of whether the
+    web-search lookahead runs at all. When
     there's nothing missing, no resolvable series_name/author, no resolvable
     expected total at all, web search isn't configured
     (SERPER_API_KEY/ANTHROPIC_API_KEY), or enable_missing_volume_lookahead
@@ -363,6 +373,39 @@ def _reconstruct_series_skeleton(
         (candidate_author for c in unified_candidates for candidate_author in c.authors if candidate_author), None
     )
 
+    # Guided Discovery fix (2026-09-03, live Jonathan Hunt/Goodreads
+    # production incident): snapshot which numbers were already known
+    # BEFORE canonical-source recovery runs, so any number canonical
+    # recovery newly contributes can be folded into this function's own
+    # "recovered_numbers" output below (see canonical_recovered_numbers a
+    # few lines down). Without this, canonical recovery's finds were
+    # silently dropped on the floor whenever the separate missing-volume
+    # web-search lookahead didn't ALSO recover something of its own:
+    # series_agent.py only re-merges skeleton["candidates"] into its
+    # working candidate list when `skeleton["recovered_numbers"]` is
+    # truthy (see that module's own comment at that check), and
+    # "recovered_numbers" previously meant ONLY "found by this function's
+    # own web-search lookahead/retail-search recovery", never "found by
+    # canonical-source recovery" -- confirmed via production logs where
+    # canonical recovery successfully found 18/19 volumes (logged), every
+    # one still got silently discarded because recovered_numbers stayed
+    # [] (enable_missing_volume_lookahead was False that run -- a routine
+    # NEW_RELEASE check on an already-started series -- so the lookahead
+    # that would otherwise have populated recovered_numbers never even
+    # ran; see the early-return a few lines below).
+    known_numbers_before_canonical: set[int] = set()
+    for book in owned_books:
+        number = book.get("book_number")
+        try:
+            if number is not None and float(number).is_integer():
+                known_numbers_before_canonical.add(int(float(number)))
+        except (TypeError, ValueError):
+            continue
+    for candidate in unified_candidates:
+        number = _resolve_candidate_number(candidate, resolved_series_name)
+        if number is not None and float(number).is_integer():
+            known_numbers_before_canonical.add(int(number))
+
     unified_candidates = _attempt_canonical_source_recovery(
         unified_candidates,
         series_name=resolved_series_name,
@@ -372,18 +415,21 @@ def _reconstruct_series_skeleton(
         telemetry=telemetry,
     )
 
-    known_numbers: set[int] = set()
-    for book in owned_books:
-        number = book.get("book_number")
-        try:
-            if number is not None and float(number).is_integer():
-                known_numbers.add(int(float(number)))
-        except (TypeError, ValueError):
-            continue
+    known_numbers: set[int] = set(known_numbers_before_canonical)
     for candidate in unified_candidates:
         number = _resolve_candidate_number(candidate, resolved_series_name)
         if number is not None and float(number).is_integer():
             known_numbers.add(int(number))
+
+    # Whatever canonical-source recovery just added beyond what was
+    # already known -- unioned into every "recovered_numbers" this
+    # function returns below (both the various early-return points and
+    # the full lookahead/retail-search path), so series_agent.py's re-merge
+    # gate reliably fires whenever canonical recovery alone found
+    # something new, independent of whether the web-search lookahead
+    # (which populates its own, separate contribution to recovered_numbers)
+    # ran at all or found anything itself.
+    canonical_recovered_numbers = sorted(known_numbers - known_numbers_before_canonical)
 
     def _result(missing_numbers: list[int], recovered_numbers: list[int], candidates: list["UnifiedCandidate"]) -> dict:
         return {
@@ -403,7 +449,12 @@ def _reconstruct_series_skeleton(
     # it. See this function's own docstring for the full rationale.
     expected_total = _widened_expected_total(known_numbers, verified_volume_count)
     if expected_total is None:
-        return _result([], [], unified_candidates)
+        # known_numbers is empty here (verified_volume_count is also None,
+        # or _widened_expected_total would have returned it instead) --
+        # canonical_recovered_numbers is therefore guaranteed empty too
+        # (it's a subset of known_numbers by construction), so this is a
+        # no-op pass-through, not a behavior change.
+        return _result([], canonical_recovered_numbers, unified_candidates)
 
     missing_numbers = sorted(set(range(1, expected_total + 1)) - known_numbers)
 
@@ -414,7 +465,14 @@ def _reconstruct_series_skeleton(
         or not (_web_search_enabled() and _llm_structuring_enabled())
         or not enable_missing_volume_lookahead
     ):
-        return _result(missing_numbers, [], unified_candidates)
+        # canonical_recovered_numbers here, NOT [] -- this early return
+        # covers the exact NEW_RELEASE (enable_missing_volume_lookahead=
+        # False) production incident this fix addresses: canonical
+        # recovery already ran (unconditionally, above), and may have
+        # found brand-new numbers, even though the web-search lookahead
+        # this branch is skipping never gets a chance to contribute any
+        # of its own.
+        return _result(missing_numbers, canonical_recovered_numbers, unified_candidates)
 
     targeted_missing = missing_numbers[:MAX_MISSING_VOLUME_LOOKAHEAD_QUERIES]
     query_series_name = normalize_series_name_for_query(resolved_series_name)
@@ -505,14 +563,22 @@ def _reconstruct_series_skeleton(
     # web-search lookahead and/or retail-search recovery went on to find).
     # The two sets are disjoint by construction (recovered_numbers is
     # always a subset of missing_numbers, which excludes known_numbers),
-    # so a plain sum is exact, no set union needed.
+    # so a plain sum is exact, no set union needed. Deliberately NOT
+    # canonical_recovered_numbers here too -- those numbers are already
+    # counted inside known_numbers (see its own computation above), so
+    # adding them again here would double-count them.
     final_discovered_count = len(known_numbers) + len(recovered_numbers)
 
     return {
         "candidates": refreshed,
         "expected_total": expected_total,
         "missing_numbers": missing_numbers,
-        "recovered_numbers": recovered_numbers,
+        # Unioned with canonical_recovered_numbers (2026-09-03 fix) --
+        # see this function's own top-of-function comment on that
+        # variable for why series_agent.py's re-merge needs to see
+        # canonical recovery's contribution here too, not just the
+        # web-search lookahead/retail-search recovery's.
+        "recovered_numbers": sorted(set(recovered_numbers) | set(canonical_recovered_numbers)),
         "discovery_contract_mismatch": _compute_discovery_contract_mismatch(
             final_discovered_count, verified_volume_count
         ),
