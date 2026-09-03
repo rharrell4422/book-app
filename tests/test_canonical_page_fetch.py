@@ -126,6 +126,14 @@ class FetchCanonicalPageCandidatesTest(unittest.TestCase):
         # Every candidate shares the same single source URL -- confirms
         # each was paired against the one canonical raw_result, not lost.
         self.assertTrue(all(item.get("source_url") == "https://example.com/series" for item in result))
+        # Guided Discovery Option A confidence fix (2026-09-03): tagged
+        # "canonical_page", NOT "web_search" -- confidence_engine grades
+        # "canonical_page" one tier higher ("medium" vs "low"), which is
+        # what actually gets these candidates past _overall_confidence's
+        # title_confidence=="unverified" + any-other-dim=="low" auto-reject
+        # rule for a brand-new series number (see the live Jonathan Hunt/
+        # Goodreads validation test that caught this).
+        self.assertTrue(all(item.get("source") == "canonical_page" for item in result))
 
     def test_structuring_failure_is_swallowed(self):
         with patch.object(provider_io, "fetch_canonical_page_text", return_value="page text"), patch.object(

@@ -9,7 +9,7 @@ its acceptance/escalation/rejection classification.
 import unittest
 
 import delta_engine
-from confidence_engine import _overall_confidence, _series_alignment_confidence, compute_confidence
+from confidence_engine import _overall_confidence, _provider_confidence, _series_alignment_confidence, compute_confidence
 
 
 class OverallConfidenceUnverifiedTableTest(unittest.TestCase):
@@ -113,6 +113,51 @@ class OverallConfidenceNonUnverifiedTableTest(unittest.TestCase):
 
     def test_mixed_high_and_low_with_no_zero_is_low(self):
         self.assertEqual(_overall_confidence(["high", "low", "medium", "high"]), "low")
+
+
+class CanonicalPageProviderConfidenceTierTest(unittest.TestCase):
+    """Guided Discovery Option A confidence fix (2026-09-03, Jonathan
+    Hunt/Goodreads live validation): candidates extracted from a user-
+    designated canonical page must be tagged "canonical_page", not
+    "web_search", or they're indistinguishable from generic search noise
+    once graded here. This is the one lever the fix relies on -- see
+    provider_io.fetch_canonical_page_candidates's docstring and
+    confidence_engine._PROVIDER_CONFIDENCE's "canonical_page" entry for
+    the full trace of why "low" vs "medium" here is what previously
+    caused every real book on a canonical page to auto-reject via
+    _overall_confidence's title="unverified" + any-other-dim="low" rule.
+    """
+
+    def _candidate(self, source):
+        return {"source_provenance": [{"source": source}]}
+
+    def test_canonical_page_grades_medium(self):
+        self.assertEqual(_provider_confidence(self._candidate("canonical_page")), "medium")
+
+    def test_plain_web_search_still_grades_low(self):
+        # Regression guard: confirms the fix is additive (a new tag/tier),
+        # not a change to web_search's own existing grade.
+        self.assertEqual(_provider_confidence(self._candidate("web_search")), "low")
+
+    def test_canonical_page_plus_unverified_title_clears_the_auto_reject_bar(self):
+        # The exact real-world shape from the live validation test: a
+        # brand-new series number (title_confidence="unverified", no
+        # skeleton entry yet to corroborate against) alongside
+        # number_confidence="medium"/series_alignment_confidence="high" --
+        # before this fix, provider_confidence="low" (web_search) forced
+        # overall down to "low" (auto-reject) per _overall_confidence's own
+        # documented decision table, despite the other two dimensions
+        # already being strong. With provider_confidence="medium"
+        # (canonical_page), the same four dimensions now resolve to
+        # "medium" -- accept/escalate, not auto-reject.
+        self.assertEqual(
+            _overall_confidence(["medium", "unverified", "medium", "high"]),
+            "medium",
+        )
+        self.assertEqual(
+            _overall_confidence(["low", "unverified", "medium", "high"]),
+            "low",
+        )
 
 
 class InsufficientMetadataConfidenceTest(unittest.TestCase):

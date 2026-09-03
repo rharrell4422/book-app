@@ -872,6 +872,19 @@ def fetch_canonical_page_candidates(
     ANTHROPIC_API_KEY isn't configured, or the LLM structures zero real
     book entries out of the page -- callers fall back to "no canonical
     candidates this round", never a hard failure.
+
+    Tags every returned candidate "source": "canonical_page" (via
+    _parse_web_search_structured_items's source_label override), not
+    "web_search" -- a live validation test (Jonathan Hunt/Goodreads,
+    2026-09-03) found the prompt fix above alone wasn't sufficient: every
+    extracted candidate still got auto-rejected by confidence_engine
+    because "web_search" grades "low", and title_confidence=="unverified"
+    (true for any brand-new number) + any other dimension=="low" forces
+    _overall_confidence to "low". "canonical_page" grades "medium" instead
+    (Option A of that fix -- see confidence_engine._PROVIDER_CONFIDENCE's
+    "canonical_page" entry for the full reasoning), which is enough to
+    clear that bar without touching title_confidence/number_confidence/
+    series_alignment_confidence at all.
     """
     page_text = fetch_canonical_page_text(url)
     if not page_text:
@@ -893,7 +906,7 @@ def fetch_canonical_page_candidates(
         return []
 
     structured_with_source = [(item, raw_result) for item in parsed if isinstance(item, dict)]
-    return _parse_web_search_structured_items(structured_with_source, author)
+    return _parse_web_search_structured_items(structured_with_source, author, source_label="canonical_page")
 
 
 _SERIES_OVERVIEW_PROMPT = """You are writing a short, spoiler-light overview of a book series for a reader deciding whether to start it.
@@ -1432,9 +1445,24 @@ def _structure_and_pair_web_search_hits(
     return [(verdict_by_url[source["url"]], source) for source in raw_results if source["url"] in verdict_by_url]
 
 
-def _parse_web_search_structured_items(structured_with_source: list[tuple[dict, dict]], author: str) -> list[dict]:
+def _parse_web_search_structured_items(
+    structured_with_source: list[tuple[dict, dict]],
+    author: str,
+    *,
+    source_label: str = "web_search",
+) -> list[dict]:
     """RT-2 sub-step of _fetch_web_search: turn LLM-structured (item,
-    source) pairs into the provider's normal candidate-dict shape."""
+    source) pairs into the provider's normal candidate-dict shape.
+
+    source_label defaults to "web_search" for every normal caller (Serper
+    snippet pipeline), but fetch_canonical_page_candidates overrides it to
+    "canonical_page" (Guided Discovery, 2026-09-03 Option A confidence
+    fix) so candidates extracted from a user-designated canonical URL are
+    distinguishable downstream in confidence_engine/deterministic_fusion
+    from candidates extracted from an arbitrary keyword-search snippet --
+    see confidence_engine._PROVIDER_CONFIDENCE's "canonical_page" entry
+    for why that distinction matters (it's the only lever separating the
+    two once fed into _overall_confidence)."""
     results: list[dict] = []
     for item, source in structured_with_source:
         title = str(item.get("title") or "").strip()
@@ -1505,7 +1533,7 @@ def _parse_web_search_structured_items(structured_with_source: list[tuple[dict, 
 
         results.append(
             {
-                "source": "web_search",
+                "source": source_label,
                 "source_id": source["url"],
                 "title": title,
                 "authors": [str(a) for a in author_names if str(a).strip()],

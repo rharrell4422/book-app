@@ -163,6 +163,15 @@ _PROVIDER_CONFIDENCE_WEIGHT = {
     # _PROVIDER_CONFIDENCE's matching "low" grade for the same reasoning.
     "apify_retail_search": 0.15,
     "web_search": 0.15,
+    # Guided Discovery canonical-page extraction (2026-09-03 Goodreads/
+    # Jonathan Hunt validation, Option A confidence fix) -- same LLM-from-
+    # unstructured-text extraction as web_search, but sourced from the
+    # user's own designated canonical/authoritative series URL rather than
+    # an arbitrary keyword-search hit. Weighted level with "apify" (also
+    # "medium" in confidence_engine._PROVIDER_CONFIDENCE): trusted above
+    # plain web_search/apify_retail_search's bare-title-match guesses, but
+    # not a structured catalog API, so not above google_books/hardcover.
+    "canonical_page": 0.20,
 }
 
 
@@ -376,7 +385,16 @@ def _fuse_and_score_candidates(
 
         merged_isbn13 = str(primary.get("isbn13") or "").strip() or None
         if not merged_isbn13:
-            backfilled_isbn = _first_present_field(members, "isbn13", exclude_sources={"web_search"})
+            # canonical_page excluded alongside web_search (Guided Discovery,
+            # 2026-09-03 Option A confidence fix): it's the same LLM-read-of-
+            # prose extraction as web_search, just from a trusted URL -- the
+            # trust bump that source gets in confidence_engine/
+            # _PROVIDER_CONFIDENCE_WEIGHT is about provenance of the page,
+            # not about the model's ISBN-guessing accuracy from that page's
+            # text, so it shouldn't be trusted as an ISBN source here either.
+            backfilled_isbn = _first_present_field(
+                members, "isbn13", exclude_sources={"web_search", "canonical_page"}
+            )
             merged_isbn13 = str(backfilled_isbn).strip() if backfilled_isbn else None
 
         # Same backfill treatment as isbn13 above -- asin is only ever set
@@ -1120,20 +1138,22 @@ def _filter_cross_series_contamination(
 #
 # Explicit provider trust ranking, as an ordinal rather than a float weight
 # -- mirrors _PROVIDER_CONFIDENCE_WEIGHT's own hardcover > google_books >
-# openlibrary > apify > apify_retail_search > web_search ordering, but only
-# used here to break a sort tie between two candidates that share the exact
-# same resolved series number and title (which _filter_and_merge's own
-# dedupe should mostly already prevent, but isn't guaranteed to for every
-# code path feeding finalize_discovery_output -- e.g. a targeted-pass hit
-# and a fallback-pass hit that plain title-key dedupe didn't recognize as
-# the same book). Any other/unrecognized source sorts last.
+# openlibrary > apify > canonical_page > apify_retail_search > web_search
+# ordering, but only used here to break a sort tie between two candidates
+# that share the exact same resolved series number and title (which
+# _filter_and_merge's own dedupe should mostly already prevent, but isn't
+# guaranteed to for every code path feeding finalize_discovery_output --
+# e.g. a targeted-pass hit and a fallback-pass hit that plain title-key
+# dedupe didn't recognize as the same book). Any other/unrecognized source
+# sorts last.
 _PROVIDER_SORT_RANK = {
     "hardcover": 0,
     "google_books": 1,
     "openlibrary": 2,
     "apify": 3,
-    "apify_retail_search": 4,
-    "web_search": 5,
+    "canonical_page": 4,
+    "apify_retail_search": 5,
+    "web_search": 6,
 }
 
 _TRANSIENT_CANDIDATE_FIELDS = ("confidence_score", "metadata_completeness_score", "source_provenance")

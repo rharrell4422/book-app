@@ -84,6 +84,23 @@ _PROVIDER_CONFIDENCE = {
     # starting grade still routes correctly through _overall_confidence.
     "apify_retail_search": "low",
     "web_search": "low",  # frontier web-search snippet (formerly Brave, now Serper), per spec
+    # Guided Discovery canonical-page extraction (2026-09-03 Goodreads/
+    # Jonathan Hunt validation, Option A confidence fix): structurally
+    # identical to a "web_search" candidate -- same LLM-from-unstructured-
+    # text extraction, same per-item shape -- but the source page itself
+    # is one the *user* explicitly designated as their series' canonical/
+    # authoritative source (Series.canonical_url), not an arbitrary
+    # keyword-search hit. That provenance alone (not a claim the LLM's
+    # extraction from it is any more reliable) earns one tier above plain
+    # "web_search": "medium", matching google_books/apify rather than
+    # "low"/"high". Deliberately not "high": a canonical page can still be
+    # user-editable/wiki-style (e.g. Goodreads) and this is still an LLM
+    # read of prose, not a structured API -- number_confidence/
+    # series_alignment_confidence corroboration is still required to clear
+    # _overall_confidence's title="unverified" bar (see its decision
+    # table), this just stops a trustworthy source from being graded
+    # identically to search-engine noise.
+    "canonical_page": "medium",
 }
 
 # Series Fingerprint system (see discovery_agentic_fingerprint_
