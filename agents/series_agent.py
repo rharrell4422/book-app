@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 from sqlalchemy.orm import Session
 
 import agentic_hooks
+import apify_retail_search_provider
 import confidence_engine
 import delta_engine
 import discovery_engine
@@ -1056,6 +1057,17 @@ class SeriesIntelligenceAgent:
                 {"title": book.title, "book_number": book.book_number, "isbn13": book.isbn13}
                 for book in active_series_books
             ]
+            # Dedicated budget for the retail-search actor (Second Apify
+            # Actor architecture review, 2026-09-02 chat) -- deliberately a
+            # brand-new counter, never the discover_candidates_for_series
+            # call above's own apify_budget (which the targeted/fallback
+            # passes have already fully spent or decided by this point).
+            # See apify_retail_search_provider.py's module docstring for
+            # why this needs to be its own budget rather than sharing or
+            # raising the primary actor's.
+            retail_search_budget = discovery_engine.ApifyCallBudget(
+                max_calls=apify_retail_search_provider.APIFY_RETAIL_SEARCH_MAX_CALLS_PER_SERIES_RUN
+            )
             skeleton = discovery_engine._reconstruct_series_skeleton(
                 discovery.get("unified_candidates", []),
                 owned_books_for_skeleton,
@@ -1064,6 +1076,7 @@ class SeriesIntelligenceAgent:
                 telemetry=telemetry,
                 cache=cache,
                 enable_missing_volume_lookahead=enable_missing_volume_lookahead,
+                retail_search_budget=retail_search_budget,
             )
             agentic_hooks.record_reasoning_step(
                 agentic_context,

@@ -69,6 +69,20 @@ _PROVIDER_CONFIDENCE = {
     # validation; upgrade to "high" once stable (Apify integration design
     # chat's consensus).
     "apify": "medium",
+    # Second Apify actor (Second Apify Actor architecture review,
+    # 2026-09-02 chat): igview-owner/amazon-search-scraper, a search-
+    # results-only listing with a real ASIN/title straight from Amazon but
+    # no author/series-position/ISBN signal at all (see
+    # apify_retail_search_provider.py's module docstring) -- graded "low"
+    # like web_search/openlibrary rather than "medium" like the primary
+    # product-detail actor, since there's no structured field here to
+    # trust beyond the bare title match. Corroboration from another
+    # provider (see _provider_confidence's own multi-source handling) is
+    # what should promote a given candidate, not this grade alone. Only
+    # ever invoked for an already-confirmed, narrowed interior gap (see
+    # discovery_engine._attempt_retail_search_recovery), so a "low"
+    # starting grade still routes correctly through _overall_confidence.
+    "apify_retail_search": "low",
     "web_search": "low",  # frontier web-search snippet (formerly Brave, now Serper), per spec
 }
 

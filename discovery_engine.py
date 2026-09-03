@@ -65,6 +65,7 @@ from services.identity import _edition_priority, _normalize_title_for_identity, 
 from services.discovery_telemetry import DiscoveryTelemetry, maybe_pass_scope
 from services.discovery_cache import DiscoveryCache, CACHE_MISS
 from apify_provider import ApifyCallBudget, apify_enabled, fetch_apify_candidates
+from apify_retail_search_provider import fetch_retail_search_candidates
 from provider_protocol import (
     GoogleBooksProvider,
     OpenLibraryProvider,
@@ -235,6 +236,7 @@ def _reconstruct_series_skeleton(
     telemetry: "DiscoveryTelemetry | None" = None,
     cache: "DiscoveryCache | None" = None,
     enable_missing_volume_lookahead: bool = True,
+    retail_search_budget: "ApifyCallBudget | None" = None,
 ) -> dict:
     """Infers how many volumes a series is expected to have -- the highest
     integer book number seen anywhere, across owned_books' book_number,
@@ -294,13 +296,28 @@ def _reconstruct_series_skeleton(
     False), so a routine new-release check on an established series doesn't
     re-fire web-search queries chasing old interior gaps every run.
 
+    retail_search_budget (Second Apify Actor architecture review, 2026-09-02
+    chat -- decisions locked before implementation): when provided (and only
+    then -- default None is a total no-op, same convention as every other
+    optional budget/telemetry param on this call chain), whichever interior
+    numbers are STILL missing after this function's own web-search lookahead
+    has had its shot (missing_numbers minus whatever recovered_numbers ends
+    up containing from that lookahead -- see _attempt_retail_search_recovery)
+    get one additional, narrow recovery attempt via a second, independent
+    Apify actor (apify_retail_search_provider.py) -- a real Amazon retail-
+    search surface the primary web-search+LLM lookahead never reaches at
+    all. Uses its own dedicated ApifyCallBudget, never the primary Apify
+    actor's shared budget threaded through the targeted/fallback passes.
+
     Returns {"candidates": [...], "expected_total": int | None,
     "missing_numbers": [...], "recovered_numbers": [...]}. "candidates" is
     unified_candidates with any newly-recovered volumes fused in; when
     there's nothing missing, no resolvable series_name/author, no resolvable
     expected total at all, web search isn't configured
     (SERPER_API_KEY/ANTHROPIC_API_KEY), or enable_missing_volume_lookahead
-    is False, it's returned unchanged.
+    is False, it's returned unchanged (retail_search_budget included --
+    without a confirmed lookahead attempt there's no "still missing after
+    the lookahead" signal to act on; see _attempt_retail_search_recovery).
     """
     resolved_series_name = series_name or next((c.series_name for c in unified_candidates if c.series_name), None)
     resolved_author = author or next(
@@ -376,33 +393,52 @@ def _reconstruct_series_skeleton(
         )
     except Exception as exc:  # a lookahead failure should never sink the candidates already found
         _log(f"missing-volume lookahead failed: {exc}")
-        return _result(missing_numbers, [], unified_candidates)
+        lookahead_raw = []
 
-    if not lookahead_raw:
-        return _result(missing_numbers, [], unified_candidates)
+    if lookahead_raw:
+        # Existing candidates fed in under the highest-priority bucket key
+        # so fusion's own backfill logic treats a lookahead hit as a
+        # supplement to an already-found candidate (when it matches one by
+        # identity) rather than a competing, potentially-lower-quality
+        # duplicate -- see _fuse_and_score_candidates. Each entry's own
+        # "source" field (already baked in via _unified_candidate_to_raw_dict)
+        # is untouched by which bucket key it's passed under here.
+        existing_raw = [_unified_candidate_to_raw_dict(candidate) for candidate in unified_candidates]
+        refreshed = _fuse_and_score_candidates(
+            {"hardcover": existing_raw, "google": [], "openlibrary": [], "web": lookahead_raw},
+            resolved_author,
+            resolved_series_name,
+        )
+        recovered_numbers = sorted(
+            {
+                int(candidate.series_number)
+                for candidate in refreshed
+                if candidate.series_number is not None
+                and float(candidate.series_number).is_integer()
+                and int(candidate.series_number) in targeted_missing
+            }
+        )
+    else:
+        # Serper/LLM genuinely found nothing (or errored) for every
+        # lookahead query -- previously this returned immediately here,
+        # which also skipped the retail-search recovery attempt below for
+        # a Serper outage even when Apify was independently configured and
+        # reachable (the same substitution gap _web_search_empty_result_
+        # fallback already exists to close for the *targeted*/*fallback*
+        # passes). Falling through instead of returning early lets
+        # _attempt_retail_search_recovery still get a shot: it doesn't
+        # depend on Serper/Anthropic at all, only on APIFY_API_TOKEN.
+        refreshed = unified_candidates
+        recovered_numbers = []
 
-    # Existing candidates fed in under the highest-priority bucket key so
-    # fusion's own backfill logic treats a lookahead hit as a supplement to
-    # an already-found candidate (when it matches one by identity) rather
-    # than a competing, potentially-lower-quality duplicate -- see
-    # _fuse_and_score_candidates. Each entry's own "source" field (already
-    # baked in via _unified_candidate_to_raw_dict) is untouched by which
-    # bucket key it's passed under here.
-    existing_raw = [_unified_candidate_to_raw_dict(candidate) for candidate in unified_candidates]
-    refreshed = _fuse_and_score_candidates(
-        {"hardcover": existing_raw, "google": [], "openlibrary": [], "web": lookahead_raw},
-        resolved_author,
-        resolved_series_name,
-    )
-
-    recovered_numbers = sorted(
-        {
-            int(candidate.series_number)
-            for candidate in refreshed
-            if candidate.series_number is not None
-            and float(candidate.series_number).is_integer()
-            and int(candidate.series_number) in targeted_missing
-        }
+    refreshed, recovered_numbers = _attempt_retail_search_recovery(
+        missing_numbers,
+        recovered_numbers,
+        refreshed,
+        series_name=resolved_series_name,
+        author=resolved_author,
+        query_series_name=query_series_name,
+        retail_search_budget=retail_search_budget,
     )
 
     return {
@@ -411,6 +447,88 @@ def _reconstruct_series_skeleton(
         "missing_numbers": missing_numbers,
         "recovered_numbers": recovered_numbers,
     }
+
+
+def _attempt_retail_search_recovery(
+    missing_numbers: list[int],
+    recovered_numbers: list[int],
+    candidates: list["UnifiedCandidate"],
+    *,
+    series_name: str,
+    author: str,
+    query_series_name: str,
+    retail_search_budget: "ApifyCallBudget | None",
+) -> tuple[list["UnifiedCandidate"], list[int]]:
+    """Narrow, dedicated tail-of-_reconstruct_series_skeleton hook for the
+    second (retail-search) Apify actor -- see apify_retail_search_provider.py
+    and this module's own _reconstruct_series_skeleton docstring for the
+    full architecture rationale (Second Apify Actor review, 2026-09-02
+    chat). Deliberately NOT wired into _fetch_web_search's shared
+    apify_budget machinery the way the *primary* Apify actor is (that
+    machinery runs on every web-search pass -- targeted, author-fallback,
+    AND this lookahead -- which would fire this actor far earlier than the
+    locked trigger condition allows): this function is the only call site,
+    reached once, only from here, only after the lookahead above has
+    already run (successfully or not).
+
+    Trigger (locked decision, corrected from the original proposal's raw
+    `missing_numbers` check): fires only on `missing_numbers` MINUS
+    `recovered_numbers` -- i.e. interior gaps that survive the lookahead,
+    not the lookahead's own pre-search gap list, which never shrinks after
+    a successful recovery and would over-fire this actor even when nothing
+    is actually still missing.
+
+    Recovery detection deliberately uses _resolve_candidate_number's
+    title-text-inference fallback, NOT a fused candidate's raw
+    `series_number` field directly (unlike the web-search lookahead's own
+    recovery check just above this function's call site) -- confirmed via
+    live actor validation (2026-09-02), igview-owner/amazon-search-scraper
+    returns no series-position field at all, so a retail-search hit's
+    `series_number_hint` (and therefore its fused `series_number`) is
+    always None; checking that field directly would silently never detect
+    a single recovery, no matter how good the actor's results were.
+
+    No-ops (returns `candidates`/`recovered_numbers` unchanged) whenever
+    there's nothing still missing, no budget was supplied by the caller
+    (default None -- see _reconstruct_series_skeleton's docstring), or
+    APIFY_API_TOKEN isn't configured -- exactly like every other optional
+    Apify call in this codebase, never raises out to the caller.
+
+    Issues exactly one broad "<series> <author>" query (not one query per
+    still-missing number) -- this actor's own budget allows only one call
+    total per series-check run, and a broad series-level query against
+    Amazon's own relevance ranking is more likely to surface several
+    missing volumes from that single call than spending it on one specific
+    number would.
+    """
+    still_missing = sorted(set(missing_numbers) - set(recovered_numbers))
+    if not still_missing or retail_search_budget is None or not apify_enabled():
+        return candidates, recovered_numbers
+
+    retail_search_query = f"{query_series_name} {author}".strip()
+    try:
+        retail_raw = fetch_retail_search_candidates(retail_search_query, retail_search_budget)
+    except Exception as exc:  # a retail-search failure should never sink the candidates already found
+        _log(f"retail-search recovery failed: {exc}")
+        return candidates, recovered_numbers
+    if not retail_raw:
+        return candidates, recovered_numbers
+
+    # Same "existing candidates as highest-priority bucket, new hits fill
+    # gaps rather than override" fusion shape the lookahead pass above
+    # already uses -- see its own comment for the full rationale.
+    existing_raw = [_unified_candidate_to_raw_dict(candidate) for candidate in candidates]
+    refreshed = _fuse_and_score_candidates(
+        {"hardcover": existing_raw, "google": [], "openlibrary": [], "web": retail_raw},
+        author,
+        series_name,
+    )
+    newly_recovered = set()
+    for candidate in refreshed:
+        number = _resolve_candidate_number(candidate, series_name)
+        if number is not None and float(number).is_integer() and int(number) in still_missing:
+            newly_recovered.add(int(number))
+    return refreshed, sorted(set(recovered_numbers) | newly_recovered)
 
 
 def precheck_for_new_volumes(

@@ -7116,5 +7116,186 @@ class CatalogSufficiencyGateTest(unittest.TestCase):
         mock_web_search.assert_called()
 
 
+class RetailSearchRecoveryTest(unittest.TestCase):
+    """Unit coverage for discovery_engine._attempt_retail_search_recovery --
+    the narrow, dedicated tail-of-_reconstruct_series_skeleton hook for the
+    second (retail-search) Apify actor (Second Apify Actor architecture
+    review, 2026-09-02 chat). See apify_retail_search_provider.py's module
+    docstring and this function's own docstring for the full rationale.
+    """
+
+    def _unified(self, number: float) -> "discovery_engine.UnifiedCandidate":
+        return discovery_engine.UnifiedCandidate(
+            title=f"Book {int(number)}", authors=["Some Author"], series_number=number, confidence_score=1.0
+        )
+
+    def test_noop_when_nothing_still_missing(self):
+        # missing_numbers minus recovered_numbers is empty (the lookahead
+        # already recovered everything) -- must not call the actor at all.
+        candidates = [self._unified(1)]
+        with patch.object(discovery_engine, "fetch_retail_search_candidates") as mock_fetch:
+            refreshed, recovered = discovery_engine._attempt_retail_search_recovery(
+                [5],
+                [5],
+                candidates,
+                series_name="Some Series",
+                author="Some Author",
+                query_series_name="Some Series",
+                retail_search_budget=discovery_engine.ApifyCallBudget(),
+            )
+        mock_fetch.assert_not_called()
+        self.assertEqual(refreshed, candidates)
+        self.assertEqual(recovered, [5])
+
+    def test_noop_when_no_budget_supplied(self):
+        # Default None -- total no-op, same convention as every other
+        # optional budget param on this call chain.
+        candidates = [self._unified(1)]
+        with patch.object(discovery_engine, "fetch_retail_search_candidates") as mock_fetch:
+            refreshed, recovered = discovery_engine._attempt_retail_search_recovery(
+                [5],
+                [],
+                candidates,
+                series_name="Some Series",
+                author="Some Author",
+                query_series_name="Some Series",
+                retail_search_budget=None,
+            )
+        mock_fetch.assert_not_called()
+        self.assertEqual(refreshed, candidates)
+        self.assertEqual(recovered, [])
+
+    def test_noop_when_apify_not_enabled(self):
+        candidates = [self._unified(1)]
+        with patch.dict(os.environ, {"APIFY_API_TOKEN": ""}), patch.object(
+            discovery_engine, "fetch_retail_search_candidates"
+        ) as mock_fetch:
+            refreshed, recovered = discovery_engine._attempt_retail_search_recovery(
+                [5],
+                [],
+                candidates,
+                series_name="Some Series",
+                author="Some Author",
+                query_series_name="Some Series",
+                retail_search_budget=discovery_engine.ApifyCallBudget(),
+            )
+        mock_fetch.assert_not_called()
+        self.assertEqual(refreshed, candidates)
+        self.assertEqual(recovered, [])
+
+    def test_issues_one_broad_series_query_not_one_per_missing_number(self):
+        candidates = [self._unified(1)]
+        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
+            discovery_engine, "fetch_retail_search_candidates", return_value=[]
+        ) as mock_fetch:
+            discovery_engine._attempt_retail_search_recovery(
+                [3, 5, 7],
+                [],
+                candidates,
+                series_name="Some Series",
+                author="Some Author",
+                query_series_name="Some Series",
+                retail_search_budget=discovery_engine.ApifyCallBudget(),
+            )
+        mock_fetch.assert_called_once()
+        query_arg = mock_fetch.call_args.args[0]
+        self.assertEqual(query_arg, "Some Series Some Author")
+
+    def test_recovers_still_missing_numbers_and_unions_with_prior_recovery(self):
+        candidates = [self._unified(1)]
+        retail_hit = {
+            "source": "apify_retail_search",
+            "source_id": "B0AAA1111",
+            "title": "Book 5",
+            "authors": [],
+            "published_date": None,
+            "description": None,
+            "isbn13": None,
+            "source_url": "https://www.amazon.com/dp/B0AAA1111",
+            "language": "",
+            "series_number_hint": None,
+            "upcoming_hint": None,
+            "series_name_hint": None,
+            "series_total_hint": None,
+            "asin": "B0AAA1111",
+            "cover_image": None,
+            "confidence": None,
+        }
+        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
+            discovery_engine, "fetch_retail_search_candidates", return_value=[retail_hit]
+        ):
+            refreshed, recovered = discovery_engine._attempt_retail_search_recovery(
+                [3, 5],
+                [3],  # 3 was already recovered by the web-search lookahead
+                candidates,
+                series_name="Some Series",
+                author="Some Author",
+                query_series_name="Some Series",
+                retail_search_budget=discovery_engine.ApifyCallBudget(),
+            )
+        # 3 (prior) unioned with 5 (newly recovered via retail search) --
+        # never loses what the lookahead already found.
+        self.assertEqual(recovered, [3, 5])
+        self.assertIn("Book 5", [c.title for c in refreshed])
+
+    def test_actor_failure_is_swallowed_and_never_sinks_existing_candidates(self):
+        candidates = [self._unified(1)]
+        with patch.dict(os.environ, {"APIFY_API_TOKEN": "test-token"}), patch.object(
+            discovery_engine, "fetch_retail_search_candidates", side_effect=RuntimeError("boom")
+        ):
+            refreshed, recovered = discovery_engine._attempt_retail_search_recovery(
+                [5],
+                [],
+                candidates,
+                series_name="Some Series",
+                author="Some Author",
+                query_series_name="Some Series",
+                retail_search_budget=discovery_engine.ApifyCallBudget(),
+            )
+        self.assertEqual(refreshed, candidates)
+        self.assertEqual(recovered, [])
+
+    def test_reconstruct_series_skeleton_does_not_invoke_retail_search_without_a_budget(self):
+        # Regression guard: every existing caller of _reconstruct_series_
+        # skeleton that doesn't pass retail_search_budget (i.e. every test
+        # and call site that predates this feature) must see zero change
+        # in behavior.
+        unified_candidates = [self._unified(1), self._unified(3)]
+        with patch.dict(
+            os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key", "APIFY_API_TOKEN": "test-token"}
+        ), patch.object(discovery_engine, "_fetch_web_search", return_value=[]), patch.object(
+            discovery_engine, "fetch_retail_search_candidates"
+        ) as mock_retail_fetch:
+            discovery_engine._reconstruct_series_skeleton(
+                unified_candidates,
+                [],
+                series_name="Some Series",
+                author="Some Author",
+            )
+        mock_retail_fetch.assert_not_called()
+
+    def test_reconstruct_series_skeleton_tries_retail_search_when_lookahead_finds_nothing(self):
+        # Owns/found #1 and #3 but nothing for #2 -- a real interior gap.
+        unified_candidates = [self._unified(1), self._unified(3)]
+        with patch.dict(
+            os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key", "APIFY_API_TOKEN": "test-token"}
+        ), patch.object(discovery_engine, "_fetch_web_search", return_value=[]), patch.object(
+            discovery_engine, "fetch_retail_search_candidates", return_value=[]
+        ) as mock_retail_fetch:
+            result = discovery_engine._reconstruct_series_skeleton(
+                unified_candidates,
+                [],
+                series_name="Some Series",
+                author="Some Author",
+                retail_search_budget=discovery_engine.ApifyCallBudget(),
+            )
+        mock_retail_fetch.assert_called_once()
+        # The lookahead itself found nothing (_fetch_web_search -> []), so
+        # #2 is still missing after it -- exactly the "still missing after
+        # the lookahead pass" trigger this call site exists for.
+        self.assertEqual(result["missing_numbers"], [2])
+        self.assertEqual(result["recovered_numbers"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -153,6 +153,15 @@ _PROVIDER_CONFIDENCE_WEIGHT = {
     # candidates also get positional (not just weight) primacy over
     # web_search inside _fuse_and_score_candidates.
     "apify": 0.20,
+    # Second Apify actor (Second Apify Actor architecture review,
+    # 2026-09-02 chat) -- a search-results-only listing (real ASIN/title,
+    # no author/series-position/ISBN) invoked only as a last-resort
+    # recovery for a confirmed interior gap (see discovery_engine.
+    # _attempt_retail_search_recovery). Weighted level with web_search,
+    # not the primary "apify" actor above, since it carries no structured
+    # signal beyond the bare title/ASIN match -- see confidence_engine.
+    # _PROVIDER_CONFIDENCE's matching "low" grade for the same reasoning.
+    "apify_retail_search": 0.15,
     "web_search": 0.15,
 }
 
@@ -371,15 +380,16 @@ def _fuse_and_score_candidates(
             merged_isbn13 = str(backfilled_isbn).strip() if backfilled_isbn else None
 
         # Same backfill treatment as isbn13 above -- asin is only ever set
-        # by apify_provider.py (confirmed by grep; no exclude_sources
-        # equivalent needed, unlike isbn13's web_search exclusion, since
-        # there's only one truthful source to backfill from in the first
-        # place). Without this, an ASIN captured on an Apify hit silently
-        # vanishes whenever that hit gets grouped with any other provider's
-        # hit for the same book -- members[0]/primary becomes that other
-        # provider's dict, which never had an "asin" key at all -- exactly
-        # the multi-source case the "Review Candidate Book" notification's
-        # optional ASIN lookup most wants it for.
+        # by apify_provider.py and apify_retail_search_provider.py
+        # (confirmed by grep; no exclude_sources equivalent needed, unlike
+        # isbn13's web_search exclusion, since both truthful sources here
+        # are real Amazon-native ASINs, not a guess worth distrusting as a
+        # backfill source). Without this, an ASIN captured on an Apify hit
+        # silently vanishes whenever that hit gets grouped with any other
+        # provider's hit for the same book -- members[0]/primary becomes
+        # that other provider's dict, which never had an "asin" key at
+        # all -- exactly the multi-source case the "Review Candidate Book"
+        # notification's optional ASIN lookup most wants it for.
         merged_asin = str(primary.get("asin") or "").strip() or None
         if not merged_asin:
             backfilled_asin = _first_present_field(members, "asin")
@@ -1097,22 +1107,34 @@ def _filter_cross_series_contamination(
 # _fetch_* function produced them; the candidate-level "source" field
 # below (and on every UnifiedCandidate/raw dict from that point on) names
 # providers by their public catalog identity instead -- "google_books" not
-# "google", "web_search" not "web", plus "apify" (which has no key of its
-# own in fetch_results at all: Apify candidates are prepended into the
-# "web" list upstream, in provider_io.py's web-search sub-flow, before
-# they ever reach fusion). Once a raw dict has a "source" field, nothing
-# downstream of fusion should ever see the fetch_results spelling again.
+# "google", "web_search" not "web", plus "apify"/"apify_retail_search"
+# (neither has a key of its own in fetch_results at all: the primary
+# actor's candidates are prepended into the "web" list upstream, in
+# provider_io.py's web-search sub-flow, before they ever reach fusion; the
+# retail-search actor's are folded in even later, at the tail of
+# discovery_engine._reconstruct_series_skeleton via
+# _attempt_retail_search_recovery -- see that function's own docstring for
+# why it's a separate, narrower attachment point). Once a raw dict has a
+# "source" field, nothing downstream of fusion should ever see the
+# fetch_results spelling again.
 #
 # Explicit provider trust ranking, as an ordinal rather than a float weight
 # -- mirrors _PROVIDER_CONFIDENCE_WEIGHT's own hardcover > google_books >
-# openlibrary > web_search ordering, but only used here to break a sort
-# tie between two candidates that share the exact same resolved series
-# number and title (which _filter_and_merge's own dedupe should mostly
-# already prevent, but isn't guaranteed to for every code path feeding
-# finalize_discovery_output -- e.g. a targeted-pass hit and a fallback-pass
-# hit that plain title-key dedupe didn't recognize as the same book). Any
-# other/unrecognized source sorts last.
-_PROVIDER_SORT_RANK = {"hardcover": 0, "google_books": 1, "openlibrary": 2, "apify": 3, "web_search": 4}
+# openlibrary > apify > apify_retail_search > web_search ordering, but only
+# used here to break a sort tie between two candidates that share the exact
+# same resolved series number and title (which _filter_and_merge's own
+# dedupe should mostly already prevent, but isn't guaranteed to for every
+# code path feeding finalize_discovery_output -- e.g. a targeted-pass hit
+# and a fallback-pass hit that plain title-key dedupe didn't recognize as
+# the same book). Any other/unrecognized source sorts last.
+_PROVIDER_SORT_RANK = {
+    "hardcover": 0,
+    "google_books": 1,
+    "openlibrary": 2,
+    "apify": 3,
+    "apify_retail_search": 4,
+    "web_search": 5,
+}
 
 _TRANSIENT_CANDIDATE_FIELDS = ("confidence_score", "metadata_completeness_score", "source_provenance")
 
