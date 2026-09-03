@@ -596,9 +596,13 @@ def _attempt_canonical_source_recovery(
 
     Any other canonical_source routes through provider_io.fetch_canonical_
     page_candidates instead -- a direct httpx fetch of canonical_url,
-    trafilatura-extracted to bounded plain text, then handed to the exact
-    same _structure_web_results_with_llm() prompt/schema every other web-
-    search hit already goes through.
+    trafilatura-extracted to bounded plain text, then handed to
+    provider_io._structure_canonical_page_with_llm's own dedicated
+    canonical-page prompt (see that function's/build_canonical_page_
+    extraction_prompt's docstrings for why this is a separate prompt from
+    the one every other web-search hit goes through, not the same one --
+    the two have opposite framing needs: one book per snippet vs.
+    potentially many books on one canonical page).
 
     Fails soft and returns unified_candidates unchanged (never raises) if
     canonical_url is empty, or the fetch/actor call fails, times out, is

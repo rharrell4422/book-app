@@ -3,12 +3,14 @@ fetch_canonical_page_candidates -- the Guided Discovery (locked
 2026-09-03, iterations 1-5) canonical-URL page-fetch capability described
 in that design chat's iteration 3/5 diffs.
 """
+import json
 import unittest
 from unittest.mock import MagicMock, patch
 
 import httpx
 
 import provider_io
+from llm_client import LLMResponse
 
 
 class FetchCanonicalPageTextTest(unittest.TestCase):
@@ -56,7 +58,7 @@ class FetchCanonicalPageTextTest(unittest.TestCase):
 class FetchCanonicalPageCandidatesTest(unittest.TestCase):
     def test_returns_empty_when_page_fetch_fails(self):
         with patch.object(provider_io, "fetch_canonical_page_text", return_value=None), patch.object(
-            provider_io, "_structure_web_results_with_llm"
+            provider_io, "_structure_canonical_page_with_llm"
         ) as mock_structure:
             result = provider_io.fetch_canonical_page_candidates(
                 "https://example.com/series", "Goodreads", "Some Series", "Some Author"
@@ -66,7 +68,7 @@ class FetchCanonicalPageCandidatesTest(unittest.TestCase):
 
     def test_returns_empty_when_llm_structures_nothing(self):
         with patch.object(provider_io, "fetch_canonical_page_text", return_value="page text"), patch.object(
-            provider_io, "_structure_web_results_with_llm", return_value=[]
+            provider_io, "_structure_canonical_page_with_llm", return_value=[]
         ):
             result = provider_io.fetch_canonical_page_candidates(
                 "https://example.com/series", "Goodreads", "Some Series", "Some Author"
@@ -80,9 +82,12 @@ class FetchCanonicalPageCandidatesTest(unittest.TestCase):
         # URL-keyed pairing (see fetch_canonical_page_candidates's own
         # docstring) -- that pairing keeps only the LAST structured item
         # per URL, which would silently drop every book but one here.
+        # No result_index in these -- _structure_canonical_page_with_llm's
+        # dedicated prompt/schema drops it entirely (see that function's
+        # own docstring: every item is paired with the same single source
+        # dict regardless of index, so it would serve no purpose here).
         structured_items = [
             {
-                "result_index": 0,
                 "title": "Book One",
                 "series_name": "Some Series",
                 "book_number": 1,
@@ -92,7 +97,6 @@ class FetchCanonicalPageCandidatesTest(unittest.TestCase):
                 "isbn13": None,
             },
             {
-                "result_index": 0,
                 "title": "Book Two",
                 "series_name": "Some Series",
                 "book_number": 2,
@@ -102,7 +106,6 @@ class FetchCanonicalPageCandidatesTest(unittest.TestCase):
                 "isbn13": None,
             },
             {
-                "result_index": 0,
                 "title": "Book Three",
                 "series_name": "Some Series",
                 "book_number": 3,
@@ -113,7 +116,7 @@ class FetchCanonicalPageCandidatesTest(unittest.TestCase):
             },
         ]
         with patch.object(provider_io, "fetch_canonical_page_text", return_value="page listing all three books"), patch.object(
-            provider_io, "_structure_web_results_with_llm", return_value=structured_items
+            provider_io, "_structure_canonical_page_with_llm", return_value=structured_items
         ):
             result = provider_io.fetch_canonical_page_candidates(
                 "https://example.com/series", "Goodreads", "Some Series", "Some Author"
@@ -126,10 +129,105 @@ class FetchCanonicalPageCandidatesTest(unittest.TestCase):
 
     def test_structuring_failure_is_swallowed(self):
         with patch.object(provider_io, "fetch_canonical_page_text", return_value="page text"), patch.object(
-            provider_io, "_structure_web_results_with_llm", side_effect=RuntimeError("boom")
+            provider_io, "_structure_canonical_page_with_llm", side_effect=RuntimeError("boom")
         ):
             result = provider_io.fetch_canonical_page_candidates(
                 "https://example.com/series", "Goodreads", "Some Series", "Some Author"
+            )
+        self.assertEqual(result, [])
+
+
+class StructureCanonicalPageWithLlmTest(unittest.TestCase):
+    """Coverage for the Option A fix (2026-09-03 Goodreads/Jonathan Hunt
+    validation test): provider_io._structure_canonical_page_with_llm, the
+    canonical-page-dedicated structuring function that replaced reusing
+    _structure_web_results_with_llm's snippet-oriented prompt (which was
+    root-caused to produce zero extracted candidates against a real
+    canonical page -- see that function's own docstring).
+    """
+
+    def test_returns_empty_without_api_key(self):
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": ""}, clear=False):
+            result = provider_io._structure_canonical_page_with_llm(
+                "Some Series", "Some Author", "page text", "Canonical Goodreads page"
+            )
+        self.assertEqual(result, [])
+
+    def test_returns_empty_for_blank_page_text(self):
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}, clear=False):
+            result = provider_io._structure_canonical_page_with_llm(
+                "Some Series", "Some Author", "   ", "Canonical Goodreads page"
+            )
+        self.assertEqual(result, [])
+
+    def test_uses_the_dedicated_canonical_page_prompt_not_the_snippet_one(self):
+        # The whole point of Option A: this call site must use
+        # build_canonical_page_extraction_prompt's prompt text (which
+        # tells the model many books are expected), never
+        # build_extraction_prompt's snippet prompt (which tells the model
+        # to skip "whole series summary" pages -- the exact bug this
+        # fixed).
+        llm_response = LLMResponse(text="[]", tokens_in=10, tokens_out=2, model_id="claude-haiku-4-5-20251001")
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}, clear=False), patch.object(
+            provider_io, "call_llm", return_value=llm_response
+        ) as mock_call_llm:
+            provider_io._structure_canonical_page_with_llm(
+                "Some Series", "Some Author", "page listing every book", "Canonical Goodreads page"
+            )
+        prompt_used = mock_call_llm.call_args.kwargs["prompt"]
+        self.assertIn("EXPECTED to describe MANY books", prompt_used)
+        self.assertNotIn("fan wiki summaries of a whole series", prompt_used)
+        self.assertEqual(mock_call_llm.call_args.kwargs["tier"], "A")
+
+    def test_parses_multiple_structured_books_from_one_call(self):
+        structured = [
+            {"title": "Book One", "book_number": 1, "author_names": ["Some Author"], "is_upcoming": False},
+            {"title": "Book Two", "book_number": 2, "author_names": ["Some Author"], "is_upcoming": False},
+        ]
+        llm_response = LLMResponse(
+            text=json.dumps(structured), tokens_in=10, tokens_out=20, model_id="claude-haiku-4-5-20251001"
+        )
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}, clear=False), patch.object(
+            provider_io, "call_llm", return_value=llm_response
+        ):
+            result = provider_io._structure_canonical_page_with_llm(
+                "Some Series", "Some Author", "page listing every book", "Canonical Goodreads page"
+            )
+        self.assertEqual(len(result), 2)
+        self.assertEqual({item["title"] for item in result}, {"Book One", "Book Two"})
+
+    def test_strips_markdown_fences_before_parsing(self):
+        llm_response = LLMResponse(
+            text='```json\n[{"title": "Book One", "book_number": 1}]\n```',
+            tokens_in=10,
+            tokens_out=10,
+            model_id="claude-haiku-4-5-20251001",
+        )
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}, clear=False), patch.object(
+            provider_io, "call_llm", return_value=llm_response
+        ):
+            result = provider_io._structure_canonical_page_with_llm(
+                "Some Series", "Some Author", "page text", "Canonical Goodreads page"
+            )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["title"], "Book One")
+
+    def test_returns_empty_on_json_parse_failure(self):
+        llm_response = LLMResponse(text="not json", tokens_in=10, tokens_out=5, model_id="claude-haiku-4-5-20251001")
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}, clear=False), patch.object(
+            provider_io, "call_llm", return_value=llm_response
+        ):
+            result = provider_io._structure_canonical_page_with_llm(
+                "Some Series", "Some Author", "page text", "Canonical Goodreads page"
+            )
+        self.assertEqual(result, [])
+
+    def test_returns_empty_when_llm_call_raises(self):
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}, clear=False), patch.object(
+            provider_io, "call_llm", side_effect=RuntimeError("boom")
+        ):
+            result = provider_io._structure_canonical_page_with_llm(
+                "Some Series", "Some Author", "page text", "Canonical Goodreads page"
             )
         self.assertEqual(result, [])
 

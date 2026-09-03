@@ -101,6 +101,84 @@ def build_extraction_prompt(
     )
 
 
+_CANONICAL_PAGE_STRUCTURING_PROMPT = """You are extracting a full list of books from a canonical series-listing page.
+
+{scope_line}
+Target author: "{author}"
+
+Below is the full text content of {source_label}, a page the user has identified as the authoritative source listing every book in this series. Unlike a short search-result snippet, this page is EXPECTED to describe MANY books at once -- extract EVERY book you can identify on it, however many there are. Do not skip it for being a "whole series summary" or a listing/catalog page -- that IS the intended content here, not noise to filter out.
+
+For each book you identify, extract its data using the fields below. If the page mixes in books from a different series, by a different author, or unrelated content (navigation text, ads, unrelated recommendations), skip those specific entries -- but do not reject the page as a whole just because it also contains that kind of noise.
+
+Genre-specific metadata guidance:
+- Book numbering may be expressed in many formats: "Book N", "Volume N", "Part N", "Arc N", "Season N Episode M", or Roman numerals. Infer "book_number" whenever the numbering is explicit or clearly implied by list order.
+- Fractional numbering (e.g., "3.5", "0.5", "Book 2.5", "Interlude", "Side Story", "Novella") should be accepted as valid book entries. Treat these as legitimate positions within the series.
+- Reject box sets or omnibus editions unless the page explicitly describes a new individual volume within the set.
+
+Page content:
+{page_text}
+
+If the page does not explicitly confirm a book has already been released, set "is_upcoming" to true and "published_date" to null rather than guessing it's already available.
+
+Respond with ONLY a JSON array (no prose, no markdown code fences). Each element must have this shape:
+{{"title": <string, the clean book title without the series name or a "Book N" suffix -- BUT if the book has no title of its own beyond its series name and position (i.e. the only title given for it IS "<Series Name> <N>", with no separate subtitle at all), output that full "<Series Name> <N>" text as-is instead of stripping it down to just the bare series name>, "series_name": <string or null, the name of the series this book belongs to, if any -- null if it's a standalone>, "book_number": <int or null, this book's position in its series if stated or clearly implied>, "author_names": [<string>, ...], "published_date": <string, "YYYY-MM-DD"/"YYYY-MM"/"YYYY" if EXPLICITLY stated, else null>, "is_upcoming": <bool, see rule above>, "isbn13": <string or null>}}
+
+If the page describes zero books belonging to this series, respond with exactly: []"""
+
+
+def build_canonical_page_extraction_prompt(
+    *,
+    scope_line: str,
+    author: str,
+    source_label: str,
+    page_text: str,
+) -> str:
+    """Tier A prompt builder, canonical-page variant (Guided Discovery,
+    Option A fix, 2026-09-03 Goodreads/Jonathan Hunt validation test).
+
+    A dedicated prompt for provider_io.fetch_canonical_page_candidates,
+    deliberately NOT sharing build_extraction_prompt's snippet-oriented
+    prompt/schema, even though both ultimately feed the same
+    _parse_web_search_structured_items downstream. Reusing the snippet
+    prompt unmodified against a real canonical series page (that
+    validation test) produced ZERO extracted candidates, root-caused to
+    two things that prompt does on purpose for the snippet case but which
+    are exactly backwards for a canonical page:
+
+    1. build_extraction_prompt explicitly instructs the model to SKIP
+       "fan wiki summaries of a whole series" and "retailer category/
+       search pages" -- a canonical series-listing page (e.g. a Goodreads
+       series page) IS structurally that exact shape. An LLM applying
+       that exclusion by analogy has every reason to reject the entire
+       page as out-of-scope noise, which is exactly what happened.
+    2. Its schema is framed one-book-per-result ("for EACH result...
+       extract its data", keyed by a single result_index per input) --
+       nothing in that prompt text tells the model it may/should emit
+       many array elements describing many different books all found
+       within one single input. fetch_canonical_page_candidates' own
+       calling code is ready for that (every parsed item is paired with
+       the same one source dict, no result_index-based lookup needed --
+       see its own docstring), but the model was never told to behave
+       that way.
+
+    This prompt inverts both: states outright that the page is EXPECTED
+    to describe many books and instructs extracting all of them, and
+    drops the whole-series-summary/catalog-page exclusion entirely --
+    that's the intended input here, not noise. No result_index in the
+    output schema, unlike build_extraction_prompt's -- fetch_canonical_
+    page_candidates always pairs every returned item with the same
+    single source dict regardless of index (there's only one page ever
+    passed in), so result_index would serve no purpose and risks
+    confusing the model into artificially deduplicating entries by index.
+    """
+    return _CANONICAL_PAGE_STRUCTURING_PROMPT.format(
+        scope_line=scope_line,
+        author=author,
+        source_label=source_label,
+        page_text=page_text,
+    )
+
+
 # Deliberately a completely separate prompt from _WEB_SEARCH_STRUCTURING_PROMPT
 # -- that one extracts book data from raw web-search snippets; this one takes
 # already-structured UnifiedCandidates and reconciles disagreements between

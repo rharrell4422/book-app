@@ -49,6 +49,7 @@ from prompts import (
     _WEB_SEARCH_STRUCTURING_PROMPT,
     _LLM_RECONCILIATION_PROMPT,
     build_extraction_prompt,
+    build_canonical_page_extraction_prompt,
     build_reconciliation_prompt,
 )
 
@@ -692,6 +693,84 @@ def _structure_web_results_with_llm(
     return parsed if isinstance(parsed, list) else []
 
 
+def _structure_canonical_page_with_llm(
+    series_name: str | None,
+    author: str,
+    page_text: str,
+    source_label: str,
+    *,
+    telemetry: "DiscoveryTelemetry | None" = None,
+) -> list[dict]:
+    """Canonical-page variant of _structure_web_results_with_llm above
+    (Guided Discovery, Option A fix, 2026-09-03 Goodreads/Jonathan Hunt
+    validation test) -- see build_canonical_page_extraction_prompt's own
+    docstring for why this needs a dedicated prompt rather than reusing
+    the snippet-oriented one. Otherwise identical machinery to
+    _structure_web_results_with_llm (same call_llm tier="A" dispatch,
+    same temperature=0 determinism, same markdown-fence stripping, same
+    JSON-array parsing, same fail-soft [] on any missing-key/call/parse
+    failure) -- deliberately NOT sharing that function's body directly
+    since it also builds a {count}/{snippets} block for a list of
+    raw_results that doesn't apply here (always exactly one page, never
+    a list to enumerate), and it calls build_extraction_prompt, not this
+    call site's build_canonical_page_extraction_prompt.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key or not str(page_text or "").strip():
+        return []
+
+    series_name = str(series_name or "").strip()
+    if series_name:
+        scope_line = f'Target series: "{series_name}"'
+    else:
+        scope_line = "Target: ANY book by this author, across all of their series and standalone works."
+
+    prompt = build_canonical_page_extraction_prompt(
+        scope_line=scope_line,
+        author=author,
+        source_label=source_label,
+        page_text=page_text,
+    )
+
+    started = time.monotonic()
+    llm_response = None
+    try:
+        llm_response = call_llm(
+            tier="A",
+            prompt=prompt,
+            max_tokens=2000,
+            temperature=0,
+            timeout=WEB_SEARCH_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:  # a failed structuring call must degrade to
+        # "no candidates from this canonical page" like a JSON-parse
+        # failure below, never raise out to fetch_canonical_page_candidates.
+        _log(f"LLM canonical-page structuring call failed: {exc}")
+        return []
+    finally:
+        if telemetry is not None:
+            telemetry.record_llm_call(
+                duration_s=time.monotonic() - started,
+                tokens_in=llm_response.tokens_in if llm_response is not None else 0,
+                tokens_out=llm_response.tokens_out if llm_response is not None else 0,
+                model_id=ANTHROPIC_MODEL,
+            )
+    text = llm_response.text
+
+    # The prompt asks for raw JSON, but strip markdown fences defensively in
+    # case the model wraps its answer in one anyway.
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 CANONICAL_PAGE_TEXT_MAX_CHARS = 2500
 
 
@@ -755,14 +834,25 @@ def fetch_canonical_page_candidates(
     *,
     telemetry: "DiscoveryTelemetry | None" = None,
 ) -> list[dict]:
-    """Guided Discovery (locked 2026-09-03, iterations 1-5): structures a
-    fetched canonical page's content into candidate dicts, reusing the
-    EXACT SAME _structure_web_results_with_llm() prompt/schema every
-    ordinary Serper snippet already goes through (Iteration 3/5's own
-    "reuse the current structuring pattern" requirement) -- the fetched
-    page's cleaned text is simply dressed up as a single one-item raw
-    web-search result whose "description" is a bounded block of real page
-    text instead of a one-line snippet.
+    """Guided Discovery (locked 2026-09-03, iterations 1-5; structuring
+    prompt fixed 2026-09-03 -- Option A of the Goodreads/Jonathan Hunt
+    validation test): structures a fetched canonical page's content into
+    candidate dicts via _structure_canonical_page_with_llm's dedicated
+    canonical-page prompt/schema -- NOT _structure_web_results_with_llm's
+    snippet-oriented one.
+
+    Originally reused _structure_web_results_with_llm unmodified (per
+    Iteration 3/5's "reuse the current structuring pattern" requirement),
+    but a live validation test against a real canonical page (Jonathan
+    Hunt Thriller / Goodreads, 2026-09-03) produced zero extracted
+    candidates: that prompt explicitly tells the model to SKIP "fan wiki
+    summaries of a whole series"/"retailer category pages" -- exactly
+    what a canonical series-listing page structurally looks like -- and
+    frames its schema as one-book-per-input-result, never instructing the
+    model that one input may describe many books. See
+    build_canonical_page_extraction_prompt's own docstring for the full
+    root-cause writeup. _structure_canonical_page_with_llm's prompt
+    inverts both of those.
 
     Deliberately does NOT route through _structure_with_verdict_cache/
     _structure_and_pair_web_search_hits the way _fetch_web_search's normal
@@ -793,7 +883,9 @@ def fetch_canonical_page_candidates(
         "url": str(url or "").strip(),
     }
     try:
-        parsed = _structure_web_results_with_llm(series_name, author, [raw_result], telemetry=telemetry)
+        parsed = _structure_canonical_page_with_llm(
+            series_name, author, page_text, raw_result["title"], telemetry=telemetry
+        )
     except Exception as exc:  # a structuring failure here must never sink discovery
         _log(f"canonical page structuring failed for {url!r}: {exc}")
         return []
