@@ -613,8 +613,20 @@ def _attempt_canonical_source_recovery(
     cleaned_url = str(canonical_url or "").strip()
     cleaned_author = str(author or "").strip()
     if not cleaned_url or not cleaned_author:
+        # 2026-09-03 observability fix: this early return used to be the
+        # SAME silence as "canonical recovery ran and found nothing" below
+        # -- impossible to tell apart from logs alone which case a given
+        # Check Now run hit. Distinguished explicitly now.
+        _log(
+            f"canonical-source recovery skipped for series={series_name!r}: "
+            f"canonical_url={'set' if cleaned_url else 'EMPTY'} author={'set' if cleaned_author else 'EMPTY'}"
+        )
         return unified_candidates
 
+    _log(
+        f"canonical-source recovery starting for series={series_name!r}: "
+        f"canonical_source={canonical_source!r} canonical_url={cleaned_url!r}"
+    )
     try:
         if str(canonical_source or "").strip() == "KU":
             one_call_budget = ApifyCallBudget(max_calls=1)
@@ -632,8 +644,15 @@ def _attempt_canonical_source_recovery(
         return unified_candidates
 
     if not raw_candidates:
+        # provider_io's own fetch_canonical_page_candidates/fetch_
+        # canonical_page_text now log the specific reason (fetch failure,
+        # empty body, trafilatura found nothing, LLM found zero books,
+        # JSON parse failure) -- this just confirms recovery reached this
+        # point with nothing to fuse in.
+        _log(f"canonical-source recovery for {cleaned_url!r} returned zero candidates -- no fusion needed")
         return unified_candidates
 
+    _log(f"canonical-source recovery for {cleaned_url!r} returned {len(raw_candidates)} raw candidate(s) -- fusing")
     existing_raw = [_unified_candidate_to_raw_dict(candidate) for candidate in unified_candidates]
     return _fuse_and_score_candidates(
         {"hardcover": existing_raw, "google": [], "openlibrary": [], "web": raw_candidates},

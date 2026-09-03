@@ -767,6 +767,10 @@ def _structure_canonical_page_with_llm(
     try:
         parsed = json.loads(text)
     except (json.JSONDecodeError, ValueError):
+        # 2026-09-03 observability fix (see fetch_canonical_page_
+        # candidates's own new logging for the incident this addresses):
+        # previously silent here too.
+        _log(f"canonical page LLM structuring response was not valid JSON: {text[:200]!r}")
         return []
     return parsed if isinstance(parsed, list) else []
 
@@ -812,6 +816,7 @@ def fetch_canonical_page_text(url: str) -> str | None:
 
     html = response.text
     if not html:
+        _log(f"canonical page fetch for {cleaned_url!r} returned an empty body (status={response.status_code})")
         return None
 
     try:
@@ -822,6 +827,21 @@ def fetch_canonical_page_text(url: str) -> str | None:
 
     cleaned_text = str(extracted or "").strip()
     if not cleaned_text:
+        # Silent before this log line (2026-09-03 observability fix, added
+        # after a live Jonathan Hunt/Goodreads re-test went from "LLM call
+        # failed" (logged) on one run to zero canonical-related log lines
+        # at all on the very next run, nine minutes later, same URL --
+        # impossible to tell from logs alone whether that meant "no
+        # canonical attempt happened" or "attempt happened but trafilatura
+        # silently found nothing" (e.g. the site's own bot-blocking/rate-
+        # limiting returning a 200 with an unusable interstitial/CAPTCHA
+        # page body instead of an error status httpx would have raised
+        # on). This is that missing signal.
+        _log(
+            f"canonical page fetch for {cleaned_url!r} succeeded (status={response.status_code}, "
+            f"{len(html)} bytes of HTML) but trafilatura extracted no usable main-content text -- "
+            "page may be a bot-block/interstitial/JS-shell rather than the real content"
+        )
         return None
     return cleaned_text[:CANONICAL_PAGE_TEXT_MAX_CHARS]
 
@@ -888,7 +908,12 @@ def fetch_canonical_page_candidates(
     """
     page_text = fetch_canonical_page_text(url)
     if not page_text:
+        # fetch_canonical_page_text already logs the specific reason
+        # (fetch failure / empty body / trafilatura found nothing) --
+        # nothing to add here.
         return []
+
+    _log(f"canonical page fetch for {url!r} extracted {len(page_text)} chars of text -- structuring with LLM")
 
     raw_result = {
         "title": f"Canonical {canonical_source or 'source'} page",
@@ -903,10 +928,20 @@ def fetch_canonical_page_candidates(
         _log(f"canonical page structuring failed for {url!r}: {exc}")
         return []
     if not parsed:
+        # 2026-09-03 observability fix (same incident as fetch_canonical_
+        # page_text's own new log line above): previously silent, so a
+        # canonical page that fetched fine but the LLM judged to describe
+        # zero real books (or a JSON-parse failure inside
+        # _structure_canonical_page_with_llm -- see that function's own
+        # logging) was indistinguishable in the logs from this function
+        # never having been called at all.
+        _log(f"canonical page structuring for {url!r} returned zero book candidates")
         return []
 
     structured_with_source = [(item, raw_result) for item in parsed if isinstance(item, dict)]
-    return _parse_web_search_structured_items(structured_with_source, author, source_label="canonical_page")
+    results = _parse_web_search_structured_items(structured_with_source, author, source_label="canonical_page")
+    _log(f"canonical page for {url!r} yielded {len(results)} candidate(s): {[r['title'] for r in results]}")
+    return results
 
 
 _SERIES_OVERVIEW_PROMPT = """You are writing a short, spoiler-light overview of a book series for a reader deciding whether to start it.
