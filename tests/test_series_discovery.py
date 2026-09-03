@@ -4623,6 +4623,17 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
             series_name="Cherry Blossom Girls",
             series_number=10.0,
             isbn13="9780000000010",
+            # Same reasoning as existing_candidate's metadata_completeness_
+            # score above -- as of the 2026-09-03 reorder fix (compute_
+            # confidence now runs against skeleton["candidates"], not just
+            # discovery["unified_candidates"]), this candidate IS scored by
+            # confidence_engine for the first time in this test, so the
+            # pydantic default (0.0) would trip delta_engine's
+            # "insufficient_metadata" flag and force title_confidence to
+            # "zero" -- an artifact of this test building a UnifiedCandidate
+            # directly, not a real signal about the recovery mechanism this
+            # test actually exercises.
+            metadata_completeness_score=1.0,
             source_provenance=[
                 {
                     "source": "web_search",
@@ -4645,6 +4656,10 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
             series_name="Cherry Blossom Girls",
             series_number=11.0,
             isbn13="9780000000011",
+            # See recovered_candidate's comment just above -- same fix,
+            # same reason (this candidate is also inside skeleton[
+            # "candidates"], so the 2026-09-03 reorder now scores it too).
+            metadata_completeness_score=1.0,
             source_provenance=[
                 {
                     "source": "hardcover",
@@ -4720,13 +4735,14 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         # lookahead, so it gets no special trust and correctly fails
         # belongs_to_series for lacking both a strong confidence and any
         # textual tie to the series -- but failing that gate no longer
-        # means silently dropped. series_agent never asked confidence_engine
-        # to score it either (it's not in this test's `unified_candidates`
-        # override), so there's no grade to route on; the safe fallback for
-        # "ambiguous and nothing to grade it" is a durable candidate
-        # notification, not silent disappearance -- a human still needs to
-        # see and dismiss it, just via services/candidate_notifications.py
-        # now rather than needs_review.
+        # means silently dropped. It IS scored by confidence_engine (as of
+        # the 2026-09-03 reorder, every skeleton["candidates"] entry is),
+        # landing on "medium" (unverified title capped at medium, matching
+        # author, well-formed number) rather than a hard "low"/"zero" drop
+        # -- ambiguous-but-medium is exactly the "safe fallback" case: a
+        # durable candidate notification, not silent disappearance, so a
+        # human still needs to see and dismiss it via
+        # services/candidate_notifications.py rather than needs_review.
         self.assertNotIn(
             "Unrelated Standalone Thriller: (Cherry Blossom Girls Book 11)", available_titles | upcoming_titles
         )
@@ -4741,6 +4757,108 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
             SeriesCandidateNotification.candidate_title == "Unrelated Standalone Thriller",
         ).all()
         self.assertEqual(len(stray_notifications), 1)
+
+    def test_confidence_computation_uses_post_skeleton_candidates_so_canonical_recovery_can_promote_provider_confidence(self):
+        # Regression (live bug, Jonathan Hunt/Goodreads, 2026-09-03):
+        # series_delta/series_confidence/confidence_lookup used to be built
+        # from discovery["unified_candidates"] -- the PRE-skeleton candidate
+        # set -- computed BEFORE _reconstruct_series_skeleton (and therefore
+        # before canonical-source recovery, which runs inside it) ever ran.
+        # When canonical recovery merged a new, more-trusted "canonical_page"
+        # source into an ALREADY-discovered, single-source "web_search"
+        # candidate -- correctly promoting its provider_confidence from
+        # "low" to "medium" inside that merge (confidence_engine.
+        # _provider_confidence takes the max across every source in
+        # provenance) -- confidence_lookup never saw the promotion: it kept
+        # reading the STALE, pre-merge, single-source "low" grade computed
+        # here before skeleton ever ran, and every one of these candidates
+        # was hard-dropped regardless (confirmed via a real Check Now run
+        # that logged canonical recovery correctly finding and merging 18/19
+        # volumes, every one still dropped as provider="low"). Fixed by
+        # moving the whole series_delta/series_confidence/confidence_lookup
+        # computation to run AFTER _reconstruct_series_skeleton, against
+        # skeleton["candidates"] instead of discovery["unified_candidates"].
+        # Number 7 (not 1-6/8-9): setUp only owns 1-6 and 8-9, so this is a
+        # genuinely new/missing book, not suppressed as already-known.
+        pre_skeleton_candidate = discovery_engine.UnifiedCandidate(
+            title="Cherry Blossom Girls Book 7",
+            authors=["Harmon Cooper"],
+            series_name="Cherry Blossom Girls",
+            series_number=7.0,
+            isbn13="9780000000007",
+            metadata_completeness_score=1.0,
+            source_provenance=[
+                {
+                    "source": "web_search",
+                    "source_id": "ws-7",
+                    "source_url": None,
+                    "language": "",
+                    "series_number_hint": 7,
+                    "upcoming_hint": False,
+                }
+            ],
+        )
+        # The enriched, post-canonical-recovery version of the SAME book
+        # (same isbn13) -- canonical-source recovery's own fuse-then-merge
+        # step (inside _reconstruct_series_skeleton, mocked out below) is
+        # what would normally produce this: a second, more-trusted
+        # "canonical_page" source folded into provenance alongside the
+        # original "web_search" one.
+        post_skeleton_candidate = discovery_engine.UnifiedCandidate(
+            title="Cherry Blossom Girls Book 7",
+            authors=["Harmon Cooper"],
+            series_name="Cherry Blossom Girls",
+            series_number=7.0,
+            isbn13="9780000000007",
+            metadata_completeness_score=1.0,
+            source_provenance=[
+                {
+                    "source": "web_search",
+                    "source_id": "ws-7",
+                    "source_url": None,
+                    "language": "",
+                    "series_number_hint": 7,
+                    "upcoming_hint": False,
+                },
+                {
+                    "source": "canonical_page",
+                    "source_id": "cp-7",
+                    "source_url": None,
+                    "language": "",
+                    "series_number_hint": 7,
+                    "upcoming_hint": False,
+                },
+            ],
+        )
+        candidates = [
+            {
+                "source": "web_search",
+                "source_id": "ws-7",
+                "title": "Cherry Blossom Girls Book 7",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-05-01",
+                "isbn13": "9780000000007",
+                "source_url": None,
+                "language": "",
+                "confidence": "author_fallback",
+                "series_number_hint": 7,
+                "upcoming_hint": False,
+            }
+        ]
+        skeleton_result = {
+            "candidates": [post_skeleton_candidate],
+            "expected_total": 7,
+            "missing_numbers": [],
+            "recovered_numbers": [],
+        }
+        with self._mock_discovery(
+            candidates, used_author_fallback=True, unified_candidates=[pre_skeleton_candidate]
+        ), patch.object(discovery_engine, "_reconstruct_series_skeleton", return_value=skeleton_result):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        available_titles = {book["title"] for book in result["available_missing"]}
+        self.assertIn("Cherry Blossom Girls Book 7", available_titles)
 
     def test_no_author_on_file_returns_empty_result_without_calling_apis(self):
         series = Series(name="No Author Series", profile_id="robbie")

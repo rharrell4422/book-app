@@ -929,23 +929,110 @@ class SeriesIntelligenceAgent:
 
             # Phase 2 + 3 of agentic discovery: computes a deterministic
             # delta between the Phase 1 SeriesSkeleton baseline and this
-            # run's PRE-_filter_and_merge candidates (discovery["unified_
-            # candidates"] -- see delta_engine's own docstring for why
-            # pre-filter, not the post-filter `candidates` above), then a
-            # deterministic confidence score per candidate on top of that
-            # delta, and logs both. As of the manual-override rollout,
-            # `confidence_lookup` below is consulted by the belongs_to_series
-            # loop to route each POST-filter candidate to auto-accept/
-            # needs_review/auto-drop -- see `confidence_engine.correlation_key`
-            # for why that lookup needs its own key function rather than
+            # run's discovered candidates, then a deterministic confidence
+            # score per candidate on top of that delta, and logs both. As
+            # of the manual-override rollout, `confidence_lookup` below is
+            # consulted by the belongs_to_series loop to route each
+            # POST-filter candidate to auto-accept/needs_review/auto-drop --
+            # see `confidence_engine.correlation_key` for why that lookup
+            # needs its own key function rather than
             # `confidence_engine._candidate_key`. Still cannot change
             # `candidates` or `provider_failures` themselves, or anything
             # about discovery/fetching -- only which of *this* function's own
             # three output buckets (available_missing/upcoming_books vs.
             # needs_review vs. dropped) an already-discovered candidate lands
             # in.
+            #
+            # MOVED to run AFTER discovery_engine._reconstruct_series_
+            # skeleton below (2026-09-03 fix, live Jonathan Hunt/Goodreads
+            # production incident) -- originally ran here, against
+            # discovery["unified_candidates"] (the PRE-skeleton candidate
+            # set), with a comment on the discovery_contract_mismatch
+            # assignment further down explicitly flagging this as a known,
+            # deliberately-deferred risk ("that call already ran before
+            # this point... reordering it would be a much larger, riskier
+            # change"). That risk materialized in production: canonical-
+            # source recovery (which runs INSIDE _reconstruct_series_
+            # skeleton, unconditionally, every call) can merge a brand-new,
+            # trusted "canonical_page" source into an ALREADY-discovered,
+            # single-source "web_search"-tagged candidate -- correctly
+            # promoting its provider_confidence from "low" to "medium"
+            # inside that merge -- but confidence_lookup was built from the
+            # STALE, pre-merge, single-source version computed here before
+            # skeleton ever ran, so the DROP-decision loop below kept
+            # reading that candidate's confidence as permanently "low"
+            # regardless of what skeleton reconstruction went on to find or
+            # merge. Confirmed via a real Check Now run that logged
+            # canonical recovery successfully finding 18/19 volumes, all
+            # correctly merged with existing candidates, yet every one
+            # still auto-dropped as "low" by this exact stale-lookup
+            # mechanism. See discovery_engine._reconstruct_series_skeleton's
+            # own docstring/call site below for confirmation nothing
+            # between the two locations reads series_confidence/
+            # series_delta/confidence_lookup/fingerprint_updates_this_round
+            # before this new location -- the move is behavior-preserving
+            # for every other call site, only the INPUT candidate set
+            # changes (discovery["unified_candidates"] -> skeleton[
+            # "candidates"], which is a strict superset/enrichment of it).
             series_confidence: dict = {"confidence": []}
             fingerprint_updates_this_round: dict | None = None
+            skeleton_entries: list[dict] = []
+            confidence_lookup: dict[tuple, dict] = {}
+
+            # Missing-volume detection: a series can own/find books 1-4 and
+            # 6-9 but nothing for 5 -- that's not book 5 ranking low in the
+            # targeted search, it's that no provider returned it at all, so
+            # no amount of relevance-ranking tuning above recovers it. Fires
+            # a few extra, deliberately narrow "<series> <author> book <N>"
+            # lookahead queries (bounded by
+            # discovery_engine.MAX_MISSING_VOLUME_LOOKAHEAD_QUERIES) for
+            # whichever numbers between 1 and the highest known number have
+            # neither an owned book nor a discovered candidate, and folds any
+            # hits back through the same fuse-then-filter pipeline the
+            # targeted/fallback passes already went through -- belongs_to_series
+            # below still runs against every recovered candidate exactly like
+            # any other, nothing here bypasses it.
+            owned_books_for_skeleton = [
+                {"title": book.title, "book_number": book.book_number, "isbn13": book.isbn13}
+                for book in active_series_books
+            ]
+            # Dedicated budget for the retail-search actor (Second Apify
+            # Actor architecture review, 2026-09-02 chat) -- deliberately a
+            # brand-new counter, never the discover_candidates_for_series
+            # call above's own apify_budget (which the targeted/fallback
+            # passes have already fully spent or decided by this point).
+            # See apify_retail_search_provider.py's module docstring for
+            # why this needs to be its own budget rather than sharing or
+            # raising the primary actor's.
+            retail_search_budget = discovery_engine.ApifyCallBudget(
+                max_calls=apify_retail_search_provider.APIFY_RETAIL_SEARCH_MAX_CALLS_PER_SERIES_RUN
+            )
+            skeleton = discovery_engine._reconstruct_series_skeleton(
+                discovery.get("unified_candidates", []),
+                owned_books_for_skeleton,
+                series_name=series.name,
+                author=series_author,
+                telemetry=telemetry,
+                cache=cache,
+                enable_missing_volume_lookahead=enable_missing_volume_lookahead,
+                retail_search_budget=retail_search_budget,
+                # Guided Discovery (locked 2026-09-03, iterations 1-5): all
+                # three read straight off the Series row -- None for every
+                # series created before this feature existed (or that
+                # never filled them in), which reproduces pre-Guided-
+                # Discovery behavior exactly (see that function's own
+                # docstring).
+                canonical_url=series.canonical_url,
+                canonical_source=series.canonical_source,
+                verified_volume_count=series.verified_volume_count,
+            )
+
+            # series_delta/series_confidence/confidence_lookup/
+            # fingerprint_updates_this_round -- see the (2026-09-03 fix)
+            # comment above, at this block's ORIGINAL, pre-skeleton
+            # location, for the full incident/rationale on why this now
+            # runs here, against skeleton["candidates"], instead of
+            # earlier against discovery["unified_candidates"].
             try:
                 # Rebuilt here rather than just read, so a stale/missing
                 # SeriesSkeleton row (e.g. between boot and the first Check
@@ -965,15 +1052,15 @@ class SeriesIntelligenceAgent:
                 # required for its upsert-with-retry concurrency
                 # protection to actually work, and safe here since nothing
                 # above this point in the function has written anything
-                # else to `db` yet.
+                # else to `db` yet (the _reconstruct_series_skeleton call
+                # just above is a pure in-memory/network computation, no
+                # DB writes of its own).
                 backfill_skeleton_for_series(db, series_id)
                 skeleton_row = (
                     db.query(SeriesSkeleton).filter(SeriesSkeleton.series_id == series_id).first()
                 )
                 skeleton_entries = skeleton_row.skeleton_json if skeleton_row else []
-                unified_candidate_dicts = [
-                    candidate.model_dump() for candidate in discovery.get("unified_candidates", [])
-                ]
+                unified_candidate_dicts = [candidate.model_dump() for candidate in skeleton["candidates"]]
                 series_delta = delta_engine.compute_series_delta(
                     series_id,
                     skeleton_entries,
@@ -1040,58 +1127,11 @@ class SeriesIntelligenceAgent:
             # function's docstring for exactly why the two need a shared,
             # field-name-tolerant key rather than object identity or
             # confidence_engine._candidate_key).
-            confidence_lookup: dict[tuple, dict] = {
+            confidence_lookup = {
                 confidence_engine.correlation_key(entry["candidate"]): entry
                 for entry in series_confidence.get("confidence", [])
             }
 
-            # Missing-volume detection: a series can own/find books 1-4 and
-            # 6-9 but nothing for 5 -- that's not book 5 ranking low in the
-            # targeted search, it's that no provider returned it at all, so
-            # no amount of relevance-ranking tuning above recovers it. Fires
-            # a few extra, deliberately narrow "<series> <author> book <N>"
-            # lookahead queries (bounded by
-            # discovery_engine.MAX_MISSING_VOLUME_LOOKAHEAD_QUERIES) for
-            # whichever numbers between 1 and the highest known number have
-            # neither an owned book nor a discovered candidate, and folds any
-            # hits back through the same fuse-then-filter pipeline the
-            # targeted/fallback passes already went through -- belongs_to_series
-            # below still runs against every recovered candidate exactly like
-            # any other, nothing here bypasses it.
-            owned_books_for_skeleton = [
-                {"title": book.title, "book_number": book.book_number, "isbn13": book.isbn13}
-                for book in active_series_books
-            ]
-            # Dedicated budget for the retail-search actor (Second Apify
-            # Actor architecture review, 2026-09-02 chat) -- deliberately a
-            # brand-new counter, never the discover_candidates_for_series
-            # call above's own apify_budget (which the targeted/fallback
-            # passes have already fully spent or decided by this point).
-            # See apify_retail_search_provider.py's module docstring for
-            # why this needs to be its own budget rather than sharing or
-            # raising the primary actor's.
-            retail_search_budget = discovery_engine.ApifyCallBudget(
-                max_calls=apify_retail_search_provider.APIFY_RETAIL_SEARCH_MAX_CALLS_PER_SERIES_RUN
-            )
-            skeleton = discovery_engine._reconstruct_series_skeleton(
-                discovery.get("unified_candidates", []),
-                owned_books_for_skeleton,
-                series_name=series.name,
-                author=series_author,
-                telemetry=telemetry,
-                cache=cache,
-                enable_missing_volume_lookahead=enable_missing_volume_lookahead,
-                retail_search_budget=retail_search_budget,
-                # Guided Discovery (locked 2026-09-03, iterations 1-5): all
-                # three read straight off the Series row -- None for every
-                # series created before this feature existed (or that
-                # never filled them in), which reproduces pre-Guided-
-                # Discovery behavior exactly (see that function's own
-                # docstring).
-                canonical_url=series.canonical_url,
-                canonical_source=series.canonical_source,
-                verified_volume_count=series.verified_volume_count,
-            )
             # Guided Discovery: a parallel, orthogonal diagnostic -- None
             # whenever this series has no verified_volume_count set.
             # Deliberately NOT folded into provider_failures/
@@ -1101,11 +1141,11 @@ class SeriesIntelligenceAgent:
             # separate. Surfaced on series_confidence (flagged as a
             # top-level diagnostic other confidence-consuming code can key
             # off, without altering compute_confidence's own per-candidate
-            # scoring above -- that call already ran before this point,
-            # using the pre-skeleton candidate set, and reordering it
-            # would be a much larger, riskier change) and echoed into the
-            # same reasoning-step Tier C/telemetry already logs below, so
-            # it's visible for review/triage without being a routing input.
+            # scoring above, which as of the 2026-09-03 fix now runs AFTER
+            # this point too, against the same skeleton["candidates"]) and
+            # echoed into the same reasoning-step Tier C/telemetry already
+            # logs below, so it's visible for review/triage without being
+            # a routing input.
             discovery_contract_mismatch = skeleton.get("discovery_contract_mismatch")
             series_confidence["discovery_contract_mismatch"] = discovery_contract_mismatch
             agentic_hooks.record_reasoning_step(
@@ -1696,7 +1736,41 @@ class SeriesIntelligenceAgent:
                         "tier_c_confidence": tier_c_score["tier_c_confidence"],
                     }
 
-                if overall_grade in ("low", "zero"):
+                # Provider-only-low exemption (2026-09-03 fix, same live
+                # Jonathan Hunt/Goodreads incident as the confidence-
+                # computation reorder above): a candidate that cleared
+                # belongs_to_series via targeted_with_number (tagged
+                # "targeted" or "missing_volume_recovery" -- a deliberate,
+                # number-specific search, not a generic textual title
+                # match) can land here as overall="low" for a reason that
+                # has nothing to do with whether it's really the right
+                # book. _overall_confidence treats a single "low" dimension
+                # exactly like a genuine content red flag ("zero"), but the
+                # ONLY dimension a lone web_search/canonical-page hit for a
+                # specific missing number can ever grade "low" on by itself
+                # is provider_confidence -- a source-trust signal, not
+                # evidence of a wrong book. Every *content* dimension
+                # (title/number/series_alignment) staying at or above
+                # "medium" is what distinguishes this from a real cross-
+                # contamination candidate -- a genuine "zero"/"low" on any
+                # of those three still hard-drops below, unconditionally,
+                # exactly as before. Confirmed via a real Check Now run
+                # where canonical-recovery-found volumes whose only
+                # corroborating source graded "low" on provider_confidence
+                # alone were hard-dropped here despite cleanly clearing
+                # belongs_to_series through this exact mechanism.
+                content_dims_ok = confidence_entry is not None and all(
+                    confidence_entry.get(dimension) not in ("low", "zero")
+                    for dimension in ("title_confidence", "number_confidence", "series_alignment_confidence")
+                )
+                provider_only_low = (
+                    targeted_with_number
+                    and overall_grade == "low"
+                    and confidence_entry is not None
+                    and confidence_entry.get("provider_confidence") == "low"
+                    and content_dims_ok
+                )
+                if overall_grade in ("low", "zero") and not provider_only_low:
                     # PB-11 diagnostic (Percy Jackson books 4/5 investigation,
                     # 2026-08-25): prints exactly which dimension(s) caused
                     # the drop and whether a skeleton entry exists at this
