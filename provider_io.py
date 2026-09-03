@@ -775,7 +775,27 @@ def _structure_canonical_page_with_llm(
     return parsed if isinstance(parsed, list) else []
 
 
-CANONICAL_PAGE_TEXT_MAX_CHARS = 2500
+# Revised from 2500 (Guided Discovery iteration 5, item 19: "~2,000-3,000
+# characters, matching WEB_SEARCH_MAX_RESULTS * a typical Serper snippet's
+# size") after a live Jonathan Hunt/Goodreads re-test (2026-09-03, post-
+# canonical-page-observability-logging fix) proved that budget wrong for
+# this specific use case: the log line "canonical page fetch ... extracted
+# 2500 chars of text" followed by "yielded 4 candidate(s)" showed the cap
+# truncating the series' own book list after only its first 4 volumes
+# (roughly 625 extracted chars/book on this page) -- out of 19 total. The
+# iteration-5 rationale (matching the multi-*snippet* pipeline's own total
+# budget) never actually applies here: that budget caps several short,
+# independent snippets so no single one dominates a shared prompt, but a
+# canonical series page is deliberately the OPPOSITE shape on purpose (see
+# iteration 3, item 11's "one URL, one fetch" design and fetch_canonical_
+# page_candidates's own docstring on why one page is expected to describe
+# MANY books) -- capping it at snippet scale directly defeats that intent
+# once a series has more than a handful of volumes. 15000 leaves headroom
+# for a ~20-24 volume series at this page's observed density while keeping
+# the fetch bounded (still one single one-time LLM call per Check Now
+# round, not per-query, so the added token cost is trivial -- see
+# fetch_canonical_page_candidates's own per-call cost in telemetry).
+CANONICAL_PAGE_TEXT_MAX_CHARS = 15000
 
 
 def fetch_canonical_page_text(url: str) -> str | None:
@@ -795,11 +815,12 @@ def fetch_canonical_page_text(url: str) -> str | None:
     (fetch_canonical_page_candidates) falls back to "no canonical
     candidates this round" rather than ever sinking discovery.
 
-    The extracted text is capped at CANONICAL_PAGE_TEXT_MAX_CHARS
-    (~2,000-3,000 characters, matching WEB_SEARCH_MAX_RESULTS * a typical
-    Serper snippet's size -- see the Guided Discovery iteration 5 review)
-    so this one page can't dominate or unbalance a structuring prompt
-    otherwise built from several much shorter snippets.
+    The extracted text is capped at CANONICAL_PAGE_TEXT_MAX_CHARS -- see
+    that constant's own docstring for the current value and the 2026-09-03
+    revision (up from the original iteration-5 snippet-scale budget, after
+    a live test proved it too small to cover a full ~19-volume series'
+    listing) so a long series' book list isn't truncated before every
+    volume on the page has a chance to be described.
     """
     cleaned_url = str(url or "").strip()
     if not cleaned_url:
