@@ -851,6 +851,34 @@ def normalize_series_name_for_query(series_name: str | None) -> str:
     return stripped or name
 
 
+def _given_names_are_initials_variant(tokens_a: set[str], tokens_b: set[str]) -> bool:
+    """True if the shorter side's given-name token(s) plausibly abbreviate
+    the longer side's (e.g. {"g", "j"} vs {"georgia"} -- same leading
+    letter, covering a byline abbreviated to initials on one side, like
+    Goodreads' "G.J. Wagner" against this app's stored "Georgia Wagner").
+
+    Deliberately a near-duplicate of confidence_engine._given_names_are_
+    initials_variant (same author-identity problem, same tolerance rule)
+    rather than a shared import: confidence_engine imports discovery_
+    engine, which re-exports this module's own _author_matches below, so
+    importing confidence_engine from here would be circular. See that
+    function's own docstring for the full rationale, including the
+    subset-relationship branch (a plain extra middle initial, e.g. "James
+    A. Hunter" vs "James Hunter", isn't an abbreviation at all -- it's one
+    side being a strict superset of the other).
+    """
+    if not tokens_a or not tokens_b:
+        return True
+    if tokens_a <= tokens_b or tokens_b <= tokens_a:
+        return True
+    joined_a = "".join(sorted(tokens_a))
+    joined_b = "".join(sorted(tokens_b))
+    shorter, longer = (joined_a, joined_b) if len(joined_a) <= len(joined_b) else (joined_b, joined_a)
+    if not shorter or len(shorter) > 6:
+        return False
+    return longer.startswith(shorter[0]) or longer.startswith(shorter)
+
+
 def _author_matches(candidate_authors: list[str], target_author: str) -> bool:
     target_names = split_author_names(target_author) or [target_author]
     for target_name in target_names:
@@ -860,6 +888,28 @@ def _author_matches(candidate_authors: list[str], target_author: str) -> bool:
         for candidate in candidate_authors:
             candidate_norm = normalize_text(candidate)
             if all(token in candidate_norm for token in target_tokens):
+                return True
+            # Initials-tolerant fallback (2026-09-03 fix, live Jonathan
+            # Hunt/Goodreads production incident): the strict substring
+            # check above requires every target token to appear verbatim,
+            # so a byline abbreviated to initials on one side (Goodreads
+            # listed this series' author as "G.J. Wagner"; the series row
+            # here stores the fuller "Georgia Wagner; Scott Cook") never
+            # matches even though it's clearly the same author -- every one
+            # of a canonical page's candidates was rejected right here,
+            # inside _filter_and_merge's very first gate, before confidence
+            # scoring (or even belongs_to_series) ever got a chance to run,
+            # silently producing "Candidates found: 0". Surname (the last
+            # token) must still match exactly; only the given-name portion
+            # gets the same initials-variant tolerance confidence_engine's
+            # own series_alignment dimension already grants for the
+            # identical author-identity problem.
+            candidate_tokens = [token for token in candidate_norm.split() if token]
+            if not candidate_tokens:
+                continue
+            if candidate_tokens[-1] != target_tokens[-1]:
+                continue
+            if _given_names_are_initials_variant(set(candidate_tokens[:-1]), set(target_tokens[:-1])):
                 return True
     return False
 

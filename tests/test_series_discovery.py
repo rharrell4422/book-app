@@ -1400,6 +1400,72 @@ class FilterAndMergeConfidenceTagTest(unittest.TestCase):
         self.assertEqual(by_title["Book B"], "author_fallback")
 
 
+class AuthorMatchesInitialsVariantTest(unittest.TestCase):
+    """Regression (live bug, Jonathan Hunt/Goodreads, 2026-09-03):
+    _author_matches used a strict substring check requiring every one of
+    the target author's tokens to appear verbatim in a candidate's author
+    string. Goodreads listed this series' real author as "G.J. Wagner"
+    while the series row here stores the fuller "Georgia Wagner; Scott
+    Cook" -- "georgia" never appears verbatim in "g j wagner", so EVERY one
+    of a canonical page's 18 candidates was rejected inside _filter_and_
+    merge's very first gate, before confidence scoring or belongs_to_series
+    ever got a chance to run, producing "Candidates found: 0" and "no new
+    books found" despite discovery correctly finding the whole series.
+    Fixed by adding a surname-must-match / given-name-initials-tolerant
+    fallback, mirroring confidence_engine._given_names_are_initials_
+    variant's already-proven tolerance for the identical author-identity
+    problem on the series_alignment confidence dimension.
+    """
+
+    def test_initials_byline_matches_the_fuller_stored_name(self):
+        self.assertTrue(discovery_engine._author_matches(["G.J. Wagner"], "Georgia Wagner; Scott Cook"))
+
+    def test_full_name_still_matches_itself(self):
+        self.assertTrue(discovery_engine._author_matches(["Georgia Wagner"], "Georgia Wagner; Scott Cook"))
+
+    def test_unrelated_author_still_rejected(self):
+        self.assertFalse(discovery_engine._author_matches(["Some Other Author"], "Georgia Wagner; Scott Cook"))
+
+    def test_initials_with_a_different_surname_still_rejected(self):
+        # Confirms the tolerance is scoped to the given-name portion only --
+        # a matching initial letter alone, without the same surname, must
+        # never be treated as a match.
+        self.assertFalse(discovery_engine._author_matches(["G.J. Smith"], "Georgia Wagner; Scott Cook"))
+
+    def test_pre_existing_middle_initial_superset_case_still_matches(self):
+        # Dungeon Duel incident (2026-09-02, confidence_engine's own
+        # docstring) -- an extra middle initial on one side is a superset,
+        # not an abbreviation, but the subset-relationship branch already
+        # handles it; confirms this fix didn't regress that case.
+        self.assertTrue(discovery_engine._author_matches(["James A. Hunter"], "James Hunter"))
+
+    def test_canonical_page_candidates_survive_filter_and_merge_with_initials_byline(self):
+        # End-to-end through the real gate this bug lived in, not just the
+        # helper function -- mirrors the actual production shape (an
+        # _unified_candidate_to_raw_dict-style raw dict for a canonical-page
+        # find, author byline abbreviated to initials).
+        raw = {
+            "source": "canonical_page",
+            "source_id": "cp-9",
+            "title": "The Terror Plot",
+            "authors": ["G.J. Wagner"],
+            "published_date": None,
+            "isbn13": None,
+            "source_url": None,
+            "language": "",
+            "series_number_hint": 9,
+        }
+        merged = discovery_engine._filter_and_merge(
+            [raw],
+            "Georgia Wagner; Scott Cook",
+            set(),
+            confidence="missing_volume_recovery",
+            series_name="Jonathan Hunt Thriller",
+        )
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["title"], "The Terror Plot")
+
+
 class DiscoverCandidatesForAuthorTest(unittest.TestCase):
     """Tests discovery_engine.discover_candidates_for_author -- the lighter,
     non-series-scoped sibling used by "More by this author". Network calls
