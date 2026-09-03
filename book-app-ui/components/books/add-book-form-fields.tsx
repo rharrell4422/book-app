@@ -26,7 +26,28 @@ export type AddBookFormState = {
   publicationDate: string;
   readDate: string;
   autoSummary: string;
+  // Guided Discovery (locked 2026-09-03, iterations 1-5): optional, only
+  // ever sent to POST /series/ the moment a genuinely NEW series is being
+  // created here (see use-add-book-form.ts's handleAddBook) -- an
+  // existing/matched series never re-sends these, matching the locked
+  // "applies only to newly created series" retroactive-gating decision.
+  canonicalUrl: string;
+  canonicalSource: CanonicalSource | "";
+  verifiedVolumeCount: string;
 };
+
+// Mirrors schemas.CanonicalSource on the backend.
+export type CanonicalSource = "KU" | "Nook" | "Kobo" | "GooglePlay" | "PublisherSite" | "Goodreads" | "Other";
+
+export const CANONICAL_SOURCE_OPTIONS: { value: CanonicalSource; label: string }[] = [
+  { value: "KU", label: "Amazon / Kindle Unlimited" },
+  { value: "Nook", label: "Barnes & Noble / Nook" },
+  { value: "Kobo", label: "Kobo" },
+  { value: "GooglePlay", label: "Google Play Books" },
+  { value: "PublisherSite", label: "Publisher site" },
+  { value: "Goodreads", label: "Goodreads" },
+  { value: "Other", label: "Other" },
+];
 
 // Add Book defaults to "series" since entering book #1 of a new series is
 // at least as common a starting point as adding a standalone book, and
@@ -44,6 +65,9 @@ export const EMPTY_ADD_BOOK_FORM: AddBookFormState = {
   publicationDate: "",
   readDate: "",
   autoSummary: "",
+  canonicalUrl: "",
+  canonicalSource: "",
+  verifiedVolumeCount: "",
 };
 
 export type LookupResultState = {
@@ -344,6 +368,55 @@ export function AddBookFormFields({
                 placeholder="e.g. 1"
               />
             </div>
+
+            {seriesLocked ? null : (
+              <div className="space-y-2 rounded-md border bg-muted/30 px-3 py-2 sm:col-span-2">
+                <p className="text-xs font-medium text-foreground">
+                  Guided Discovery (optional -- only used if this is a brand new series)
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  If you know the exact page you source this series from and how many books
+                  currently exist there, adding it here helps discovery find every volume.
+                  Ignored if this series already exists.
+                </p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="space-y-1 sm:col-span-2">
+                    <Label htmlFor={`${fieldIdPrefix}-canonical-url`}>Source URL</Label>
+                    <Input
+                      id={`${fieldIdPrefix}-canonical-url`}
+                      value={form.canonicalUrl}
+                      onChange={(event) => onFieldChange("canonicalUrl", event.target.value)}
+                      placeholder="https://..."
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor={`${fieldIdPrefix}-canonical-source`}>Source</Label>
+                    <select
+                      id={`${fieldIdPrefix}-canonical-source`}
+                      value={form.canonicalSource}
+                      onChange={(event) => onFieldChange("canonicalSource", event.target.value as CanonicalSource | "")}
+                      className="h-9 w-full rounded-md border bg-background px-2 text-sm"
+                    >
+                      <option value="">Select...</option>
+                      {CANONICAL_SOURCE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor={`${fieldIdPrefix}-verified-count`}>Verified volume count</Label>
+                    <Input
+                      id={`${fieldIdPrefix}-verified-count`}
+                      value={form.verifiedVolumeCount}
+                      onChange={(event) => onFieldChange("verifiedVolumeCount", event.target.value)}
+                      placeholder="e.g. 12"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
           </>
         ) : null}
 

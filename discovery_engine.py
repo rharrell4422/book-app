@@ -152,6 +152,7 @@ from provider_io import (
     _catalog_sufficiency_gate_enabled,
     _fetch_serper_web_search,
     _structure_web_results_with_llm,
+    fetch_canonical_page_candidates,
     generate_series_overview,
     _refine_undated_web_search_results_batch,
     _structure_with_verdict_cache,
@@ -237,6 +238,9 @@ def _reconstruct_series_skeleton(
     cache: "DiscoveryCache | None" = None,
     enable_missing_volume_lookahead: bool = True,
     retail_search_budget: "ApifyCallBudget | None" = None,
+    canonical_url: str | None = None,
+    canonical_source: str | None = None,
+    verified_volume_count: int | None = None,
 ) -> dict:
     """Infers how many volumes a series is expected to have -- the highest
     integer book number seen anywhere, across owned_books' book_number,
@@ -310,7 +314,8 @@ def _reconstruct_series_skeleton(
     actor's shared budget threaded through the targeted/fallback passes.
 
     Returns {"candidates": [...], "expected_total": int | None,
-    "missing_numbers": [...], "recovered_numbers": [...]}. "candidates" is
+    "missing_numbers": [...], "recovered_numbers": [...],
+    "discovery_contract_mismatch": dict | None}. "candidates" is
     unified_candidates with any newly-recovered volumes fused in; when
     there's nothing missing, no resolvable series_name/author, no resolvable
     expected total at all, web search isn't configured
@@ -318,10 +323,53 @@ def _reconstruct_series_skeleton(
     is False, it's returned unchanged (retail_search_budget included --
     without a confirmed lookahead attempt there's no "still missing after
     the lookahead" signal to act on; see _attempt_retail_search_recovery).
+
+    canonical_url/canonical_source/verified_volume_count (Guided Discovery,
+    locked 2026-09-03, iterations 1-5): all three optional and default to
+    None, which reproduces pre-Guided-Discovery behavior exactly -- same
+    convention as every other optional param on this call chain.
+
+    - canonical_url/canonical_source, when present, are handed to
+      _attempt_canonical_source_recovery UNCONDITIONALLY, before
+      known_numbers is even computed -- unlike retail_search_budget's
+      recovery (a last-resort gap-filler gated on a confirmed post-
+      lookahead gap), the user's canonical URL is a first-class input, not
+      a fallback, so it runs every call regardless of whether a gap
+      exists yet, and its hits are folded into `unified_candidates` before
+      anything else below reads it.
+
+    - verified_volume_count, when present, becomes a FLOOR on
+      expected_total -- it can only ever widen the 1..N gap range this
+      function searches (catching a gap past the highest number any
+      provider has actually found, including from a cold start with zero
+      owned/found numbers at all), never narrow it, and never suppresses
+      an already-discovered candidate whose own number exceeds it (see
+      the Guided Discovery iteration 3 review: "authoritative for
+      expected coverage, not for candidate suppression"). Also becomes
+      the comparison baseline for discovery_contract_mismatch, a separate
+      diagnostic dict describing how the FINAL discovered count (owned +
+      every candidate this call ends up returning) compares to it --
+      {"expected_volume_count": int, "discovered_volume_count": int,
+      "direction": "under" | "over" | "match"} -- or None when
+      verified_volume_count wasn't supplied. This is a parallel,
+      orthogonal diagnostic, deliberately never folded into
+      provider_failures (see services/series_check_engine.py's own
+      provider_failures/all_providers_failed semantics, which this must
+      never influence): every provider can succeed and this can still be
+      "under" simply because the verified count hasn't been reached yet.
     """
     resolved_series_name = series_name or next((c.series_name for c in unified_candidates if c.series_name), None)
     resolved_author = author or next(
         (candidate_author for c in unified_candidates for candidate_author in c.authors if candidate_author), None
+    )
+
+    unified_candidates = _attempt_canonical_source_recovery(
+        unified_candidates,
+        series_name=resolved_series_name,
+        author=resolved_author,
+        canonical_url=canonical_url,
+        canonical_source=canonical_source,
+        telemetry=telemetry,
     )
 
     known_numbers: set[int] = set()
@@ -340,15 +388,23 @@ def _reconstruct_series_skeleton(
     def _result(missing_numbers: list[int], recovered_numbers: list[int], candidates: list["UnifiedCandidate"]) -> dict:
         return {
             "candidates": candidates,
-            "expected_total": max(known_numbers) if known_numbers else None,
+            "expected_total": _widened_expected_total(known_numbers, verified_volume_count),
             "missing_numbers": missing_numbers,
             "recovered_numbers": recovered_numbers,
+            "discovery_contract_mismatch": _compute_discovery_contract_mismatch(
+                len(known_numbers), verified_volume_count
+            ),
         }
 
-    if not known_numbers:
+    # verified_volume_count (Guided Discovery) is a FLOOR, never a ceiling
+    # -- widens expected_total (and therefore missing_numbers) past
+    # whatever the highest owned/found integer happens to be, including
+    # from a cold start with zero known numbers at all, but never narrows
+    # it. See this function's own docstring for the full rationale.
+    expected_total = _widened_expected_total(known_numbers, verified_volume_count)
+    if expected_total is None:
         return _result([], [], unified_candidates)
 
-    expected_total = max(known_numbers)
     missing_numbers = sorted(set(range(1, expected_total + 1)) - known_numbers)
 
     if (
@@ -441,12 +497,145 @@ def _reconstruct_series_skeleton(
         retail_search_budget=retail_search_budget,
     )
 
+    # Guided Discovery's discovery_contract_mismatch compares verified_
+    # volume_count against the FINAL discovered count -- known_numbers
+    # (owned + everything found before this function's own recovery
+    # passes ran, which already includes canonical-source recovery -- see
+    # the top of this function) plus recovered_numbers (whatever the
+    # web-search lookahead and/or retail-search recovery went on to find).
+    # The two sets are disjoint by construction (recovered_numbers is
+    # always a subset of missing_numbers, which excludes known_numbers),
+    # so a plain sum is exact, no set union needed.
+    final_discovered_count = len(known_numbers) + len(recovered_numbers)
+
     return {
         "candidates": refreshed,
         "expected_total": expected_total,
         "missing_numbers": missing_numbers,
         "recovered_numbers": recovered_numbers,
+        "discovery_contract_mismatch": _compute_discovery_contract_mismatch(
+            final_discovered_count, verified_volume_count
+        ),
     }
+
+
+def _widened_expected_total(known_numbers: set[int], verified_volume_count: int | None) -> int | None:
+    """Guided Discovery (locked 2026-09-03, iterations 1-5): verified_
+    volume_count is a FLOOR on expected_total, never a ceiling -- widens
+    the 1..N gap-detection range past whatever the highest owned/found
+    integer happens to be (including from a cold start with zero known
+    numbers), never narrows it. See _reconstruct_series_skeleton's own
+    docstring for the full rationale.
+    """
+    candidates = [value for value in (max(known_numbers) if known_numbers else None, verified_volume_count) if value is not None]
+    return max(candidates) if candidates else None
+
+
+def _compute_discovery_contract_mismatch(discovered_volume_count: int, verified_volume_count: int | None) -> dict | None:
+    """Guided Discovery (locked 2026-09-03, iterations 1-5): the soft
+    discovery_contract_mismatch diagnostic -- None whenever
+    verified_volume_count wasn't supplied (no contract, no signal; every
+    existing series with no Guided Discovery fields behaves exactly as
+    before). Otherwise always returns a dict, including the "match" case
+    -- deliberately not None-if-match, so a caller can distinguish "no
+    contract exists" from "contract exists and is currently satisfied"
+    without a second flag.
+
+    Orthogonal to provider_failures/all_providers_failed on purpose (see
+    services/series_check_engine.py) -- every provider can succeed and
+    this can still report "under" simply because the verified count
+    hasn't been reached yet; this must never be read as "a data source
+    errored."
+    """
+    if verified_volume_count is None:
+        return None
+    if discovered_volume_count < verified_volume_count:
+        direction = "under"
+    elif discovered_volume_count > verified_volume_count:
+        direction = "over"
+    else:
+        direction = "match"
+    return {
+        "expected_volume_count": verified_volume_count,
+        "discovered_volume_count": discovered_volume_count,
+        "direction": direction,
+    }
+
+
+def _attempt_canonical_source_recovery(
+    unified_candidates: list["UnifiedCandidate"],
+    *,
+    series_name: str | None,
+    author: str | None,
+    canonical_url: str | None,
+    canonical_source: str | None,
+    telemetry: "DiscoveryTelemetry | None",
+) -> list["UnifiedCandidate"]:
+    """Guided Discovery (locked 2026-09-03, iterations 1-5): a user-supplied
+    canonical_url is a first-class discovery input, not a last-resort gap
+    filler like _attempt_retail_search_recovery below -- called
+    unconditionally from the top of _reconstruct_series_skeleton, before
+    known_numbers is even computed, regardless of whether any gap exists
+    yet. Its hits are fused in under the exact same "existing candidates
+    win" priority convention every other supplemental pass in this module
+    already uses (see _attempt_retail_search_recovery's own comment) -- a
+    canonical hit can only backfill/supplement, never override, an
+    already-found candidate.
+
+    canonical_source == "KU" (Amazon/Kindle Unlimited) reuses the existing
+    single-actor Apify product scraper directly on canonical_url --
+    apify_provider.fetch_apify_candidates already supports being handed an
+    explicit URL instead of a query-built search page (see its own
+    docstring), so no new Apify code is needed, just a direct call with
+    the user's URL as the sole amazon_urls entry and a dedicated one-call
+    budget -- never discover_candidates_for_series's own shared per-run
+    apify_budget (that budget belongs to the targeted/fallback passes,
+    which have already fully spent or decided it by the time this
+    function runs) and never retail_search_budget (a different actor
+    entirely).
+
+    Any other canonical_source routes through provider_io.fetch_canonical_
+    page_candidates instead -- a direct httpx fetch of canonical_url,
+    trafilatura-extracted to bounded plain text, then handed to the exact
+    same _structure_web_results_with_llm() prompt/schema every other web-
+    search hit already goes through.
+
+    Fails soft and returns unified_candidates unchanged (never raises) if
+    canonical_url is empty, or the fetch/actor call fails, times out, is
+    blocked, or returns unusable/JS-shell content -- an optional upgrade
+    path, never a hard dependency (Guided Discovery iteration 4/5's locked
+    fail-soft behavior). No job status changes, no new error state.
+    """
+    cleaned_url = str(canonical_url or "").strip()
+    cleaned_author = str(author or "").strip()
+    if not cleaned_url or not cleaned_author:
+        return unified_candidates
+
+    try:
+        if str(canonical_source or "").strip() == "KU":
+            one_call_budget = ApifyCallBudget(max_calls=1)
+            raw_candidates = fetch_apify_candidates("", [cleaned_url], one_call_budget)
+        else:
+            raw_candidates = fetch_canonical_page_candidates(
+                cleaned_url,
+                str(canonical_source or "Other"),
+                series_name,
+                cleaned_author,
+                telemetry=telemetry,
+            )
+    except Exception as exc:  # canonical recovery must never sink an otherwise-good discovery pass
+        _log(f"canonical-source recovery failed for {cleaned_url!r}: {exc}")
+        return unified_candidates
+
+    if not raw_candidates:
+        return unified_candidates
+
+    existing_raw = [_unified_candidate_to_raw_dict(candidate) for candidate in unified_candidates]
+    return _fuse_and_score_candidates(
+        {"hardcover": existing_raw, "google": [], "openlibrary": [], "web": raw_candidates},
+        cleaned_author,
+        series_name,
+    )
 
 
 def _attempt_retail_search_recovery(

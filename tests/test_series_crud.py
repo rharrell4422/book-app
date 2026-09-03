@@ -185,5 +185,101 @@ class JonathanHuntDuplicateSeriesIncidentTest(unittest.TestCase):
         self.assertNotEqual(other_profile.id, first.id)
 
 
+class GuidedDiscoverySeriesFieldsTest(unittest.TestCase):
+    """Guided Discovery (locked 2026-09-03, iterations 1-5): create_series
+    persists canonical_url/canonical_source/verified_volume_count on a
+    genuinely new series, and backfills them (fill-only-if-empty, same
+    convention as author -- see JonathanHuntDuplicateSeriesIncidentTest
+    above) when a request matches an already-tracked series instead.
+    """
+
+    def setUp(self):
+        self.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(bind=self.engine)
+        self.db = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)()
+
+    def tearDown(self):
+        self.db.close()
+        Base.metadata.drop_all(bind=self.engine)
+        self.engine.dispose()
+
+    def test_new_series_persists_all_three_fields(self):
+        series = crud.create_series(
+            self.db,
+            schemas.SeriesBase(
+                name="Jonathan Hunt Thriller Series",
+                author="Georgia Wagner",
+                canonical_url="https://www.amazon.com/dp/B000TEST",
+                canonical_source="KU",
+                verified_volume_count=12,
+            ),
+            profile_id="robbie",
+        )
+        self.assertEqual(series.canonical_url, "https://www.amazon.com/dp/B000TEST")
+        self.assertEqual(series.canonical_source, "KU")
+        self.assertEqual(series.verified_volume_count, 12)
+
+    def test_omitting_fields_leaves_them_null_existing_series_unaffected(self):
+        # Every series created before Guided Discovery existed (or that
+        # simply never filled these in) must behave identically.
+        series = crud.create_series(
+            self.db, schemas.SeriesBase(name="Some Other Series", author="Some Author"), profile_id="robbie"
+        )
+        self.assertIsNone(series.canonical_url)
+        self.assertIsNone(series.canonical_source)
+        self.assertIsNone(series.verified_volume_count)
+
+    def test_matching_existing_series_backfills_blank_canonical_fields(self):
+        first = crud.create_series(
+            self.db, schemas.SeriesBase(name="Jonathan Hunt Thriller Series", author="Georgia Wagner"), profile_id="robbie"
+        )
+        self.assertIsNone(first.canonical_url)
+
+        reused = crud.create_series(
+            self.db,
+            schemas.SeriesBase(
+                name="Jonathan Hunt Thriller Series",
+                author="Georgia Wagner",
+                canonical_url="https://www.amazon.com/dp/B000TEST",
+                canonical_source="KU",
+                verified_volume_count=12,
+            ),
+            profile_id="robbie",
+        )
+        self.assertEqual(reused.id, first.id)
+        self.assertEqual(reused.canonical_url, "https://www.amazon.com/dp/B000TEST")
+        self.assertEqual(reused.canonical_source, "KU")
+        self.assertEqual(reused.verified_volume_count, 12)
+
+    def test_matching_existing_series_never_clobbers_already_set_canonical_fields(self):
+        first = crud.create_series(
+            self.db,
+            schemas.SeriesBase(
+                name="Jonathan Hunt Thriller Series",
+                author="Georgia Wagner",
+                canonical_url="https://www.amazon.com/dp/ORIGINAL",
+                canonical_source="KU",
+                verified_volume_count=12,
+            ),
+            profile_id="robbie",
+        )
+
+        reused = crud.create_series(
+            self.db,
+            schemas.SeriesBase(
+                name="Jonathan Hunt Thriller Series",
+                author="Georgia Wagner",
+                canonical_url="https://www.amazon.com/dp/DIFFERENT",
+                canonical_source="Goodreads",
+                verified_volume_count=99,
+            ),
+            profile_id="robbie",
+        )
+        self.assertEqual(reused.id, first.id)
+        self.assertEqual(reused.canonical_url, "https://www.amazon.com/dp/ORIGINAL")
+        self.assertEqual(reused.canonical_source, "KU")
+        self.assertEqual(reused.verified_volume_count, 12)
+
+
 if __name__ == "__main__":
     unittest.main()

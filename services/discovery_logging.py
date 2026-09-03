@@ -79,6 +79,20 @@ def log_discovery_summary(*, result: dict, terminal_error: str | None = None) ->
     if result.get("idle_check"):
         _console_log("idle_check=True (short-circuited via catalog-only pre-check -- see architecture spec #7.2/#7.3, rounds_run=0)")
     _console_log(f"all_providers_failed={bool(result.get('all_providers_failed'))} provider_failures={len(provider_failures)}")
+    # Guided Discovery (locked 2026-09-03, iterations 1-5): deliberately
+    # printed as its own line, clearly labeled "contract vs. discovery" --
+    # never folded into the provider_failures line above. None means this
+    # series has no verified_volume_count set (no contract exists yet),
+    # not that the contract is satisfied -- see discovery_engine.
+    # _compute_discovery_contract_mismatch's own docstring.
+    contract_mismatch = result.get("discovery_contract_mismatch")
+    if contract_mismatch:
+        _console_log(
+            "discovery_contract_mismatch (contract vs. discovery, NOT a provider error): "
+            f"expected={contract_mismatch.get('expected_volume_count')} "
+            f"discovered={contract_mismatch.get('discovered_volume_count')} "
+            f"direction={contract_mismatch.get('direction')}"
+        )
     _console_log(
         "asin_discovery: "
         f"discovered={int(asin_discovery.get('discovered') or 0)} "

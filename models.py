@@ -96,6 +96,25 @@ class Series(Base):
     books_in_series = Column(JSON, nullable=True)  # list of book IDs
     series_status = Column(String, default="unknown")  # ongoing, completed, unknown
 
+    # Guided Discovery (architecture locked 2026-09-03, iterations 1-5):
+    # optional, user-supplied authoritative metadata for a series -- the
+    # URL the user actually sources this series from (e.g. its Kindle
+    # Unlimited catalog page), which storefront it is, and how many
+    # volumes the user has personally verified exist there. All three are
+    # nullable/optional at the DB and schema level (never enforced as a
+    # hard gate on discovery -- see discovery_engine._reconstruct_series_
+    # skeleton's own docstring) so every existing series with none of
+    # these set keeps behaving exactly as before; they only ever
+    # ADDITIVELY widen gap-detection coverage and surface a soft mismatch
+    # signal when present (see discovery_contract_mismatch there), never
+    # suppress a genuinely-discovered candidate. canonical_source is a
+    # free-form string, not a DB-level enum, validated instead at the
+    # Pydantic layer (schemas.SeriesBase) so adding a new source later
+    # never needs a migration.
+    canonical_url = Column(String, nullable=True)
+    canonical_source = Column(String, nullable=True)  # KU, Nook, Kobo, GooglePlay, PublisherSite, Goodreads, Other
+    verified_volume_count = Column(Integer, nullable=True)
+
     # Intelligence
     next_unread_book_number = Column(Float, nullable=True)
     next_upcoming_book_number = Column(Float, nullable=True)

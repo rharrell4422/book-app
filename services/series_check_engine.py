@@ -382,6 +382,7 @@ def run_series_check_job_full(series_id: int) -> None:
                         "status": "no_hits",
                         "provider_failures": [],
                         "all_providers_failed": False,
+                        "discovery_contract_mismatch": None,
                     }
 
         # Step 8, section 9.1: Mechanism B's budget check runs ONCE per
@@ -441,6 +442,7 @@ def run_series_check_job_full(series_id: int) -> None:
                     "status": "no_hits",
                     "provider_failures": [],
                     "all_providers_failed": False,
+                    "discovery_contract_mismatch": None,
                     "timed_out": True,
                     # The discovery thread itself is NOT stopped by
                     # cancel_futures=True below (Python can't preempt an
@@ -1185,6 +1187,7 @@ def run_series_check_job_full(series_id: int) -> None:
             "validated_candidates": [],
             "provider_failures": [],
             "all_providers_failed": True,
+            "discovery_contract_mismatch": None,
             "asin_discovery": {
                 "discovered": 0,
                 "processed": 0,

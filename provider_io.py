@@ -22,6 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
+import trafilatura
 from dotenv import load_dotenv
 
 from apify_provider import ApifyCallBudget, apify_enabled, fetch_apify_candidates
@@ -689,6 +690,118 @@ def _structure_web_results_with_llm(
         )
         return []
     return parsed if isinstance(parsed, list) else []
+
+
+CANONICAL_PAGE_TEXT_MAX_CHARS = 2500
+
+
+def fetch_canonical_page_text(url: str) -> str | None:
+    """Guided Discovery (locked 2026-09-03, iterations 3-5): best-effort
+    direct fetch of a user-supplied canonical series URL, extracted to
+    bounded, readable plain text via trafilatura.
+
+    Deliberately narrow and best-effort: a plain httpx GET using this
+    module's existing REQUEST_HEADERS (the same honest, non-browser
+    User-Agent every other fetch here already uses) has no chance against
+    a JS-rendered SPA (e.g. Kobo/Google Play Books) and may be blocked
+    outright by some retail sites -- exactly the situation Amazon already
+    needed a dedicated Apify actor for (see apify_provider.py). This is an
+    optional upgrade path, never a hard dependency: returns None (never
+    raises) on any failure -- non-200, timeout, connection error, or
+    trafilatura finding no extractable main content -- so the only caller
+    (fetch_canonical_page_candidates) falls back to "no canonical
+    candidates this round" rather than ever sinking discovery.
+
+    The extracted text is capped at CANONICAL_PAGE_TEXT_MAX_CHARS
+    (~2,000-3,000 characters, matching WEB_SEARCH_MAX_RESULTS * a typical
+    Serper snippet's size -- see the Guided Discovery iteration 5 review)
+    so this one page can't dominate or unbalance a structuring prompt
+    otherwise built from several much shorter snippets.
+    """
+    cleaned_url = str(url or "").strip()
+    if not cleaned_url:
+        return None
+
+    try:
+        response = httpx.get(
+            cleaned_url, headers=REQUEST_HEADERS, timeout=WEB_SEARCH_TIMEOUT_SECONDS, follow_redirects=True
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        _log(f"canonical page fetch failed for {cleaned_url!r}: {exc}")
+        return None
+
+    html = response.text
+    if not html:
+        return None
+
+    try:
+        extracted = trafilatura.extract(html, url=cleaned_url)
+    except Exception as exc:
+        _log(f"canonical page extraction failed for {cleaned_url!r}: {exc}")
+        return None
+
+    cleaned_text = str(extracted or "").strip()
+    if not cleaned_text:
+        return None
+    return cleaned_text[:CANONICAL_PAGE_TEXT_MAX_CHARS]
+
+
+def fetch_canonical_page_candidates(
+    url: str,
+    canonical_source: str,
+    series_name: str | None,
+    author: str,
+    *,
+    telemetry: "DiscoveryTelemetry | None" = None,
+) -> list[dict]:
+    """Guided Discovery (locked 2026-09-03, iterations 1-5): structures a
+    fetched canonical page's content into candidate dicts, reusing the
+    EXACT SAME _structure_web_results_with_llm() prompt/schema every
+    ordinary Serper snippet already goes through (Iteration 3/5's own
+    "reuse the current structuring pattern" requirement) -- the fetched
+    page's cleaned text is simply dressed up as a single one-item raw
+    web-search result whose "description" is a bounded block of real page
+    text instead of a one-line snippet.
+
+    Deliberately does NOT route through _structure_with_verdict_cache/
+    _structure_and_pair_web_search_hits the way _fetch_web_search's normal
+    queries do -- that pairing keys its output by source URL (see
+    fresh_by_url there), which assumes at most ONE structured candidate
+    per source URL. That assumption is wrong here on purpose: a canonical
+    series page is expected to describe MANY books under one single URL
+    (that's the entire point -- see the Guided Discovery design chat), so
+    every structured item the LLM returns for this one page must survive,
+    not just the last one. Every item is instead paired directly with the
+    same single source dict below and run through
+    _parse_web_search_structured_items exactly as _fetch_web_search's own
+    pass_label="missing_volume" lookahead already does downstream of its
+    own _fetch_web_search call.
+
+    Returns [] (never raises) whenever the page fetch/extraction fails,
+    ANTHROPIC_API_KEY isn't configured, or the LLM structures zero real
+    book entries out of the page -- callers fall back to "no canonical
+    candidates this round", never a hard failure.
+    """
+    page_text = fetch_canonical_page_text(url)
+    if not page_text:
+        return []
+
+    raw_result = {
+        "title": f"Canonical {canonical_source or 'source'} page",
+        "description": page_text,
+        "url": str(url or "").strip(),
+    }
+    try:
+        parsed = _structure_web_results_with_llm(series_name, author, [raw_result], telemetry=telemetry)
+    except Exception as exc:  # a structuring failure here must never sink discovery
+        _log(f"canonical page structuring failed for {url!r}: {exc}")
+        return []
+    if not parsed:
+        return []
+
+    structured_with_source = [(item, raw_result) for item in parsed if isinstance(item, dict)]
+    return _parse_web_search_structured_items(structured_with_source, author)
 
 
 _SERIES_OVERVIEW_PROMPT = """You are writing a short, spoiler-light overview of a book series for a reader deciding whether to start it.

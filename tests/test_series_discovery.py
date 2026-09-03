@@ -7297,5 +7297,323 @@ class RetailSearchRecoveryTest(unittest.TestCase):
         self.assertEqual(result["recovered_numbers"], [])
 
 
+class GuidedDiscoveryContractMismatchTest(unittest.TestCase):
+    """Unit coverage for discovery_engine._compute_discovery_contract_mismatch
+    and _widened_expected_total -- the two pure helpers Guided Discovery
+    (locked 2026-09-03, iterations 1-5) adds to _reconstruct_series_skeleton.
+    """
+
+    def test_mismatch_is_none_when_no_verified_count(self):
+        self.assertIsNone(discovery_engine._compute_discovery_contract_mismatch(5, None))
+
+    def test_mismatch_direction_under(self):
+        result = discovery_engine._compute_discovery_contract_mismatch(5, 7)
+        self.assertEqual(result, {"expected_volume_count": 7, "discovered_volume_count": 5, "direction": "under"})
+
+    def test_mismatch_direction_over(self):
+        # Never suppressed -- a discovered count past the verified count is
+        # still reported (as "over"), never clamped/dropped -- see the
+        # Guided Discovery iteration 3 review's "no suppression" rule.
+        result = discovery_engine._compute_discovery_contract_mismatch(8, 7)
+        self.assertEqual(result, {"expected_volume_count": 7, "discovered_volume_count": 8, "direction": "over"})
+
+    def test_mismatch_direction_match_is_not_none(self):
+        # Deliberately a real dict, not None -- lets a caller distinguish
+        # "no contract exists" (None) from "contract exists and is
+        # currently satisfied" ({"direction": "match"}).
+        result = discovery_engine._compute_discovery_contract_mismatch(7, 7)
+        self.assertEqual(result["direction"], "match")
+
+    def test_widened_expected_total_is_a_floor_not_a_ceiling(self):
+        # verified_volume_count below the highest known number changes
+        # nothing -- known numbers always win when they're already ahead.
+        self.assertEqual(discovery_engine._widened_expected_total({1, 2, 9}, 5), 9)
+        # verified_volume_count above the highest known number widens it.
+        self.assertEqual(discovery_engine._widened_expected_total({1, 2}, 5), 5)
+        # Cold start (zero known numbers) -- verified_volume_count alone
+        # still produces a real expected_total instead of None.
+        self.assertEqual(discovery_engine._widened_expected_total(set(), 5), 5)
+        # Both empty/None -- matches pre-Guided-Discovery "nothing to infer" behavior.
+        self.assertIsNone(discovery_engine._widened_expected_total(set(), None))
+
+
+class CanonicalSourceRecoveryTest(unittest.TestCase):
+    """Unit coverage for discovery_engine._attempt_canonical_source_recovery
+    -- the unconditional, first-class (not gap-gated) Guided Discovery
+    recovery pass at the top of _reconstruct_series_skeleton.
+    """
+
+    def _unified(self, number: float) -> "discovery_engine.UnifiedCandidate":
+        return discovery_engine.UnifiedCandidate(
+            title=f"Book {int(number)}", authors=["Some Author"], series_number=number, confidence_score=1.0
+        )
+
+    def test_noop_when_no_canonical_url(self):
+        candidates = [self._unified(1)]
+        with patch.object(discovery_engine, "fetch_apify_candidates") as mock_apify, patch.object(
+            discovery_engine, "fetch_canonical_page_candidates"
+        ) as mock_page:
+            refreshed = discovery_engine._attempt_canonical_source_recovery(
+                candidates,
+                series_name="Some Series",
+                author="Some Author",
+                canonical_url=None,
+                canonical_source="KU",
+                telemetry=None,
+            )
+        mock_apify.assert_not_called()
+        mock_page.assert_not_called()
+        self.assertEqual(refreshed, candidates)
+
+    def test_noop_when_no_author(self):
+        # Mirrors _reconstruct_series_skeleton's own "no resolvable author"
+        # guard on its lookahead pass -- _fuse_and_score_candidates isn't
+        # safe to call without one.
+        candidates = [self._unified(1)]
+        with patch.object(discovery_engine, "fetch_apify_candidates") as mock_apify:
+            refreshed = discovery_engine._attempt_canonical_source_recovery(
+                candidates,
+                series_name="Some Series",
+                author=None,
+                canonical_url="https://www.amazon.com/dp/B000TEST",
+                canonical_source="KU",
+                telemetry=None,
+            )
+        mock_apify.assert_not_called()
+        self.assertEqual(refreshed, candidates)
+
+    def test_ku_source_calls_apify_directly_with_canonical_url(self):
+        candidates = [self._unified(1)]
+        with patch.object(discovery_engine, "fetch_apify_candidates", return_value=[]) as mock_apify, patch.object(
+            discovery_engine, "fetch_canonical_page_candidates"
+        ) as mock_page:
+            discovery_engine._attempt_canonical_source_recovery(
+                candidates,
+                series_name="Some Series",
+                author="Some Author",
+                canonical_url="https://www.amazon.com/dp/B000TEST",
+                canonical_source="KU",
+                telemetry=None,
+            )
+        mock_page.assert_not_called()
+        mock_apify.assert_called_once()
+        query_arg, amazon_urls_arg, budget_arg = mock_apify.call_args.args
+        self.assertEqual(amazon_urls_arg, ["https://www.amazon.com/dp/B000TEST"])
+        self.assertIsInstance(budget_arg, discovery_engine.ApifyCallBudget)
+
+    def test_non_ku_source_routes_through_canonical_page_candidates(self):
+        candidates = [self._unified(1)]
+        with patch.object(discovery_engine, "fetch_apify_candidates") as mock_apify, patch.object(
+            discovery_engine, "fetch_canonical_page_candidates", return_value=[]
+        ) as mock_page:
+            discovery_engine._attempt_canonical_source_recovery(
+                candidates,
+                series_name="Some Series",
+                author="Some Author",
+                canonical_url="https://www.goodreads.com/series/12345",
+                canonical_source="Goodreads",
+                telemetry=None,
+            )
+        mock_apify.assert_not_called()
+        mock_page.assert_called_once()
+        url_arg, source_arg, series_name_arg, author_arg = mock_page.call_args.args
+        self.assertEqual(url_arg, "https://www.goodreads.com/series/12345")
+        self.assertEqual(source_arg, "Goodreads")
+        self.assertEqual(author_arg, "Some Author")
+
+    def test_fuses_recovered_candidate_into_existing_list(self):
+        candidates = [self._unified(1)]
+        recovered_raw = [
+            {
+                "source": "web_search",
+                "title": "Book 5",
+                "authors": ["Some Author"],
+                "series_number_hint": 5,
+                "source_url": "https://www.goodreads.com/book/5",
+            }
+        ]
+        with patch.object(discovery_engine, "fetch_canonical_page_candidates", return_value=recovered_raw):
+            refreshed = discovery_engine._attempt_canonical_source_recovery(
+                candidates,
+                series_name="Some Series",
+                author="Some Author",
+                canonical_url="https://www.goodreads.com/series/12345",
+                canonical_source="Goodreads",
+                telemetry=None,
+            )
+        self.assertIn("Book 5", [c.title for c in refreshed])
+        # Existing candidate must survive the fuse, not just the new one.
+        self.assertIn("Book 1", [c.title for c in refreshed])
+
+    def test_failure_is_swallowed_and_never_sinks_existing_candidates(self):
+        candidates = [self._unified(1)]
+        with patch.object(discovery_engine, "fetch_apify_candidates", side_effect=RuntimeError("boom")):
+            refreshed = discovery_engine._attempt_canonical_source_recovery(
+                candidates,
+                series_name="Some Series",
+                author="Some Author",
+                canonical_url="https://www.amazon.com/dp/B000TEST",
+                canonical_source="KU",
+                telemetry=None,
+            )
+        self.assertEqual(refreshed, candidates)
+
+
+class ReconstructSeriesSkeletonGuidedDiscoveryTest(unittest.TestCase):
+    """Integration coverage for verified_volume_count/canonical_url/
+    canonical_source/discovery_contract_mismatch threaded into
+    discovery_engine._reconstruct_series_skeleton (Guided Discovery,
+    locked 2026-09-03, iterations 1-5).
+    """
+
+    def _unified(self, number: float) -> "discovery_engine.UnifiedCandidate":
+        return discovery_engine.UnifiedCandidate(
+            title=f"Book {int(number)}", authors=["Some Author"], series_number=number, confidence_score=1.0
+        )
+
+    def test_omitting_new_kwargs_reproduces_prior_behavior(self):
+        # Regression guard, same convention as RetailSearchRecoveryTest's
+        # own equivalent -- every existing caller/test that predates this
+        # feature must see zero change: no discovery_contract_mismatch
+        # signal, no canonical recovery attempt, no widened expected_total.
+        unified_candidates = [self._unified(1), self._unified(2)]
+        with patch.object(discovery_engine, "fetch_apify_candidates") as mock_apify, patch.object(
+            discovery_engine, "fetch_canonical_page_candidates"
+        ) as mock_page:
+            result = discovery_engine._reconstruct_series_skeleton(
+                unified_candidates,
+                [],
+                series_name="Some Series",
+                author="Some Author",
+                enable_missing_volume_lookahead=False,
+            )
+        mock_apify.assert_not_called()
+        mock_page.assert_not_called()
+        self.assertEqual(result["expected_total"], 2)
+        self.assertEqual(result["missing_numbers"], [])
+        self.assertIsNone(result["discovery_contract_mismatch"])
+
+    def test_verified_volume_count_widens_missing_numbers_past_known_max(self):
+        unified_candidates = [self._unified(1), self._unified(2)]
+        result = discovery_engine._reconstruct_series_skeleton(
+            unified_candidates,
+            [],
+            series_name="Some Series",
+            author="Some Author",
+            enable_missing_volume_lookahead=False,
+            verified_volume_count=5,
+        )
+        self.assertEqual(result["expected_total"], 5)
+        self.assertEqual(result["missing_numbers"], [3, 4, 5])
+
+    def test_verified_volume_count_creates_full_skeleton_from_cold_start(self):
+        # Zero owned/found numbers at all -- previously this short-
+        # circuited to expected_total=None/missing_numbers=[]. A verified_
+        # volume_count alone must still produce a real 1..N gap list.
+        result = discovery_engine._reconstruct_series_skeleton(
+            [],
+            [],
+            series_name="Some Series",
+            author="Some Author",
+            enable_missing_volume_lookahead=False,
+            verified_volume_count=3,
+        )
+        self.assertEqual(result["expected_total"], 3)
+        self.assertEqual(result["missing_numbers"], [1, 2, 3])
+
+    def test_verified_volume_count_never_narrows_below_known_max(self):
+        # Known numbers already exceed verified_volume_count -- must never
+        # shrink expected_total/missing_numbers ("floor, not ceiling").
+        unified_candidates = [self._unified(1), self._unified(2), self._unified(9)]
+        result = discovery_engine._reconstruct_series_skeleton(
+            unified_candidates,
+            [],
+            series_name="Some Series",
+            author="Some Author",
+            enable_missing_volume_lookahead=False,
+            verified_volume_count=5,
+        )
+        self.assertEqual(result["expected_total"], 9)
+        self.assertEqual(result["missing_numbers"], [3, 4, 5, 6, 7, 8])
+
+    def test_discovery_contract_mismatch_reflects_final_discovered_count(self):
+        # 1 and 2 owned/found, verified_volume_count=5 -> still missing
+        # 3,4,5 with no lookahead configured -- discovered stays at 2,
+        # which is "under" against the verified count of 5.
+        unified_candidates = [self._unified(1), self._unified(2)]
+        result = discovery_engine._reconstruct_series_skeleton(
+            unified_candidates,
+            [],
+            series_name="Some Series",
+            author="Some Author",
+            enable_missing_volume_lookahead=False,
+            verified_volume_count=5,
+        )
+        self.assertEqual(
+            result["discovery_contract_mismatch"],
+            {"expected_volume_count": 5, "discovered_volume_count": 2, "direction": "under"},
+        )
+
+    def test_discovery_contract_mismatch_accounts_for_recovered_numbers(self):
+        # Same setup, but the lookahead recovers #3 and #4 this round --
+        # discovered_volume_count must include recovered_numbers, not just
+        # the pre-lookahead known_numbers count.
+        unified_candidates = [self._unified(1), self._unified(2)]
+        # Final web_search-provider candidate shape (post-_parse_web_search_
+        # structured_items -- see _attempt_retail_search_recovery's own
+        # retail_hit fixture above for the same convention), NOT the raw
+        # LLM-structuring output shape -- _fetch_web_search's return value
+        # feeds `_fuse_and_score_candidates`'s "web" bucket directly.
+        lookahead_hit_3 = {
+            "source": "web_search",
+            "source_id": "https://example.com/3",
+            "title": "Book 3",
+            "authors": ["Some Author"],
+            "published_date": "2022-01-01",
+            "description": None,
+            "isbn13": None,
+            "source_url": "https://example.com/3",
+            "language": "",
+            "series_number_hint": 3,
+            "upcoming_hint": False,
+            "series_name_hint": "Some Series",
+        }
+        lookahead_hit_4 = {**lookahead_hit_3, "title": "Book 4", "source_url": "https://example.com/4", "series_number_hint": 4}
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+            discovery_engine,
+            "_fetch_web_search",
+            return_value=[lookahead_hit_3, lookahead_hit_4],
+        ):
+            result = discovery_engine._reconstruct_series_skeleton(
+                unified_candidates,
+                [],
+                series_name="Some Series",
+                author="Some Author",
+                verified_volume_count=5,
+            )
+        self.assertEqual(sorted(result["recovered_numbers"]), [3, 4])
+        self.assertEqual(
+            result["discovery_contract_mismatch"],
+            {"expected_volume_count": 5, "discovered_volume_count": 4, "direction": "under"},
+        )
+
+    def test_canonical_url_recovery_runs_unconditionally_even_with_no_gap(self):
+        # No missing numbers at all (1 and 2 both present) -- unlike the
+        # gap-gated retail-search recovery, canonical recovery must still
+        # fire: it's a first-class input, not a last-resort gap filler.
+        unified_candidates = [self._unified(1), self._unified(2)]
+        with patch.object(discovery_engine, "fetch_apify_candidates", return_value=[]) as mock_apify:
+            discovery_engine._reconstruct_series_skeleton(
+                unified_candidates,
+                [],
+                series_name="Some Series",
+                author="Some Author",
+                enable_missing_volume_lookahead=False,
+                canonical_url="https://www.amazon.com/dp/B000TEST",
+                canonical_source="KU",
+            )
+        mock_apify.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

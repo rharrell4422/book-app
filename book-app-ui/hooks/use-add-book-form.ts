@@ -336,12 +336,30 @@ export function useAddBookForm(options?: {
           if (matchedSeries) {
             resolvedSeriesId = Number(matchedSeries.id);
           } else {
+            // Guided Discovery (locked 2026-09-03, iterations 1-5): only
+            // sent here, on the "genuinely creating a new series" branch --
+            // an already-matched series (the `matchedSeries` branch above)
+            // never re-sends these, matching the locked "applies only to
+            // newly created series" retroactive-gating decision. Backend
+            // crud.create_series still backfills them (fill-only-if-empty)
+            // if a race means this "new" attempt actually lands on a series
+            // someone else just created concurrently -- see that function's
+            // own docstring.
+            const verifiedVolumeCountNumber = form.verifiedVolumeCount.trim()
+              ? Number(form.verifiedVolumeCount.trim())
+              : null;
             const createSeriesResponse = await fetchApiWithFallback("/series/", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 name: seriesName,
                 author,
+                canonical_url: form.canonicalUrl.trim() || undefined,
+                canonical_source: form.canonicalSource || undefined,
+                verified_volume_count:
+                  verifiedVolumeCountNumber !== null && Number.isFinite(verifiedVolumeCountNumber) && verifiedVolumeCountNumber > 0
+                    ? verifiedVolumeCountNumber
+                    : undefined,
               }),
             });
 

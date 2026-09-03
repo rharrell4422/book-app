@@ -66,6 +66,12 @@ function formFromBook(book: BookRecord, seriesList: AddBookSeriesOption[]): AddB
     publicationDate: dateField(book.publication_date),
     readDate: dateField(book.read_date),
     autoSummary: String(book.auto_summary || ""),
+    // Guided Discovery fields are Add Book-only (creating a NEW series) --
+    // editing an existing book never creates a series, so these are
+    // always empty here.
+    canonicalUrl: "",
+    canonicalSource: "",
+    verifiedVolumeCount: "",
   };
 }
 

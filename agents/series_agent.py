@@ -650,6 +650,11 @@ def _empty_result(series_id: int | None, series_name: str | None, reason: str) -
         # _needs_review_to_skeleton_updates for the populated case.
         "skeleton_updates": [],
         "probes": [],
+        # Guided Discovery (locked 2026-09-03, iterations 1-5): None here --
+        # every early-exit path in this function stops before a series row
+        # (or its verified_volume_count) is ever consulted, so there is no
+        # contract to evaluate.
+        "discovery_contract_mismatch": None,
         # Series Fingerprint system (see discovery_agentic_fingerprint_
         # recommendation.md): mirrors skeleton_updates' shape/rationale
         # above -- always present so services/series_check_engine.py's
@@ -1077,7 +1082,32 @@ class SeriesIntelligenceAgent:
                 cache=cache,
                 enable_missing_volume_lookahead=enable_missing_volume_lookahead,
                 retail_search_budget=retail_search_budget,
+                # Guided Discovery (locked 2026-09-03, iterations 1-5): all
+                # three read straight off the Series row -- None for every
+                # series created before this feature existed (or that
+                # never filled them in), which reproduces pre-Guided-
+                # Discovery behavior exactly (see that function's own
+                # docstring).
+                canonical_url=series.canonical_url,
+                canonical_source=series.canonical_source,
+                verified_volume_count=series.verified_volume_count,
             )
+            # Guided Discovery: a parallel, orthogonal diagnostic -- None
+            # whenever this series has no verified_volume_count set.
+            # Deliberately NOT folded into provider_failures/
+            # all_providers_failed above (already computed and logged by
+            # this point) -- see discovery_engine._compute_discovery_
+            # contract_mismatch's own docstring for why the two must stay
+            # separate. Surfaced on series_confidence (flagged as a
+            # top-level diagnostic other confidence-consuming code can key
+            # off, without altering compute_confidence's own per-candidate
+            # scoring above -- that call already ran before this point,
+            # using the pre-skeleton candidate set, and reordering it
+            # would be a much larger, riskier change) and echoed into the
+            # same reasoning-step Tier C/telemetry already logs below, so
+            # it's visible for review/triage without being a routing input.
+            discovery_contract_mismatch = skeleton.get("discovery_contract_mismatch")
+            series_confidence["discovery_contract_mismatch"] = discovery_contract_mismatch
             agentic_hooks.record_reasoning_step(
                 agentic_context,
                 {
@@ -1085,6 +1115,7 @@ class SeriesIntelligenceAgent:
                     "decision": "recovered_missing_volumes" if skeleton["recovered_numbers"] else "stop",
                     "missing_numbers": skeleton["missing_numbers"],
                     "recovered_numbers": skeleton["recovered_numbers"],
+                    "discovery_contract_mismatch": discovery_contract_mismatch,
                 },
             )
             if skeleton["recovered_numbers"]:
@@ -2212,6 +2243,17 @@ class SeriesIntelligenceAgent:
                 "candidate": (available_missing[0] if available_missing else (upcoming_books[0] if upcoming_books else None)),
                 "provider_failures": provider_failures,
                 "all_providers_failed": all_providers_failed,
+                # Guided Discovery (locked 2026-09-03, iterations 1-5):
+                # top-level and orthogonal to provider_failures/
+                # all_providers_failed right above -- see discovery_engine.
+                # _compute_discovery_contract_mismatch's own docstring for
+                # why the two must never be conflated. services/series_
+                # check_engine.py reads this the same way it reads
+                # provider_failures, except as a per-round OVERWRITE
+                # (last_result's value wins) rather than an accumulated
+                # list -- a mismatch is a point-in-time comparison, not an
+                # additive failure log.
+                "discovery_contract_mismatch": discovery_contract_mismatch,
                 "asin_discovery": {
                     "discovered": len(candidates),
                     "processed": len(candidates),

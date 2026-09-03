@@ -76,8 +76,23 @@ def create_series(db: Session, series, profile_id: str):
         # differently formatted (e.g. missing a co-author) -- there's no
         # reliable way to tell "more complete" from "just different" here,
         # so the first non-empty value wins and stays.
-        if not str(existing.author or "").strip() and payload.get("author"):
-            existing.author = payload["author"]
+        #
+        # Guided Discovery (locked 2026-09-03, iterations 1-5): the three
+        # canonical fields join this exact same backfill-only convention --
+        # a retry that matched an already-tracked series (e.g. adding book
+        # #2 of a series first created without them) can still supply them
+        # once, filling the gap, but never clobbers a value already set.
+        backfill_only_if_empty = ("author", "canonical_url", "canonical_source", "verified_volume_count")
+        changed = False
+        for field in backfill_only_if_empty:
+            if str(getattr(existing, field, "") or "").strip():
+                continue
+            new_value = payload.get(field)
+            if new_value in (None, ""):
+                continue
+            setattr(existing, field, new_value)
+            changed = True
+        if changed:
             db.commit()
             db.refresh(existing)
         return existing

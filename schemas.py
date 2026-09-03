@@ -201,6 +201,17 @@ class SeriesState(BaseModel):
     has_upcoming_books: bool = False
     is_caught_up: bool = False
 
+# Guided Discovery (locked 2026-09-03, iterations 1-5): validated here at
+# the Pydantic layer rather than as a DB-level enum/CheckConstraint on
+# models.Series.canonical_source (a plain nullable String there) -- adding
+# a new source later is then just adding a literal to this tuple, no
+# migration needed. "KU" (Kindle Unlimited/Amazon) is the one value that
+# routes through the existing Apify actors (see discovery_engine._attempt_
+# canonical_source_recovery); every other value routes through the
+# Serper+LLM canonical-page-fetch path instead.
+CanonicalSource = Literal["KU", "Nook", "Kobo", "GooglePlay", "PublisherSite", "Goodreads", "Other"]
+
+
 class SeriesBase(BaseModel):
     name: str
     author: Optional[str] = None
@@ -227,6 +238,12 @@ class SeriesBase(BaseModel):
     # doesn't have to duplicate the healthy/stale/very_stale thresholds.
     last_checked: Optional[date] = None
     discovery_health: Optional[str] = None
+    # Guided Discovery (locked 2026-09-03, iterations 1-5): all three
+    # optional -- omitting them reproduces pre-Guided-Discovery behavior
+    # exactly (see models.Series's own docstring on these columns).
+    canonical_url: Optional[str] = None
+    canonical_source: Optional[CanonicalSource] = None
+    verified_volume_count: Optional[int] = None
 
 
 class SeriesResponse(SeriesBase):
@@ -285,6 +302,10 @@ class SeriesDetailResponse(BaseModel):
     series_state: SeriesState | None = None
     last_checked: date | None = None
     discovery_health: str | None = None
+    # Guided Discovery (locked 2026-09-03, iterations 1-5): see SeriesBase.
+    canonical_url: str | None = None
+    canonical_source: CanonicalSource | None = None
+    verified_volume_count: int | None = None
 
     created_at: datetime
     updated_at: datetime
