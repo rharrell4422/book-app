@@ -383,22 +383,41 @@ export function AddBookFormFields({
                   <div className="space-y-1 sm:col-span-2">
                     <div className="flex items-center justify-between gap-2">
                       <Label htmlFor={`${fieldIdPrefix}-canonical-url`}>Source URL</Label>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-6 px-2 text-[11px]"
-                        onClick={() => {
-                          // UI-only assist -- opens two search tabs so the user can
-                          // find and manually copy/paste the series' real canonical
-                          // page below. No scraping, no discovery/provider logic.
-                          const { goodreads, google } = getCanonicalPageSearchUrls(form.seriesName, form.author);
-                          window.open(goodreads, "_blank", "noopener,noreferrer");
-                          window.open(google, "_blank", "noopener,noreferrer");
-                        }}
-                      >
-                        Find canonical page
-                      </Button>
+                      {/* Two separate buttons, not one button firing two window.open()
+                          calls -- most browsers (Safari especially, Chrome often too)
+                          only honor the FIRST window.open() in a click handler as a
+                          trusted user gesture and silently block any subsequent one
+                          in that same handler as an unsolicited popup. Each button
+                          here is its own genuine click, so both are always allowed. */}
+                      <div className="flex items-center gap-1">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-2 text-[11px]"
+                          onClick={() => {
+                            // UI-only assist -- opens a search tab so the user can find
+                            // and manually copy/paste the series' real canonical page
+                            // below. No scraping, no discovery/provider logic.
+                            const { goodreads } = getCanonicalPageSearchUrls(form.seriesName, form.author);
+                            window.open(goodreads, "_blank", "noopener,noreferrer");
+                          }}
+                        >
+                          Find on Goodreads
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-2 text-[11px]"
+                          onClick={() => {
+                            const { google } = getCanonicalPageSearchUrls(form.seriesName, form.author);
+                            window.open(google, "_blank", "noopener,noreferrer");
+                          }}
+                        >
+                          Find on Google
+                        </Button>
+                      </div>
                     </div>
                     <Input
                       id={`${fieldIdPrefix}-canonical-url`}
