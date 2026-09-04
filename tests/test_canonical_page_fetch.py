@@ -153,6 +153,33 @@ class FetchCanonicalPageCandidatesTest(unittest.TestCase):
         # Goodreads validation test that caught this).
         self.assertTrue(all(item.get("source") == "canonical_page" for item in result))
 
+    def test_tags_every_candidate_with_the_specific_canonical_source(self):
+        # Author Bibliography Discovery (2026-09-04): every candidate also
+        # carries the specific canonical_source it came from (not just the
+        # generic "canonical_page" source label above) -- this is what lets
+        # agents/series_agent.py's routing block single out "PublisherSite"
+        # (an author's own personal site/blog) for mandatory needs_review,
+        # while every other canonical_source keeps auto-accepting normally.
+        structured_items = [
+            {
+                "title": "Book One",
+                "series_name": "Some Series",
+                "book_number": 1,
+                "author_names": ["Some Author"],
+                "published_date": "2020-01-01",
+                "is_upcoming": False,
+                "isbn13": None,
+            },
+        ]
+        with patch.object(provider_io, "fetch_canonical_page_text", return_value="page text"), patch.object(
+            provider_io, "_structure_canonical_page_with_llm", return_value=structured_items
+        ):
+            result = provider_io.fetch_canonical_page_candidates(
+                "https://authorsite.example.com/books", "PublisherSite", "Some Series", "Some Author"
+            )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["canonical_source"], "PublisherSite")
+
     def test_structuring_failure_is_swallowed(self):
         with patch.object(provider_io, "fetch_canonical_page_text", return_value="page text"), patch.object(
             provider_io, "_structure_canonical_page_with_llm", side_effect=RuntimeError("boom")

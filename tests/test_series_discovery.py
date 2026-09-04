@@ -3596,6 +3596,80 @@ class SeriesCheckIntegrationTest(unittest.TestCase):
         self.assertEqual(result["available_missing"][0]["series_number"], 7)
         self.assertEqual(result["upcoming_books"], [])
 
+    def test_publisher_site_canonical_candidate_always_escalates_to_needs_review(self):
+        # Author Bibliography Discovery (2026-09-04): identical fixture to
+        # test_available_book_is_added_and_classified_available above
+        # (explicit title match + targeted number -- belongs_to_series
+        # would normally pass cleanly and auto-accept), except this
+        # candidate is tagged as having come from the author's own
+        # personal site/blog (canonical_source == "PublisherSite", set by
+        # provider_io.fetch_canonical_page_candidates). That must force
+        # needs_review (a durable series_candidate_notifications row)
+        # instead of auto-adding, since a personal-site announcement is
+        # self-reported, not a vetted catalog listing -- unlike every
+        # other canonical_source (Goodreads, KU, Nook, Kobo, GooglePlay,
+        # Other), which keep the normal auto-accept-on-clean-match
+        # behavior untouched.
+        candidates = [
+            {
+                "source": "canonical_page",
+                "source_id": "https://authorsite.example.com/books",
+                "title": "Cherry Blossom Girls Book 7",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": "https://authorsite.example.com/books",
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 7,
+                "upcoming_hint": False,
+                "canonical_source": "PublisherSite",
+            }
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertFalse(result["found"])
+        self.assertEqual(result["available_missing"], [])
+        self.assertEqual(result["upcoming_books"], [])
+
+        rows = self.db.query(SeriesCandidateNotification).filter(
+            SeriesCandidateNotification.series_id == self.series.id
+        ).all()
+        self.assertEqual(len(rows), 1)
+
+    def test_goodreads_canonical_candidate_still_auto_accepts(self):
+        # Control for the test above: the exact same clean-match fixture,
+        # but canonical_source == "Goodreads" instead of "PublisherSite" --
+        # must keep auto-accepting exactly like a plain non-canonical
+        # "hardcover" hit does, proving the needs_review override is
+        # scoped to PublisherSite specifically, not to canonical_page hits
+        # in general.
+        candidates = [
+            {
+                "source": "canonical_page",
+                "source_id": "https://www.goodreads.com/series/12345",
+                "title": "Cherry Blossom Girls Book 7",
+                "authors": ["Harmon Cooper"],
+                "published_date": "2024-02-20",
+                "isbn13": None,
+                "source_url": "https://www.goodreads.com/series/12345",
+                "language": "",
+                "confidence": "targeted",
+                "series_number_hint": 7,
+                "upcoming_hint": False,
+                "canonical_source": "Goodreads",
+            }
+        ]
+        with self._mock_discovery(candidates):
+            agent = SeriesIntelligenceAgent()
+            result = agent.run_series_check(self.db, self.series.id, emit_summary=False)
+
+        self.assertTrue(result["found"])
+        self.assertEqual(len(result["available_missing"]), 1)
+        self.assertEqual(result["available_missing"][0]["series_number"], 7)
+
     def test_belongs_to_series_gate_is_wrapped_in_a_tier_c_pass_scope(self):
         # HTA Orchestrator Step 4: the belongs_to_series gate (run once
         # per candidate, inside run_series_check's classification loop)

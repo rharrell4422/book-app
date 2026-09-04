@@ -1472,6 +1472,25 @@ class SeriesIntelligenceAgent:
                 # either -- see confidence_engine._overall_confidence).
                 low_confidence_ambiguous = not belongs_to_series
 
+                # Author Bibliography Discovery (2026-09-04): a canonical
+                # page fetched from the author's own personal site/blog
+                # (canonical_source == "PublisherSite" -- see the Guided
+                # Discovery dialog's "Source" dropdown) always escalates to
+                # needs_review below, regardless of how cleanly it just
+                # passed belongs_to_series. Every other canonical_source
+                # (Goodreads, KU, Nook, Kobo, GooglePlay, Other) keeps the
+                # normal auto-accept-on-clean-match behavior -- this is
+                # deliberately narrow to the one source type that's a
+                # self-reported announcement rather than a vetted retailer/
+                # community catalog listing (an author's own blog post
+                # about a "coming this fall" release is real signal worth
+                # surfacing, but its title/date are exactly the kind of
+                # thing a human should confirm before it's silently added
+                # as an owned-library entry). provider_io.fetch_canonical_
+                # page_candidates is the only place that sets this key.
+                if raw.get("canonical_source") == "PublisherSite":
+                    low_confidence_ambiguous = True
+
                 isbn13 = str(raw.get("isbn13") or "").strip()
                 already_known = _is_known_candidate(
                     isbn13=isbn13,

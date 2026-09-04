@@ -130,6 +130,13 @@ export function EditSeriesDiscoveryDialog({
                   </option>
                 ))}
               </select>
+              {canonicalSource === "PublisherSite" ? (
+                <p className="text-[11px] text-muted-foreground">
+                  Good for an author&apos;s personal site/blog, which sometimes announces upcoming books before
+                  Goodreads or Amazon do. Books found here will need your review before being added, since a personal
+                  site&apos;s announcement isn&apos;t a vetted catalog listing.
+                </p>
+              ) : null}
             </div>
             <div className="space-y-1">
               <Label htmlFor="edit-series-verified-count">Verified volume count</Label>

@@ -998,6 +998,22 @@ def fetch_canonical_page_candidates(
 
     structured_with_source = [(item, raw_result) for item in parsed if isinstance(item, dict)]
     results = _parse_web_search_structured_items(structured_with_source, author, source_label="canonical_page")
+    # Author Bibliography Discovery (2026-09-04): tag every candidate with
+    # the specific canonical_source it came from (KU/Nook/Kobo/GooglePlay/
+    # PublisherSite/Goodreads/Other), not just the generic "canonical_page"
+    # source label already set above. Nothing in confidence_engine/
+    # deterministic_fusion reads this key -- it rides along on the dict
+    # unchanged the same way confidence_score/metadata_completeness_score
+    # already do (see _unified_candidate_to_raw_dict) -- but agents/
+    # series_agent.py's routing block reads it to force a "PublisherSite"
+    # candidate (an author's own personal site/blog) to needs_review even
+    # when it otherwise passes belongs_to_series cleanly: unlike Goodreads/
+    # retailer canonical pages, a personal site's own announcement of an
+    # upcoming book is often a tentative/self-reported date, not a vetted
+    # catalog listing.
+    cleaned_canonical_source = str(canonical_source or "").strip() or None
+    for item in results:
+        item["canonical_source"] = cleaned_canonical_source
     _log(f"canonical page for {url!r} yielded {len(results)} candidate(s): {[r['title'] for r in results]}")
     return results
 

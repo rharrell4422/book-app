@@ -197,7 +197,7 @@ export const CANONICAL_SOURCE_OPTIONS: { value: CanonicalSource; label: string }
   { value: "Nook", label: "Barnes & Noble / Nook" },
   { value: "Kobo", label: "Kobo" },
   { value: "GooglePlay", label: "Google Play Books" },
-  { value: "PublisherSite", label: "Publisher site" },
+  { value: "PublisherSite", label: "Publisher / Author site" },
   { value: "Goodreads", label: "Goodreads" },
   { value: "Other", label: "Other" },
 ];
