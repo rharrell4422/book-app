@@ -17,7 +17,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { MobileSeriesList } from "@/components/series/mobile-series-list";
-import { DiscoveryHealthBadge, type DiscoveryHealth } from "@/components/series/discovery-health-badge";
+import { type DiscoveryHealth } from "@/components/series/discovery-health-badge";
 import { useIsMobile } from "@/hooks/use-mobile";
 
 type SeriesRow = {
@@ -1085,9 +1085,6 @@ export default function SeriesPage() {
                 <TableCell className="truncate" title={s.name}>
                   <div className="flex items-center gap-1 truncate">
                     <span className="truncate">{s.name}</span>
-                    {!s.is_finished ? (
-                      <DiscoveryHealthBadge health={s.discovery_health} lastChecked={s.last_checked} />
-                    ) : null}
                     {getSeriesState(s).has_new_available_books ? (
                       <BookOpenIcon className="h-3.5 w-3.5 shrink-0 text-sky-600" aria-label="New available book(s) found" />
                     ) : null}
