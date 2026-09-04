@@ -31,6 +31,10 @@ type SeriesRow = {
   total_books?: number | null;
   books_tracked?: number;
   last_checked?: string | null;
+  // Two-Timestamp UI Adjustments spec (locked 2026-09-04) -- see
+  // models.Series's own comment on these two columns vs. last_checked.
+  last_verified_at?: string | null;
+  last_synced_at?: string | null;
   updated_at?: string | null;
   discovery_health?: DiscoveryHealth | null;
   has_new_available_books?: boolean;
@@ -72,6 +76,8 @@ type SeriesApiRow = {
   total_books?: number | null;
   updated_at?: string | null;
   last_checked?: string | null;
+  last_verified_at?: string | null;
+  last_synced_at?: string | null;
   discovery_health?: DiscoveryHealth | null;
   has_new_available_books?: boolean;
   has_new_upcoming_books?: boolean;
@@ -218,7 +224,11 @@ function compareSeriesByColumn(a: SeriesRow, b: SeriesRow, key: SeriesSortKey, d
               ? Number(a.next_upcoming_book_number ?? 0)
               : key === "total"
                 ? Number(a.total_books ?? 0)
-                : parsedTime(a.last_checked);
+                : key === "lastChecked"
+                  ? parsedTime(a.last_checked)
+                  : key === "lastVerified"
+                    ? parsedTime(a.last_verified_at)
+                    : parsedTime(a.last_synced_at);
 
   const bValue =
     key === "id"
@@ -233,7 +243,11 @@ function compareSeriesByColumn(a: SeriesRow, b: SeriesRow, key: SeriesSortKey, d
               ? Number(b.next_upcoming_book_number ?? 0)
               : key === "total"
                 ? Number(b.total_books ?? 0)
-                : parsedTime(b.last_checked);
+                : key === "lastChecked"
+                  ? parsedTime(b.last_checked)
+                  : key === "lastVerified"
+                    ? parsedTime(b.last_verified_at)
+                    : parsedTime(b.last_synced_at);
 
   if (typeof aValue === "number" && typeof bValue === "number") {
     return direction === "asc" ? aValue - bValue : bValue - aValue;
@@ -365,29 +379,46 @@ function getCheckBannerClassName(tone: CheckBannerTone) {
   return "border-amber-200 bg-amber-50 text-amber-900";
 }
 
-type SeriesSortKey = "id" | "name" | "author" | "nextUnread" | "nextUpcoming" | "total" | "lastChecked";
+type SeriesSortKey = "id" | "name" | "author" | "nextUnread" | "nextUpcoming" | "total" | "lastChecked" | "lastVerified" | "lastSynced";
 type SortDirection = "asc" | "desc";
-type SeriesColumnKey = "id" | "name" | "author" | "nextUnread" | "nextUpcoming" | "total" | "lastChecked" | "actions";
+type SeriesColumnKey = "id" | "name" | "author" | "nextUnread" | "nextUpcoming" | "total" | "lastChecked" | "lastVerified" | "lastSynced" | "actions";
+
+const SERIES_COLUMN_KEYS: SeriesColumnKey[] = [
+  "id",
+  "name",
+  "author",
+  "nextUnread",
+  "nextUpcoming",
+  "total",
+  "lastChecked",
+  "lastVerified",
+  "lastSynced",
+  "actions",
+];
 
 const DEFAULT_SERIES_COLUMN_WIDTHS: Record<SeriesColumnKey, number> = {
-  id: 6,
-  name: 22,
-  author: 18,
-  nextUnread: 10,
-  nextUpcoming: 12,
-  total: 8,
-  lastChecked: 12,
-  actions: 12,
+  id: 5,
+  name: 18,
+  author: 14,
+  nextUnread: 8,
+  nextUpcoming: 9,
+  total: 6,
+  lastChecked: 10,
+  lastVerified: 10,
+  lastSynced: 10,
+  actions: 10,
 };
 
 const MIN_SERIES_COLUMN_WIDTHS: Record<SeriesColumnKey, number> = {
   id: 4,
   name: 12,
   author: 10,
-  nextUnread: 8,
-  nextUpcoming: 8,
+  nextUnread: 6,
+  nextUpcoming: 6,
   total: 6,
   lastChecked: 8,
+  lastVerified: 8,
+  lastSynced: 8,
   actions: 8,
 };
 
@@ -398,20 +429,21 @@ const SERIES_RESIZE_NEIGHBOR: Record<SeriesColumnKey, SeriesColumnKey | null> = 
   nextUnread: "nextUpcoming",
   nextUpcoming: "total",
   total: "lastChecked",
-  lastChecked: "actions",
+  lastChecked: "lastVerified",
+  lastVerified: "lastSynced",
+  lastSynced: "actions",
   actions: null,
 };
 
-const SERIES_TABLE_COLUMN_WIDTHS_STORAGE_KEY = "seriesTableColumnWidthsV1";
+const SERIES_TABLE_COLUMN_WIDTHS_STORAGE_KEY = "seriesTableColumnWidthsV2";
 
 function sanitizeSavedSeriesColumnWidths(value: unknown): Record<SeriesColumnKey, number> | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<Record<SeriesColumnKey, unknown>>;
 
-  const keys: SeriesColumnKey[] = ["id", "name", "author", "nextUnread", "nextUpcoming", "total", "lastChecked", "actions"];
   const next: Partial<Record<SeriesColumnKey, number>> = {};
 
-  for (const key of keys) {
+  for (const key of SERIES_COLUMN_KEYS) {
     const raw = candidate[key];
     if (typeof raw !== "number" || !Number.isFinite(raw)) {
       return null;
@@ -420,19 +452,14 @@ function sanitizeSavedSeriesColumnWidths(value: unknown): Record<SeriesColumnKey
     next[key] = Math.max(minimum, Number(raw));
   }
 
-  const total = keys.reduce((sum, key) => sum + (next[key] ?? 0), 0);
+  const total = SERIES_COLUMN_KEYS.reduce((sum, key) => sum + (next[key] ?? 0), 0);
   if (total <= 0) return null;
 
-  return {
-    id: Number((((next.id ?? DEFAULT_SERIES_COLUMN_WIDTHS.id) / total) * 100).toFixed(2)),
-    name: Number((((next.name ?? DEFAULT_SERIES_COLUMN_WIDTHS.name) / total) * 100).toFixed(2)),
-    author: Number((((next.author ?? DEFAULT_SERIES_COLUMN_WIDTHS.author) / total) * 100).toFixed(2)),
-    nextUnread: Number((((next.nextUnread ?? DEFAULT_SERIES_COLUMN_WIDTHS.nextUnread) / total) * 100).toFixed(2)),
-    nextUpcoming: Number((((next.nextUpcoming ?? DEFAULT_SERIES_COLUMN_WIDTHS.nextUpcoming) / total) * 100).toFixed(2)),
-    total: Number((((next.total ?? DEFAULT_SERIES_COLUMN_WIDTHS.total) / total) * 100).toFixed(2)),
-    lastChecked: Number((((next.lastChecked ?? DEFAULT_SERIES_COLUMN_WIDTHS.lastChecked) / total) * 100).toFixed(2)),
-    actions: Number((((next.actions ?? DEFAULT_SERIES_COLUMN_WIDTHS.actions) / total) * 100).toFixed(2)),
-  };
+  const result = {} as Record<SeriesColumnKey, number>;
+  for (const key of SERIES_COLUMN_KEYS) {
+    result[key] = Number((((next[key] ?? DEFAULT_SERIES_COLUMN_WIDTHS[key]) / total) * 100).toFixed(2));
+  }
+  return result;
 }
 
 export default function SeriesPage() {
@@ -734,6 +761,8 @@ export default function SeriesPage() {
           // backend's own derived healthy/stale/very_stale/never_checked
           // state for it (see models.Series.discovery_health).
           last_checked: item.last_checked ?? null,
+          last_verified_at: item.last_verified_at ?? null,
+          last_synced_at: item.last_synced_at ?? null,
           discovery_health: (item.discovery_health as DiscoveryHealth | null | undefined) ?? null,
           updated_at: item.updated_at ?? null,
           has_new_available_books: seriesState.has_new_available_books,
@@ -1020,6 +1049,8 @@ export default function SeriesPage() {
             hasNewBooks: hasNewBooksTag(s),
             missingBooksLabel: formatMissingBooksLabel(s.missing_books),
             lastCheckedDisplay: formatDate(s.last_checked),
+            lastVerifiedDisplay: s.last_verified_at ? formatDate(s.last_verified_at) : "Never verified",
+            lastSyncedDisplay: s.last_synced_at ? formatDate(s.last_synced_at) : "Never synced",
             checkState: rowCheckState[s.id] ?? null,
           }))}
           viewMode={viewMode}
@@ -1124,6 +1155,24 @@ export default function SeriesPage() {
                   className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
                 />
               </TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.lastVerified}%` }}>
+                <button type="button" className="text-left" onClick={() => toggleSort("lastVerified")} title="Last time you clicked Search Book Online for this series">Last Verified{sortLabel("lastVerified")}</button>
+                <button
+                  type="button"
+                  aria-label="Resize Last Verified column"
+                  onMouseDown={(event) => startColumnResize("lastVerified", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
+              </TableHead>
+              <TableHead className="relative" style={{ width: `${columnWidths.lastSynced}%` }}>
+                <button type="button" className="text-left" onClick={() => toggleSort("lastSynced")} title="Last time Check for New actually added a new book to this series">Last Synced{sortLabel("lastSynced")}</button>
+                <button
+                  type="button"
+                  aria-label="Resize Last Synced column"
+                  onMouseDown={(event) => startColumnResize("lastSynced", event)}
+                  className="absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize border-r border-border/60 hover:bg-muted/30"
+                />
+              </TableHead>
               <TableHead style={{ width: `${columnWidths.actions}%` }}>
                 <Button type="button" variant="ghost" size="sm" onClick={clearFilters}>
                   Clear
@@ -1152,6 +1201,8 @@ export default function SeriesPage() {
                 <TableCell>{s.next_upcoming_book_number ?? "—"}</TableCell>
                 <TableCell>{s.total_books ?? "—"}</TableCell>
                 <TableCell>{formatDate(s.last_checked)}</TableCell>
+                <TableCell>{s.last_verified_at ? formatDate(s.last_verified_at) : "Never verified"}</TableCell>
+                <TableCell>{s.last_synced_at ? formatDate(s.last_synced_at) : "Never synced"}</TableCell>
                 <TableCell className="whitespace-nowrap">
                   <div className="flex items-center gap-2 whitespace-nowrap">
                     <Link href={`/series/${s.id}?fromView=${viewMode}`}>

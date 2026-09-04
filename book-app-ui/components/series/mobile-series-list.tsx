@@ -32,6 +32,9 @@ export type MobileSeriesItem = {
   hasNewBooks: boolean;
   missingBooksLabel: string | null;
   lastCheckedDisplay: string;
+  // Two-Timestamp UI Adjustments spec (locked 2026-09-04).
+  lastVerifiedDisplay: string;
+  lastSyncedDisplay: string;
   checkState: MobileSeriesCheckState | null;
 };
 
@@ -63,7 +66,7 @@ export function MobileSeriesList({
 
   return (
     <ul className="flex flex-col gap-2 px-2">
-      {items.map(({ series, hasNewBooks, missingBooksLabel, lastCheckedDisplay, checkState }) => (
+      {items.map(({ series, hasNewBooks, missingBooksLabel, lastCheckedDisplay, lastVerifiedDisplay, lastSyncedDisplay, checkState }) => (
         <li key={series.id} className="rounded-lg border bg-card/80 p-3">
           <div className="flex items-center gap-2">
             {hasNewBooks ? <NewBooksPill /> : null}
@@ -77,6 +80,10 @@ export function MobileSeriesList({
             <span>Next upcoming <span className="font-medium text-foreground">{series.next_upcoming_book_number ?? "—"}</span></span>
             <span>Total <span className="font-medium text-foreground">{series.total_books ?? "—"}</span></span>
             <span>Checked {lastCheckedDisplay}</span>
+          </div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+            <span>Last Verified {lastVerifiedDisplay}</span>
+            <span>Last Synced {lastSyncedDisplay}</span>
           </div>
 
           <div className="mt-2 flex items-center gap-2 border-t pt-2">

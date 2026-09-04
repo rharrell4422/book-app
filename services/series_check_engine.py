@@ -1150,6 +1150,14 @@ def run_series_check_job_full(series_id: int) -> None:
             response_status = "success"
             response_message = "NEW BOOKS found and added to library."
             logger.info("CHECK NOW completed successfully for series: %s", db_series.name)
+            # Two-Timestamp UI Adjustments spec (locked 2026-09-04):
+            # last_synced_at only advances on this exact branch -- a run
+            # that completes but persists nothing (the "no_new_books"
+            # branch below) leaves it untouched, unlike last_checked
+            # (stamped unconditionally by agents/series_agent.py on every
+            # completed run regardless of outcome).
+            db_series.last_synced_at = date.today()
+            db.commit()
         else:
             response_status = "no_new_books"
             response_message = "NO NEW BOOKS FOUND."

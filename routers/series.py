@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from typing import List
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -121,6 +121,8 @@ def read_series_by_id(series_id: int, db: Session = Depends(get_db), profile_id:
         series_state=db_series.series_state,
         last_checked=db_series.last_checked,
         discovery_health=db_series.discovery_health,
+        last_verified_at=db_series.last_verified_at,
+        last_synced_at=db_series.last_synced_at,
         created_at=db_series.created_at,
         updated_at=db_series.updated_at,
         books=[schemas.BookResponse.model_validate(book) for book in sorted_books]
@@ -176,6 +178,32 @@ def mark_series_unfinished(series_id: int, db: Session = Depends(get_db), profil
 @router.post("/{series_id}/mark_finished")
 def mark_series_finished(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
     return _set_series_finished_state(series_id, True, db, profile_id)
+
+
+@router.post("/{series_id}/verify")
+def verify_series(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
+    """Two-Timestamp UI Adjustments spec (locked 2026-09-04): stamps
+    last_verified_at to the server's own today() every time the user
+    clicks "Search Book Online" on the series detail page -- a manual,
+    best-effort audit signal, deliberately independent of whatever the
+    user actually finds in the tab that button opens (per the spec, "no
+    requirement to store whether a new book was detected"). Always uses
+    the server's clock rather than trusting a client-supplied timestamp,
+    the same way /check does not let a client dictate last_checked.
+    Idempotent/side-effect-free beyond the stamp itself -- safe to call
+    repeatedly in a single session."""
+    db_series = crud.get_series(db, series_id, profile_id)
+    if not db_series:
+        raise HTTPException(status_code=404, detail="Series not found")
+
+    db_series.last_verified_at = date.today()
+    db.commit()
+    db.refresh(db_series)
+
+    return {
+        "series_id": series_id,
+        "last_verified_at": db_series.last_verified_at,
+    }
 
 
 @router.post("/{series_id}/check")

@@ -18,6 +18,15 @@ export type SeriesDetailHeaderSeries = {
   next_upcoming_book_number?: number | null;
 };
 
+// Two-Timestamp UI Adjustments spec (locked 2026-09-04). Pre-formatted
+// display strings (e.g. "Sep 4, 2026" / "Never verified") rather than raw
+// dates -- keeps date-formatting logic centralized in book-format.ts's
+// formatDate rather than duplicated into this presentational component.
+export type SeriesDetailHeaderTimestamps = {
+  lastVerifiedDisplay: string;
+  lastSyncedDisplay: string;
+};
+
 export type SeriesDetailHeaderStats = {
   unread: number;
   read: number;
@@ -39,6 +48,7 @@ export type SeriesDetailHeaderProps = {
   compact: boolean;
   canEdit: boolean;
   series: SeriesDetailHeaderSeries;
+  timestamps: SeriesDetailHeaderTimestamps;
   stats: SeriesDetailHeaderStats;
   needsVerificationOnly: boolean;
   onToggleNeedsVerification: () => void;
@@ -121,6 +131,7 @@ export function SeriesDetailHeader({
   compact,
   canEdit,
   series,
+  timestamps,
   stats,
   needsVerificationOnly,
   onToggleNeedsVerification,
@@ -328,6 +339,9 @@ export function SeriesDetailHeader({
           </div>
 
           {check.loading ? <CheckProgress check={check} /> : null}
+          <p className="text-[11px] text-muted-foreground">
+            Last Verified: {timestamps.lastVerifiedDisplay} · Last Synced: {timestamps.lastSyncedDisplay}
+          </p>
         </div>
       ) : (
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -348,9 +362,15 @@ export function SeriesDetailHeader({
                 {check.loading ? `Checking ${series.name}…` : `Check ${series.name} for New`}
               </Button>
             ) : null}
+            <span className="text-[11px] text-muted-foreground" title="Last time Check for New actually added a new book to this series">
+              Last Synced: {timestamps.lastSyncedDisplay}
+            </span>
             <Button type="button" variant="outline" size="sm" onClick={onSearchNextBookOnline} title={searchOnlineHint}>
               {searchOnlineLabel}
             </Button>
+            <span className="text-[11px] text-muted-foreground" title="Last time you clicked Search Book Online for this series">
+              Last Verified: {timestamps.lastVerifiedDisplay}
+            </span>
             <Button
               type="button"
               variant="outline"

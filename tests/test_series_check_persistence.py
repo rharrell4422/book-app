@@ -699,6 +699,56 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
         )
         self.assertEqual(len(deleted), 1)
 
+    def test_last_synced_at_stamped_when_new_books_persisted(self):
+        # Two-Timestamp UI Adjustments spec (locked 2026-09-04):
+        # last_synced_at should advance exactly when a Check for New run
+        # actually persists new book(s) -- the "success" branch.
+        self.assertIsNone(self.series.last_synced_at)
+
+        self._run_job_with_mocked_discovery(
+            [
+                {
+                    "title": "Edge of Shadow",
+                    "author": "Some Author",
+                    "series_name": "The First Peacemaker",
+                    "book_number": 9,
+                    "source_url": None,
+                    "provider": "web_search",
+                    "publication_date": None,
+                    "expected_date": None,
+                    "status_hint": "available",
+                    "asin_or_id": "web_search:edge-of-shadow-9",
+                    "is_missing": True,
+                    "status": "available",
+                    "canonical_metadata": {
+                        "title_normalized": "Edge of Shadow",
+                        "series_name_normalized": "The First Peacemaker",
+                        "book_number_normalized": 9,
+                        "publish_date_normalized": None,
+                        "upcoming_date_normalized": None,
+                        "availability": "available",
+                        "edition_type": "unknown",
+                        "title_selector": None,
+                    },
+                }
+            ]
+        )
+
+        self.db.refresh(self.series)
+        self.assertEqual(self.series.last_synced_at, date.today())
+
+    def test_last_synced_at_untouched_when_no_new_books_found(self):
+        # The "no_new_books" branch must never advance last_synced_at --
+        # otherwise it degenerates into last_checked (stamped on every
+        # attempt), losing the "did a sync actually land books" signal the
+        # spec calls for.
+        self.assertIsNone(self.series.last_synced_at)
+
+        self._run_job_with_mocked_discovery([])
+
+        self.db.refresh(self.series)
+        self.assertIsNone(self.series.last_synced_at)
+
 
 class SeriesCheckPrecheckTest(unittest.TestCase):
     """Tests the catalog-only pre-check short-circuit (architecture spec

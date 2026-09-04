@@ -120,6 +120,22 @@ class Series(Base):
     next_upcoming_book_number = Column(Float, nullable=True)
     missing_books = Column(JSON, nullable=True)  # list of book_numbers
     last_checked = Column(Date, nullable=True)
+    # Two-Timestamp UI Adjustments spec (locked 2026-09-04): last_checked
+    # above is left untouched -- it's the "did we attempt a Check for New
+    # run at all" cadence signal the series list's default sort already
+    # depends on, and stays unconditional (stamped whether or not the run
+    # found anything). These two are new, narrower signals that stay null
+    # until their specific action actually happens:
+    #   - last_verified_at: stamped every time the user clicks "Search
+    #     Book Online" (routers/series.py's POST /{series_id}/verify) --
+    #     a manual, no-strings-attached audit stamp; never inferred from
+    #     the Check for New pipeline.
+    #   - last_synced_at: stamped only when a Check for New run actually
+    #     persists new book(s) (services/series_check_engine.py's
+    #     response_status == "success" branch) -- unlike last_checked,
+    #     this stays null/unchanged on a run that finds nothing.
+    last_verified_at = Column(Date, nullable=True)
+    last_synced_at = Column(Date, nullable=True)
     has_new_books = Column(Boolean, default=False)
     has_unread_books = Column(Boolean, default=False)
     has_upcoming_books = Column(Boolean, default=False)

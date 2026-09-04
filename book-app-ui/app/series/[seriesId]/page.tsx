@@ -88,6 +88,10 @@ type SeriesRecord = {
   next_unread_book_number?: number | null;
   next_upcoming_book_number?: number | null;
   missing_books?: string[];
+  // Two-Timestamp UI Adjustments spec (locked 2026-09-04) -- see
+  // models.Series's own comment on these two columns.
+  last_verified_at?: string | null;
+  last_synced_at?: string | null;
   title_normalization_mode_override?: TitleNormalizationMode | null;
   // Guided Discovery (locked 2026-09-03, iterations 1-5).
   canonical_url?: string | null;
@@ -1226,7 +1230,29 @@ export default function SeriesDetailPage() {
     const query = [series.name, series.author, nextBookNumber ? `book ${nextBookNumber}` : null, "release date"]
       .filter(Boolean)
       .join(" ");
+    // window.open must stay directly in this synchronous click handler --
+    // an awaited call before it risks the popup being blocked as not
+    // originating from a user gesture (Safari in particular). The
+    // last_verified_at stamp below is a best-effort side effect, so it
+    // fires-and-forgets *after* the tab opens rather than gating it.
     window.open(`https://www.google.com/search?q=${encodeURIComponent(query)}`, "_blank", "noopener,noreferrer");
+
+    const verifiedSeriesId = series.id;
+    void fetchApiWithFallback(`/series/${verifiedSeriesId}/verify`, { method: "POST" })
+      .then((response) => response.json())
+      .then((body: { last_verified_at?: string | null }) => {
+        setSeries((prev) => {
+          if (!prev || prev.id !== verifiedSeriesId) return prev;
+          return { ...prev, last_verified_at: body.last_verified_at ?? new Date().toISOString().slice(0, 10) };
+        });
+      })
+      .catch((error) => {
+        // Search Book Online (§ Two-Timestamp UI Adjustments spec, locked
+        // 2026-09-04) is "no requirement to store whether a new book was
+        // detected" -- this stamp is a nice-to-have audit trail, not
+        // something worth surfacing an error banner over if it fails.
+        console.error("Unable to stamp last_verified_at:", error);
+      });
   }
 
   function handleDeleteSeriesWithBooks() {
@@ -1662,6 +1688,10 @@ export default function SeriesDetailPage() {
         compact={isCompact}
         canEdit={canEdit}
         series={series}
+        timestamps={{
+          lastVerifiedDisplay: series.last_verified_at ? formatDate(series.last_verified_at) : "Never verified",
+          lastSyncedDisplay: series.last_synced_at ? formatDate(series.last_synced_at) : "Never synced",
+        }}
         stats={{
           unread: unreadCount,
           read: readCount,

@@ -238,6 +238,11 @@ class SeriesBase(BaseModel):
     # doesn't have to duplicate the healthy/stale/very_stale thresholds.
     last_checked: Optional[date] = None
     discovery_health: Optional[str] = None
+    # Two-Timestamp UI Adjustments spec (locked 2026-09-04): see
+    # models.Series's own comment on these two columns for how they
+    # differ from last_checked above.
+    last_verified_at: Optional[date] = None
+    last_synced_at: Optional[date] = None
     # Guided Discovery (locked 2026-09-03, iterations 1-5): all three
     # optional -- omitting them reproduces pre-Guided-Discovery behavior
     # exactly (see models.Series's own docstring on these columns).
@@ -273,6 +278,8 @@ class SeriesListItem(BaseModel):
     is_caught_up: Optional[bool] = None
     last_checked: Optional[date] = None
     discovery_health: Optional[str] = None
+    last_verified_at: Optional[date] = None
+    last_synced_at: Optional[date] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -302,6 +309,8 @@ class SeriesDetailResponse(BaseModel):
     series_state: SeriesState | None = None
     last_checked: date | None = None
     discovery_health: str | None = None
+    last_verified_at: date | None = None
+    last_synced_at: date | None = None
     # Guided Discovery (locked 2026-09-03, iterations 1-5): see SeriesBase.
     canonical_url: str | None = None
     canonical_source: CanonicalSource | None = None
