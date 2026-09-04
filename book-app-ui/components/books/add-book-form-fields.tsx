@@ -5,7 +5,7 @@ import { CircleHelpIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { BookStatus } from "@/lib/book-format";
+import { getCanonicalPageSearchUrls, type BookStatus } from "@/lib/book-format";
 
 export type BookClassification = "standalone" | "series";
 
@@ -381,7 +381,25 @@ export function AddBookFormFields({
                 </p>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <div className="space-y-1 sm:col-span-2">
-                    <Label htmlFor={`${fieldIdPrefix}-canonical-url`}>Source URL</Label>
+                    <div className="flex items-center justify-between gap-2">
+                      <Label htmlFor={`${fieldIdPrefix}-canonical-url`}>Source URL</Label>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-2 text-[11px]"
+                        onClick={() => {
+                          // UI-only assist -- opens two search tabs so the user can
+                          // find and manually copy/paste the series' real canonical
+                          // page below. No scraping, no discovery/provider logic.
+                          const { goodreads, google } = getCanonicalPageSearchUrls(form.seriesName, form.author);
+                          window.open(goodreads, "_blank", "noopener,noreferrer");
+                          window.open(google, "_blank", "noopener,noreferrer");
+                        }}
+                      >
+                        Find canonical page
+                      </Button>
+                    </div>
                     <Input
                       id={`${fieldIdPrefix}-canonical-url`}
                       value={form.canonicalUrl}

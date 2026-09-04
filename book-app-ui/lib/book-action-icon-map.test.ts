@@ -12,9 +12,7 @@ const ALL_STATES: BookActionState[] = [
   "read",
   "unread",
   "series",
-  "hasSourceUrl",
-  "missingSourceUrl",
-  "unconfirmedDate",
+  "findPublicationDate",
   "delete",
   "edit",
   "moreByAuthor",
@@ -58,13 +56,11 @@ describe("getBookActionVisual", () => {
     expect(read.buttonVariant).toBe("outline");
   });
 
-  it("distinguishes the check-online 3-way by label and warning color", () => {
-    expect(getBookActionVisual("hasSourceUrl").label).toBe("Check source listing");
-    expect(getBookActionVisual("missingSourceUrl").label).toBe("Search for this book online");
-
-    const unconfirmed = getBookActionVisual("unconfirmedDate");
-    expect(unconfirmed.icon).toBe(ExternalLinkIcon);
-    expect(unconfirmed.colorVariant).toBe("warning");
+  it("gives the find-publication-date action a single consistent label regardless of book state", () => {
+    const findDate = getBookActionVisual("findPublicationDate");
+    expect(findDate.icon).toBe(ExternalLinkIcon);
+    expect(findDate.label).toBe("Find publication date");
+    expect(findDate.colorVariant).toBe("neutral");
   });
 
   it("distinguishes the standalone-summary has-content/empty split by label only", () => {
@@ -91,9 +87,7 @@ describe("isDelayedBookAction", () => {
   it("does not delay navigation actions", () => {
     const immediateStates: BookActionState[] = [
       "series",
-      "hasSourceUrl",
-      "missingSourceUrl",
-      "unconfirmedDate",
+      "findPublicationDate",
       "edit",
       "moreByAuthor",
       "summarySeries",

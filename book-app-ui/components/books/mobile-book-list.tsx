@@ -42,7 +42,7 @@ export function MobileBookList({
   onOpenSummary,
   onMoreByAuthor,
   onViewSeries,
-  onCheckOnline,
+  onFindPublicationDate,
 }: {
   items: MobileBookCardItem[];
   canEdit: boolean;
@@ -52,7 +52,7 @@ export function MobileBookList({
   onOpenSummary: (book: MobileBookCardBook) => void;
   onMoreByAuthor: (author: string) => void;
   onViewSeries: (seriesId: number) => void;
-  onCheckOnline: (book: MobileBookCardBook) => void;
+  onFindPublicationDate: (book: MobileBookCardBook) => void;
 }) {
   if (items.length === 0) {
     return <p className="px-3 py-6 text-center text-sm text-muted-foreground">No books match the current filters.</p>;
@@ -94,10 +94,7 @@ export function MobileBookList({
                 onClick={() => onOpenSummary(book)}
               />
             )}
-            <BookActionIcon
-              state={unconfirmedDate ? "unconfirmedDate" : book.source_url ? "hasSourceUrl" : "missingSourceUrl"}
-              onClick={() => onCheckOnline(book)}
-            />
+            <BookActionIcon state="findPublicationDate" onClick={() => onFindPublicationDate(book)} />
             <BookActionIcon state="moreByAuthor" onClick={() => onMoreByAuthor(String(book.author || ""))} />
             {canEdit ? (
               <div className="ml-auto flex items-center gap-1">

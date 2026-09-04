@@ -163,18 +163,41 @@ export function isPastOrTodayDate(value?: string | null): boolean {
   return parsedDate <= today;
 }
 
-/** Where to send a user to verify a book's details themselves (e.g. an
- * unconfirmed release date on a brand-new preorder) -- the app deliberately
- * doesn't scrape retailer pages to extract this automatically (fragile and
- * against most retailers' terms of service), so this just links to the
- * actual listing the book was discovered from, or falls back to a plain
- * Google search for it. */
-export function getCheckOnlineUrl(book: { title?: string | null; author?: string | null; source_url?: string | null }): string {
-  const sourceUrl = String(book.source_url || "").trim();
-  if (sourceUrl) return sourceUrl;
-
-  const query = [book.title, book.author, "release date"].filter(Boolean).join(" ");
+/** Where to send a user to find a book's publication date themselves --
+ * the app deliberately doesn't scrape retailer pages to extract this
+ * automatically (fragile and against most retailers' terms of service).
+ *
+ * 2026-09-03: replaces the old getCheckOnlineUrl, which jumped straight to
+ * a book's saved source_url when present. That was dropped on purpose --
+ * source_url varies per book (Amazon, Goodreads, Google, whatever provider
+ * originally supplied it, with zero consistency across books), and
+ * clicking through rarely surfaced the one piece of data actually wanted.
+ * A plain, consistent Google search for the publication date reliably
+ * surfaces it directly in Google's answer box (verified live against
+ * "The Winter Siege: (Jonathan Hunt Thriller Book 11.0) Georgia Wagner;
+ * Scott Cook publication date"), so this is now unconditional -- same
+ * query shape for every book, regardless of source_url or whether the
+ * date is already confirmed. */
+export function getFindPublicationDateUrl(book: { title?: string | null; author?: string | null }): string {
+  const query = [book.title, book.author, "publication date"].filter(Boolean).join(" ");
   return `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+}
+
+/** Two search tabs to help a user locate a series' real canonical page
+ * (Goodreads series page, product listing, etc.) to paste into the Add
+ * Book card's "Source URL" field -- Guided Discovery UI-only assist
+ * (2026-09-03), never scraped or fetched by the app itself. Goodreads-
+ * biased since Goodreads series pages are the most common canonical
+ * source in practice, but the plain Google query still surfaces other
+ * kinds of canonical pages (publisher sites, etc.) when Goodreads doesn't
+ * have the series. */
+export function getCanonicalPageSearchUrls(seriesName?: string | null, author?: string | null) {
+  const query = [seriesName, author].filter(Boolean).join(" ").trim();
+  const encoded = encodeURIComponent(query);
+  return {
+    goodreads: `https://www.goodreads.com/search?q=${encoded}`,
+    google: `https://www.google.com/search?q=${encodeURIComponent([seriesName, author, "Goodreads"].filter(Boolean).join(" "))}`,
+  };
 }
 
 /** Direct links to look up ratings/reviews for a book on a few common
@@ -196,7 +219,7 @@ export function getRatingsReviewLinks(title?: string | null, author?: string | n
 
 /** True when a book is flagged as upcoming/available but no release date
  * could be pinned down at all (e.g. a brand-new preorder listing whose
- * search snippet had no date -- see getCheckOnlineUrl). Surfaced in the UI
+ * search snippet had no date -- see getFindPublicationDateUrl). Surfaced in the UI
  * as a "verify this" flag next to the status, since an unconfirmed date is
  * meaningfully different from "no news yet" (unread/not tracked) or "we
  * know exactly when" (a real date is shown). */

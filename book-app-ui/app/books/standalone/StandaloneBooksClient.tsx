@@ -14,7 +14,7 @@ import { useAuth } from "@/lib/auth-context";
 import {
   type BookStatus,
   formatDate,
-  getCheckOnlineUrl,
+  getFindPublicationDateUrl,
   getStatusChipClass,
   getUnifiedBookStatus,
   hasUnconfirmedReleaseDate,
@@ -417,7 +417,6 @@ export default function StandaloneBooksClient() {
           <TableBody>
             {sortedBooks.map((b) => {
               const status = getBookStatus(b);
-              const unconfirmedDate = hasUnconfirmedReleaseDate(status, b);
               return (
                 <TableRow key={b.id}>
                   <TableCell className="truncate" title={b.title ?? undefined}>{b.title || "—"}</TableCell>
@@ -429,8 +428,8 @@ export default function StandaloneBooksClient() {
                   <TableCell className="whitespace-nowrap">
                     <div className="flex items-center gap-0.5">
                       <BookActionIcon
-                        state={unconfirmedDate ? "unconfirmedDate" : b.source_url ? "hasSourceUrl" : "missingSourceUrl"}
-                        onClick={() => window.open(getCheckOnlineUrl(b), "_blank", "noopener,noreferrer")}
+                        state="findPublicationDate"
+                        onClick={() => window.open(getFindPublicationDateUrl(b), "_blank", "noopener,noreferrer")}
                       />
                       <BookActionIcon state="moreByAuthor" onClick={() => setMoreByAuthorTarget(String(b.author || ""))} />
                       <BookActionIcon
@@ -472,7 +471,7 @@ export default function StandaloneBooksClient() {
           onMoreByAuthor={(author) => setMoreByAuthorTarget(author)}
           // Standalone books never have a series_id, so this is never invoked.
           onViewSeries={() => {}}
-          onCheckOnline={(book) => window.open(getCheckOnlineUrl(book), "_blank", "noopener,noreferrer")}
+          onFindPublicationDate={(book) => window.open(getFindPublicationDateUrl(book), "_blank", "noopener,noreferrer")}
         />
       )}
       <p className="text-xs text-muted-foreground">

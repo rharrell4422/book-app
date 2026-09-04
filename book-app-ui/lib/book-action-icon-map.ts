@@ -21,9 +21,7 @@ export type BookActionState =
   | "read"
   | "unread"
   | "series"
-  | "hasSourceUrl"
-  | "missingSourceUrl"
-  | "unconfirmedDate"
+  | "findPublicationDate"
   | "delete"
   | "edit"
   | "moreByAuthor"
@@ -92,35 +90,26 @@ const BOOK_ACTION_VISUALS: Record<BookActionState, BookActionVisual> = {
     buttonVariant: "ghost",
     delayed: false,
   },
-  hasSourceUrl: {
+  // 2026-09-03: replaces the old three-state "check online" action
+  // (hasSourceUrl/missingSourceUrl/unconfirmedDate), which jumped straight
+  // to a book's saved source_url when present. That URL could be Amazon,
+  // Goodreads, Google, or anything else depending on which provider
+  // originally supplied the book -- no consistency across books, and
+  // clicking through rarely surfaced the one piece of data actually
+  // wanted (the publication date). Deliberately one single state now,
+  // same icon/label/behavior for every book regardless of source_url or
+  // date-confirmed status: always a Google search for "<title> <author>
+  // publication date" (see book-format.ts's getFindPublicationDateUrl).
+  // The separate amber "date unconfirmed" warning badge next to the
+  // status chip (BooksClient.tsx etc., driven by hasUnconfirmedReleaseDate)
+  // is unrelated to this icon and is unaffected by this change.
+  findPublicationDate: {
     icon: ExternalLinkIcon,
-    label: "Check source listing",
-    ariaLabel: "Check source listing",
-    tooltipLabel: "Check source listing",
+    label: "Find publication date",
+    ariaLabel: "Find publication date",
+    tooltipLabel: "Find publication date",
     colorVariant: "neutral",
     buttonVariant: "ghost",
-    delayed: false,
-  },
-  missingSourceUrl: {
-    icon: ExternalLinkIcon,
-    label: "Search for this book online",
-    ariaLabel: "Search for this book online",
-    tooltipLabel: "Search for this book online",
-    colorVariant: "neutral",
-    buttonVariant: "ghost",
-    delayed: false,
-  },
-  unconfirmedDate: {
-    icon: ExternalLinkIcon,
-    label: "Verify release date online",
-    // Fixed regardless of source_url presence -- today's aria-label silently
-    // ignores the unconfirmed-date case entirely; centralizing the mapping
-    // here is a deliberate small fix rather than preserving that gap.
-    ariaLabel: "Check online -- release date unconfirmed",
-    tooltipLabel: "No confirmed date yet -- click to verify with the retailer",
-    colorVariant: "warning",
-    buttonVariant: "ghost",
-    extraClassName: "text-amber-600 hover:text-amber-700",
     delayed: false,
   },
   moreByAuthor: {

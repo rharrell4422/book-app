@@ -14,7 +14,7 @@ import { useAuth } from "@/lib/auth-context";
 import {
   type BookStatus,
   formatDate,
-  getCheckOnlineUrl,
+  getFindPublicationDateUrl,
   getUnifiedBookStatus,
   hasUnconfirmedReleaseDate,
   getStatusChipClass as getStatusChipClassShared,
@@ -823,7 +823,7 @@ export default function BooksClient() {
           onOpenSummary={openSummaryEditor}
           onMoreByAuthor={(author) => setMoreByAuthorTarget(author)}
           onViewSeries={(seriesId) => router.push(`/series/${seriesId}`)}
-          onCheckOnline={(book) => window.open(getCheckOnlineUrl(book), "_blank", "noopener,noreferrer")}
+          onFindPublicationDate={(book) => window.open(getFindPublicationDateUrl(book), "_blank", "noopener,noreferrer")}
         />
       ) : (
       <div ref={tableWrapRef} className="overflow-x-auto rounded-lg border bg-card/80">
@@ -977,7 +977,7 @@ export default function BooksClient() {
                       <div className="flex items-center gap-1">
                         <span className={getStatusChipClass(status)}>{status}</span>
                         {unconfirmedDate ? (
-                          <span title="No confirmed release date yet -- click the check-online icon to verify with the retailer">
+                          <span title="No confirmed release date yet -- click Find publication date to look it up">
                             <AlertTriangleIcon className="h-3.5 w-3.5 shrink-0 text-amber-600" aria-label="Date unconfirmed" />
                           </span>
                         ) : null}
@@ -1000,8 +1000,8 @@ export default function BooksClient() {
                         />
                       )}
                       <BookActionIcon
-                        state={unconfirmedDate ? "unconfirmedDate" : b.source_url ? "hasSourceUrl" : "missingSourceUrl"}
-                        onClick={() => window.open(getCheckOnlineUrl(b), "_blank", "noopener,noreferrer")}
+                        state="findPublicationDate"
+                        onClick={() => window.open(getFindPublicationDateUrl(b), "_blank", "noopener,noreferrer")}
                       />
                       <BookActionIcon state="moreByAuthor" onClick={() => setMoreByAuthorTarget(String(b.author || ""))} />
                       {canEdit ? (

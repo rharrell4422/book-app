@@ -1,6 +1,33 @@
 import { describe, expect, it } from "vitest";
 
-import { getUnifiedBookStatus } from "./book-format";
+import { getFindPublicationDateUrl, getUnifiedBookStatus } from "./book-format";
+
+describe("getFindPublicationDateUrl", () => {
+  // 2026-09-03: replaces the old getCheckOnlineUrl (source_url jump +
+  // "release date" query). Deliberately unconditional now -- same query
+  // shape for every book regardless of source_url presence or whether the
+  // date is already confirmed, since a saved source_url could be Amazon,
+  // Goodreads, or Google depending on the discovering provider with no
+  // consistency across books, while the plain Google query reliably
+  // surfaces the publication date directly.
+  it("always builds a Google search for title + author + publication date, ignoring source_url", () => {
+    const url = getFindPublicationDateUrl({
+      title: "The Winter Siege: (Jonathan Hunt Thriller Book 11.0)",
+      author: "Georgia Wagner; Scott Cook",
+      // @ts-expect-error -- source_url isn't part of this function's input anymore; confirms it's ignored even if present on the object.
+      source_url: "https://www.amazon.com/dp/whatever",
+    });
+    expect(url).toBe(
+      "https://www.google.com/search?q=" +
+        encodeURIComponent("The Winter Siege: (Jonathan Hunt Thriller Book 11.0) Georgia Wagner; Scott Cook publication date"),
+    );
+  });
+
+  it("drops missing title/author cleanly", () => {
+    const url = getFindPublicationDateUrl({ title: "Solo Title", author: null });
+    expect(url).toBe("https://www.google.com/search?q=" + encodeURIComponent("Solo Title publication date"));
+  });
+});
 
 describe("getUnifiedBookStatus", () => {
   // Phase 3 of the "Two-Axis Status Architecture" design chat's finalized
