@@ -458,14 +458,36 @@ function shouldExcludeUpcomingBySpec(book: BookRecord): boolean {
   return parsedDate > today;
 }
 
+function compareByBookNumber(a: BookRecord, b: BookRecord): number {
+  const aNum = Number(a?.book_number ?? a?.series_order ?? 0);
+  const bNum = Number(b?.book_number ?? b?.series_order ?? 0);
+  const aVal = Number.isFinite(aNum) ? aNum : 0;
+  const bVal = Number.isFinite(bNum) ? bNum : 0;
+  return aVal - bVal;
+}
+
+// Not-yet-read books (unread/available/upcoming -- anything getBookStatus
+// doesn't call "read") are grouped ahead of read books, each group still
+// numerically ordered within itself. Plain ascending book-number order on
+// its own buries newly-discovered volumes (Check Now almost always adds
+// the highest, not-yet-read numbers) at the very bottom of a long, mostly-
+// read back catalog -- e.g. a 33-book read series where Check Now finds
+// 34-36 requires scrolling past all 33 read books to see them. Read books
+// keep their existing numeric-only order unchanged; only the split (not-
+// read group before read group) is new.
 function sortBooksBySeriesOrder(books: BookRecord[]): BookRecord[] {
-  return [...books].sort((a, b) => {
-    const aNum = Number(a?.book_number ?? a?.series_order ?? 0);
-    const bNum = Number(b?.book_number ?? b?.series_order ?? 0);
-    const aVal = Number.isFinite(aNum) ? aNum : 0;
-    const bVal = Number.isFinite(bNum) ? bNum : 0;
-    return aVal - bVal;
-  });
+  const notRead: BookRecord[] = [];
+  const read: BookRecord[] = [];
+  for (const book of books) {
+    if (getBookStatus(book) === "read") {
+      read.push(book);
+    } else {
+      notRead.push(book);
+    }
+  }
+  notRead.sort(compareByBookNumber);
+  read.sort(compareByBookNumber);
+  return [...notRead, ...read];
 }
 
 export default function SeriesDetailPage() {
