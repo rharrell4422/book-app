@@ -5,6 +5,7 @@ from services.identity import (
     _canonical_title_identity_key,
     _normalized_book_number_value,
     _series_book_identity_key,
+    _title_is_bare_series_name,
     owned_title_for_identity,
 )
 
@@ -173,6 +174,34 @@ class OwnedTitleForIdentityTest(unittest.TestCase):
             _canonical_title_identity_key(owned_title_for_identity(raw)),
             _canonical_title_identity_key(owned_title_for_identity(resolved)),
         )
+
+
+class TitleIsBareSeriesNameTest(unittest.TestCase):
+    """Regression coverage distinguishing the two situations
+    services/series_check_engine.py's canonical-title-only dedupe fallback
+    can hit when book numbers disagree (see _title_is_bare_series_name's
+    own docstring for the full "Defiance of the Fall 17" vs. "Escape
+    Velocity" incident writeup): a title collision against a generic,
+    bare-series-name existing row (book 1 is very often titled with
+    nothing else) is expected/coincidental, but a collision against a
+    genuinely distinctive existing title is near-certainly the same real
+    book carrying a wrong number, not a coincidence.
+    """
+
+    def test_bare_series_name_title_is_generic(self):
+        self.assertTrue(_title_is_bare_series_name("Defiance of the Fall", "Defiance of the Fall"))
+
+    def test_distinctive_title_is_not_generic(self):
+        self.assertFalse(_title_is_bare_series_name("Escape Velocity", "Backyard Starship"))
+
+    def test_case_and_punctuation_insensitive(self):
+        self.assertTrue(_title_is_bare_series_name("THE FIRST PEACEMAKER!", "The First Peacemaker"))
+
+    def test_blank_title_is_not_generic(self):
+        self.assertFalse(_title_is_bare_series_name("", "Backyard Starship"))
+
+    def test_blank_series_name_is_not_generic(self):
+        self.assertFalse(_title_is_bare_series_name("Backyard Starship", ""))
 
 
 if __name__ == "__main__":

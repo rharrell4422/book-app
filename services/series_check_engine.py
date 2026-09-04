@@ -35,6 +35,7 @@ from services.identity import (
     owned_title_for_identity,
     _series_book_identity_key,
     _series_number_slot_key,
+    _title_is_bare_series_name,
 )
 from services.availability_bridge import derive_legacy_fields
 from services.notifications import create_series_discovery_notification
@@ -564,12 +565,39 @@ def run_series_check_job_full(series_id: int) -> None:
                         if _book_numbers_compatible(normalized_book_number, title_only_match.book_number):
                             matched_existing = title_only_match
                             dedupe_reason_code = "DEDUPE_UPDATE_BY_TITLE"
-                        else:
+                        elif _title_is_bare_series_name(owned_title_for_identity(title_only_match), db_series.name):
+                            # Case 1 from _title_is_bare_series_name's
+                            # docstring ("Defiance of the Fall 17"): the
+                            # EXISTING row's title is just the bare series
+                            # name, so this collision is the expected,
+                            # coincidental kind -- fall through and let the
+                            # candidate be inserted as a genuinely new book.
                             _console_log(
                                 f"[DEDUPE_SKIP_TITLE_NUMBER_MISMATCH] series_id={series_id} "
                                 f"candidate_title={normalized_title!r} candidate_number={normalized_book_number!r} "
                                 f"existing_book_id={title_only_match.id} existing_number={title_only_match.book_number!r}"
                             )
+                        else:
+                            # Case 2 ("Escape Velocity", Backyard Starship,
+                            # 2026-09-03 live incident): the EXISTING row's
+                            # title is genuinely distinctive, not the bare
+                            # series name, so an exact title collision here
+                            # is near-certainly the SAME real book carrying
+                            # a bad number from a noisy web-search lookahead
+                            # hit, not a coincidence. Discarding here (not
+                            # inserting, not updating the existing row's
+                            # number either -- we don't know which side, if
+                            # either, is actually right) avoids creating a
+                            # visible duplicate under a fabricated number.
+                            # See _title_is_bare_series_name's own docstring
+                            # for the full incident writeup.
+                            _console_log(
+                                f"[DEDUPE_SKIP_LIKELY_DUPLICATE_BAD_NUMBER] series_id={series_id} "
+                                f"candidate_title={normalized_title!r} candidate_number={normalized_book_number!r} "
+                                f"existing_book_id={title_only_match.id} existing_title={title_only_match.title!r} "
+                                f"existing_number={title_only_match.book_number!r}"
+                            )
+                            continue
 
                     identity_fingerprint = candidate_asin or series_book_key or canonical_title_key or _normalize_discovered_title(normalized_title)
                     if identity_fingerprint in seen_batch_identity_keys and matched_existing is None:

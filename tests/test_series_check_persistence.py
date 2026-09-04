@@ -1,4 +1,5 @@
 import unittest
+from datetime import date
 from unittest.mock import patch
 
 from sqlalchemy import create_engine
@@ -480,6 +481,18 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
         # metadata refresh) the existing book 1 row instead of inserting
         # the real new book, so it never showed up and no notification
         # fired. See services/identity.py's _book_numbers_compatible.
+        #
+        # Series renamed to match the real incident's series (the shared
+        # setUp default, "The First Peacemaker", is an unrelated
+        # placeholder reused across this file's other tests) -- necessary
+        # for _title_is_bare_series_name's own "is this title just the
+        # series' own bare name" check (added alongside the "Escape
+        # Velocity" fix below) to correctly recognize book 1's title here
+        # as the generic, coincidental-collision case it's meant to be.
+        self.series.name = "Defiance of the Fall"
+        self.db.add(self.series)
+        self.db.commit()
+
         book_one = Book(
             title="Defiance of the Fall",
             author="Some Author",
@@ -539,6 +552,87 @@ class SeriesCheckPersistenceTest(unittest.TestCase):
         self.assertIsNotNone(book_seventeen)
         self.assertNotEqual(book_seventeen.id, book_one_id)
         self.assertEqual(book_seventeen.read_status, "available")
+
+    def test_distinctive_titled_candidate_with_mismatched_number_is_discarded_not_duplicated(self):
+        # Regression (live bug, "Escape Velocity" / Backyard Starship,
+        # 2026-09-03): the opposite failure mode from "Defiance of the Fall
+        # 17" above -- same code path (canonical-title-only match, numbers
+        # disagree), but the EXISTING row's title here ("Escape Velocity")
+        # is genuinely distinctive, not the bare series name. Before this
+        # fix, ANY number mismatch at this fallback fell through to being
+        # inserted as a brand-new book -- correct for book-1-style generic
+        # titles, but wrong here: a *speculative* web-search lookahead
+        # query ("<series> book 36", fired purely because 36 is the next
+        # untried integer past the highest owned book -- see provider_io.
+        # WEB_SEARCH_LOOKAHEAD_BOOKS) returned a low-quality hit that the
+        # LLM structuring pass still extracted, defaulting its number to
+        # the one the query was hypothesizing rather than confirming it
+        # from real content. The result was a visible duplicate: "Escape
+        # Velocity" appearing twice, once correctly at book 33 (already
+        # owned) and once fabricated at book 36. See
+        # services/identity.py's _title_is_bare_series_name for the full
+        # two-case writeup this fix is based on.
+        escape_velocity = Book(
+            title="Escape Velocity: (The First Peacemaker Book 33)",
+            author="Some Author",
+            series_id=self.series.id,
+            profile_id=self.series.profile_id,
+            book_number=33.0,
+            series_order=33,
+            record_status="active",
+            is_read=False,
+            read_status="available",
+            publication_date=date(2026, 7, 26),
+        )
+        self.db.add(escape_velocity)
+        self.db.commit()
+        escape_velocity_id = escape_velocity.id
+
+        self._run_job_with_mocked_discovery(
+            [
+                {
+                    # Same distinctive title as the already-owned book 33,
+                    # but a speculative lookahead query hallucinated number
+                    # 36 for it instead of independently confirming it.
+                    "title": "Escape Velocity",
+                    "author": "Some Author",
+                    "series_name": "The First Peacemaker",
+                    "book_number": 36,
+                    "source_url": None,
+                    "provider": "web_search",
+                    "publication_date": None,
+                    "expected_date": None,
+                    "status_hint": "available",
+                    "asin_or_id": None,
+                    "is_missing": True,
+                    "status": "available",
+                    "canonical_metadata": {
+                        "title_normalized": "Escape Velocity",
+                        "series_name_normalized": "The First Peacemaker",
+                        "book_number_normalized": 36,
+                        "publish_date_normalized": None,
+                        "upcoming_date_normalized": None,
+                        "availability": "available",
+                        "edition_type": "unknown",
+                        "title_selector": None,
+                    },
+                }
+            ]
+        )
+
+        self.db.refresh(escape_velocity)
+        self.assertEqual(escape_velocity.id, escape_velocity_id)
+        self.assertEqual(escape_velocity.book_number, 33.0)
+
+        book_thirty_six = (
+            self.db.query(Book)
+            .filter(Book.series_id == self.series.id, Book.book_number == 36.0)
+            .first()
+        )
+        self.assertIsNone(book_thirty_six, "should be discarded as a likely duplicate, not inserted as book 36")
+
+        all_books = self.db.query(Book).filter(Book.series_id == self.series.id).all()
+        self.assertEqual(len(all_books), 1, "no duplicate row should have been created")
 
     def test_dedupe_collapse_merges_release_date_from_loser_into_keeper(self):
         # Reproduces the real-world "Quest Academy" / "Ultimate Level" /

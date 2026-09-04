@@ -237,6 +237,49 @@ def _canonical_title_identity_key(title: str | None) -> str | None:
     return normalized_title or None
 
 
+def _title_is_bare_series_name(title: str | None, series_name: str | None) -> bool:
+    """True when `title`, once normalized, IS the series' own bare name --
+    e.g. book 1 of "Backyard Starship" is very often titled with nothing
+    but "Backyard Starship" itself, no number or subtitle at all.
+
+    Distinguishes the two genuinely different situations
+    _book_numbers_compatible's "numbers disagree" outcome can mean, which
+    look identical from that check alone (title collision + a number
+    mismatch) but call for opposite handling:
+
+    1. The EXISTING row's title is this generic placeholder (this
+       function returns True) -- the "Defiance of the Fall 17" incident
+       (2026-08-30): a genuinely new, differently-numbered book whose own
+       title lost its volume number somewhere upstream (an LLM
+       reconciliation pass, most commonly) coincidentally collides with
+       book 1's bare-series-name title. The number field itself came from
+       an independent, trustworthy source here -- inserting as a new book
+       is correct; silently matching it onto book 1 would erase it
+       entirely (no insert, no notification).
+
+    2. The EXISTING row's title is a genuinely distinctive one, not the
+       bare series name (this function returns False) -- the "Escape
+       Velocity" incident (Backyard Starship, 2026-09-03): a *speculative*
+       "<series> book <N>" web-search lookahead query (fired for every
+       integer past the highest owned number, N unrelated to any
+       confirmed content -- see provider_io.WEB_SEARCH_LOOKAHEAD_BOOKS)
+       returned a low-quality/irrelevant hit that the LLM structuring pass
+       still extracted as *some* book, defaulting its number to the one
+       the speculative query happened to be hypothesizing rather than
+       independently confirming it from the snippet's own content. Two
+       genuinely different real books sharing one series/author ever
+       having the exact same distinctive title is vanishingly unlikely --
+       far more likely is that this candidate IS the existing book,
+       carrying a number the web/LLM pipeline simply got wrong. Treating
+       this like case 1 (insert as new) would create a visible duplicate
+       under a fabricated number; the caller should discard the candidate
+       instead.
+    """
+    normalized_title = _normalize_title_for_identity(title)
+    normalized_series_name = _normalize_title_for_identity(series_name)
+    return bool(normalized_title) and normalized_title == normalized_series_name
+
+
 def _book_numbers_compatible(candidate_number, existing_number) -> bool:
     """Guards the bare-title-only identity fallback (_canonical_title_
     identity_key, used by services/series_check_engine.py's persistence
