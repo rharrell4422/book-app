@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useToast } from "@/components/ui/use-toast";
 import { fetchApiWithFallback } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { ValueFilterMenu } from "@/components/value-filter-menu";
@@ -103,48 +102,6 @@ const OMNIBUS_RANGE_PATTERN = /\bbooks?\s+(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d
 
 type SeriesDetailApiRow = SeriesApiRow & {
   books?: SeriesDetailBook[];
-};
-
-type CheckBannerTone = "success" | "danger" | "error";
-
-type CheckBannerState = {
-  seriesId: number;
-  seriesTitle: string;
-  tone: CheckBannerTone;
-  title: string;
-  message: string;
-  actionHref?: string;
-  actionLabel?: string;
-  detail?: string;
-};
-
-const CHECK_STATUS_POLL_INTERVAL_MS = 1000;
-const CHECK_STATUS_MAX_POLLS = 600;
-const CHECK_STATUS_STALLED_POLLS = 120;
-
-type SeriesCheckStatusResponse = {
-  series_id: number;
-  session_id?: string | null;
-  status: "idle" | "started" | "running" | "complete";
-  updated_at?: string;
-  error?: string;
-  result?: Record<string, unknown>;
-  complete?: boolean;
-  no_new_books?: boolean;
-  reason?: string;
-  missing_books?: Array<number | string>;
-  found_books?: Array<Record<string, unknown>>;
-  progress?: number;
-  current_pass?: string | null;
-  progress_total?: number;
-  progress_completed?: number;
-  current_book_number?: number | null;
-};
-
-type CandidateDiagnostic = {
-  book_number?: number;
-  reason?: string | null;
-  message?: string | null;
 };
 
 function getSeriesState(row: Pick<SeriesRow, "has_new_available_books" | "has_new_upcoming_books" | "has_unread_books" | "has_upcoming_books" | "is_caught_up" | "series_state">): SeriesState {
@@ -257,24 +214,6 @@ function compareSeriesByColumn(a: SeriesRow, b: SeriesRow, key: SeriesSortKey, d
   return direction === "asc" ? delta : -delta;
 }
 
-function summarizeCandidateDiagnostics(rawDiagnostics: unknown): string | null {
-  if (!Array.isArray(rawDiagnostics) || rawDiagnostics.length === 0) {
-    return null;
-  }
-
-  const diagnostics = rawDiagnostics as CandidateDiagnostic[];
-  const firstMeaningful = diagnostics.find((item) => item?.message);
-  if (firstMeaningful?.message) {
-    return firstMeaningful.message;
-  }
-
-  return null;
-}
-
-function delay(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
 function inferMissingNumbersFromBooks(books: SeriesDetailBook[] | undefined): number[] {
   if (!Array.isArray(books) || books.length === 0) {
     return [];
@@ -367,18 +306,6 @@ function formatMissingBooksLabel(missingBooks: Array<number | string> | undefine
   return `Missing: Book ${values.join(", ")}`;
 }
 
-function getCheckBannerClassName(tone: CheckBannerTone) {
-  if (tone === "success") {
-    return "border-emerald-200 bg-emerald-50 text-emerald-900";
-  }
-
-  if (tone === "danger") {
-    return "border-rose-200 bg-rose-50 text-rose-900";
-  }
-
-  return "border-amber-200 bg-amber-50 text-amber-900";
-}
-
 type SeriesSortKey = "id" | "name" | "author" | "nextUnread" | "nextUpcoming" | "total" | "lastChecked" | "lastVerified" | "lastSynced";
 type SortDirection = "asc" | "desc";
 type SeriesColumnKey = "id" | "name" | "author" | "nextUnread" | "nextUpcoming" | "total" | "lastChecked" | "lastVerified" | "lastSynced" | "actions";
@@ -463,27 +390,11 @@ function sanitizeSavedSeriesColumnWidths(value: unknown): Record<SeriesColumnKey
 }
 
 export default function SeriesPage() {
-  const { toast } = useToast();
   const isMobile = useIsMobile();
   const [series, setSeries] = useState<SeriesRow[]>([]);
   const [viewMode, setViewMode] = useState<"ongoing" | "finished">("ongoing");
   const [quickSearch, setQuickSearch] = useState("");
-  const [loadingId, setLoadingId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
-  const [checkBanner, setCheckBanner] = useState<CheckBannerState | null>(null);
-  const [rowCheckState, setRowCheckState] = useState<Record<number, CheckBannerState>>({});
-
-  function dismissCheckBanner(seriesId?: number) {
-    setCheckBanner(null);
-    if (seriesId === undefined) {
-      return;
-    }
-    setRowCheckState((prev) => {
-      const next = { ...prev };
-      delete next[seriesId];
-      return next;
-    });
-  }
   const [valueFilters, setValueFilters] = useState({
     name: [] as string[],
     author: [] as string[],
@@ -649,11 +560,6 @@ export default function SeriesPage() {
     return sortConfig.direction === "asc" ? " ▲" : " ▼";
   }
 
-  function clearFilters() {
-    setValueFilters({ name: [], author: [] });
-    setValueFilterSearch({ name: "", author: "" });
-  }
-
   useEffect(() => {
     const handleMouseMove = (event: MouseEvent) => {
       const active = resizeStateRef.current;
@@ -791,166 +697,6 @@ export default function SeriesPage() {
     return () => window.cancelAnimationFrame(rafId);
   }, []);
 
-  async function handleCheckNow(seriesId: number) {
-    const targetSeries = series.find((item) => item.id === seriesId);
-    const seriesTitle = String(targetSeries?.name || `Series ${seriesId}`);
-    const missingLabel = formatMissingBooksLabel(targetSeries?.missing_books);
-
-    setLoadingId(seriesId);
-    setMessage("");
-    setRowCheckState((prev) => ({
-      ...prev,
-      [seriesId]: {
-        seriesId,
-        seriesTitle,
-        tone: "error",
-        title: `${seriesTitle} Checking`,
-        message: missingLabel ? `${missingLabel}. Checking missing books first...` : "Checking for new books...",
-      },
-    }));
-
-    try {
-      const response = await fetchApiWithFallback(`/series/${seriesId}/check`, { method: "POST" });
-      const kickoff = (await response.json()) as SeriesCheckStatusResponse;
-      const sessionId = kickoff.session_id;
-
-      let statusPayload = kickoff;
-      let pollCount = 0;
-      let unchangedStatusPolls = 0;
-      let lastStatusFingerprint = `${statusPayload.updated_at || ""}|${statusPayload.progress_completed || 0}|${statusPayload.current_book_number || ""}`;
-      while (statusPayload.status === "started" || statusPayload.status === "running") {
-        if (pollCount >= CHECK_STATUS_MAX_POLLS) {
-          throw new Error("Series check timed out. It may still be running in the background; try again in a moment.");
-        }
-
-        await delay(CHECK_STATUS_POLL_INTERVAL_MS);
-        const statusPath = sessionId
-          ? `/series/${seriesId}/check/status?session_id=${encodeURIComponent(sessionId)}`
-          : `/series/${seriesId}/check/status`;
-        const statusResponse = await fetchApiWithFallback(statusPath, { cache: "no-store" });
-        statusPayload = (await statusResponse.json()) as SeriesCheckStatusResponse;
-        pollCount += 1;
-
-        const nextStatusFingerprint = `${statusPayload.updated_at || ""}|${statusPayload.progress || 0}|${statusPayload.current_pass || ""}`;
-        if (nextStatusFingerprint === lastStatusFingerprint) {
-          unchangedStatusPolls += 1;
-        } else {
-          unchangedStatusPolls = 0;
-          lastStatusFingerprint = nextStatusFingerprint;
-        }
-
-        if (unchangedStatusPolls >= CHECK_STATUS_STALLED_POLLS) {
-          throw new Error("Series check appears stalled. Please try again.");
-        }
-
-        const completed = Number(statusPayload.progress_completed || 0);
-        const total = Number(statusPayload.progress_total || 0);
-        const progress = Number(statusPayload.progress || 0);
-        const currentBook = statusPayload.current_book_number;
-        const currentPass = statusPayload.current_pass;
-        setRowCheckState((prev) => ({
-          ...prev,
-          [seriesId]: {
-            seriesId,
-            seriesTitle,
-            tone: "error",
-            title: `${seriesTitle} Checking`,
-            message: total > 0
-              ? `Checking ${completed}/${total}${currentBook ? ` (book ${currentBook})` : ""}${currentPass ? ` • ${currentPass}` : ""}...`
-              : `Checking ${progress}%${currentPass ? ` • ${currentPass}` : ""}...`,
-          },
-        }));
-      }
-
-      if (statusPayload.error) {
-        throw new Error(statusPayload.error || "Error checking series.");
-      }
-
-      const data = statusPayload.result ?? {};
-      const missingFromStatus = Array.isArray(statusPayload.missing_books) ? statusPayload.missing_books : [];
-
-      let nextBanner: CheckBannerState;
-      const foundBooks = Array.isArray(statusPayload.found_books)
-        ? statusPayload.found_books
-        : Array.isArray(data.added_books)
-          ? data.added_books
-          : [];
-
-      if (foundBooks.length > 0) {
-        nextBanner = {
-          seriesId,
-          seriesTitle,
-          tone: "success",
-          title: `${seriesTitle} Checked`,
-          message: foundBooks.length === 1
-            ? "Book added to series and library."
-            : `${foundBooks.length} books added to series and library.`,
-          actionHref: `/series/${seriesId}?fromView=${viewMode}`,
-          actionLabel: "View series",
-        };
-        setMessage(nextBanner.message);
-        toast({
-          title: `${seriesTitle} Checked`,
-          description: nextBanner.message,
-        });
-      } else {
-        const diagnosticDetail = summarizeCandidateDiagnostics(
-          typeof data === "object" && data !== null ? (data as Record<string, unknown>).candidate_diagnostics : null,
-        );
-        const missingAfterCheck = missingFromStatus.length > 0
-          ? missingFromStatus
-          : Array.isArray(targetSeries?.missing_books)
-            ? targetSeries.missing_books
-            : [];
-        const missingDetail = formatMissingBooksLabel(missingAfterCheck);
-        nextBanner = {
-          seriesId,
-          seriesTitle,
-          tone: "danger",
-          title: `${seriesTitle} Checked`,
-          message: "No new books.",
-          detail: [missingDetail, diagnosticDetail].filter(Boolean).join(". ") || undefined,
-        };
-        setMessage("No new books.");
-        toast({
-          title: `${seriesTitle} Checked`,
-          description: [missingDetail, diagnosticDetail].filter(Boolean).length > 0
-            ? `No new books. ${[missingDetail, diagnosticDetail].filter(Boolean).join(". ")}`
-            : "No new books.",
-        });
-      }
-
-      setCheckBanner(nextBanner);
-      setRowCheckState((prev) => ({
-        ...prev,
-        [seriesId]: nextBanner,
-      }));
-
-      fetchSeries();
-    } catch (error) {
-      console.error("Error checking series:", error);
-      const errorBanner: CheckBannerState = {
-        seriesId,
-        seriesTitle,
-        tone: "error",
-        title: `${seriesTitle} Check Failed`,
-        message: error instanceof Error ? error.message : "Error checking series.",
-      };
-      setCheckBanner(errorBanner);
-      setRowCheckState((prev) => ({
-        ...prev,
-        [seriesId]: errorBanner,
-      }));
-      setMessage(errorBanner.message);
-      toast({
-        title: errorBanner.title,
-        description: errorBanner.message,
-      });
-    }
-
-    setLoadingId(null);
-  }
-
   return (
     <div className="p-4 space-y-3">
       <div className="grid gap-2 md:grid-cols-[1fr_auto_auto] md:items-start">
@@ -1002,29 +748,7 @@ export default function SeriesPage() {
         </div>
       </div>
 
-      {checkBanner ? (
-        <div className={`rounded-lg border px-4 py-3 text-sm ${getCheckBannerClassName(checkBanner.tone)}`}>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="font-semibold">{checkBanner.title}</p>
-              <p>{checkBanner.message}</p>
-              {checkBanner.detail ? <p className="text-xs opacity-80">{checkBanner.detail}</p> : null}
-            </div>
-            <div className="flex items-center gap-2">
-              {checkBanner.actionHref && checkBanner.actionLabel ? (
-                <Link href={checkBanner.actionHref}>
-                  <Button variant={checkBanner.tone === "success" ? "secondary" : "outline"} size="sm">
-                    {checkBanner.actionLabel}
-                  </Button>
-                </Link>
-              ) : null}
-              <Button type="button" variant="ghost" size="sm" onClick={() => dismissCheckBanner(checkBanner.seriesId)}>
-                Dismiss
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : message ? (
+      {message ? (
         <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
           {message}
         </div>
@@ -1051,13 +775,8 @@ export default function SeriesPage() {
             lastCheckedDisplay: formatDate(s.last_checked),
             lastVerifiedDisplay: s.last_verified_at ? formatDate(s.last_verified_at) : "Never verified",
             lastSyncedDisplay: s.last_synced_at ? formatDate(s.last_synced_at) : "Never synced",
-            checkState: rowCheckState[s.id] ?? null,
           }))}
           viewMode={viewMode}
-          checkingSeriesId={loadingId}
-          onCheckNow={handleCheckNow}
-          onDismissCheckState={dismissCheckBanner}
-          getCheckStateClassName={(tone) => getCheckBannerClassName(tone as CheckBannerTone)}
         />
       ) : (
       <div ref={tableWrapRef} className="overflow-x-auto rounded-lg border bg-card/80">
@@ -1174,9 +893,7 @@ export default function SeriesPage() {
                 />
               </TableHead>
               <TableHead style={{ width: `${columnWidths.actions}%` }}>
-                <Button type="button" variant="ghost" size="sm" onClick={clearFilters}>
-                  Clear
-                </Button>
+                View Books
               </TableHead>
             </TableRow>
           </TableHeader>
@@ -1204,43 +921,11 @@ export default function SeriesPage() {
                 <TableCell>{s.last_verified_at ? formatDate(s.last_verified_at) : "Never verified"}</TableCell>
                 <TableCell>{s.last_synced_at ? formatDate(s.last_synced_at) : "Never synced"}</TableCell>
                 <TableCell className="whitespace-nowrap">
-                  <div className="flex items-center gap-2 whitespace-nowrap">
-                    <Link href={`/series/${s.id}?fromView=${viewMode}`}>
-                      <Button variant="ghost" size="sm" className="shrink-0">
-                        View books
-                      </Button>
-                    </Link>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="shrink-0"
-                      onClick={() => handleCheckNow(s.id)}
-                      disabled={loadingId === s.id}
-                    >
-                      {loadingId === s.id ? "Checking…" : "Check for New"}
+                  <Link href={`/series/${s.id}?fromView=${viewMode}`}>
+                    <Button variant="ghost" size="sm" className="shrink-0">
+                      View books
                     </Button>
-                    {rowCheckState[s.id]?.actionHref && rowCheckState[s.id]?.actionLabel ? (
-                      <Link href={rowCheckState[s.id].actionHref!}>
-                        <Button variant="secondary" size="sm" className="shrink-0">
-                          {rowCheckState[s.id].actionLabel}
-                        </Button>
-                      </Link>
-                    ) : null}
-                  </div>
-                  {rowCheckState[s.id] ? (
-                    <div className={`mt-2 rounded border px-2 py-1 text-[11px] ${getCheckBannerClassName(rowCheckState[s.id].tone)}`}>
-                      <span className="font-semibold">{rowCheckState[s.id].title}</span>
-                      <span className="ml-1">{rowCheckState[s.id].message}</span>
-                      {rowCheckState[s.id].detail ? <span className="ml-1 opacity-80">{rowCheckState[s.id].detail}</span> : null}
-                      <button
-                        type="button"
-                        onClick={() => dismissCheckBanner(s.id)}
-                        className="ml-2 underline underline-offset-2"
-                      >
-                        dismiss
-                      </button>
-                    </div>
-                  ) : null}
+                  </Link>
                 </TableCell>
               </TableRow>
             ))}

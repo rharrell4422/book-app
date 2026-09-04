@@ -18,15 +18,6 @@ export type MobileSeriesRow = {
   is_finished?: boolean;
 };
 
-export type MobileSeriesCheckState = {
-  tone: "success" | "info" | "error" | string;
-  title: string;
-  message: string;
-  detail?: string | null;
-  actionHref?: string | null;
-  actionLabel?: string | null;
-};
-
 export type MobileSeriesItem = {
   series: MobileSeriesRow;
   hasNewBooks: boolean;
@@ -35,7 +26,6 @@ export type MobileSeriesItem = {
   // Two-Timestamp UI Adjustments spec (locked 2026-09-04).
   lastVerifiedDisplay: string;
   lastSyncedDisplay: string;
-  checkState: MobileSeriesCheckState | null;
 };
 
 /**
@@ -48,17 +38,9 @@ export type MobileSeriesItem = {
 export function MobileSeriesList({
   items,
   viewMode,
-  checkingSeriesId,
-  onCheckNow,
-  onDismissCheckState,
-  getCheckStateClassName,
 }: {
   items: MobileSeriesItem[];
   viewMode: "ongoing" | "finished";
-  checkingSeriesId: number | null;
-  onCheckNow: (seriesId: number) => void;
-  onDismissCheckState: (seriesId: number) => void;
-  getCheckStateClassName: (tone: string) => string;
 }) {
   if (items.length === 0) {
     return <p className="px-3 py-6 text-center text-sm text-muted-foreground">No series match the current filters.</p>;
@@ -66,7 +48,7 @@ export function MobileSeriesList({
 
   return (
     <ul className="flex flex-col gap-2 px-2">
-      {items.map(({ series, hasNewBooks, missingBooksLabel, lastCheckedDisplay, lastVerifiedDisplay, lastSyncedDisplay, checkState }) => (
+      {items.map(({ series, hasNewBooks, missingBooksLabel, lastCheckedDisplay, lastVerifiedDisplay, lastSyncedDisplay }) => (
         <li key={series.id} className="rounded-lg border bg-card/80 p-3">
           <div className="flex items-center gap-2">
             {hasNewBooks ? <NewBooksPill /> : null}
@@ -90,31 +72,7 @@ export function MobileSeriesList({
             <Link href={`/series/${series.id}?fromView=${viewMode}`}>
               <Button variant="ghost" size="sm">View books</Button>
             </Link>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => onCheckNow(series.id)}
-              disabled={checkingSeriesId === series.id}
-            >
-              {checkingSeriesId === series.id ? "Checking…" : "Check for New"}
-            </Button>
           </div>
-
-          {checkState ? (
-            <div className={`mt-2 rounded border px-2 py-1 text-[11px] ${getCheckStateClassName(checkState.tone)}`}>
-              <span className="font-semibold">{checkState.title}</span>
-              <span className="ml-1">{checkState.message}</span>
-              {checkState.detail ? <span className="ml-1 opacity-80">{checkState.detail}</span> : null}
-              {checkState.actionHref && checkState.actionLabel ? (
-                <Link href={checkState.actionHref} className="ml-2 underline underline-offset-2">
-                  {checkState.actionLabel}
-                </Link>
-              ) : null}
-              <button type="button" onClick={() => onDismissCheckState(series.id)} className="ml-2 underline underline-offset-2">
-                dismiss
-              </button>
-            </div>
-          ) : null}
         </li>
       ))}
     </ul>
