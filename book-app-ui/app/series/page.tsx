@@ -6,7 +6,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { fetchApiWithFallback } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { ValueFilterMenu } from "@/components/value-filter-menu";
-import { formatDate, normalizeText, parseFlexibleDate } from "@/lib/book-format";
+import { formatDate, getUnifiedBookStatus, normalizeText, parseFlexibleDate } from "@/lib/book-format";
 import {
   Table,
   TableBody,
@@ -41,6 +41,15 @@ type SeriesRow = {
   missing_books?: string[];
   inferred_missing_numbers?: number[];
   series_state?: SeriesState | null;
+  // Computed client-side (see seriesHasActiveNewBook) directly from this
+  // series' books[] -- true if ANY active book is unread/available/
+  // upcoming (not read), matching exactly what the "view books in series"
+  // page would show. The legacy has_new_available_books/has_new_upcoming_
+  // books properties only flag books discovered via the ghost/Check Now
+  // path (is_missing/is_upcoming_auto/is_upcoming_final), so a book added
+  // manually or via import with availability_status="available"/
+  // "upcoming" was never reflected there -- this field closes that gap.
+  has_new_books_tag?: boolean;
 };
 
 type SeriesState = {
@@ -78,6 +87,10 @@ type SeriesDetailBook = {
   book_number?: number | null;
   series_order?: number | null;
   record_status?: string | null;
+  is_read?: boolean | null;
+  availability_status?: string | null;
+  release_date?: string | null;
+  publication_date?: string | null;
 };
 
 const OMNIBUS_RANGE_PATTERN = /\bbooks?\s+(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\b/i;
@@ -157,10 +170,34 @@ function getSeriesPriority(row: SeriesRow): number {
   return getSeriesState(row).is_caught_up ? 1 : 0;
 }
 
+// Scans a series' own books[] the same way the series-detail ("view books
+// in series") page derives each row's status (getUnifiedBookStatus), so
+// the list-page "New Books" tag can never disagree with what the detail
+// page actually shows. Any active (non-deleted) book that isn't "read" --
+// i.e. unread, available, or upcoming -- counts.
+function seriesHasActiveNewBook(books: SeriesDetailBook[] | undefined): boolean {
+  if (!Array.isArray(books) || books.length === 0) {
+    return false;
+  }
+
+  return books.some((book) => {
+    if (String(book?.record_status ?? "active") === "deleted") {
+      return false;
+    }
+    return getUnifiedBookStatus(book) !== "read";
+  });
+}
+
 // UI Adjustments spec: the old three-tag system (new-available,
 // new-upcoming, unread-remains) collapses into a single "New Books" tag --
 // unread, available, or upcoming all count as "new books" to the user.
+// Prefers the book-scan-derived flag (has_new_books_tag) since it's
+// guaranteed fresh; ORs in the legacy series-level flags as a safety net
+// in case books[] wasn't populated for some caller.
 function hasNewBooksTag(row: SeriesRow): boolean {
+  if (row.has_new_books_tag) {
+    return true;
+  }
   const state = getSeriesState(row);
   return state.has_new_available_books || state.has_new_upcoming_books || state.has_unread_books;
 }
@@ -707,6 +744,7 @@ export default function SeriesPage() {
           missing_books: mergedMissingBooks,
           inferred_missing_numbers: inferredMissingNumbers,
           series_state: seriesState,
+          has_new_books_tag: seriesHasActiveNewBook(books),
         } satisfies SeriesRow;
       });
 
@@ -977,18 +1015,13 @@ export default function SeriesPage() {
 
       {isMobile ? (
         <MobileSeriesList
-          items={sortedSeries.map((s) => {
-            const state = getSeriesState(s);
-            return {
-              series: s,
-              hasNewAvailableBooks: state.has_new_available_books,
-              hasNewUpcomingBooks: state.has_new_upcoming_books,
-              hasUnreadBooks: state.has_unread_books,
-              missingBooksLabel: formatMissingBooksLabel(s.missing_books),
-              lastCheckedDisplay: formatDate(s.last_checked),
-              checkState: rowCheckState[s.id] ?? null,
-            };
-          })}
+          items={sortedSeries.map((s) => ({
+            series: s,
+            hasNewBooks: hasNewBooksTag(s),
+            missingBooksLabel: formatMissingBooksLabel(s.missing_books),
+            lastCheckedDisplay: formatDate(s.last_checked),
+            checkState: rowCheckState[s.id] ?? null,
+          }))}
           viewMode={viewMode}
           checkingSeriesId={loadingId}
           onCheckNow={handleCheckNow}

@@ -29,9 +29,7 @@ export type MobileSeriesCheckState = {
 
 export type MobileSeriesItem = {
   series: MobileSeriesRow;
-  hasNewAvailableBooks: boolean;
-  hasNewUpcomingBooks: boolean;
-  hasUnreadBooks: boolean;
+  hasNewBooks: boolean;
   missingBooksLabel: string | null;
   lastCheckedDisplay: string;
   checkState: MobileSeriesCheckState | null;
@@ -65,10 +63,10 @@ export function MobileSeriesList({
 
   return (
     <ul className="flex flex-col gap-2 px-2">
-      {items.map(({ series, hasNewAvailableBooks, hasNewUpcomingBooks, hasUnreadBooks, missingBooksLabel, lastCheckedDisplay, checkState }) => (
+      {items.map(({ series, hasNewBooks, missingBooksLabel, lastCheckedDisplay, checkState }) => (
         <li key={series.id} className="rounded-lg border bg-card/80 p-3">
           <div className="flex items-center gap-2">
-            {hasNewAvailableBooks || hasNewUpcomingBooks || hasUnreadBooks ? <NewBooksPill /> : null}
+            {hasNewBooks ? <NewBooksPill /> : null}
             <p className="min-w-0 flex-1 truncate text-sm font-semibold leading-tight">{series.name}</p>
           </div>
           {series.author ? <p className="truncate text-xs text-muted-foreground">{series.author}</p> : null}
