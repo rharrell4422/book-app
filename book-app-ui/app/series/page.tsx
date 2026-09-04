@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { BookOpenIcon, Clock3Icon } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { fetchApiWithFallback } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
@@ -18,6 +17,7 @@ import {
 } from "@/components/ui/table";
 import { MobileSeriesList } from "@/components/series/mobile-series-list";
 import { type DiscoveryHealth } from "@/components/series/discovery-health-badge";
+import { NewBooksPill } from "@/components/series/new-books-pill";
 import { useIsMobile } from "@/hooks/use-mobile";
 
 type SeriesRow = {
@@ -155,6 +155,55 @@ function getSeriesState(row: Pick<SeriesRow, "has_new_available_books" | "has_ne
 // isn't caught up, same as any other unread/available/upcoming book.
 function getSeriesPriority(row: SeriesRow): number {
   return getSeriesState(row).is_caught_up ? 1 : 0;
+}
+
+// UI Adjustments spec: the old three-tag system (new-available,
+// new-upcoming, unread-remains) collapses into a single "New Books" tag --
+// unread, available, or upcoming all count as "new books" to the user.
+function hasNewBooksTag(row: SeriesRow): boolean {
+  const state = getSeriesState(row);
+  return state.has_new_available_books || state.has_new_upcoming_books || state.has_unread_books;
+}
+
+function compareSeriesByColumn(a: SeriesRow, b: SeriesRow, key: SeriesSortKey, direction: SortDirection): number {
+  const parsedTime = (value?: string | null) => parseFlexibleDate(value)?.valueOf() ?? 0;
+
+  const aValue =
+    key === "id"
+      ? Number(a.id ?? 0)
+      : key === "name"
+        ? String(a.name || "")
+        : key === "author"
+          ? String(a.author || "")
+          : key === "nextUnread"
+            ? Number(a.next_unread_book_number ?? 0)
+            : key === "nextUpcoming"
+              ? Number(a.next_upcoming_book_number ?? 0)
+              : key === "total"
+                ? Number(a.total_books ?? 0)
+                : parsedTime(a.last_checked);
+
+  const bValue =
+    key === "id"
+      ? Number(b.id ?? 0)
+      : key === "name"
+        ? String(b.name || "")
+        : key === "author"
+          ? String(b.author || "")
+          : key === "nextUnread"
+            ? Number(b.next_unread_book_number ?? 0)
+            : key === "nextUpcoming"
+              ? Number(b.next_upcoming_book_number ?? 0)
+              : key === "total"
+                ? Number(b.total_books ?? 0)
+                : parsedTime(b.last_checked);
+
+  if (typeof aValue === "number" && typeof bValue === "number") {
+    return direction === "asc" ? aValue - bValue : bValue - aValue;
+  }
+
+  const delta = String(aValue).localeCompare(String(bValue), undefined, { sensitivity: "base" });
+  return direction === "asc" ? delta : -delta;
 }
 
 function summarizeCandidateDiagnostics(rawDiagnostics: unknown): string | null {
@@ -472,61 +521,43 @@ export default function SeriesPage() {
   }, [quickSearch, series, valueFilters, viewMode]);
 
   const sortedSeries = useMemo(() => {
+    const parsedTime = (value?: string | null) => parseFlexibleDate(value)?.valueOf() ?? 0;
+
     const prioritizedSeries = filteredSeries
       .map((row, index) => ({ row, index }))
       .sort((a, b) => {
-        const priorityDelta = getSeriesPriority(a.row) - getSeriesPriority(b.row);
-        if (priorityDelta !== 0) {
-          return priorityDelta;
+        if (viewMode === "ongoing") {
+          // UI Adjustments spec (points 4-5): series with a "New Books" tag
+          // always sort first on the Unfinished Series view.
+          const aHasNew = hasNewBooksTag(a.row);
+          const bHasNew = hasNewBooksTag(b.row);
+          if (aHasNew !== bHasNew) {
+            return aHasNew ? -1 : 1;
+          }
+        } else {
+          const priorityDelta = getSeriesPriority(a.row) - getSeriesPriority(b.row);
+          if (priorityDelta !== 0) {
+            return priorityDelta;
+          }
         }
 
-        if (!sortConfig.key) {
+        if (sortConfig.key) {
+          const columnDelta = compareSeriesByColumn(a.row, b.row, sortConfig.key, sortConfig.direction);
+          if (columnDelta !== 0) {
+            return columnDelta;
+          }
           return a.index - b.index;
         }
 
-        const parsedTime = (value?: string | null) => parseFlexibleDate(value)?.valueOf() ?? 0;
-
-        const key = sortConfig.key;
-
-        const aValue =
-          key === "id"
-            ? Number(a.row.id ?? 0)
-            : key === "name"
-              ? String(a.row.name || "")
-              : key === "author"
-                ? String(a.row.author || "")
-                : key === "nextUnread"
-                  ? Number(a.row.next_unread_book_number ?? 0)
-                  : key === "nextUpcoming"
-                    ? Number(a.row.next_upcoming_book_number ?? 0)
-                    : key === "total"
-                      ? Number(a.row.total_books ?? 0)
-                      : parsedTime(a.row.last_checked);
-
-        const bValue =
-          key === "id"
-            ? Number(b.row.id ?? 0)
-            : key === "name"
-              ? String(b.row.name || "")
-              : key === "author"
-                ? String(b.row.author || "")
-                : key === "nextUnread"
-                  ? Number(b.row.next_unread_book_number ?? 0)
-                  : key === "nextUpcoming"
-                    ? Number(b.row.next_upcoming_book_number ?? 0)
-                    : key === "total"
-                      ? Number(b.row.total_books ?? 0)
-                      : parsedTime(b.row.last_checked);
-
-        if (typeof aValue === "number" && typeof bValue === "number") {
-          const valueDelta = aValue - bValue;
-          if (valueDelta !== 0) {
-            return sortConfig.direction === "asc" ? valueDelta : -valueDelta;
-          }
-        } else {
-          const valueDelta = String(aValue).localeCompare(String(bValue), undefined, { sensitivity: "base" });
-          if (valueDelta !== 0) {
-            return sortConfig.direction === "asc" ? valueDelta : -valueDelta;
+        if (viewMode === "ongoing") {
+          // Default order (no manual column sort): within each New-Books
+          // tier, the series with the longest gap since it was last
+          // checked -- i.e. the oldest last_checked date -- floats to the
+          // top. A series that's never been checked (last_checked is null,
+          // parsed as time 0) counts as the longest possible gap.
+          const lastCheckedDelta = parsedTime(a.row.last_checked) - parsedTime(b.row.last_checked);
+          if (lastCheckedDelta !== 0) {
+            return lastCheckedDelta;
           }
         }
 
@@ -535,7 +566,7 @@ export default function SeriesPage() {
       .map((item) => item.row);
 
     return prioritizedSeries;
-  }, [filteredSeries, sortConfig]);
+  }, [filteredSeries, sortConfig, viewMode]);
 
   function toggleSort(key: SeriesSortKey) {
     setSortConfig((prev) => {
@@ -864,19 +895,9 @@ export default function SeriesPage() {
           <p className="max-w-2xl text-xs leading-5 text-muted-foreground md:hidden">
             Browse your tracked series and refresh status for each series.
           </p>
-          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
-            <span className="inline-flex items-center gap-1">
-              <BookOpenIcon className="h-3.5 w-3.5 text-sky-600" aria-hidden="true" />
-              <span>new available book(s) found</span>
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <Clock3Icon className="h-3.5 w-3.5 text-rose-600" aria-hidden="true" />
-              <span>new upcoming book(s) found</span>
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span aria-hidden="true">📘</span>
-              <span>unread books remain</span>
-            </span>
+          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+            <NewBooksPill />
+            <span>= unread, available, or upcoming book(s)</span>
           </div>
         </div>
 
@@ -1083,15 +1104,9 @@ export default function SeriesPage() {
               <TableRow key={s.id}>
                 <TableCell>{s.id}</TableCell>
                 <TableCell className="truncate" title={s.name}>
-                  <div className="flex items-center gap-1 truncate">
+                  <div className="flex items-center gap-2 truncate">
+                    {hasNewBooksTag(s) ? <NewBooksPill /> : null}
                     <span className="truncate">{s.name}</span>
-                    {getSeriesState(s).has_new_available_books ? (
-                      <BookOpenIcon className="h-3.5 w-3.5 shrink-0 text-sky-600" aria-label="New available book(s) found" />
-                    ) : null}
-                    {getSeriesState(s).has_new_upcoming_books ? (
-                      <Clock3Icon className="h-3.5 w-3.5 shrink-0 text-rose-600" aria-label="New upcoming book(s) found" />
-                    ) : null}
-                    {getSeriesState(s).has_unread_books ? <span aria-label="Unread books remain">📘</span> : null}
                   </div>
                   {Array.isArray(s.missing_books) && s.missing_books.length > 0 ? (
                     <p className="mt-1 truncate text-[11px] text-rose-700" title={formatMissingBooksLabel(s.missing_books) || undefined}>

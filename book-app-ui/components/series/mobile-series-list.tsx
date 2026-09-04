@@ -1,10 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { BookOpenIcon, Clock3Icon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { type DiscoveryHealth } from "@/components/series/discovery-health-badge";
+import { NewBooksPill } from "@/components/series/new-books-pill";
 
 export type MobileSeriesRow = {
   id: number;
@@ -65,16 +65,11 @@ export function MobileSeriesList({
 
   return (
     <ul className="flex flex-col gap-2 px-2">
-      {items.map(({ series, hasNewAvailableBooks, hasNewUpcomingBooks, missingBooksLabel, lastCheckedDisplay, checkState }) => (
+      {items.map(({ series, hasNewAvailableBooks, hasNewUpcomingBooks, hasUnreadBooks, missingBooksLabel, lastCheckedDisplay, checkState }) => (
         <li key={series.id} className="rounded-lg border bg-card/80 p-3">
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-2">
+            {hasNewAvailableBooks || hasNewUpcomingBooks || hasUnreadBooks ? <NewBooksPill /> : null}
             <p className="min-w-0 flex-1 truncate text-sm font-semibold leading-tight">{series.name}</p>
-            {hasNewAvailableBooks ? (
-              <BookOpenIcon className="h-3.5 w-3.5 shrink-0 text-sky-600" aria-label="New available book(s) found" />
-            ) : null}
-            {hasNewUpcomingBooks ? (
-              <Clock3Icon className="h-3.5 w-3.5 shrink-0 text-rose-600" aria-label="New upcoming book(s) found" />
-            ) : null}
           </div>
           {series.author ? <p className="truncate text-xs text-muted-foreground">{series.author}</p> : null}
           {missingBooksLabel ? <p className="mt-0.5 truncate text-[11px] text-rose-700">{missingBooksLabel}</p> : null}
