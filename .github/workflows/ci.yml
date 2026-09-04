@@ -26,4 +26,14 @@ jobs:
         run: bash scripts/check_discovery_sources.sh
 
       - name: Run unit tests
-        run: python -m unittest discover -s tests -p 'test*.py'
+        # pytest, not `python -m unittest discover`: tests/conftest.py's
+        # autouse fixtures (forcing AUTH_DISABLED off, popping any real
+        # ANTHROPIC_API_KEY, and pinning TIER_C_PARALLEL_SHADOW_SAMPLE_RATE
+        # to 0.0 for tests that don't explicitly want fan-out) are a
+        # pytest-only mechanism -- conftest.py is never imported by plain
+        # unittest discovery, since it doesn't match the `test*.py` glob.
+        # Running under `unittest` silently skipped all three, which is
+        # what made the sample-rate fixture's ~1-in-20-per-call flake
+        # (Step 10 Phase 6 raised the real default off 0.0) an intermittent
+        # CI failure instead of the non-issue it is under pytest.
+        run: python -m pytest tests/
