@@ -54,6 +54,24 @@ class FetchCanonicalPageTextTest(unittest.TestCase):
         self.assertLessEqual(len(result), provider_io.CANONICAL_PAGE_TEXT_MAX_CHARS)
         self.assertFalse(result.startswith(" "))
 
+    def test_calls_trafilatura_with_fast_mode(self):
+        # Regression (live bug, "Escape Velocity"/Backyard Starship,
+        # 2026-09-03): trafilatura's default extraction mode runs a
+        # secondary "which block is the real main content" scoring pass
+        # tuned for blog/article pages, which misjudged an entire Goodreads
+        # series-listing page's book list as boilerplate and kept only one
+        # stray paragraph -- confirmed directly against the real page
+        # (353 chars / zero books with default mode, 15,851 chars / all 36
+        # books with fast=True). fast=True skips that secondary pass.
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.text = "<html>...</html>"
+        with patch.object(provider_io.httpx, "get", return_value=response), patch.object(
+            provider_io.trafilatura, "extract", return_value="Book list content"
+        ) as mock_extract:
+            provider_io.fetch_canonical_page_text("https://example.com/series")
+        mock_extract.assert_called_once_with("<html>...</html>", url="https://example.com/series", fast=True)
+
 
 class FetchCanonicalPageCandidatesTest(unittest.TestCase):
     def test_returns_empty_when_page_fetch_fails(self):

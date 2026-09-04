@@ -795,7 +795,19 @@ def _structure_canonical_page_with_llm(
 # the fetch bounded (still one single one-time LLM call per Check Now
 # round, not per-query, so the added token cost is trivial -- see
 # fetch_canonical_page_candidates's own per-call cost in telemetry).
-CANONICAL_PAGE_TEXT_MAX_CHARS = 15000
+#
+# Revised again to 20000 (live "Escape Velocity"/Backyard Starship
+# investigation, 2026-09-03, alongside fetch_canonical_page_text's own
+# fast=True fix below): a longer-running, higher-review-count series page
+# is denser than the Jonathan Hunt page this budget was originally sized
+# against -- a direct fetch+extract test against the real Backyard
+# Starship page (35 primary works) produced 15,851 chars with fast=True,
+# just over the old 15000 cap, which would have silently clipped the tail
+# of the list (its own newest/most-wanted volumes) on every sufficiently
+# long series from here on. 20000 leaves comparable headroom past that
+# measurement to the old cap's headroom past its own Jonathan Hunt
+# measurement (~19 volumes).
+CANONICAL_PAGE_TEXT_MAX_CHARS = 20000
 
 
 def fetch_canonical_page_text(url: str) -> str | None:
@@ -841,7 +853,32 @@ def fetch_canonical_page_text(url: str) -> str | None:
         return None
 
     try:
-        extracted = trafilatura.extract(html, url=cleaned_url)
+        # fast=True (live "Escape Velocity"/Backyard Starship investigation,
+        # 2026-09-03): trafilatura's default mode runs a secondary
+        # "which block is the real main content" scoring pass on top of its
+        # primary extraction, designed for blog/news/article pages with one
+        # dominant prose block competing against sidebar/nav noise. A
+        # Goodreads series-listing page is the opposite shape -- dozens of
+        # short, near-identical "Book N / title / ratings / reviews" blocks,
+        # no single dominant prose block -- and that secondary pass can
+        # misjudge the entire book list as boilerplate, keeping only one
+        # stray long paragraph (a single book's blurb) instead. Confirmed
+        # directly against the real page: default mode returned 353 chars
+        # (just Book 1's blurb, zero structured list) for Backyard Starship,
+        # while fast=True (skips that secondary pass, keeping the primary
+        # extraction's fuller output) returned 15,851 chars covering every
+        # book 0.5 through 35 on the same page. Verified fast=True doesn't
+        # regress the Jonathan Hunt page this pipeline was originally built
+        # and tested against -- byte-identical output to default mode there
+        # (7,185 chars, books 1-18), since that page's book list apparently
+        # scored high enough under the secondary pass to survive it anyway.
+        # This is NOT a "different Goodreads page layout" fix (both pages
+        # share the exact same template/markup, confirmed by direct diff of
+        # the raw HTML) -- it's a heuristic false-negative in trafilatura's
+        # own content-scoring, triggered by this page's much higher
+        # ratings/reviews-per-book text density (35 long-running, heavily-
+        # reviewed volumes vs. Jonathan Hunt's newer, sparser 18).
+        extracted = trafilatura.extract(html, url=cleaned_url, fast=True)
     except Exception as exc:
         _log(f"canonical page extraction failed for {cleaned_url!r}: {exc}")
         return None
