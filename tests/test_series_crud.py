@@ -66,6 +66,73 @@ class SeriesCrudTest(unittest.TestCase):
         self.assertEqual(updated.author, "Someone Else")
         self.assertTrue(updated.is_finished)
 
+    def test_update_series_attaches_canonical_fields_to_a_pre_existing_series_without_clobbering_other_fields(self):
+        # Regression for the "Edit Series Discovery Settings" UI (2026-09-03,
+        # live Backyard Starship incident): before this feature, Guided
+        # Discovery's canonical_url/canonical_source/verified_volume_count
+        # could only ever be set at series-CREATION time -- a series added
+        # before Guided Discovery existed (or where the user simply didn't
+        # have the canonical URL handy yet) had no path to ever get one
+        # attached, so canonical-source recovery silently never ran for it
+        # (discovery_engine logged "canonical_url=EMPTY" every single Check
+        # Now). The new dialog sends a PUT with ONLY name + the three
+        # canonical fields (schemas.SeriesBase requires `name`; everything
+        # else is intentionally omitted from the request body) -- this
+        # confirms crud.update_series's model_dump(exclude_unset=True)
+        # correctly leaves every other already-set field (description here)
+        # completely untouched, and -- unlike create_series's "backfill only
+        # if empty" convention -- unconditionally SETS the canonical fields
+        # even though this series has owned books already (33 in the real
+        # incident).
+        series = Series(
+            name="Backyard Starship",
+            author="J.N Chaney; Terry Maggert",
+            description="A sci-fi series I already have notes on.",
+            profile_id="robbie",
+        )
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+
+        payload = schemas.SeriesBase(
+            name="Backyard Starship",
+            canonical_url="https://www.goodreads.com/series/327230-backyard-starship",
+            canonical_source="Goodreads",
+            verified_volume_count=35,
+        )
+        updated = crud.update_series(self.db, series.id, payload, profile_id="robbie")
+
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated.canonical_url, "https://www.goodreads.com/series/327230-backyard-starship")
+        self.assertEqual(updated.canonical_source, "Goodreads")
+        self.assertEqual(updated.verified_volume_count, 35)
+        # Untouched -- not present in the request body at all.
+        self.assertEqual(updated.author, "J.N Chaney; Terry Maggert")
+        self.assertEqual(updated.description, "A sci-fi series I already have notes on.")
+
+    def test_update_series_can_clear_canonical_fields_by_sending_null(self):
+        # The dialog sends explicit null (not empty string) when a field is
+        # cleared -- confirms that round-trips correctly through Pydantic's
+        # exclude_unset (a field present in the body with value None IS
+        # "set", so it's applied, distinct from a field omitted entirely).
+        series = Series(
+            name="Some Series",
+            profile_id="robbie",
+            canonical_url="https://example.com/old",
+            canonical_source="Other",
+            verified_volume_count=5,
+        )
+        self.db.add(series)
+        self.db.commit()
+        self.db.refresh(series)
+
+        payload = schemas.SeriesBase(name="Some Series", canonical_url=None, canonical_source=None, verified_volume_count=None)
+        updated = crud.update_series(self.db, series.id, payload, profile_id="robbie")
+
+        self.assertIsNone(updated.canonical_url)
+        self.assertIsNone(updated.canonical_source)
+        self.assertIsNone(updated.verified_volume_count)
+
     def test_delete_series_cascade_does_not_touch_a_ghost_cross_profile_book(self):
         # CR-9 regression: the Series row lookup was profile-checked, but
         # the cascade delete of its Book rows filtered by series_id alone

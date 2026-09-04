@@ -52,6 +52,7 @@ export type SeriesDetailHeaderProps = {
   onSearchNextBookOnline: () => void;
   onSeriesRecap: () => void;
   onNormalizeTitles: () => void;
+  onEditDiscoverySettings: () => void;
   onToggleFinished: () => void;
   onDeleteSeries: () => void;
 };
@@ -133,6 +134,7 @@ export function SeriesDetailHeader({
   onSearchNextBookOnline,
   onSeriesRecap,
   onNormalizeTitles,
+  onEditDiscoverySettings,
   onToggleFinished,
   onDeleteSeries,
 }: SeriesDetailHeaderProps) {
@@ -280,6 +282,17 @@ export function SeriesDetailHeader({
                     variant="ghost"
                     size="sm"
                     className="w-full justify-start"
+                    onClick={() => runFromOverflow(onEditDiscoverySettings)}
+                  >
+                    Guided Discovery Settings
+                  </Button>
+                ) : null}
+                {canEdit ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="w-full justify-start"
                     disabled={finishedToggleSaving}
                     onClick={() => runFromOverflow(onToggleFinished)}
                   >
@@ -351,6 +364,11 @@ export function SeriesDetailHeader({
             {canEdit ? (
               <Button type="button" variant="outline" size="sm" onClick={onNormalizeTitles}>
                 Optional Title Normalization
+              </Button>
+            ) : null}
+            {canEdit ? (
+              <Button type="button" variant="outline" size="sm" onClick={onEditDiscoverySettings}>
+                Guided Discovery Settings
               </Button>
             ) : null}
           </div>

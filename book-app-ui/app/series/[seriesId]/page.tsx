@@ -24,12 +24,14 @@ import {
   getStatusChipClass,
   getUnifiedBookStatus,
   hasUnconfirmedReleaseDate,
+  type CanonicalSource,
 } from "@/lib/book-format";
 import { ConfirmDialog, type ConfirmDialogState } from "@/components/confirm-dialog";
 import { AddBookDialog } from "@/components/books/add-book-dialog";
 import { EditBookDialog } from "@/components/books/edit-book-dialog";
 import { BookSummaryDialog } from "@/components/series/book-summary-dialog";
 import { NormalizeTitlesDialog } from "@/components/series/normalize-titles-dialog";
+import { EditSeriesDiscoveryDialog } from "@/components/series/edit-series-discovery-dialog";
 import { MoreByAuthorDialog } from "@/components/books/more-by-author-dialog";
 import { MobileSeriesBookList } from "@/components/series/mobile-series-book-list";
 import { SeriesDetailHeader } from "@/components/series/series-detail-header";
@@ -87,6 +89,10 @@ type SeriesRecord = {
   next_upcoming_book_number?: number | null;
   missing_books?: string[];
   title_normalization_mode_override?: TitleNormalizationMode | null;
+  // Guided Discovery (locked 2026-09-03, iterations 1-5).
+  canonical_url?: string | null;
+  canonical_source?: CanonicalSource | null;
+  verified_volume_count?: number | null;
   books?: BookRecord[];
   [key: string]: unknown;
 };
@@ -508,6 +514,11 @@ export default function SeriesDetailPage() {
   const [normalizeCustomPreset, setNormalizeCustomPreset] = useState<CustomTitlePatternPresetId>("book_title_series_suffix");
   const [normalizeExcludeUpcoming, setNormalizeExcludeUpcoming] = useState(true);
   const [normalizeTitlesDialogOpen, setNormalizeTitlesDialogOpen] = useState(false);
+  const [editDiscoveryDialogOpen, setEditDiscoveryDialogOpen] = useState(false);
+  const [editDiscoveryCanonicalUrl, setEditDiscoveryCanonicalUrl] = useState("");
+  const [editDiscoveryCanonicalSource, setEditDiscoveryCanonicalSource] = useState<CanonicalSource | "">("");
+  const [editDiscoveryVerifiedVolumeCount, setEditDiscoveryVerifiedVolumeCount] = useState("");
+  const [editDiscoverySaving, setEditDiscoverySaving] = useState(false);
   const [deleteSeriesSaving, setDeleteSeriesSaving] = useState(false);
   const [editBookDialogOpen, setEditBookDialogOpen] = useState(false);
   const [editBookId, setEditBookId] = useState<number | null>(null);
@@ -1406,6 +1417,87 @@ export default function SeriesDetailPage() {
     }
   }
 
+  function startEditDiscoverySettings() {
+    if (!series) return;
+    setEditDiscoveryCanonicalUrl(String(series.canonical_url || ""));
+    setEditDiscoveryCanonicalSource((series.canonical_source as CanonicalSource | null) || "");
+    setEditDiscoveryVerifiedVolumeCount(
+      series.verified_volume_count !== null && series.verified_volume_count !== undefined
+        ? String(series.verified_volume_count)
+        : ""
+    );
+    setEditDiscoveryDialogOpen(true);
+  }
+
+  /**
+   * Saves Guided Discovery's canonical fields onto an EXISTING series via
+   * PUT /series/{id} -- 2026-09-03 fix for a real gap found live on
+   * Backyard Starship: those fields could previously only ever be set at
+   * series-creation time (Add Book form), with no way to attach them to a
+   * series created before Guided Discovery existed. PUT already supported
+   * this (schemas.SeriesBase + crud.update_series's exclude_unset partial-
+   * update convention); `name` is the only field this always sends besides
+   * the three canonical ones, since SeriesBase requires it but
+   * exclude_unset means every other already-set field on the row (author,
+   * description, etc.) is left completely untouched.
+   *
+   * runCheckAfter chains straight into the existing handleCheckForNew flow
+   * once the save succeeds -- that flow already runs canonical-source
+   * recovery unconditionally whenever canonical_url is present (see
+   * discovery_engine._attempt_canonical_source_recovery), fused alongside
+   * Hardcover/Google/web-search rather than replacing them, so a series
+   * with 33 owned books keeps benefiting from every provider, not just
+   * the canonical page.
+   */
+  async function handleSaveDiscoverySettings(runCheckAfter: boolean) {
+    if (!series) return;
+
+    const trimmedUrl = editDiscoveryCanonicalUrl.trim();
+    const trimmedCount = editDiscoveryVerifiedVolumeCount.trim();
+    const parsedCount = trimmedCount ? Number(trimmedCount) : null;
+    if (trimmedCount && (!Number.isFinite(parsedCount) || (parsedCount as number) <= 0)) {
+      toast({
+        title: "Invalid verified volume count",
+        description: "Verified volume count must be a positive number when provided.",
+      });
+      return;
+    }
+
+    setEditDiscoverySaving(true);
+    try {
+      const response = await fetchApiWithFallback(`/series/${series.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: series.name,
+          canonical_url: trimmedUrl || null,
+          canonical_source: editDiscoveryCanonicalSource || null,
+          verified_volume_count: parsedCount,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to save discovery settings (${response.status})`);
+      }
+
+      await refreshSeriesFromApi();
+      setEditDiscoveryDialogOpen(false);
+      toast({ title: "Discovery settings saved", description: `Updated Guided Discovery settings for ${series.name}.` });
+
+      if (runCheckAfter) {
+        await handleCheckForNew();
+      }
+    } catch (error) {
+      console.error(error);
+      toast({
+        title: "Save failed",
+        description: error instanceof Error ? error.message : "Unable to save discovery settings right now.",
+      });
+    } finally {
+      setEditDiscoverySaving(false);
+    }
+  }
+
   function openSummaryEditor(book: BookRecord) {
     setSummaryEditorBook(book);
     setSummaryDraft(String(book?.auto_summary || ""));
@@ -1576,6 +1668,7 @@ export default function SeriesDetailPage() {
           setNormalizeWizardMode(seriesNormalizationMode);
           setNormalizeTitlesDialogOpen(true);
         }}
+        onEditDiscoverySettings={startEditDiscoverySettings}
         onToggleFinished={handleToggleSeriesFinished}
         onDeleteSeries={() => void handleDeleteSeriesWithBooks()}
       />
@@ -1829,6 +1922,23 @@ export default function SeriesDetailPage() {
         skippedUnnumberedCount={skippedUnnumberedCount}
         onApply={handleApplyTitleNormalization}
         applying={titleNormalizeSaving}
+      />
+
+      <EditSeriesDiscoveryDialog
+        open={editDiscoveryDialogOpen}
+        onOpenChange={setEditDiscoveryDialogOpen}
+        seriesName={series.name}
+        seriesAuthor={series.author}
+        canonicalUrl={editDiscoveryCanonicalUrl}
+        canonicalSource={editDiscoveryCanonicalSource}
+        verifiedVolumeCount={editDiscoveryVerifiedVolumeCount}
+        onCanonicalUrlChange={setEditDiscoveryCanonicalUrl}
+        onCanonicalSourceChange={setEditDiscoveryCanonicalSource}
+        onVerifiedVolumeCountChange={setEditDiscoveryVerifiedVolumeCount}
+        onSave={() => void handleSaveDiscoverySettings(false)}
+        onSaveAndCheckNow={() => void handleSaveDiscoverySettings(true)}
+        saving={editDiscoverySaving}
+        checking={seriesCheckLoading}
       />
 
       <ConfirmDialog

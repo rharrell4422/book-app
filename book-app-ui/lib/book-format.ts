@@ -183,6 +183,25 @@ export function getFindPublicationDateUrl(book: { title?: string | null; author?
   return `https://www.google.com/search?q=${encodeURIComponent(query)}`;
 }
 
+// Mirrors schemas.CanonicalSource on the backend. Shared between the Add
+// Book form's "new series" Guided Discovery section and the series
+// detail page's "Edit Discovery Settings" dialog (2026-09-03) -- the
+// latter is what lets an EXISTING, already-created series (e.g. one
+// tracked long before Guided Discovery existed) get a canonical_url
+// attached after the fact, via PUT /series/{id} (which already supported
+// updating these fields; the gap was purely the missing UI to call it).
+export type CanonicalSource = "KU" | "Nook" | "Kobo" | "GooglePlay" | "PublisherSite" | "Goodreads" | "Other";
+
+export const CANONICAL_SOURCE_OPTIONS: { value: CanonicalSource; label: string }[] = [
+  { value: "KU", label: "Amazon / Kindle Unlimited" },
+  { value: "Nook", label: "Barnes & Noble / Nook" },
+  { value: "Kobo", label: "Kobo" },
+  { value: "GooglePlay", label: "Google Play Books" },
+  { value: "PublisherSite", label: "Publisher site" },
+  { value: "Goodreads", label: "Goodreads" },
+  { value: "Other", label: "Other" },
+];
+
 /** Two search tabs to help a user locate a series' real canonical page
  * (Goodreads series page, product listing, etc.) to paste into the Add
  * Book card's "Source URL" field -- Guided Discovery UI-only assist

@@ -5,7 +5,15 @@ import { CircleHelpIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { getCanonicalPageSearchUrls, type BookStatus } from "@/lib/book-format";
+import {
+  CANONICAL_SOURCE_OPTIONS,
+  getCanonicalPageSearchUrls,
+  type BookStatus,
+  type CanonicalSource,
+} from "@/lib/book-format";
+
+export type { CanonicalSource };
+export { CANONICAL_SOURCE_OPTIONS };
 
 export type BookClassification = "standalone" | "series";
 
@@ -35,19 +43,6 @@ export type AddBookFormState = {
   canonicalSource: CanonicalSource | "";
   verifiedVolumeCount: string;
 };
-
-// Mirrors schemas.CanonicalSource on the backend.
-export type CanonicalSource = "KU" | "Nook" | "Kobo" | "GooglePlay" | "PublisherSite" | "Goodreads" | "Other";
-
-export const CANONICAL_SOURCE_OPTIONS: { value: CanonicalSource; label: string }[] = [
-  { value: "KU", label: "Amazon / Kindle Unlimited" },
-  { value: "Nook", label: "Barnes & Noble / Nook" },
-  { value: "Kobo", label: "Kobo" },
-  { value: "GooglePlay", label: "Google Play Books" },
-  { value: "PublisherSite", label: "Publisher site" },
-  { value: "Goodreads", label: "Goodreads" },
-  { value: "Other", label: "Other" },
-];
 
 // Add Book defaults to "series" since entering book #1 of a new series is
 // at least as common a starting point as adding a standalone book, and
