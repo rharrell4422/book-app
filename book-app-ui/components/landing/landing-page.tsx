@@ -24,7 +24,6 @@ const inter = Inter({ subsets: ["latin"], weight: ["400", "500", "600", "700"], 
 
 const VALUE_PROPS: { icon: typeof LibraryIcon; text: string }[] = [
   { icon: BellIcon, text: "Never miss a new release again." },
-  { icon: BookOpenIcon, text: "Know exactly where you left off." },
   { icon: SearchIcon, text: "Discover new books instantly." },
 ];
 
@@ -135,6 +134,14 @@ export function LandingPage() {
                 <p className="text-[11px] leading-snug text-slate-300">{description}</p>
               </div>
             ))}
+            <div
+              className={`animate-in fade-in slide-in-from-bottom-4 ${STAGGER_DELAYS[FEATURES.length % STAGGER_DELAYS.length]} group flex flex-col items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-black/30 px-3 py-3 text-center backdrop-blur-sm duration-700 transition-[transform,background-color,border-color,box-shadow] hover:-translate-y-1 hover:border-white/20 hover:bg-white/10 hover:shadow-[0_0_30px_-5px_rgba(96,165,250,0.4)]`}
+            >
+              <span className="flex size-9 items-center justify-center rounded-full bg-white/10 ring-1 ring-white/15 transition-colors group-hover:bg-white/15">
+                <BookOpenIcon className="size-4 text-blue-300 transition-transform group-hover:scale-110" />
+              </span>
+              <p className="text-xs font-semibold text-slate-100 sm:text-sm">Know exactly where you left off.</p>
+            </div>
           </div>
         </section>
 
