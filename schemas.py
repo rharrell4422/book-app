@@ -249,6 +249,7 @@ class SeriesBase(BaseModel):
     canonical_url: Optional[str] = None
     canonical_source: Optional[CanonicalSource] = None
     verified_volume_count: Optional[int] = None
+    discovery_target_numbers: Optional[list[int]] = None
 
 
 class SeriesResponse(SeriesBase):
@@ -315,6 +316,7 @@ class SeriesDetailResponse(BaseModel):
     canonical_url: str | None = None
     canonical_source: CanonicalSource | None = None
     verified_volume_count: int | None = None
+    discovery_target_numbers: list[int] | None = None
 
     created_at: datetime
     updated_at: datetime

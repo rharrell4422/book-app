@@ -1985,6 +1985,7 @@ def _fetch_all_providers_parallel(
     # unconditionally (not just on the "sufficient" branch, unlike the
     # original version of this gate) precisely because the last diagnosis
     # of this gate had no visibility into *why* it did or didn't fire.
+    forced_next_book_queries: list[str] | None = None
     if run_web_search:
         if _catalog_sufficiency_gate_enabled():
             contributing_provider_count = sum(
@@ -2031,7 +2032,30 @@ def _fetch_all_providers_parallel(
             )
             outcome = "PASSED" if sufficient else "FAILED"
             if sufficient:
-                run_web_search = False
+                # Check for New (targeted pass): when catalogs look complete,
+                # still run ONE web search for the next expected volume
+                # (highest_owned + 1) so established series like Tracy
+                # Crosswhite #13 can surface without Guided Discovery.
+                if (
+                    pass_label == "targeted"
+                    and highest_owned_book_number
+                    and _web_search_enabled()
+                    and _llm_structuring_enabled()
+                ):
+                    next_number = int(highest_owned_book_number) + 1
+                    lookahead_author = f" {query_author}" if query_author else ""
+                    forced_next_book_queries = [
+                        f'"{query_series_name}"{lookahead_author} book {next_number}'
+                    ]
+                    run_web_search = True
+                    outcome = "FORCED_NEXT_BOOK"
+                    _log(
+                        f"Catalog-sufficiency gate [{pass_label}]: FORCED next-book web search "
+                        f"for book {next_number} despite sufficient catalogs "
+                        f"(highest_owned_book_number={highest_owned_book_number})"
+                    )
+                else:
+                    run_web_search = False
             if telemetry is not None:
                 telemetry.record_gate_outcome("catalog_sufficiency", outcome)
         else:
@@ -2040,11 +2064,12 @@ def _fetch_all_providers_parallel(
                 telemetry.record_gate_outcome("catalog_sufficiency", "SKIPPED")
 
     if run_web_search:
+        web_queries_to_run = forced_next_book_queries if forced_next_book_queries is not None else resolved_web_queries
         _run_tasks(
             {
                 "web": (
                     WebDiscoveryProvider().fetch,
-                    (resolved_web_queries, series_name, author),
+                    (web_queries_to_run, series_name, author),
                     {
                         "diagnostics": diagnostics,
                         "telemetry": telemetry,

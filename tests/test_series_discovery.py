@@ -7267,6 +7267,35 @@ class CatalogSufficiencyGateTest(unittest.TestCase):
         mock_web_search.assert_not_called()
         self.assertEqual(result["web"], [])
 
+    def test_fetch_all_providers_parallel_forces_next_book_web_search_when_catalogs_sufficient(self):
+        with patch.object(
+            discovery_engine,
+            "_fetch_hardcover",
+            return_value=[self._catalog_hit(f"Book {n}", n, source="hardcover") for n in range(1, 13)],
+        ), patch.object(
+            discovery_engine,
+            "_fetch_google_books",
+            return_value=[self._catalog_hit(f"Book {n}", n, source="google_books") for n in range(1, 13)],
+        ), patch.object(
+            discovery_engine,
+            "_fetch_openlibrary",
+            return_value=[self._catalog_hit(f"Book {n}", n, source="openlibrary") for n in range(1, 13)],
+        ), patch.object(provider_io, "_fetch_serper_web_search", return_value=[]) as mock_web_search:
+            result = discovery_engine._fetch_all_providers_parallel(
+                "Robert Dugoni",
+                "Tracy Crosswhite",
+                "Tracy Crosswhite Robert Dugoni",
+                12,
+                author="Robert Dugoni",
+                enable_web_search=True,
+                pass_label="targeted",
+            )
+
+        mock_web_search.assert_called_once()
+        queries_used = mock_web_search.call_args[0][0]
+        self.assertIn('"Tracy Crosswhite" Robert Dugoni book 13', queries_used)
+        self.assertEqual(result["web"], [])
+
     def test_fetch_all_providers_parallel_still_runs_web_search_when_catalogs_incomplete(self):
         with patch.object(
             discovery_engine,
@@ -7952,6 +7981,45 @@ class ReconstructSeriesSkeletonGuidedDiscoveryTest(unittest.TestCase):
                 verified_volume_count=8,
             )
         self.assertEqual(sorted(result["recovered_numbers"]), [3, 8])
+
+
+class TargetedVolumeDiscoveryTest(unittest.TestCase):
+    def test_normalize_target_book_numbers_dedupes_sorts_and_caps(self):
+        self.assertEqual(discovery_engine.normalize_target_book_numbers([13, 2, 2, 6, 8, 9, 10, 11, 12]), [2, 6, 8, 9, 10, 11])
+
+    def test_discover_target_volumes_runs_only_explicit_queries(self):
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-key", "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+            discovery_engine, "fetch_apify_candidates", return_value=[]
+        ), patch.object(
+            discovery_engine,
+            "_fetch_web_search",
+            return_value=[
+                {
+                    "source": "web_search",
+                    "source_id": "https://example.com/13",
+                    "title": "Graves Tell Lies",
+                    "authors": ["Robert Dugoni"],
+                    "published_date": "2027-12-14",
+                    "description": None,
+                    "isbn13": None,
+                    "source_url": "https://example.com/13",
+                    "language": "",
+                    "series_number_hint": 13,
+                    "upcoming_hint": True,
+                    "series_name_hint": "Tracy Crosswhite",
+                }
+            ],
+        ) as mock_web_search:
+            result = discovery_engine.discover_target_volumes_for_series(
+                "Tracy Crosswhite",
+                "Robert Dugoni",
+                [13],
+            )
+
+        mock_web_search.assert_called_once()
+        queries_used = mock_web_search.call_args[0][0]
+        self.assertEqual(queries_used, ['"Tracy Crosswhite" Robert Dugoni book 13'])
+        self.assertTrue(any(candidate.get("series_number_hint") == 13 for candidate in result["candidates"]))
 
 
 if __name__ == "__main__":

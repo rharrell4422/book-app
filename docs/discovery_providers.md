@@ -81,7 +81,9 @@ catalog APIs + manual adds only.
 - **Jonathan Hunt Thriller Series** — treated as out-of-scope for automatic Amazon/KU
   discovery; use Goodreads canonical URL if continuing to test that series.
 - **Tracy Crosswhite** — book 13 (*Graves Tell Lies*) is on Amazon/KU but not in
-  major catalogs yet; KU Guided Discovery needs Apify re-enabled, or add the book manually.
+  major catalogs yet; use **Find missing book(s): 13** + **Find These Books Now**, or
+  rely on **Check for New** (always runs one Serper query for highest-owned + 1 even
+  when catalogs look complete). KU URL + Apify optional when token is set.
 
 ## Related files
 

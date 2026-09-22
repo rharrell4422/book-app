@@ -717,6 +717,7 @@ class SeriesIntelligenceAgent:
         cache: "DiscoveryCache | None" = None,
         run_id: str | None = None,
         tier_c_shadow_allowed: bool = True,
+        discovery_mode: str = "default",
     ) -> dict:
         """`run_id`/`tier_c_shadow_allowed` (Step 8, "Tier C Shadow
         Scoring Persistence + Promotion Path"): both optional and default
@@ -861,15 +862,38 @@ class SeriesIntelligenceAgent:
             # _is_cross_series_contamination there) -- while still allowing
             # it to surface anything new for *this* series.
 
-            discovery = discovery_engine.discover_candidates_for_series(
-                series.name,
-                series_author,
-                exclude_title_keys=author_owned_titles,
-                progress_callback=progress_callback,
-                highest_owned_book_number=highest_owned_book_number,
-                telemetry=telemetry,
-                cache=cache,
+            targeted_mode = discovery_mode == "targeted"
+            target_book_numbers = discovery_engine.normalize_target_book_numbers(
+                series.discovery_target_numbers if isinstance(series.discovery_target_numbers, list) else None
             )
+            skip_canonical_in_skeleton = False
+            if targeted_mode and target_book_numbers:
+                _console_log(
+                    f"TARGETED volume discovery for series={series.name!r}: "
+                    f"target_book_numbers={target_book_numbers}"
+                )
+                discovery = discovery_engine.discover_target_volumes_for_series(
+                    series.name,
+                    series_author,
+                    target_book_numbers,
+                    exclude_title_keys=author_owned_titles,
+                    canonical_url=series.canonical_url,
+                    canonical_source=series.canonical_source,
+                    progress_callback=progress_callback,
+                    telemetry=telemetry,
+                    cache=cache,
+                )
+                skip_canonical_in_skeleton = True
+            else:
+                discovery = discovery_engine.discover_candidates_for_series(
+                    series.name,
+                    series_author,
+                    exclude_title_keys=author_owned_titles,
+                    progress_callback=progress_callback,
+                    highest_owned_book_number=highest_owned_book_number,
+                    telemetry=telemetry,
+                    cache=cache,
+                )
             candidates = discovery["candidates"]
             provider_failures = discovery["provider_failures"]
             all_providers_failed = discovery["all_providers_failed"]
@@ -1025,6 +1049,7 @@ class SeriesIntelligenceAgent:
                 canonical_url=series.canonical_url,
                 canonical_source=series.canonical_source,
                 verified_volume_count=series.verified_volume_count,
+                skip_canonical_source_recovery=skip_canonical_in_skeleton,
             )
 
             # series_delta/series_confidence/confidence_lookup/

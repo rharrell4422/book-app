@@ -48,6 +48,39 @@ logger = logging.getLogger(__name__)
 
 series_agent = SeriesIntelligenceAgent()
 series_check_jobs: dict[int, dict] = {}
+
+
+def _clear_resolved_discovery_targets(db_series: models.Series, persisted_books: list[dict]) -> bool:
+    """Remove target volume numbers that were successfully persisted this run."""
+    raw_targets = db_series.discovery_target_numbers
+    if not isinstance(raw_targets, list) or not raw_targets:
+        return False
+
+    target_numbers = discovery_engine.normalize_target_book_numbers(raw_targets)
+    if not target_numbers:
+        db_series.discovery_target_numbers = None
+        return True
+
+    added_numbers: set[int] = set()
+    for book in persisted_books:
+        book_number = book.get("book_number")
+        if book_number is None:
+            continue
+        try:
+            if float(book_number).is_integer():
+                added_numbers.add(int(float(book_number)))
+        except (TypeError, ValueError):
+            continue
+
+    if not added_numbers:
+        return False
+
+    remaining = [number for number in target_numbers if number not in added_numbers]
+    if remaining == target_numbers:
+        return False
+
+    db_series.discovery_target_numbers = remaining or None
+    return True
 SERIES_CHECK_TIMEOUT_SECONDS = 300
 SERIES_CHECK_HARD_TIMEOUT_SECONDS = 300
 # Bounds the internal catch-up loop below, not a single discovery call --
@@ -244,6 +277,8 @@ def run_series_check_job_full(series_id: int) -> None:
         db_series = db.query(models.Series).filter(models.Series.id == series_id).first()
         if db_series:
             logger.info("CHECK NOW triggered for series_id=%s, series_name=%s", series_id, db_series.name)
+        job_state = series_check_jobs.get(series_id) or {}
+        discovery_mode = str(job_state.get("discovery_mode") or "default")
         fallback_missing = [7]
         if db_series and isinstance(db_series.missing_books, list) and db_series.missing_books:
             try:
@@ -428,6 +463,7 @@ def run_series_check_job_full(series_id: int) -> None:
                 discovery_cache,
                 run_id,
                 tier_c_shadow_allowed,
+                discovery_mode,
             )
             try:
                 result = future.result(timeout=remaining_budget)
@@ -1110,6 +1146,9 @@ def run_series_check_job_full(series_id: int) -> None:
                 count_new_books=total_discovery_delta_count,
                 book_titles=discovery_delta_titles,
             )
+            db.commit()
+
+        if _clear_resolved_discovery_targets(db_series, all_persisted_new_books):
             db.commit()
 
         rebuild_snapshot = recalculate_intelligence(db, series_id, scan_result=result if isinstance(result, dict) else None)

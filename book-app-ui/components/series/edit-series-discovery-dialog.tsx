@@ -21,11 +21,13 @@ export type EditSeriesDiscoveryDialogProps = {
   canonicalUrl: string;
   canonicalSource: CanonicalSource | "";
   verifiedVolumeCount: string;
+  discoveryTargetNumbers: string;
   onCanonicalUrlChange: (value: string) => void;
   onCanonicalSourceChange: (value: CanonicalSource | "") => void;
   onVerifiedVolumeCountChange: (value: string) => void;
+  onDiscoveryTargetNumbersChange: (value: string) => void;
   onSave: () => void;
-  onSaveAndCheckNow: () => void;
+  onFindTheseBooksNow: () => void;
   saving: boolean;
   checking: boolean;
 };
@@ -50,11 +52,13 @@ export function EditSeriesDiscoveryDialog({
   canonicalUrl,
   canonicalSource,
   verifiedVolumeCount,
+  discoveryTargetNumbers,
   onCanonicalUrlChange,
   onCanonicalSourceChange,
   onVerifiedVolumeCountChange,
+  onDiscoveryTargetNumbersChange,
   onSave,
-  onSaveAndCheckNow,
+  onFindTheseBooksNow,
   saving,
   checking,
 }: EditSeriesDiscoveryDialogProps) {
@@ -83,9 +87,6 @@ export function EditSeriesDiscoveryDialog({
                   size="sm"
                   className="h-6 px-2 text-[11px]"
                   onClick={() => {
-                    // UI-only assist -- opens a search tab so the user can find and
-                    // paste the series' real canonical page below. No scraping, no
-                    // discovery/provider logic.
                     const { goodreads } = getCanonicalPageSearchUrls(seriesName, seriesAuthor);
                     window.open(goodreads, "_blank", "noopener,noreferrer");
                   }}
@@ -148,14 +149,27 @@ export function EditSeriesDiscoveryDialog({
               />
             </div>
           </div>
+
+          <div className="space-y-1">
+            <Label htmlFor="edit-series-discovery-targets">Find missing book(s)</Label>
+            <Input
+              id="edit-series-discovery-targets"
+              value={discoveryTargetNumbers}
+              onChange={(event) => onDiscoveryTargetNumbersChange(event.target.value)}
+              placeholder="e.g. 13 or 2, 6, 8"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Searches only these volume numbers (up to 6). Cleared automatically when a listed book is found and added.
+            </p>
+          </div>
         </div>
 
         <DialogFooter showCloseButton>
           <Button type="button" variant="outline" onClick={onSave} disabled={busy}>
             {saving ? "Saving..." : "Save"}
           </Button>
-          <Button type="button" variant="secondary" onClick={onSaveAndCheckNow} disabled={busy}>
-            {saving ? "Saving..." : checking ? "Checking..." : "Save & Run Canonical Discovery Now"}
+          <Button type="button" variant="secondary" onClick={onFindTheseBooksNow} disabled={busy}>
+            {saving ? "Saving..." : checking ? "Finding..." : "Find These Books Now"}
           </Button>
         </DialogFooter>
       </DialogContent>

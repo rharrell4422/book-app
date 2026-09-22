@@ -20,10 +20,13 @@ import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/lib/auth-context";
 import {
   formatDate,
+  formatDiscoveryTargetNumbers,
+  getCheckNextBookOnAmazonUrl,
   getFindPublicationDateUrl,
   getStatusChipClass,
   getUnifiedBookStatus,
   hasUnconfirmedReleaseDate,
+  parseDiscoveryTargetNumbers,
   type CanonicalSource,
 } from "@/lib/book-format";
 import { ConfirmDialog, type ConfirmDialogState } from "@/components/confirm-dialog";
@@ -97,6 +100,7 @@ type SeriesRecord = {
   canonical_url?: string | null;
   canonical_source?: CanonicalSource | null;
   verified_volume_count?: number | null;
+  discovery_target_numbers?: number[] | null;
   books?: BookRecord[];
   [key: string]: unknown;
 };
@@ -544,6 +548,7 @@ export default function SeriesDetailPage() {
   const [editDiscoveryCanonicalUrl, setEditDiscoveryCanonicalUrl] = useState("");
   const [editDiscoveryCanonicalSource, setEditDiscoveryCanonicalSource] = useState<CanonicalSource | "">("");
   const [editDiscoveryVerifiedVolumeCount, setEditDiscoveryVerifiedVolumeCount] = useState("");
+  const [editDiscoveryTargetNumbers, setEditDiscoveryTargetNumbers] = useState("");
   const [editDiscoverySaving, setEditDiscoverySaving] = useState(false);
   const [deleteSeriesSaving, setDeleteSeriesSaving] = useState(false);
   const [editBookDialogOpen, setEditBookDialogOpen] = useState(false);
@@ -1074,7 +1079,7 @@ export default function SeriesDetailPage() {
     setSeries(data);
   }
 
-  async function handleCheckForNew() {
+  async function handleCheckForNew(discoveryMode: "default" | "targeted" = "default") {
     if (!series) return;
 
     clearSeriesCheckResetTimeout();
@@ -1082,10 +1087,18 @@ export default function SeriesDetailPage() {
     setSeriesCheckProgress(0);
     setSeriesCheckCurrentPass("exact match");
     setSeriesCheckStillChecking(false);
-    flashAddedMessage(`Checking ${series.name} for new books...`);
+    flashAddedMessage(
+      discoveryMode === "targeted"
+        ? `Finding targeted book(s) for ${series.name}...`
+        : `Checking ${series.name} for new books...`,
+    );
 
     try {
-      const response = await fetchApiWithFallback(`/series/${series.id}/check`, { method: "POST" });
+      const checkPath =
+        discoveryMode === "targeted"
+          ? `/series/${series.id}/check?discovery_mode=targeted`
+          : `/series/${series.id}/check`;
+      const response = await fetchApiWithFallback(checkPath, { method: "POST" });
       if (!response.ok) {
         throw new Error(`Unable to start check (${response.status})`);
       }
@@ -1227,15 +1240,12 @@ export default function SeriesDetailPage() {
     // miss a real release entirely). This gives a fast manual escape hatch
     // to check a retailer/Goodreads directly for "book <owned + 1>" instead
     // of waiting on -- or debugging -- the automated pipeline.
-    const query = [series.name, series.author, nextBookNumber ? `book ${nextBookNumber}` : null, "release date"]
-      .filter(Boolean)
-      .join(" ");
     // window.open must stay directly in this synchronous click handler --
     // an awaited call before it risks the popup being blocked as not
     // originating from a user gesture (Safari in particular). The
     // last_verified_at stamp below is a best-effort side effect, so it
     // fires-and-forgets *after* the tab opens rather than gating it.
-    window.open(`https://www.google.com/search?q=${encodeURIComponent(query)}`, "_blank", "noopener,noreferrer");
+    window.open(getCheckNextBookOnAmazonUrl(series, nextBookNumber), "_blank", "noopener,noreferrer");
 
     const verifiedSeriesId = series.id;
     void fetchApiWithFallback(`/series/${verifiedSeriesId}/verify`, { method: "POST" })
@@ -1247,7 +1257,7 @@ export default function SeriesDetailPage() {
         });
       })
       .catch((error) => {
-        // Search Book Online (§ Two-Timestamp UI Adjustments spec, locked
+        // Check book on Amazon (§ Two-Timestamp UI Adjustments spec, locked
         // 2026-09-04) is "no requirement to store whether a new book was
         // detected" -- this stamp is a nice-to-have audit trail, not
         // something worth surfacing an error banner over if it fails.
@@ -1474,6 +1484,7 @@ export default function SeriesDetailPage() {
         ? String(series.verified_volume_count)
         : ""
     );
+    setEditDiscoveryTargetNumbers(formatDiscoveryTargetNumbers(series.discovery_target_numbers));
     setEditDiscoveryDialogOpen(true);
   }
 
@@ -1497,7 +1508,7 @@ export default function SeriesDetailPage() {
    * with 33 owned books keeps benefiting from every provider, not just
    * the canonical page.
    */
-  async function handleSaveDiscoverySettings(runCheckAfter: boolean) {
+  async function handleSaveDiscoverySettings(options: { runTargetedFind: boolean }) {
     if (!series) return;
 
     const trimmedUrl = editDiscoveryCanonicalUrl.trim();
@@ -1507,6 +1518,23 @@ export default function SeriesDetailPage() {
       toast({
         title: "Invalid verified volume count",
         description: "Verified volume count must be a positive number when provided.",
+      });
+      return;
+    }
+
+    const parsedTargets = parseDiscoveryTargetNumbers(editDiscoveryTargetNumbers);
+    if (parsedTargets === null) {
+      toast({
+        title: "Invalid find missing book(s) value",
+        description: "Use positive whole numbers separated by commas, e.g. 13 or 2, 6, 8.",
+      });
+      return;
+    }
+
+    if (options.runTargetedFind && parsedTargets.length === 0) {
+      toast({
+        title: "No target book numbers",
+        description: "Enter at least one book number in Find missing book(s) before running a targeted find.",
       });
       return;
     }
@@ -1521,6 +1549,7 @@ export default function SeriesDetailPage() {
           canonical_url: trimmedUrl || null,
           canonical_source: editDiscoveryCanonicalSource || null,
           verified_volume_count: parsedCount,
+          discovery_target_numbers: parsedTargets.length > 0 ? parsedTargets : null,
         }),
       });
 
@@ -1532,8 +1561,8 @@ export default function SeriesDetailPage() {
       setEditDiscoveryDialogOpen(false);
       toast({ title: "Discovery settings saved", description: `Updated Guided Discovery settings for ${series.name}.` });
 
-      if (runCheckAfter) {
-        await handleCheckForNew();
+      if (options.runTargetedFind) {
+        await handleCheckForNew("targeted");
       }
     } catch (error) {
       console.error(error);
@@ -1984,11 +2013,13 @@ export default function SeriesDetailPage() {
         canonicalUrl={editDiscoveryCanonicalUrl}
         canonicalSource={editDiscoveryCanonicalSource}
         verifiedVolumeCount={editDiscoveryVerifiedVolumeCount}
+        discoveryTargetNumbers={editDiscoveryTargetNumbers}
         onCanonicalUrlChange={setEditDiscoveryCanonicalUrl}
         onCanonicalSourceChange={setEditDiscoveryCanonicalSource}
         onVerifiedVolumeCountChange={setEditDiscoveryVerifiedVolumeCount}
-        onSave={() => void handleSaveDiscoverySettings(false)}
-        onSaveAndCheckNow={() => void handleSaveDiscoverySettings(true)}
+        onDiscoveryTargetNumbersChange={setEditDiscoveryTargetNumbers}
+        onSave={() => void handleSaveDiscoverySettings({ runTargetedFind: false })}
+        onFindTheseBooksNow={() => void handleSaveDiscoverySettings({ runTargetedFind: true })}
         saving={editDiscoverySaving}
         checking={seriesCheckLoading}
       />

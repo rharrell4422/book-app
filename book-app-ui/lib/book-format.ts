@@ -183,6 +183,48 @@ export function getFindPublicationDateUrl(book: { title?: string | null; author?
   return `https://www.google.com/search?q=${encodeURIComponent(query)}`;
 }
 
+/** Amazon search for the next expected volume in a series -- replaces the
+ * old Google "Search Book N Online" escape hatch (2026-09-22). */
+export function getCheckNextBookOnAmazonUrl(
+  series: { name?: string | null; author?: string | null },
+  nextBookNumber: number | null | undefined,
+): string {
+  const query = [series.name, series.author, nextBookNumber ? `book ${nextBookNumber}` : null]
+    .filter(Boolean)
+    .join(" ");
+  return `https://www.amazon.com/s?k=${encodeURIComponent(query)}`;
+}
+
+const DISCOVERY_TARGET_NUMBERS_MAX = 6;
+
+/** Parse Guided Discovery "Find missing book(s)" input -- e.g. "13" or "2, 6, 8". */
+export function parseDiscoveryTargetNumbers(input: string): number[] | null {
+  const trimmed = input.trim();
+  if (!trimmed) return [];
+
+  const parts = trimmed.split(/[,;\s]+/).map((part) => part.trim()).filter(Boolean);
+  const numbers: number[] = [];
+  const seen = new Set<number>();
+
+  for (const part of parts) {
+    const value = Number(part);
+    if (!Number.isFinite(value) || value <= 0 || !Number.isInteger(value)) {
+      return null;
+    }
+    if (seen.has(value)) continue;
+    seen.add(value);
+    numbers.push(value);
+  }
+
+  numbers.sort((a, b) => a - b);
+  return numbers.slice(0, DISCOVERY_TARGET_NUMBERS_MAX);
+}
+
+export function formatDiscoveryTargetNumbers(numbers: number[] | null | undefined): string {
+  if (!Array.isArray(numbers) || numbers.length === 0) return "";
+  return numbers.join(", ");
+}
+
 // Mirrors schemas.CanonicalSource on the backend. Shared between the Add
 // Book form's "new series" Guided Discovery section and the series
 // detail page's "Edit Discovery Settings" dialog (2026-09-03) -- the

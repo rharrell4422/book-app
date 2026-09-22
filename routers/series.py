@@ -184,7 +184,7 @@ def mark_series_finished(series_id: int, db: Session = Depends(get_db), profile_
 def verify_series(series_id: int, db: Session = Depends(get_db), profile_id: str = Depends(get_current_profile_id)):
     """Two-Timestamp UI Adjustments spec (locked 2026-09-04): stamps
     last_verified_at to the server's own today() every time the user
-    clicks "Search Book Online" on the series detail page -- a manual,
+    clicks "Check book on Amazon" on the series detail page -- a manual,
     best-effort audit signal, deliberately independent of whatever the
     user actually finds in the tab that button opens (per the spec, "no
     requirement to store whether a new book was detected"). Always uses
@@ -210,6 +210,7 @@ def verify_series(series_id: int, db: Session = Depends(get_db), profile_id: str
 async def check_series_for_new_books(
     series_id: int,
     background_tasks: BackgroundTasks,
+    discovery_mode: str = "default",
     db: Session = Depends(get_db),
     profile_id: str = Depends(get_current_profile_id),
 ):
@@ -234,6 +235,7 @@ async def check_series_for_new_books(
             "current_pass": existing_job.get("current_pass") or "exact match",
         }
 
+    normalized_discovery_mode = "targeted" if str(discovery_mode or "").strip().lower() == "targeted" else "default"
     background_tasks.add_task(run_series_check_job_full, series_id)
 
     session_id = f"check_{series_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -244,6 +246,7 @@ async def check_series_for_new_books(
         "current_pass": "exact match",
         "result": None,
         "completion": None,
+        "discovery_mode": normalized_discovery_mode,
     }
 
     return {

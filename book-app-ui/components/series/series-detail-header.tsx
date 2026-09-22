@@ -151,10 +151,10 @@ export function SeriesDetailHeader({
 }: SeriesDetailHeaderProps) {
   const [overflowOpen, setOverflowOpen] = useState(false);
 
-  const searchOnlineLabel = `Search Book ${nextBookNumber ?? "?"} Online`;
+  const searchOnlineLabel = nextBookNumber ? `Check book ${nextBookNumber} on Amazon` : "Check next book on Amazon";
   const searchOnlineHint = nextBookNumber
-    ? `Search online for Book ${nextBookNumber} -- use this if "Check for New" doesn't find a book you know exists`
-    : "Search online for the next book in this series -- use this if \"Check for New\" doesn't find a book you know exists";
+    ? `Open Amazon to browse or download book ${nextBookNumber} -- use this if "Check for New" doesn't find a book you know exists`
+    : "Open Amazon for the next book in this series -- use this if \"Check for New\" doesn't find a book you know exists";
   const finishedLabel = finishedToggleSaving
     ? "Saving..."
     : series.is_finished
@@ -368,7 +368,7 @@ export function SeriesDetailHeader({
             <Button type="button" variant="outline" size="sm" onClick={onSearchNextBookOnline} title={searchOnlineHint}>
               {searchOnlineLabel}
             </Button>
-            <span className="text-[11px] text-muted-foreground" title="Last time you clicked Search Book Online for this series">
+            <span className="text-[11px] text-muted-foreground" title="Last time you clicked Check book on Amazon for this series">
               Last Verified: {timestamps.lastVerifiedDisplay}
             </span>
             <Button

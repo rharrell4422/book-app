@@ -114,6 +114,13 @@ class Series(Base):
     canonical_url = Column(String, nullable=True)
     canonical_source = Column(String, nullable=True)  # KU, Nook, Kobo, GooglePlay, PublisherSite, Goodreads, Other
     verified_volume_count = Column(Integer, nullable=True)
+    # Guided Discovery targeted find (2026-09-22): optional list of integer
+    # book numbers the user wants the next "Find These Books Now" run to
+    # search for surgically (e.g. [13] or [2, 6, 8]) -- NOT the same as
+    # missing_books above, which is intelligence output ("discovered but
+    # not owned"). Cleared per-number when that volume is successfully
+    # persisted; NULL when empty.
+    discovery_target_numbers = Column(JSON, nullable=True)
 
     # Intelligence
     next_unread_book_number = Column(Float, nullable=True)

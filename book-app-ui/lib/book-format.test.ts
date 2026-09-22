@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { getFindPublicationDateUrl, getUnifiedBookStatus } from "./book-format";
+import {
+  getCheckNextBookOnAmazonUrl,
+  getFindPublicationDateUrl,
+  getUnifiedBookStatus,
+  parseDiscoveryTargetNumbers,
+} from "./book-format";
 
 describe("getFindPublicationDateUrl", () => {
   // 2026-09-03: replaces the old getCheckOnlineUrl (source_url jump +
@@ -26,6 +31,30 @@ describe("getFindPublicationDateUrl", () => {
   it("drops missing title/author cleanly", () => {
     const url = getFindPublicationDateUrl({ title: "Solo Title", author: null });
     expect(url).toBe("https://www.google.com/search?q=" + encodeURIComponent("Solo Title publication date"));
+  });
+});
+
+describe("getCheckNextBookOnAmazonUrl", () => {
+  it("builds an Amazon search for the next book number", () => {
+    const url = getCheckNextBookOnAmazonUrl(
+      { name: "Tracy Crosswhite", author: "Robert Dugoni" },
+      13,
+    );
+    expect(url).toBe(
+      "https://www.amazon.com/s?k=" + encodeURIComponent("Tracy Crosswhite Robert Dugoni book 13"),
+    );
+  });
+});
+
+describe("parseDiscoveryTargetNumbers", () => {
+  it("parses comma-separated volume numbers", () => {
+    expect(parseDiscoveryTargetNumbers("13")).toEqual([13]);
+    expect(parseDiscoveryTargetNumbers("2, 6, 8")).toEqual([2, 6, 8]);
+    expect(parseDiscoveryTargetNumbers("")).toEqual([]);
+  });
+
+  it("rejects invalid tokens", () => {
+    expect(parseDiscoveryTargetNumbers("2, foo")).toBeNull();
   });
 });
 

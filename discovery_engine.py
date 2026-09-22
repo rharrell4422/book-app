@@ -241,6 +241,7 @@ def _reconstruct_series_skeleton(
     canonical_url: str | None = None,
     canonical_source: str | None = None,
     verified_volume_count: int | None = None,
+    skip_canonical_source_recovery: bool = False,
 ) -> dict:
     """Infers how many volumes a series is expected to have -- the highest
     integer book number seen anywhere, across owned_books' book_number,
@@ -406,14 +407,15 @@ def _reconstruct_series_skeleton(
         if number is not None and float(number).is_integer():
             known_numbers_before_canonical.add(int(number))
 
-    unified_candidates = _attempt_canonical_source_recovery(
-        unified_candidates,
-        series_name=resolved_series_name,
-        author=resolved_author,
-        canonical_url=canonical_url,
-        canonical_source=canonical_source,
-        telemetry=telemetry,
-    )
+    if not skip_canonical_source_recovery:
+        unified_candidates = _attempt_canonical_source_recovery(
+            unified_candidates,
+            series_name=resolved_series_name,
+            author=resolved_author,
+            canonical_url=canonical_url,
+            canonical_source=canonical_source,
+            telemetry=telemetry,
+        )
 
     known_numbers: set[int] = set(known_numbers_before_canonical)
     for candidate in unified_candidates:
@@ -1209,6 +1211,145 @@ def _build_series_discovery_result(
         # nothing here changes "candidates" above.
         "drop_diagnostics": discovery_drop_diagnostics,
     }
+
+
+def normalize_target_book_numbers(
+    raw_numbers: list[int] | list[float] | None,
+    *,
+    max_count: int = MAX_MISSING_VOLUME_LOOKAHEAD_QUERIES,
+) -> list[int]:
+    """Normalize user-supplied Guided Discovery target volumes -- unique
+    positive integers, sorted, capped at max_count."""
+    if not raw_numbers:
+        return []
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for raw in raw_numbers:
+        try:
+            if raw is None or not float(raw).is_integer():
+                continue
+            number = int(float(raw))
+        except (TypeError, ValueError):
+            continue
+        if number <= 0 or number in seen:
+            continue
+        seen.add(number)
+        normalized.append(number)
+    normalized.sort()
+    return normalized[:max_count]
+
+
+def discover_target_volumes_for_series(
+    series_name: str,
+    author: str,
+    target_book_numbers: list[int],
+    *,
+    exclude_title_keys: set[str] | None = None,
+    canonical_url: str | None = None,
+    canonical_source: str | None = None,
+    progress_callback=None,
+    telemetry: "DiscoveryTelemetry | None" = None,
+    cache: "DiscoveryCache | None" = None,
+) -> dict:
+    """Surgical Guided Discovery: web search (+ optional canonical URL)
+    ONLY for explicit target volume numbers -- no full catalog sweep."""
+    exclude_title_keys = exclude_title_keys or set()
+    series_name = str(series_name or "").strip()
+    author = str(author or "").strip()
+    targets = normalize_target_book_numbers(target_book_numbers)
+    discovery_drop_diagnostics: list[dict] = []
+    provider_failures: list[dict] = []
+
+    if not author or not targets:
+        return _build_series_discovery_result(
+            [],
+            [],
+            provider_failures,
+            False,
+            False,
+            discovery_drop_diagnostics,
+        )
+
+    _log(
+        f"targeted-volume discovery for series={series_name!r}: target_book_numbers={targets} "
+        f"serper={'on' if _web_search_enabled() else 'OFF'} "
+        f"anthropic={'on' if _llm_structuring_enabled() else 'OFF'} "
+        f"apify={'on' if apify_enabled() else 'OFF'}"
+    )
+
+    if progress_callback:
+        progress_callback({"current_pass": f"Finding book(s) {', '.join(str(n) for n in targets)}"})
+
+    unified_candidates: list[UnifiedCandidate] = []
+    unified_candidates = _attempt_canonical_source_recovery(
+        unified_candidates,
+        series_name=series_name,
+        author=author,
+        canonical_url=canonical_url,
+        canonical_source=canonical_source,
+        telemetry=telemetry,
+    )
+
+    query_series_name = normalize_series_name_for_query(series_name)
+    query_author = primary_author_name(author)
+    lookahead_author = f" {query_author}" if query_author else ""
+    web_queries = [
+        f'"{query_series_name}"{lookahead_author} book {number}' for number in targets
+    ]
+
+    web_raw: list[dict] = []
+    any_provider_succeeded = bool(unified_candidates)
+    if _web_search_enabled() and _llm_structuring_enabled():
+        try:
+            web_raw = _fetch_web_search(
+                web_queries,
+                series_name,
+                author,
+                telemetry=telemetry,
+                cache=cache,
+                pass_label="targeted_volumes",
+            )
+            any_provider_succeeded = any_provider_succeeded or bool(web_raw)
+        except Exception as exc:
+            provider_failures.append({"provider": "web_search", "error": str(exc)})
+    elif web_queries:
+        provider_failures.append(
+            {
+                "provider": "web_search",
+                "error": "Serper and Anthropic must both be configured for targeted volume discovery",
+            }
+        )
+
+    existing_raw = [_unified_candidate_to_raw_dict(candidate) for candidate in unified_candidates]
+    fetch_results = {
+        "google": [],
+        "openlibrary": [],
+        "hardcover": existing_raw,
+        "web": web_raw,
+    }
+    combined, fused_candidates = _fuse_reconcile_and_filter_candidates(
+        fetch_results,
+        author,
+        series_name,
+        exclude_title_keys,
+        confidence="targeted",
+        diagnostics=discovery_drop_diagnostics,
+        telemetry=telemetry,
+    )
+
+    all_providers_failed = bool(provider_failures) and not any_provider_succeeded
+
+    if progress_callback:
+        progress_callback({"current_pass": "Done", "total": 1, "completed": 1})
+
+    return _build_series_discovery_result(
+        combined,
+        fused_candidates,
+        provider_failures,
+        all_providers_failed,
+        False,
+        discovery_drop_diagnostics,
+    )
 
 
 def discover_candidates_for_series(
