@@ -693,6 +693,27 @@ def looks_like_non_new_release(title: str) -> bool:
     return bool(_BUNDLE_TITLE_PATTERN.search(title_norm))
 
 
+# Audiobook / audio-drama listings (often split into "Part 1 of 2" with
+# fractional series numbers like Empyrean 1.1). Discovery used to treat
+# these as new print volumes because ISBN/title differ from the main book.
+_AUDIOBOOK_TITLE_PATTERNS = (
+    re.compile(r"\bdramatized\s+adaptation\b"),
+    re.compile(r"\bgraphic\s+audio\b"),
+    re.compile(r"\bfull[- ]cast\b"),
+    re.compile(r"\b(?:audible(?:\s+audio)?|audio\s*cd|audiobook)\b"),
+    re.compile(r"\baudio\s+edition\b"),
+    re.compile(r"\bread\s+by\b"),  # "Title: Read by …" catalog convention
+)
+
+
+def looks_like_audiobook_listing(title: str) -> bool:
+    """True when a catalog/web title is clearly an audio format, not a print/ebook story entry."""
+    title_norm = normalize_text(title)
+    if not title_norm:
+        return False
+    return any(pattern.search(title_norm) for pattern in _AUDIOBOOK_TITLE_PATTERNS)
+
+
 def is_english_or_unknown(language: str | None) -> bool:
     """This app's library is in English -- exclude editions we can
     positively identify as a different language (translations), but don't

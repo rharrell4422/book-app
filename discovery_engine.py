@@ -106,6 +106,7 @@ from discovery_text import (
     _parse_positive_number,
     infer_number_from_title,
     looks_like_non_new_release,
+    looks_like_audiobook_listing,
     is_english_or_unknown,
     parse_flexible_date,
     parse_flexible_date_with_precision,

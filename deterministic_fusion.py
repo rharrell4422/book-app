@@ -32,6 +32,7 @@ from discovery_text import (
     infer_series_hint_from_title_text,
     is_english_or_unknown,
     looks_like_non_new_release,
+    looks_like_audiobook_listing,
     looks_like_placeholder_title,
     looks_like_series_index_entry,
     normalize_text,
@@ -54,6 +55,8 @@ def _filter_and_merge(
         if not title:
             continue
         if looks_like_non_new_release(title):
+            continue
+        if looks_like_audiobook_listing(title):
             continue
         if looks_like_placeholder_title(title):
             continue

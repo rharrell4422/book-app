@@ -234,6 +234,16 @@ class DiscoveryEngineHelperTest(unittest.TestCase):
             discovery_engine.looks_like_non_new_release("Threshing Day (Wing and Claw Collection)")
         )
 
+    def test_looks_like_audiobook_listing_filters_dramatized_and_audible_titles(self):
+        self.assertTrue(
+            discovery_engine.looks_like_audiobook_listing(
+                "Fourth Wing (Part 1 of 2) [Dramatized Adaptation]: (The Empyrean Book 1.1)"
+            )
+        )
+        self.assertTrue(discovery_engine.looks_like_audiobook_listing("Iron Flame (Audible Audio Edition)"))
+        self.assertFalse(discovery_engine.looks_like_audiobook_listing("Fourth Wing (The Empyrean Book 1)"))
+        self.assertFalse(discovery_engine.looks_like_audiobook_listing("Iron Flame"))
+
     def test_looks_like_non_new_release_filters_series_volume_compilations(self):
         # Regression (live bug): "Safehold Series, Volume I" and "The
         # Safehold Series, Volume I: Off Armageddon Reef, ..." are both a
